@@ -3,7 +3,7 @@
 // App_API table in platform.h. It redraws only when something asks for it:
 // input, resize, a reload or request_redraw from any thread. While the app
 // reports it is animating and the window is visible, the display link adds a
-// frame every vsync.
+// frame every vsync, and other redraws wait for the next tick.
 
 #import <Cocoa/Cocoa.h>
 #import <CoreServices/CoreServices.h>
@@ -21,7 +21,6 @@
 #define HOT_RELOAD 1
 #endif
 
-#define MAX_EVENTS 1024
 #define PERSISTENT_SIZE (256ull << 20)
 #define FRAME_SIZE (64ull << 20)
 
@@ -38,10 +37,14 @@ static int g_reload_count;
 
 static Memory g_memory;
 static Shell g_shell;
-static Event g_events[MAX_EVENTS];
+static Event *g_events;
 static uint32_t g_event_count;
+static uint32_t g_event_capacity;
 static atomic_bool g_needs_redraw;
 static bool g_animating;
+static double g_last_tick; // CACurrentMediaTime of the last display link frame
+static double g_tick_interval = 1.0 / 60;
+static CFRunLoopTimerRef g_tick_fallback;
 static CFRunLoopRef g_main_run_loop;
 static double g_start_time;
 
@@ -103,23 +106,47 @@ static bool coalesce(Event *last, Event e) {
   return false;
 }
 
+// The queue grows rather than drop an event or draw early: a lost mouse up
+// or key up leaves it stuck down. It only gets long if the run loop goes a
+// long time without sleeping.
 static void push_event(Event e) {
   if (g_event_count == 0 || !coalesce(&g_events[g_event_count - 1], e)) {
-    // The run loop hasn't slept for MAX_EVENTS events. Hand them to the app
-    // now instead of dropping any: a lost mouse up or key up leaves it stuck
-    // down.
-    if (g_event_count == MAX_EVENTS) draw_frame();
-    if (g_event_count < MAX_EVENTS) g_events[g_event_count++] = e;
+    if (g_event_count == g_event_capacity) {
+      g_event_capacity = g_event_capacity ? g_event_capacity * 2 : 256;
+      g_events = realloc(g_events, g_event_capacity * sizeof(Event));
+    }
+    g_events[g_event_count++] = e;
   }
   atomic_store(&g_needs_redraw, true);
 }
 
-// Draws once per run loop pass, just before the loop sleeps, so a burst of
-// events becomes one frame. This doesn't wait for the display link: the link
-// may not fire at all while the display sleeps.
-static void before_waiting(CFRunLoopObserverRef observer, CFRunLoopActivity activity, void *info) {
-  if (atomic_load(&g_needs_redraw)) draw_frame();
+// When the next display link frame is due, the deadline by which it should
+// have arrived. Two intervals of slack cover a late tick. Zero if the link
+// is paused or hasn't ticked recently, as when the display sleeps.
+static double tick_deadline(void) {
+  if (g_display_link.paused) return 0;
+  double deadline = g_last_tick + 2 * g_tick_interval;
+  return CACurrentMediaTime() < deadline ? deadline : 0;
 }
+
+// Draws once per run loop pass, just before the loop sleeps, so a burst of
+// events becomes one frame. While the display link is ticking, the redraw
+// waits for the next tick instead, so input during an animation doesn't add
+// frames between vsyncs and block in nextDrawable. A timer wakes the loop at
+// the deadline in case the tick never comes.
+static void before_waiting(CFRunLoopObserverRef observer, CFRunLoopActivity activity, void *info) {
+  if (!atomic_load(&g_needs_redraw)) return;
+  double deadline = tick_deadline();
+  if (deadline == 0) {
+    draw_frame();
+    return;
+  }
+  CFRunLoopTimerSetNextFireDate(g_tick_fallback, CFAbsoluteTimeGetCurrent() + (deadline - CACurrentMediaTime()));
+}
+
+// Firing is all the fallback timer does: the run loop pass it causes ends in
+// before_waiting, which draws if the tick still hasn't come.
+static void tick_fallback_fired(CFRunLoopTimerRef timer, void *info) {}
 
 // Hot reload
 
@@ -178,9 +205,10 @@ static void reload_if_changed(void) {
     return;
   }
   g_app.api.unload(&g_memory);
-  // Odin dylibs use thread-local storage, which macOS never unloads, so the
-  // old image stays mapped. Nothing calls into it after this.
-  dlclose(g_app.handle);
+  // The old image stays open for good. A State the new code can't read is
+  // released through a procedure the old code left in it, so that code must
+  // stay mapped. (macOS wouldn't unmap an Odin dylib anyway, since it uses
+  // thread-local storage.)
   g_app = next;
   @autoreleasepool {
     g_app.api.reload(&g_memory, &g_shell);
@@ -244,7 +272,8 @@ static uint32_t scroll_phase(NSEventPhase phase) {
 - (CALayer *)makeBackingLayer {
   g_layer = [CAMetalLayer layer];
   g_layer.device = MTLCreateSystemDefaultDevice();
-  g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+  // An sRGB format, so blending happens in linear space. See src/render.
+  g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm_sRGB;
   g_layer.colorspace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
   g_layer.framebufferOnly = YES;
   return g_layer;
@@ -346,6 +375,9 @@ static Event key_event(NSEvent *e, uint32_t kind) {
 - (void)flagsChanged:(NSEvent *)e { push_event(key_event(e, EVENT_MODIFIERS_CHANGED)); }
 
 - (void)display_link_tick:(CADisplayLink *)link {
+  g_last_tick = CACurrentMediaTime();
+  double interval = link.targetTimestamp - link.timestamp;
+  if (interval > 0) g_tick_interval = interval;
   draw_frame();
 }
 
@@ -356,7 +388,11 @@ static Event key_event(NSEvent *e, uint32_t kind) {
 // still draw.
 static void update_display_link(void) {
   bool visible = (g_window.occlusionState & NSWindowOcclusionStateVisible) != 0;
-  g_display_link.paused = !(g_animating && visible);
+  bool paused = !(g_animating && visible);
+  // Count unpausing as a tick, so redraws start waiting for the link right
+  // away and fall back to drawing directly if its first tick never comes.
+  if (g_display_link.paused && !paused) g_last_tick = CACurrentMediaTime();
+  g_display_link.paused = paused;
 }
 
 // App
@@ -410,6 +446,10 @@ static void update_display_link(void) {
   CFRunLoopObserverRef observer =
       CFRunLoopObserverCreate(NULL, kCFRunLoopBeforeWaiting, true, 0, before_waiting, NULL);
   CFRunLoopAddObserver(g_main_run_loop, observer, kCFRunLoopCommonModes);
+  // Repeating with a huge interval so it stays valid after it fires and can
+  // be rearmed with CFRunLoopTimerSetNextFireDate.
+  g_tick_fallback = CFRunLoopTimerCreate(NULL, CFAbsoluteTimeGetCurrent() + 1e9, 1e9, 0, 0, tick_fallback_fired, NULL);
+  CFRunLoopAddTimer(g_main_run_loop, g_tick_fallback, kCFRunLoopCommonModes);
 
 #if HOT_RELOAD
   watch_app();

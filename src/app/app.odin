@@ -6,12 +6,14 @@
 // package, procedure pointers and anything allocated by the dylib's own
 // runtime. So State holds plain data only. Allocators carry a procedure
 // pointer, so they are rebuilt from the arenas on every call instead of being
-// stored. If State changes layout, bump STATE_VERSION; a size or version
-// mismatch on reload resets State and leaks the old Metal objects.
+// stored. If State changes layout, bump STATE_VERSION. On a size or version
+// mismatch the new code calls the old code's release proc from the header,
+// then resets State.
 package app
 
 import "base:runtime"
 import "core:fmt"
+import "core:math"
 import "core:mem"
 import "core:os"
 import "core:prof/spall"
@@ -24,24 +26,37 @@ import "../render"
 
 CLEAR_COLOR :: render.Color{0.10, 0.11, 0.13, 1}
 
-STATE_VERSION :: 1
+STATE_VERSION :: 3
 
 FRAME_HISTORY :: 120
 
+// State_Header starts State in every version of the app, so a new version
+// can read an old one's header. Never change it.
+State_Header :: struct {
+	version: u32,
+	size:    int,
+	// Frees everything the State behind this header owns, using the code that
+	// knows its layout. The shell never unloads an old dylib, so this stays
+	// callable after the dylib that set it has been replaced. It is the one
+	// procedure pointer allowed across a reload.
+	release: proc "c" (m: ^platform.Memory),
+}
+
 State :: struct {
-	version:      u32,
-	size:         int,
+	using header: State_Header,
 	arena:        mem.Arena, // the rest of the persistent block
 	frame_arena:  mem.Arena, // reset at the start of every frame
 	renderer:     render.Renderer,
+	checker:      render.Texture,
+	half_white:   render.Texture, // RGBA8, one texel {128, 128, 128, 128}
+	half_cover:   render.Texture, // R8, one texel 128
+	last_stats:   render.Stats,
 	frame_count:  u64,
 	frame_ms:     [FRAME_HISTORY]f32,
 	show_overlay: bool,
 	log_events:   bool,
-	mouse:        [2]f32,
-	mouse_inside: bool,
-	mouse_down:   bool,
-	scroll:       [2]f32,
+	input:        Input,
+	scroll:       [2]f32, // the test list's offset
 	slide_start:  f64,
 	sliding:      bool,
 	profiling:    bool,
@@ -76,12 +91,16 @@ app_reload :: proc "c" (m: ^platform.Memory, shell: ^platform.Shell) {
 	s := (^State)(m.persistent)
 	if s.version != STATE_VERSION || s.size != size_of(State) {
 		fmt.eprintfln("app: state changed (version %d, %d bytes) -> (version %d, %d bytes), resetting", s.version, s.size, STATE_VERSION, size_of(State))
+		if s.release != nil {
+			s.release(m)
+		}
 		s = state_reset(m)
 		context = app_context(s)
 		start(s, shell)
 		return
 	}
 	context = app_context(s)
+	s.release = app_shutdown
 	if !render.reload(&s.renderer) {
 		fmt.eprintln("app: shader rebuild failed, drawing with the previous shaders")
 	}
@@ -129,6 +148,7 @@ state_reset :: proc(m: ^platform.Memory) -> ^State {
 	s^ = {}
 	s.version = STATE_VERSION
 	s.size = size_of(State)
+	s.release = app_shutdown
 	used := mem.align_forward_int(size_of(State), 64)
 	mem.arena_init(&s.arena, m.persistent[used:m.persistent_size])
 	mem.arena_init(&s.frame_arena, m.frame[:m.frame_size])
@@ -169,6 +189,11 @@ start :: proc(s: ^State, shell: ^platform.Shell) {
 	if !render.init(&s.renderer, shell.metal_device, shell.metal_layer) {
 		fmt.eprintln("app: renderer init failed")
 	}
+	s.checker = make_checker(&s.renderer)
+	s.half_white = render.texture_create(&s.renderer, 1, 1, .RGBA8)
+	render.texture_update(&s.renderer, s.half_white, {128, 128, 128, 128}, 0, 0, 1, 1)
+	s.half_cover = render.texture_create(&s.renderer, 1, 1, .R8)
+	render.texture_update(&s.renderer, s.half_cover, {128}, 0, 0, 1, 1)
 	fmt.eprintfln("app: started, clear colour %v", CLEAR_COLOR)
 }
 
@@ -190,46 +215,27 @@ KEY_GRAVE :: 50 // kVK_ANSI_Grave
 SLIDE_SECONDS :: 0.6
 
 update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input) -> platform.Frame_Result {
+	input_begin_frame(&s.input)
 	for e in input.events[:input.event_count] {
 		if s.log_events {
 			fmt.eprintfln("event: %v", e)
 		}
-		#partial switch e.kind {
-		case .Mouse_Move:
-			s.mouse = {e.x, e.y}
-			s.mouse_inside = true
-		case .Mouse_Leave:
-			s.mouse_inside = false
-		case .Mouse_Down:
-			s.mouse = {e.x, e.y}
-			s.mouse_down = true
-			if e.button == .Left {
-				s.slide_start = input.time
-				s.sliding = true
-			}
-		case .Mouse_Up:
-			s.mouse_down = false
-		case .Scroll:
-			delta := [2]f32{e.dx, e.dy}
-			if !e.precise {
-				delta *= 16
-			}
-			s.scroll += delta
-		case .Key_Down:
-			if e.key_code == KEY_GRAVE && !e.repeat {
-				s.show_overlay = !s.show_overlay
-			}
+		input_apply(&s.input, e)
+		if e.kind == .Key_Down && e.key_code == KEY_GRAVE && !e.repeat {
+			s.show_overlay = !s.show_overlay
 		}
 	}
+	if .Left in s.input.pressed {
+		s.slide_start = input.time
+		s.sliding = true
+	}
+	s.scroll += s.input.scroll
 
 	w, h := input.width, input.height
 	r := &s.renderer
-	render.begin_frame(r, w, h, CLEAR_COLOR)
+	render.begin_frame(r, w, h, input.scale, CLEAR_COLOR)
 
-	render.push_rect(r, {0, 0, 220, h}, {0.14, 0.15, 0.18, 1})
-	render.push_rect(r, {0, h - 88, w, 88}, {0.07, 0.08, 0.09, 1})
-	render.push_rect(r, {260, 40 + s.scroll.y, 320, 180}, {0.20, 0.45, 0.85, 1})
-	render.push_rect(r, {260 + s.scroll.x, 240 + s.scroll.y, 320, 60}, {0.85, 0.35, 0.30, 1})
+	draw_test_screen(s, w, h)
 
 	if s.sliding {
 		t := f32((input.time - s.slide_start) / SLIDE_SECONDS)
@@ -237,13 +243,16 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input) -> platform.Fra
 			s.sliding = false
 		} else {
 			ease := 1 - (1 - t) * (1 - t)
-			render.push_rect(r, {240 + ease * (w - 300), h - 70, 40, 40}, {0.95, 0.80, 0.30, 1})
+			box := render.Rect{24 + ease * (w - 88), h - 52, 40, 40}
+			render.push_shadow(r, box, 20, 12)
+			render.push_rect(r, box, {0.95, 0.80, 0.30, 1}, 20)
 		}
 	}
 
-	if s.mouse_inside {
-		size: f32 = 14 if s.mouse_down else 10
-		render.push_rect(r, {s.mouse.x - size / 2, s.mouse.y - size / 2, size, size}, {1, 1, 1, 0.8})
+	if s.input.mouse_inside {
+		size: f32 = 14 if mouse_down(s.input) else 10
+		m := s.input.mouse
+		render.push_rect(r, {m.x - size / 2, m.y - size / 2, size, size}, {1, 1, 1, 0.8}, size / 2)
 	}
 
 	if s.show_overlay {
@@ -254,11 +263,117 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input) -> platform.Fra
 		prof_scope(s, "end_frame")
 		render.end_frame(r)
 	}
+	if r.stats != s.last_stats {
+		fmt.eprintfln("render: %d draw calls, %d instances", r.stats.draw_calls, r.stats.instances)
+		s.last_stats = r.stats
+	}
 	return {animating = b32(s.sliding)}
 }
 
+// draw_test_screen exercises the renderer: a grid of shadowed gradient cards
+// with assorted radii and borders, a scrolling clipped list, and textured
+// quads sampled with mipmaps, tinted, rounded and unfiltered.
+draw_test_screen :: proc(s: ^State, w, h: f32) {
+	r := &s.renderer
+	render.push_gradient(r, {0, 0, w, h}, CLEAR_COLOR, {0.04, 0.04, 0.05, 1})
+
+	COLS :: 14
+	ROWS :: 13
+	CARD :: 36
+	STEP :: 46
+	radii := [5]f32{0, 4, 8, 12, 18}
+	for i in 0 ..< COLS * ROWS {
+		rect := render.Rect{24 + f32(i % COLS) * STEP, 24 + f32(i / COLS) * STEP, CARD, CARD}
+		hue := f32(i) * 0.618
+		style := render.Style{
+			colors = {
+				.Top_Left = hsv(hue, 0.6, 0.95),
+				.Top_Right = hsv(hue, 0.6, 0.95),
+				.Bottom_Left = hsv(hue + 0.08, 0.75, 0.55),
+				.Bottom_Right = hsv(hue + 0.08, 0.75, 0.55),
+			},
+			radii = render.corners(radii[i % 5]),
+		}
+		if i % 7 == 3 {
+			style.radii = {.Top_Left = 18, .Top_Right = 2, .Bottom_Left = 2, .Bottom_Right = 18}
+		}
+		if i % 5 == 2 {
+			for c in render.Corner {
+				style.colors[c] = hsv(hue + f32(c) * 0.25, 0.7, 0.9)
+			}
+		}
+		render.push_shadow(r, rect, style.radii[.Top_Left], 10, {0, 3}, 0, {0, 0, 0, 0.6})
+		render.push(r, rect, style)
+		if i % 3 == 0 {
+			ring := style
+			ring.colors = render.corners(render.Color{1, 1, 1, 0.85})
+			ring.border = 1
+			render.push(r, rect, ring)
+		}
+	}
+
+	// A panel whose list scrolls with the wheel and is clipped to the panel.
+	panel := render.Rect{700, 130, 376, 270}
+	render.push_shadow(r, panel, 12, 24, {0, 8}, 0, {0, 0, 0, 0.7})
+	render.push_rect(r, panel, {0.16, 0.17, 0.20, 1}, 12)
+	render.push_rect(r, panel, {1, 1, 1, 0.12}, 12, 1)
+	render.push_clip(r, {panel.x + 8, panel.y + 8, panel.w - 16, panel.h - 16})
+	for i in 0 ..< 30 {
+		row := render.Rect{panel.x + 16, panel.y + 16 + f32(i) * 34 + s.scroll.y, 200 + f32(i % 4) * 90, 26}
+		render.push_shadow(r, row, 13, 8, {0, 2})
+		render.push_gradient(r, row, hsv(f32(i) * 0.05, 0.5, 0.9), hsv(f32(i) * 0.05 + 0.15, 0.7, 0.6), true, 13)
+	}
+	render.push_shadow(r, {panel.x + panel.w - 70, panel.y + 150, 120, 120}, 60, 30, {}, 0, {0.3, 0.6, 1, 0.9})
+	render.pop_clip(r)
+
+	// Textured quads.
+	big := render.Rect{716, 430, 160, 160}
+	render.push_shadow(r, big, 20, 20, {0, 6})
+	render.push_image(r, big, s.checker, radius = 20)
+	render.push_image(r, {900, 430, 20, 20}, s.checker) // minified: mips blend the checks
+	render.push_image(r, {960, 430, 100, 100}, s.checker, src = {0, 0, 64, 64}, tint = {1, 0.6, 0.6, 1}, radius = 50)
+	render.push_image(r, {900, 550, 40, 40}, s.checker, src = {0, 0, 32, 32}, nearest = true)
+	render.push_rect(r, {960, 550, 100, 40}, {1, 1, 1, 1}, 8, 2)
+
+	// 50% white over black three ways: a premultiplied sRGB texel, R8
+	// coverage and a solid colour. All three should come out the same grey.
+	strip := render.Rect{716, 610, 120, 40}
+	render.push_rect(r, strip, {0, 0, 0, 1})
+	render.push_image(r, {strip.x + 5, strip.y + 5, 30, 30}, s.half_white)
+	render.push_image(r, {strip.x + 45, strip.y + 5, 30, 30}, s.half_cover)
+	render.push_rect(r, {strip.x + 85, strip.y + 5, 30, 30}, {1, 1, 1, 128.0 / 255})
+}
+
+// make_checker makes a 256x256 checkerboard with mipmaps.
+make_checker :: proc(r: ^render.Renderer) -> render.Texture {
+	SIZE :: 256
+	CELL :: 16
+	pixels := make([]u8, SIZE * SIZE * 4, context.temp_allocator)
+	for y in 0 ..< SIZE {
+		for x in 0 ..< SIZE {
+			c := [4]u8{242, 140, 40, 255} if (x / CELL + y / CELL) % 2 == 0 else [4]u8{240, 240, 240, 255}
+			copy(pixels[(y * SIZE + x) * 4:], c[:])
+		}
+	}
+	t := render.texture_create(r, SIZE, SIZE, .RGBA8, mipmapped = true)
+	render.texture_update(r, t, pixels, 0, 0, SIZE, SIZE)
+	return t
+}
+
+// hsv returns an opaque sRGB colour. Hue wraps, so any value works.
+hsv :: proc(h, s, v: f32) -> render.Color {
+	h6 := (h - math.floor(h)) * 6
+	k := [3]f32{math.mod(5 + h6, 6), math.mod(3 + h6, 6), math.mod(1 + h6, 6)}
+	c: render.Color = 1
+	for i in 0 ..< 3 {
+		c[i] = v - v * s * max(0, min(k[i], 4 - k[i], 1))
+	}
+	return c
+}
+
 // draw_frame_overlay draws the CPU time of the last FRAME_HISTORY frames as
-// bars, newest on the right, with lines at 120 Hz and 60 Hz budgets.
+// bars, newest on the right, with lines at 120 Hz and 60 Hz budgets. Under
+// the bars are the last frame's draw calls (blue) and instances (green).
 draw_frame_overlay :: proc(s: ^State, view_width: f32) {
 	BAR_W :: 2
 	PX_PER_MS :: 4
@@ -268,7 +383,7 @@ draw_frame_overlay :: proc(s: ^State, view_width: f32) {
 	y0 := f32(12)
 	r := &s.renderer
 
-	render.push_rect(r, {x0, y0, panel_w, PANEL_H}, {0, 0, 0, 0.6})
+	render.push_rect(r, {x0, y0, panel_w, PANEL_H + 22}, {0, 0, 0, 0.6}, 6)
 	for i in 0 ..< FRAME_HISTORY {
 		// Oldest first, starting just after the newest entry.
 		ms := s.frame_ms[(s.frame_count + u64(i)) % FRAME_HISTORY]
@@ -283,5 +398,47 @@ draw_frame_overlay :: proc(s: ^State, view_width: f32) {
 	}
 	for budget_ms in ([2]f32{1000.0 / 120, 1000.0 / 60}) {
 		render.push_rect(r, {x0, y0 + PANEL_H - budget_ms * PX_PER_MS, panel_w, 1}, {1, 1, 1, 0.35})
+	}
+
+	y := y0 + PANEL_H + 6
+	render.push_rect(r, {x0 + 8, y + 2, 6, 6}, {0.35, 0.60, 1, 1}, 3)
+	draw_number(r, x0 + 20, y, s.last_stats.draw_calls)
+	render.push_rect(r, {x0 + 80, y + 2, 6, 6}, {0.30, 0.85, 0.40, 1}, 3)
+	draw_number(r, x0 + 92, y, s.last_stats.instances)
+}
+
+// draw_number draws n in seven-segment digits, 10 points tall. It stands in
+// for text until phase 2.
+draw_number :: proc(r: ^render.Renderer, x, y: f32, n: int) {
+	// Segment bits a to g: top, top right, bottom right, bottom, bottom left,
+	// top left, middle.
+	segments := [10]u8{0x3f, 0x06, 0x5b, 0x4f, 0x66, 0x6d, 0x7d, 0x07, 0x7f, 0x6f}
+	W :: 6
+	H :: 10
+	T :: 1.5
+	digits: [20]u8
+	count := 0
+	for v := max(n, 0); count == 0 || v > 0; v /= 10 {
+		digits[count] = u8(v % 10)
+		count += 1
+	}
+	color := render.Color{1, 1, 1, 0.9}
+	for i in 0 ..< count {
+		dx := x + f32(i) * (W + 3)
+		bits := segments[digits[count - 1 - i]]
+		rects := [7]render.Rect{
+			{dx, y, W, T},
+			{dx + W - T, y, T, H / 2},
+			{dx + W - T, y + H / 2, T, H / 2},
+			{dx, y + H - T, W, T},
+			{dx, y + H / 2, T, H / 2},
+			{dx, y, T, H / 2},
+			{dx, y + H / 2 - T / 2, W, T},
+		}
+		for rect, seg in rects {
+			if bits & (1 << u8(seg)) != 0 {
+				render.push_rect(r, rect, color)
+			}
+		}
 	}
 }

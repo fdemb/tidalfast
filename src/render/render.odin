@@ -1,22 +1,120 @@
-// A minimal Metal path: clear, then solid rects. Phase 1 replaces the
-// pipeline with the full instanced rect renderer behind the same procs.
+// The instanced rect renderer. Every shape is one instance of a quad: a
+// rounded box drawn with a signed distance function, with an optional border,
+// soft edge, per-corner colours, texture and clip rect. Solid rects, borders,
+// shadows, gradients, images and (next phase) glyphs all go through the same
+// pipeline, so a frame is one draw call per texture switch.
+//
+// Units: the app passes points. Push procs multiply by the backing scale and
+// write physical pixels into the instance, rounding rect edges, clip rects
+// and borders to whole pixels so edges land on the pixel grid.
+//
+// Colour: the API takes sRGB colours with straight alpha, the same numbers a
+// design tool shows. Instances keep them that way. The fragment shader
+// interpolates corner colours in premultiplied sRGB, so gradients match CSS,
+// then converts to linear once. The drawable is BGRA8Unorm_sRGB, so the GPU
+// blends in linear space and encodes back to sRGB when it stores. Textures
+// are sRGB formats too (sampling returns linear) except R8, which holds linear
+// coverage. Text in phase 2 relies on this: glyph coverage is blended in
+// linear light. Colour textures hold premultiplied linear values, sRGB
+// encoded, so the hardware decodes before filtering and gets premultiplied
+// linear out; texture_update converts to that from ordinary premultiplied
+// sRGB.
 package render
 
 import "core:fmt"
+import "core:math"
+import "core:mem"
 import "core:os"
 import MTL "vendor:darwin/Metal"
+
+FRAMES_IN_FLIGHT :: 3
+INITIAL_INSTANCES :: 4096
+MAX_BATCHES :: 4096
+MAX_CLIP_DEPTH :: 64
+MAX_TEXTURES :: 4096
 
 Rect :: struct {
 	x, y, w, h: f32, // points, origin top left
 }
 
+// sRGB, straight alpha, 0 to 1.
 Color :: [4]f32
 
-MAX_RECTS :: 4096
+WHITE :: Color{1, 1, 1, 1}
 
+Corner :: enum {
+	Top_Left,
+	Top_Right,
+	Bottom_Left,
+	Bottom_Right,
+}
+
+// Style is everything about a rect except where it is. The zero value is a
+// transparent, square, solid rect.
+Style :: struct {
+	colors:   [Corner]Color,
+	radii:    [Corner]f32, // points
+	border:   f32, // points; 0 fills the rect
+	softness: f32, // points of edge blur, centred on the edge
+	texture:  Texture, // zero draws solid colour
+	src:      Rect, // texels; zero means the whole texture
+	nearest:  bool, // sample without filtering
+}
+
+// A handle into the renderer's texture table: slot index in the low 16 bits,
+// the slot's generation in the high 16, so a handle to a destroyed texture
+// draws as solid colour instead of whatever reused the slot. The zero handle
+// is the 1x1 white texture, which means "solid".
+Texture :: distinct u32
+
+Texture_Format :: enum u8 {
+	R8, // linear coverage, sampled as premultiplied white (r, r, r, r)
+	RGBA8, // premultiplied sRGB, see texture_update
+	BGRA8, // premultiplied sRGB, see texture_update
+}
+
+Instance_Flag :: enum u32 {
+	Textured,
+	Nearest,
+}
+Instance_Flags :: bit_set[Instance_Flag; u32]
+
+// One rect as the shader sees it, all in physical pixels. Matches `Instance`
+// in SHADER_SOURCE.
 Instance :: struct {
-	rect:  [4]f32,
-	color: Color,
+	dst:      [4]f32, // x0 y0 x1 y1
+	src:      [4]f32, // u0 v0 u1 v1, normalized
+	colors:   [4]Color, // sRGB straight alpha, in Corner order
+	radii:    [4]f32, // in Corner order
+	border:   f32,
+	softness: f32,
+	flags:    Instance_Flags,
+	_:        f32,
+	clip:     [4]f32, // x0 y0 x1 y1
+}
+#assert(size_of(Instance) == 144)
+
+// A run of instances drawn with one texture bound. Solid instances don't
+// sample, so they join whatever batch is open; only a change from one real
+// texture to another starts a new batch.
+Batch :: struct {
+	texture: Texture, // zero until the first textured instance
+	first:   u32,
+	count:   u32,
+}
+
+Texture_Slot :: struct {
+	texture:    id, // id<MTLTexture>
+	width:      i32,
+	height:     i32,
+	generation: u16,
+	format:     Texture_Format,
+	mipmapped:  bool,
+}
+
+Stats :: struct {
+	draw_calls: int,
+	instances:  int,
 }
 
 // Renderer is plain data so it can live in the app's persistent memory. The
@@ -24,18 +122,36 @@ Instance :: struct {
 // survive a reload. The pipeline is rebuilt on reload because the shader
 // source lives in the dylib.
 Renderer :: struct {
-	device:     id, // id<MTLDevice>
-	layer:      id, // CAMetalLayer*
-	queue:      id, // id<MTLCommandQueue>
-	pipeline:   id, // id<MTLRenderPipelineState>
-	width:      f32, // points
-	height:     f32,
-	clear:      Color,
-	instances:  [MAX_RECTS]Instance,
-	rect_count: int,
+	device:         id, // id<MTLDevice>
+	layer:          id, // CAMetalLayer*
+	queue:          id, // id<MTLCommandQueue>
+	pipeline:       id, // id<MTLRenderPipelineState>
+	textures:       [MAX_TEXTURES]Texture_Slot,
+
+	// Triple buffering. Each frame writes into buffers[slot] while the GPU may
+	// still read the other two. in_flight[slot] is the retained command buffer
+	// that last read buffers[slot]; begin_frame waits for it before writing.
+	frame_index:    u64,
+	slot:           int,
+	buffers:        [FRAMES_IN_FLIGHT]id, // id<MTLBuffer>, shared storage
+	capacity:       [FRAMES_IN_FLIGHT]int, // in instances
+	in_flight:      [FRAMES_IN_FLIGHT]id, // id<MTLCommandBuffer>
+
+	// The frame being built.
+	width, height:  f32, // points
+	scale:          f32,
+	clear:          Color,
+	instances:      [^]Instance, // contents of buffers[slot]
+	instance_count: int,
+	batches:        [MAX_BATCHES]Batch,
+	batch_count:    int,
+	clips:          [MAX_CLIP_DEPTH][4]f32, // pixels
+	clip_depth:     int,
+
+	stats:          Stats, // of the last frame end_frame drew
 	// Debug: when set, end_frame waits for the GPU and writes each frame to
 	// this path as a TGA. Set it before init.
-	capture_path: string,
+	capture_path:   string,
 }
 
 // Compiled at runtime with newLibraryWithSource. The Metal compiler is not
@@ -46,30 +162,99 @@ SHADER_SOURCE :: `
 using namespace metal;
 
 struct Instance {
-	float4 rect;
-	float4 color;
+	float4 dst;
+	float4 src;
+	float4 colors[4];
+	float4 radii;
+	float border;
+	float softness;
+	uint flags;
+	float pad;
+	float4 clip;
 };
 
-struct Vertex_Out {
+constant uint TEXTURED = 1;
+constant uint NEAREST = 2;
+
+struct Fragment_In {
 	float4 position [[position]];
-	float4 color;
+	uint iid [[flat]];
 };
 
-vertex Vertex_Out rect_vertex(uint vid [[vertex_id]],
-                              uint iid [[instance_id]],
-                              constant Instance *instances [[buffer(0)]],
-                              constant float2 &viewport [[buffer(1)]]) {
-	Instance inst = instances[iid];
-	float2 corner = float2(vid & 1, vid >> 1);
-	float2 p = inst.rect.xy + corner * inst.rect.zw;
-	Vertex_Out out;
-	out.position = float4(p.x / viewport.x * 2 - 1, 1 - p.y / viewport.y * 2, 0, 1);
-	out.color = inst.color;
+// Signed distance from p to a box centred on the origin with rounded corners.
+// Negative inside.
+float box_sdf(float2 p, float2 half_size, float r) {
+	float2 q = abs(p) - half_size + r;
+	return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+
+// Coverage of the inside of an edge at signed distance d, blurred over w
+// pixels either side. w = 0.5 is plain antialiasing.
+float inside(float d, float w) {
+	return 1.0 - smoothstep(-w, w, d);
+}
+
+float3 linear_from_srgb(float3 c) {
+	return select(pow((c + 0.055) / 1.055, 2.4), c / 12.92, c <= 0.04045);
+}
+
+float4 premultiply(float4 c) {
+	return float4(c.rgb * c.a, c.a);
+}
+
+// The quad covers the rect plus its soft edge, cut down to the clip rect.
+// The fragment shader works from the pixel position alone, so clipping the
+// quad clips the shape exactly, and a clipped-away instance costs no pixels.
+vertex Fragment_In rect_vertex(uint vid [[vertex_id]],
+                               uint iid [[instance_id]],
+                               device const Instance *instances [[buffer(0)]],
+                               constant float2 &viewport [[buffer(1)]]) {
+	Instance r = instances[iid];
+	float pad = max(r.softness, 0.5) + 1.0;
+	float2 p0 = max(r.dst.xy - pad, r.clip.xy);
+	float2 p1 = max(min(r.dst.zw + pad, r.clip.zw), p0);
+	float2 p = mix(p0, p1, float2(vid & 1, vid >> 1));
+	Fragment_In out;
+	out.position = float4(p / viewport * float2(2, -2) + float2(-1, 1), 0, 1);
+	out.iid = iid;
 	return out;
 }
 
-fragment float4 rect_fragment(Vertex_Out in [[stage_in]]) {
-	return in.color;
+fragment float4 rect_fragment(Fragment_In in [[stage_in]],
+                              device const Instance *instances [[buffer(0)]],
+                              texture2d<float> tex [[texture(0)]]) {
+	constexpr sampler linear_sampler(filter::linear, mip_filter::linear, address::clamp_to_edge);
+	constexpr sampler nearest_sampler(filter::nearest, address::clamp_to_edge);
+
+	Instance r = instances[in.iid];
+	float2 pixel = in.position.xy; // pixel centre, top left origin
+	float2 size = max(r.dst.zw - r.dst.xy, 1e-4);
+	float2 half_size = size * 0.5;
+	float2 local = pixel - (r.dst.xy + half_size);
+	float2 t = (pixel - r.dst.xy) / size;
+
+	float radius = local.y < 0 ? (local.x < 0 ? r.radii.x : r.radii.y)
+	                           : (local.x < 0 ? r.radii.z : r.radii.w);
+	radius = min(radius, min(half_size.x, half_size.y));
+	float w = max(r.softness, 0.5);
+	float coverage = inside(box_sdf(local, half_size, radius), w);
+	if (r.border > 0) {
+		float inner = box_sdf(local, half_size - r.border, max(radius - r.border, 0.0));
+		coverage *= 1.0 - inside(inner, w);
+	}
+
+	float2 tc = saturate(t);
+	float4 top = mix(premultiply(r.colors[0]), premultiply(r.colors[1]), tc.x);
+	float4 bottom = mix(premultiply(r.colors[2]), premultiply(r.colors[3]), tc.x);
+	float4 c = mix(top, bottom, tc.y);
+	float3 rgb = c.a > 0 ? c.rgb / c.a : float3(0);
+	float4 color = float4(linear_from_srgb(rgb) * c.a, c.a);
+
+	if (r.flags & TEXTURED) {
+		float2 uv = mix(r.src.xy, r.src.zw, t);
+		color *= (r.flags & NEAREST) ? tex.sample(nearest_sampler, uv) : tex.sample(linear_sampler, uv);
+	}
+	return color * coverage;
 }
 `
 
@@ -80,6 +265,10 @@ init :: proc(r: ^Renderer, device, layer: rawptr) -> bool {
 	if r.capture_path != "" {
 		msg_bool(r.layer, "setFramebufferOnly:", false)
 	}
+	// Slot 0 is the white texture behind the zero handle.
+	r.textures[0] = new_texture_slot(r, 1, 1, .RGBA8, false)
+	white := [4]u8{255, 255, 255, 255}
+	texture_update(r, 0, white[:], 0, 0, 1, 1)
 	r.pipeline = build_pipeline(r)
 	return r.pipeline != nil
 }
@@ -97,6 +286,18 @@ reload :: proc(r: ^Renderer) -> bool {
 }
 
 destroy :: proc(r: ^Renderer) {
+	for &cmd in r.in_flight {
+		if cmd != nil {
+			msg(cmd, "waitUntilCompleted")
+			release(cmd)
+		}
+	}
+	for buf in r.buffers {
+		release(buf)
+	}
+	for slot in r.textures {
+		release(slot.texture)
+	}
 	release(r.pipeline)
 	release(r.queue)
 	r^ = {}
@@ -125,8 +326,9 @@ build_pipeline :: proc(r: ^Renderer) -> id {
 	att := msg_uint(msg(desc, "colorAttachments"), "objectAtIndexedSubscript:", 0)
 	pixel_format := msg_proc(proc "c" (id, SEL) -> MTL.PixelFormat)(r.layer, sel_registerName("pixelFormat"))
 	msg_uint(att, "setPixelFormat:", uint(pixel_format))
+	// The fragment shader outputs premultiplied colour.
 	msg_bool(att, "setBlendingEnabled:", true)
-	msg_uint(att, "setSourceRGBBlendFactor:", uint(MTL.BlendFactor.SourceAlpha))
+	msg_uint(att, "setSourceRGBBlendFactor:", uint(MTL.BlendFactor.One))
 	msg_uint(att, "setDestinationRGBBlendFactor:", uint(MTL.BlendFactor.OneMinusSourceAlpha))
 	msg_uint(att, "setSourceAlphaBlendFactor:", uint(MTL.BlendFactor.One))
 	msg_uint(att, "setDestinationAlphaBlendFactor:", uint(MTL.BlendFactor.OneMinusSourceAlpha))
@@ -139,19 +341,305 @@ build_pipeline :: proc(r: ^Renderer) -> id {
 	return pipeline
 }
 
-begin_frame :: proc(r: ^Renderer, width, height: f32, clear: Color) {
-	r.width = width
-	r.height = height
-	r.clear = clear
-	r.rect_count = 0
+// Textures
+
+// texture_create makes a texture with undefined contents; fill it with
+// texture_update. Mipmapped textures regenerate their mips on every update,
+// which suits cover art (written once) and not the glyph atlas.
+texture_create :: proc(r: ^Renderer, width, height: int, format: Texture_Format, mipmapped := false) -> Texture {
+	for i in 1 ..< MAX_TEXTURES {
+		slot := &r.textures[i]
+		if slot.texture == nil {
+			generation := slot.generation
+			slot^ = new_texture_slot(r, width, height, format, mipmapped)
+			slot.generation = generation
+			return Texture(u32(i) | u32(generation) << 16)
+		}
+	}
+	fmt.eprintln("render: out of texture slots")
+	return 0
 }
 
-push_rect :: proc(r: ^Renderer, rect: Rect, color: Color) {
-	if r.rect_count == MAX_RECTS {
+// texture_update copies pixels into the region (x, y, w, h). Rows are tightly
+// packed. R8 pixels are linear coverage. RGBA8 and BGRA8 pixels are sRGB with
+// alpha premultiplied in sRGB space, which is what a premultiplied
+// CGBitmapContext or stb_image plus a multiply gives you. Before upload,
+// translucent texels are rewritten as sRGB encodings of premultiplied linear
+// colour (white at 50% becomes 188 rather than 128), so the texture filters
+// and blends like a solid colour of the same alpha. Opaque and fully
+// transparent texels pass through unchanged. A copy is made in
+// context.temp_allocator only if some texel is translucent. The upload
+// happens at once on the CPU, so don't overwrite texels a frame still in
+// flight samples; writing into unused space, as an atlas does, is fine.
+texture_update :: proc(r: ^Renderer, t: Texture, pixels: []byte, x, y, w, h: int) {
+	slot := texture_slot(r, t)
+	if slot == nil {
 		return
 	}
-	r.instances[r.rect_count] = {{rect.x, rect.y, rect.w, rect.h}, color}
-	r.rect_count += 1
+	bpp := 1 if slot.format == .R8 else 4
+	assert(len(pixels) >= w * h * bpp)
+	pixels := pixels
+	if bpp == 4 {
+		pixels = premultiplied_linear(pixels[:w * h * 4])
+	}
+	region := Region{{uint(x), uint(y), 0}, {uint(w), uint(h), 1}}
+	msg_proc(proc "c" (id, SEL, Region, uint, rawptr, uint))(slot.texture, sel_registerName("replaceRegion:mipmapLevel:withBytes:bytesPerRow:"), region, 0, raw_data(pixels), uint(w * bpp))
+	if slot.mipmapped {
+		// Queued ahead of the next frame's command buffer, so the frame sees
+		// the new mips.
+		cmd := msg(r.queue, "commandBuffer")
+		blit := msg(cmd, "blitCommandEncoder")
+		msg_id(blit, "generateMipmapsForTexture:", slot.texture)
+		msg(blit, "endEncoding")
+		msg(cmd, "commit")
+	}
+}
+
+// premultiplied_linear returns pixels with each translucent texel's colour
+// channels c replaced by encode(decode(c / a) * a), or pixels itself when
+// every texel is opaque or empty.
+@(private)
+premultiplied_linear :: proc(pixels: []byte) -> []byte {
+	out: []byte
+	for i := 0; i < len(pixels); i += 4 {
+		a := pixels[i + 3]
+		if a == 0 || a == 255 {
+			continue
+		}
+		if out == nil {
+			out = make([]byte, len(pixels), context.temp_allocator)
+			copy(out, pixels)
+		}
+		alpha := f32(a) / 255
+		for c in 0 ..< 3 {
+			straight := min(f32(pixels[i + c]) / 255 / alpha, 1)
+			out[i + c] = u8(math.round(srgb_from_linear(linear_from_srgb(straight) * alpha) * 255))
+		}
+	}
+	return out if out != nil else pixels
+}
+
+// texture_destroy frees the texture. Metal keeps it alive until the command
+// buffers that use it finish, so this is safe mid-flight.
+texture_destroy :: proc(r: ^Renderer, t: Texture) {
+	slot := texture_slot(r, t)
+	if slot == nil || t == 0 {
+		return
+	}
+	release(slot.texture)
+	slot^ = {generation = slot.generation + 1}
+}
+
+texture_size :: proc(r: ^Renderer, t: Texture) -> [2]int {
+	slot := texture_slot(r, t)
+	if slot == nil {
+		return {}
+	}
+	return {int(slot.width), int(slot.height)}
+}
+
+// texture_slot returns nil for a stale or out of range handle.
+@(private)
+texture_slot :: proc(r: ^Renderer, t: Texture) -> ^Texture_Slot {
+	index := int(t & 0xffff)
+	if index >= MAX_TEXTURES {
+		return nil
+	}
+	slot := &r.textures[index]
+	if slot.texture == nil || u32(slot.generation) != u32(t) >> 16 {
+		return nil
+	}
+	return slot
+}
+
+@(private)
+new_texture_slot :: proc(r: ^Renderer, width, height: int, format: Texture_Format, mipmapped: bool) -> Texture_Slot {
+	pixel_format: MTL.PixelFormat
+	switch format {
+	case .R8:
+		pixel_format = .R8Unorm
+	case .RGBA8:
+		pixel_format = .RGBA8Unorm_sRGB
+	case .BGRA8:
+		pixel_format = .BGRA8Unorm_sRGB
+	}
+	desc := msg_proc(proc "c" (id, SEL, uint, uint, uint, bool) -> id)(objc_getClass("MTLTextureDescriptor"), sel_registerName("texture2DDescriptorWithPixelFormat:width:height:mipmapped:"), uint(pixel_format), uint(width), uint(height), mipmapped)
+	if format == .R8 {
+		swizzle := MTL.TextureSwizzleChannels{.Red, .Red, .Red, .Red}
+		msg_proc(proc "c" (id, SEL, MTL.TextureSwizzleChannels))(desc, sel_registerName("setSwizzle:"), swizzle)
+	}
+	texture := msg_id(r.device, "newTextureWithDescriptor:", desc)
+	return {texture = texture, width = i32(width), height = i32(height), format = format, mipmapped = mipmapped}
+}
+
+// Frame
+
+begin_frame :: proc(r: ^Renderer, width, height, scale: f32, clear: Color) {
+	r.width = width
+	r.height = height
+	r.scale = scale
+	r.clear = clear
+	r.slot = int(r.frame_index % FRAMES_IN_FLIGHT)
+
+	// The GPU usually finished this slot two frames ago, so this rarely waits.
+	if cmd := r.in_flight[r.slot]; cmd != nil {
+		msg(cmd, "waitUntilCompleted")
+		release(cmd)
+		r.in_flight[r.slot] = nil
+	}
+	r.instance_count = 0
+	if r.buffers[r.slot] == nil {
+		r.buffers[r.slot] = new_instance_buffer(r, INITIAL_INSTANCES)
+		r.capacity[r.slot] = INITIAL_INSTANCES
+	}
+	r.instances = ([^]Instance)(msg(r.buffers[r.slot], "contents"))
+	r.batch_count = 0
+	r.clip_depth = 1
+	r.clips[0] = {-1e9, -1e9, 1e9, 1e9}
+}
+
+// grow_instances replaces the current slot's buffer with one twice the size
+// and copies over what this frame has pushed so far. begin_frame waited for
+// the slot's last command buffer and nothing has read this frame's buffer
+// yet, so releasing the old one is safe. The bigger buffer stays with the
+// slot for later frames.
+@(private)
+grow_instances :: proc(r: ^Renderer) {
+	capacity := r.capacity[r.slot] * 2
+	buf := new_instance_buffer(r, capacity)
+	instances := ([^]Instance)(msg(buf, "contents"))
+	mem.copy(instances, r.instances, r.instance_count * size_of(Instance))
+	release(r.buffers[r.slot])
+	r.buffers[r.slot] = buf
+	r.capacity[r.slot] = capacity
+	r.instances = instances
+}
+
+@(private)
+new_instance_buffer :: proc(r: ^Renderer, capacity: int) -> id {
+	return msg_proc(proc "c" (id, SEL, uint, uint) -> id)(r.device, sel_registerName("newBufferWithLength:options:"), uint(capacity * size_of(Instance)), MTL_RESOURCE_STORAGE_MODE_SHARED)
+}
+
+// corners returns v for all four corners, for Style.colors and Style.radii.
+corners :: proc(v: $T) -> (out: [Corner]T) {
+	for &c in out {
+		c = v
+	}
+	return
+}
+
+// push draws a rect with any style. The other push procs are shorthands.
+push :: proc(r: ^Renderer, rect: Rect, style: Style) {
+	inst: Instance
+	inst.dst = snap(r, rect)
+	if (inst.dst.x >= inst.dst.z || inst.dst.y >= inst.dst.w) && style.softness == 0 {
+		return
+	}
+
+	texture := style.texture
+	if texture != 0 {
+		slot := texture_slot(r, texture)
+		if slot == nil {
+			texture = 0
+		} else {
+			inst.flags += {.Textured}
+			if style.nearest {
+				inst.flags += {.Nearest}
+			}
+			src := style.src
+			if src.w == 0 || src.h == 0 {
+				src = {0, 0, f32(slot.width), f32(slot.height)}
+			}
+			tw, th := f32(slot.width), f32(slot.height)
+			inst.src = {src.x / tw, src.y / th, (src.x + src.w) / tw, (src.y + src.h) / th}
+		}
+	}
+
+	for c in Corner {
+		inst.colors[c] = style.colors[c]
+		inst.radii[c] = style.radii[c] * r.scale
+	}
+	if style.border > 0 {
+		inst.border = max(math.round(style.border * r.scale), 1)
+	}
+	inst.softness = style.softness * r.scale
+	inst.clip = r.clips[min(r.clip_depth, MAX_CLIP_DEPTH) - 1]
+
+	// Open a new batch only when this instance needs a texture other than
+	// the one the current batch already binds.
+	b := &r.batches[max(r.batch_count - 1, 0)]
+	if r.batch_count == 0 || (texture != 0 && b.texture != 0 && b.texture != texture) {
+		if r.batch_count == MAX_BATCHES {
+			return
+		}
+		b = &r.batches[r.batch_count]
+		b^ = {first = u32(r.instance_count)}
+		r.batch_count += 1
+	}
+	if texture != 0 {
+		b.texture = texture
+	}
+
+	if r.instance_count == r.capacity[r.slot] {
+		grow_instances(r)
+	}
+	r.instances[r.instance_count] = inst
+	r.instance_count += 1
+	b.count += 1
+}
+
+push_rect :: proc(r: ^Renderer, rect: Rect, color: Color, radius: f32 = 0, border: f32 = 0) {
+	push(r, rect, {colors = corners(color), radii = corners(radius), border = border})
+}
+
+// push_gradient fades from `from` to `to`, top to bottom, or left to right
+// when horizontal is set.
+push_gradient :: proc(r: ^Renderer, rect: Rect, from, to: Color, horizontal := false, radius: f32 = 0) {
+	colors := [Corner]Color{.Top_Left = from, .Top_Right = to, .Bottom_Left = to, .Bottom_Right = to}
+	if horizontal {
+		colors[.Bottom_Left] = from
+	} else {
+		colors[.Top_Right] = from
+	}
+	push(r, rect, {colors = colors, radii = corners(radius)})
+}
+
+// push_image draws a texture, tinted by `tint`, with rounded corners if
+// radius is set. src is in texels; zero means the whole texture.
+push_image :: proc(r: ^Renderer, rect: Rect, texture: Texture, src: Rect = {}, tint := WHITE, radius: f32 = 0, nearest := false) {
+	push(r, rect, {colors = corners(tint), radii = corners(radius), texture = texture, src = src, nearest = nearest})
+}
+
+// push_shadow draws a drop shadow for a box of the given rect and radius.
+// Draw it before the box. blur works like CSS box-shadow blur: the shadow is
+// half strength at the (offset, spread) box edge and fades out over `blur`
+// points either side of it.
+push_shadow :: proc(r: ^Renderer, rect: Rect, radius: f32, blur: f32, offset := [2]f32{0, 4}, spread: f32 = 0, color := Color{0, 0, 0, 0.5}) {
+	box := Rect{rect.x + offset.x - spread, rect.y + offset.y - spread, rect.w + 2 * spread, rect.h + 2 * spread}
+	push(r, box, {colors = corners(color), radii = corners(radius + spread), softness = blur / 2})
+}
+
+// push_clip limits drawing to rect, intersected with the current clip.
+push_clip :: proc(r: ^Renderer, rect: Rect) {
+	if r.clip_depth < MAX_CLIP_DEPTH {
+		outer := r.clips[r.clip_depth - 1]
+		c := snap(r, rect)
+		r.clips[r.clip_depth] = {max(c.x, outer.x), max(c.y, outer.y), min(c.z, outer.z), min(c.w, outer.w)}
+	}
+	r.clip_depth += 1
+}
+
+pop_clip :: proc(r: ^Renderer) {
+	if r.clip_depth > 1 {
+		r.clip_depth -= 1
+	}
+}
+
+// snap converts a rect in points to pixel edges x0 y0 x1 y1 on whole pixels.
+@(private)
+snap :: proc(r: ^Renderer, rect: Rect) -> [4]f32 {
+	s := r.scale
+	return {math.round(rect.x * s), math.round(rect.y * s), math.round((rect.x + rect.w) * s), math.round((rect.y + rect.h) * s)}
 }
 
 // end_frame encodes the frame and presents it. The caller must be inside an
@@ -164,40 +652,54 @@ end_frame :: proc(r: ^Renderer) {
 	if drawable == nil {
 		return
 	}
+	texture := msg(drawable, "texture")
+	tex_w := msg_proc(proc "c" (id, SEL) -> uint)(texture, sel_registerName("width"))
+	tex_h := msg_proc(proc "c" (id, SEL) -> uint)(texture, sel_registerName("height"))
 
 	pass := msg(objc_getClass("MTLRenderPassDescriptor"), "renderPassDescriptor")
 	color := msg_uint(msg(pass, "colorAttachments"), "objectAtIndexedSubscript:", 0)
-	msg_id(color, "setTexture:", msg(drawable, "texture"))
+	msg_id(color, "setTexture:", texture)
 	msg_uint(color, "setLoadAction:", uint(MTL.LoadAction.Clear))
 	msg_uint(color, "setStoreAction:", uint(MTL.StoreAction.Store))
-	clear := MTL.ClearColor{f64(r.clear.r), f64(r.clear.g), f64(r.clear.b), f64(r.clear.a)}
+	// The drawable is sRGB, so the clear colour is given in linear.
+	clear := MTL.ClearColor{f64(linear_from_srgb(r.clear.r)), f64(linear_from_srgb(r.clear.g)), f64(linear_from_srgb(r.clear.b)), f64(r.clear.a)}
 	msg_proc(proc "c" (id, SEL, MTL.ClearColor))(color, sel_registerName("setClearColor:"), clear)
 
 	cmd := msg(r.queue, "commandBuffer")
 	enc := msg_id(cmd, "renderCommandEncoderWithDescriptor:", pass)
-	if r.rect_count > 0 {
-		// A fresh buffer per frame, so the GPU never reads memory the CPU is
-		// writing. Phase 1 replaces this with a triple-buffered ring.
-		buf := msg_proc(proc "c" (id, SEL, rawptr, uint, uint) -> id)(r.device, sel_registerName("newBufferWithBytes:length:options:"), &r.instances[0], uint(r.rect_count * size_of(Instance)), 0)
-		defer release(buf)
-		viewport := [2]f32{r.width, r.height}
+	draw_calls := 0
+	if r.instance_count > 0 {
+		viewport := [2]f32{f32(tex_w), f32(tex_h)}
+		buf := r.buffers[r.slot]
 		msg_id(enc, "setRenderPipelineState:", r.pipeline)
 		msg_proc(proc "c" (id, SEL, id, uint, uint))(enc, sel_registerName("setVertexBuffer:offset:atIndex:"), buf, 0, 0)
+		msg_proc(proc "c" (id, SEL, id, uint, uint))(enc, sel_registerName("setFragmentBuffer:offset:atIndex:"), buf, 0, 0)
 		msg_proc(proc "c" (id, SEL, rawptr, uint, uint))(enc, sel_registerName("setVertexBytes:length:atIndex:"), &viewport, size_of(viewport), 1)
-		msg_proc(proc "c" (id, SEL, uint, uint, uint, uint))(enc, sel_registerName("drawPrimitives:vertexStart:vertexCount:instanceCount:"), uint(MTL.PrimitiveType.TriangleStrip), 0, 4, uint(r.rect_count))
+		for b in r.batches[:r.batch_count] {
+			if b.count == 0 {
+				continue
+			}
+			slot := texture_slot(r, b.texture)
+			tex := slot.texture if slot != nil else r.textures[0].texture
+			msg_proc(proc "c" (id, SEL, id, uint))(enc, sel_registerName("setFragmentTexture:atIndex:"), tex, 0)
+			msg_proc(proc "c" (id, SEL, uint, uint, uint, uint, uint))(enc, sel_registerName("drawPrimitives:vertexStart:vertexCount:instanceCount:baseInstance:"), uint(MTL.PrimitiveType.TriangleStrip), 0, 4, uint(b.count), uint(b.first))
+			draw_calls += 1
+		}
 	}
 	msg(enc, "endEncoding")
 
 	capture: id
-	texture := msg(drawable, "texture")
-	tex_w := msg_proc(proc "c" (id, SEL) -> uint)(texture, sel_registerName("width"))
-	tex_h := msg_proc(proc "c" (id, SEL) -> uint)(texture, sel_registerName("height"))
 	if r.capture_path != "" {
 		capture = encode_capture(r, cmd, texture, tex_w, tex_h)
 	}
 
 	msg_id(cmd, "presentDrawable:", drawable)
 	msg(cmd, "commit")
+	// commandBuffer returns an autoreleased object; keep it until begin_frame
+	// comes back to this slot.
+	r.in_flight[r.slot] = msg(cmd, "retain")
+	r.frame_index += 1
+	r.stats = {draw_calls, r.instance_count}
 
 	if capture != nil {
 		msg(cmd, "waitUntilCompleted")
@@ -206,7 +708,19 @@ end_frame :: proc(r: ^Renderer) {
 	}
 }
 
-// MTLOrigin and MTLSize.
+linear_from_srgb :: proc(c: f32) -> f32 {
+	return c / 12.92 if c <= 0.04045 else math.pow((c + 0.055) / 1.055, 2.4)
+}
+
+srgb_from_linear :: proc(c: f32) -> f32 {
+	return c * 12.92 if c <= 0.0031308 else 1.055 * math.pow(c, 1 / 2.4) - 0.055
+}
+
+@(private)
+MTL_RESOURCE_STORAGE_MODE_SHARED :: 0
+
+// MTLOrigin, MTLSize and MTLRegion. Plain structs rather than the vendor
+// types, whose Origin is an array, so they pass by value the way C expects.
 @(private)
 Origin :: struct {
 	x, y, z: uint,
@@ -215,10 +729,14 @@ Origin :: struct {
 Size :: struct {
 	width, height, depth: uint,
 }
+@(private)
+Region :: struct {
+	origin: Origin,
+	size:   Size,
+}
 
 @(private)
 encode_capture :: proc(r: ^Renderer, cmd, texture: id, w, h: uint) -> id {
-	MTL_RESOURCE_STORAGE_MODE_SHARED :: 0
 	buf := msg_proc(proc "c" (id, SEL, uint, uint) -> id)(r.device, sel_registerName("newBufferWithLength:options:"), w * h * 4, MTL_RESOURCE_STORAGE_MODE_SHARED)
 	blit := msg(cmd, "blitCommandEncoder")
 	msg_proc(proc "c" (id, SEL, id, uint, uint, Origin, Size, id, uint, uint, uint))(
