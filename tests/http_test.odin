@@ -7,7 +7,7 @@ import "core:strings"
 import "core:testing"
 import "core:time"
 
-import tidal "../tidal"
+import tidal "../src/tidal"
 
 // A session pointed at the mock, logged in with OAuth tokens.
 @(private = "file")

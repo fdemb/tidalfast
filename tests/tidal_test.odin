@@ -8,7 +8,7 @@ import "core:strings"
 import "core:testing"
 import "core:time"
 
-import tidal "../tidal"
+import tidal "../src/tidal"
 
 // Arena for one test's results.
 @(private = "file")

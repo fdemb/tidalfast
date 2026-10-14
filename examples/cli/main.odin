@@ -9,7 +9,7 @@ import vmem "core:mem/virtual"
 import "core:os"
 import "core:strconv"
 
-import tidal "../../tidal"
+import tidal "../../src/tidal"
 
 SESSION_FILE :: "tidal-session.json"
 
