@@ -14,6 +14,7 @@ package app
 
 import "base:runtime"
 import "core:fmt"
+import "core:log"
 import "core:math"
 import "core:mem"
 import "core:os"
@@ -27,9 +28,9 @@ import "../render"
 import "../text"
 import "../ui"
 
-CLEAR_COLOR :: render.Color{0.10, 0.11, 0.13, 1}
+CLEAR_COLOR :: render.Color{0.063, 0.063, 0.063, 1}
 
-STATE_VERSION :: 14
+STATE_VERSION :: 15
 
 FRAME_HISTORY :: 120
 
@@ -67,6 +68,7 @@ State :: struct {
 	ui_ms:        f32, // last frame's time building the frame, before end_frame
 	show_overlay: bool,
 	log_events:   bool,
+	log_render:   bool, // print draw calls and instances when they change
 	ui:           ui.State,
 	library:      Library,
 	data:         Data,
@@ -111,14 +113,14 @@ app_reload :: proc "c" (m: ^platform.Memory, shell: ^platform.Shell) {
 	s := (^State)(m.persistent)
 	if s.magic != STATE_MAGIC {
 		// Whatever is there may hold pointers where release would be. Leak it.
-		fmt.eprintln("app: state from a build without a state header, resetting without releasing it")
+		log.warn("app: state from a build without a state header, resetting without releasing it")
 		s = state_reset(m)
 		context = app_context(s)
 		start(s, shell)
 		return
 	}
 	if s.version != STATE_VERSION || s.size != size_of(State) {
-		fmt.eprintfln("app: state changed (version %d, %d bytes) -> (version %d, %d bytes), resetting", s.version, s.size, STATE_VERSION, size_of(State))
+		log.warnf("app: state changed (version %d, %d bytes) -> (version %d, %d bytes), resetting", s.version, s.size, STATE_VERSION, size_of(State))
 		if s.release != nil {
 			s.release(m)
 		}
@@ -130,7 +132,7 @@ app_reload :: proc "c" (m: ^platform.Memory, shell: ^platform.Shell) {
 	context = app_context(s)
 	s.release = app_shutdown
 	if !render.reload(&s.renderer) {
-		fmt.eprintln("app: shader rebuild failed, drawing with the previous shaders")
+		log.error("app: shader rebuild failed, drawing with the previous shaders")
 	}
 	text.reload(&s.text, shell.request_redraw)
 	// The old dylib may have missed a release.
@@ -138,7 +140,7 @@ app_reload :: proc "c" (m: ^platform.Memory, shell: ^platform.Shell) {
 	data_reload(s, shell)
 	playback_reload(s, shell)
 	measure_reload(s, shell)
-	fmt.eprintfln("app: reloaded at frame %d, clear colour %v", s.frame_count, CLEAR_COLOR)
+	log.infof("app: reloaded at frame %d, clear colour %v", s.frame_count, CLEAR_COLOR)
 }
 
 app_unload :: proc "c" (m: ^platform.Memory) {
@@ -226,6 +228,7 @@ state_reset :: proc(m: ^platform.Memory) -> ^State {
 
 app_context :: proc(s: ^State) -> runtime.Context {
 	c := runtime.default_context()
+	c.logger = app_logger()
 	c.allocator = {persistent_allocator_proc, &s.arena}
 	c.temp_allocator = mem.arena_allocator(&s.frame_arena)
 	return c
@@ -246,6 +249,7 @@ start :: proc(s: ^State, shell: ^platform.Shell) {
 	bench := os.get_env("TIDALFAST_BENCH", context.temp_allocator)
 	s.show_overlay = os.get_env("TIDALFAST_OVERLAY", context.temp_allocator) != "" || bench != ""
 	s.log_events = os.get_env("TIDALFAST_LOG_EVENTS", context.temp_allocator) != ""
+	s.log_render = os.get_env("TIDALFAST_LOG_RENDER", context.temp_allocator) != ""
 
 	// TIDALFAST_SPALL=path writes a spall trace of every frame to path. Only
 	// the fd is used after this; the os.File it came from is dropped so State
@@ -257,7 +261,7 @@ start :: proc(s: ^State, shell: ^platform.Shell) {
 			s.spall_ctx = ctx
 			s.spall_buf = spall.buffer_create(make([]u8, spall.BUFFER_DEFAULT_SIZE), u32(sync.current_thread_id()))
 			s.profiling = true
-			fmt.eprintln("app: writing spall trace to", path)
+			log.info("app: writing spall trace to", path)
 		}
 	}
 
@@ -268,10 +272,10 @@ start :: proc(s: ^State, shell: ^platform.Shell) {
 	}
 
 	if !render.init(&s.renderer, shell.metal_device, shell.metal_layer) {
-		fmt.eprintln("app: renderer init failed")
+		log.error("app: renderer init failed")
 	}
 	if !text.init(&s.text, shell.request_redraw) {
-		fmt.eprintln("app: text init failed")
+		log.error("app: text init failed")
 	}
 	ui.init(&s.ui)
 	library_init(&s.library)
@@ -297,7 +301,7 @@ start :: proc(s: ^State, shell: ^platform.Shell) {
 	render.texture_update(&s.renderer, s.half_white, {128, 128, 128, 128}, 0, 0, 1, 1)
 	s.half_cover = render.texture_create(&s.renderer, 1, 1, .R8)
 	render.texture_update(&s.renderer, s.half_cover, {128}, 0, 0, 1, 1)
-	fmt.eprintfln("app: started, clear colour %v", CLEAR_COLOR)
+	log.infof("app: started, clear colour %v", CLEAR_COLOR)
 	measure_mark(s, .Init)
 }
 
@@ -326,7 +330,7 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input, shell: ^platfor
 	events := input.events[:input.event_count]
 	if s.log_events {
 		for e in events {
-			fmt.eprintfln("event: %v", e)
+			log.infof("event: %v", e)
 		}
 	}
 	w, h := input.width, input.height
@@ -340,6 +344,7 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input, shell: ^platfor
 	ui.set_clipboard(&s.ui, shell.get_clipboard, shell.set_clipboard)
 	data_update(s, input.time)
 	playback_update(s, events)
+	s.ui.scrollbars = s.playback.settings.scrollbars
 
 	// Backtick toggles the frame-time overlay. Cmd-1, 2 and 3 switch between
 	// the library and the phase 2 and phase 1 test screens.
@@ -404,7 +409,9 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input, shell: ^platfor
 	// The frame is done with the strings it borrowed, so a list can close.
 	acted := pending_apply(s)
 	if r.stats != s.last_stats {
-		fmt.eprintfln("render: %d draw calls, %d instances", r.stats.draw_calls, r.stats.instances)
+		if s.log_render {
+			log.infof("render: %d draw calls, %d instances", r.stats.draw_calls, r.stats.instances)
+		}
 		s.last_stats = r.stats
 	}
 	return {animating = b32(animating || acted || s.sliding || s.text.needs_redraw), wake_after = ui.wake_after(&s.ui)}

@@ -1,6 +1,7 @@
 package app
 
 import "core:fmt"
+import "core:log"
 import "core:math"
 import "core:time"
 
@@ -10,8 +11,8 @@ import "../text"
 ROW_H :: 28
 LIST_X :: 440
 
-TEXT_COLOR :: render.Color{0.93, 0.93, 0.95, 1}
-DIM_COLOR :: render.Color{0.62, 0.63, 0.67, 1}
+TEXT_COLOR :: render.Color{0.93, 0.93, 0.93, 1}
+DIM_COLOR :: render.Color{0.64, 0.64, 0.64, 1}
 
 // draw_text_screen draws specimen lines on the left (scripts, weights,
 // sizes, emoji and truncation) and the ROW_COUNT row list on the right.
@@ -65,7 +66,7 @@ draw_text_screen :: proc(s: ^State, w, h: f32) {
 			run := text.shape(&s.text, .Regular, 15, str)
 			y += text.draw_run(&s.text, r, run, {x, y}, TEXT_COLOR).height + 6
 			if i == count - 1 && !run.pending && b.script_frame >= 0 {
-				fmt.eprintfln("bench: scripts: %s drawn with its font %d frames, %.1f ms after it was added", str, b.frame - b.script_frame, time.duration_milliseconds(time.tick_since(b.script_added)))
+				log.infof("bench: scripts: %s drawn with its font %d frames, %.1f ms after it was added", str, b.frame - b.script_frame, time.duration_milliseconds(time.tick_since(b.script_added)))
 				b.script_frame = -1
 			}
 		}
@@ -197,18 +198,18 @@ bench_record :: proc(s: ^State, frame_ms: f32) {
 		b.rasterized += s.text.stats.rasterized
 	}
 	if phase.name == "scripts" && b.frame % SCRIPT_FRAMES == 0 {
-		fmt.eprintfln("bench: scripts: added %s: ui %.3f ms, frame %.3f ms", BENCH_SCRIPTS[b.frame / SCRIPT_FRAMES], s.ui_ms, frame_ms)
+		log.infof("bench: scripts: added %s: ui %.3f ms, frame %.3f ms", BENCH_SCRIPTS[b.frame / SCRIPT_FRAMES], s.ui_ms, frame_ms)
 	}
 	b.frame += 1
 	if b.frame < phase.frames {
 		return
 	}
 	if b.count > 0 {
-		fmt.eprintfln("bench: %s: ui avg %.3f ms, max %.3f ms; frame avg %.3f ms, max %.3f ms; %d frames, %d runs shaped, %d glyphs rasterized",
+		log.infof("bench: %s: ui avg %.3f ms, max %.3f ms; frame avg %.3f ms, max %.3f ms; %d frames, %d runs shaped, %d glyphs rasterized",
 			phase.name, b.ui_sum / f64(b.count), b.ui_max, b.frame_sum / f64(b.count), b.frame_max, b.count, b.shaped, b.rasterized)
 	}
 	b^ = {running = b.phase + 1 < len(phases), phase = b.phase + 1, ui = b.ui}
 	if !b.running {
-		fmt.eprintln("bench: done")
+		log.info("bench: done")
 	}
 }

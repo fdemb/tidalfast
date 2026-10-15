@@ -11,16 +11,41 @@ import "core:strings"
 import "../render"
 import "../ui"
 
-// spotifast's dark palette.
-WINDOW_BG :: render.Color{0x0f / 255.0, 0x11 / 255.0, 0x14 / 255.0, 1}
-PANEL :: render.Color{0x15 / 255.0, 0x18 / 255.0, 0x1c / 255.0, 1}
-SURFACE :: render.Color{0x1d / 255.0, 0x21 / 255.0, 0x27 / 255.0, 1}
-SURFACE_ACTIVE :: render.Color{0x2f / 255.0, 0x35 / 255.0, 0x3f / 255.0, 1}
-OUTLINE :: render.Color{0x2a / 255.0, 0x30 / 255.0, 0x38 / 255.0, 1}
-TEXT :: render.Color{0xf2 / 255.0, 0xf4 / 255.0, 0xf6 / 255.0, 1}
-SECONDARY :: render.Color{0xa9 / 255.0, 0xb1 / 255.0, 0xbc / 255.0, 1}
-DIM :: render.Color{0x6e / 255.0, 0x77 / 255.0, 0x84 / 255.0, 1}
-ACCENT :: render.Color{0x1e / 255.0, 0xd7 / 255.0, 0x60 / 255.0, 1}
+// Neutral greys and a cyan accent.
+WINDOW_BG :: render.Color{0x10 / 255.0, 0x10 / 255.0, 0x10 / 255.0, 1}
+PANEL :: render.Color{0x16 / 255.0, 0x16 / 255.0, 0x16 / 255.0, 1}
+SURFACE :: render.Color{0x1f / 255.0, 0x1f / 255.0, 0x1f / 255.0, 1}
+SURFACE_ACTIVE :: render.Color{0x31 / 255.0, 0x31 / 255.0, 0x31 / 255.0, 1}
+// Row highlights: a selected row, or the open playlist, is a step brighter
+// than a hovered one. Solid, one set per background, because the renderer
+// blends in linear light, where a few percent of white over a dark grey
+// comes out far brighter than the same numbers in CSS.
+Row_Colors :: struct {
+	selected, hover, selected_hover: render.Color,
+}
+
+SIDEBAR_ROWS :: Row_Colors {
+	selected       = {0x27 / 255.0, 0x27 / 255.0, 0x27 / 255.0, 1},
+	hover          = {0x20 / 255.0, 0x20 / 255.0, 0x20 / 255.0, 1},
+	selected_hover = {0x2e / 255.0, 0x2e / 255.0, 0x2e / 255.0, 1},
+}
+
+LIST_ROWS :: Row_Colors {
+	selected       = {0x21 / 255.0, 0x21 / 255.0, 0x21 / 255.0, 1},
+	hover          = {0x1a / 255.0, 0x1a / 255.0, 0x1a / 255.0, 1},
+	selected_hover = {0x28 / 255.0, 0x28 / 255.0, 0x28 / 255.0, 1},
+}
+
+// row_highlight sets b's background and hover colour from colors.
+row_highlight :: proc(b: ^ui.Box, colors: Row_Colors, selected: bool) {
+	b.background = colors.selected if selected else {}
+	b.hover_color = colors.selected_hover if selected else colors.hover
+}
+OUTLINE :: render.Color{0x2c / 255.0, 0x2c / 255.0, 0x2c / 255.0, 1}
+TEXT :: render.Color{0xf3 / 255.0, 0xf3 / 255.0, 0xf3 / 255.0, 1}
+SECONDARY :: render.Color{0xad / 255.0, 0xad / 255.0, 0xad / 255.0, 1}
+DIM :: render.Color{0x74 / 255.0, 0x74 / 255.0, 0x74 / 255.0, 1}
+ACCENT :: render.Color{0, 1, 1, 1}
 PLAYBACK_ERROR :: render.Color{0xf0 / 255.0, 0x8a / 255.0, 0x6c / 255.0, 1}
 
 SIDEBAR_MIN :: 210
@@ -159,6 +184,13 @@ draw_sidebar :: proc(s: ^State) {
 		ui.text_style(.Semibold, 15, TEXT)
 		heading := ui.label("Your Library", ui.fill(), ui.fill())
 		ui.accessible(heading, .Static_Text, heading.label)
+		{
+			ui.column("", {}, ui.children_sum(), ui.fill())
+			ui.spacer(ui.fill())
+			draw_settings_button(s)
+			ui.spacer(ui.fill())
+		}
+		ui.spacer(ui.px(10))
 	}
 	draw_search_field(s)
 	list := ui.scroll_view("playlists", ui.fill(), ui.fill())
@@ -168,9 +200,7 @@ draw_sidebar :: proc(s: ^State) {
 		item := ui.row(fmt.tprintf("##playlist%d", i), {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects, .Draw_Border}, ui.fill(), ui.px(PLAYLIST_ROW_H))
 		item.radius = 6
 		current := lib.playlist == i && !s.search.browsing
-		if current {
-			item.background = SURFACE_ACTIVE
-		}
+		row_highlight(item, SIDEBAR_ROWS, current)
 		ui.accessible(item, .Row, fmt.tprintf("%s, %s", entry.name, entry.subtitle), selected = current)
 		if ui.drop_hover(item) {
 			lib.drop_target = i
@@ -232,7 +262,7 @@ draw_main_view :: proc(s: ^State, main_w: f32) {
 		title := ui.label(view_title(s), ui.fill(), ui.px(38))
 		ui.accessible(title, .Static_Text, title.label)
 		ui.text_style(.Regular, 13, SECONDARY)
-		subtitle := ui.label(view_subtitle(s, main_w), ui.fill(), ui.px(20))
+		subtitle := ui.label(view_subtitle(s), ui.fill(), ui.px(20))
 		ui.accessible(subtitle, .Static_Text, subtitle.label)
 		ui.text_style(.Regular, 12, DIM)
 		status := ui.label(status_text(s), ui.fill(), ui.px(18))
@@ -339,11 +369,8 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 	s.measure.rows += 1
 	row := ui.row(fmt.tprintf("##track%d", i), {.Clickable, .Draw_Background, .Draw_Hot_Effects}, ui.fill(), ui.px(TRACK_ROW_H))
 	row.radius = 6
-	row.hover_color = {1, 1, 1, 0.05}
 	selected := lib.selected == i
-	if selected {
-		row.background = {SECONDARY.r, SECONDARY.g, SECONDARY.b, 0.2}
-	}
+	row_highlight(row, LIST_ROWS, selected)
 	ui.accessible(row, .Row, fmt.tprintf("%s, %s, %s", track.title, track.artist, track.album), selected = selected)
 	sig := ui.signal(row)
 	if sig.pressed || sig.right_clicked {
@@ -404,7 +431,7 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 		lib.selected = i
 		open_track_menu(s, i, {more.rect.x, more.rect.y + more.rect.h})
 	}
-	ui.tooltip(more_sig, more_label)
+	ui.tooltip(more_sig, "More")
 	ui.spacer(ui.px(8))
 }
 
@@ -533,7 +560,6 @@ draw_drag_ghost :: proc(s: ^State) {
 }
 
 draw_player_bar :: proc(s: ^State, w: f32) {
-	lib := &s.library
 	bar := ui.column("player", {.Draw_Background}, ui.fill(), ui.px(PLAYER_BAR_H))
 	bar.background = PANEL
 	line := ui.box_make("", {.Draw_Background}, ui.fill(), ui.px(1))
@@ -547,7 +573,7 @@ draw_player_bar :: proc(s: ^State, w: f32) {
 	item := playback_item(s)
 	{
 		ui.row("now_playing", {}, ui.px(title_side), ui.fill())
-		title, artist := "Nothing playing", "Double-click a song to play it"
+		title, artist := "Nothing playing", ""
 		if item != nil {
 			title, artist = item.title, item.artist
 			cover_art(s, .Album, item.cover, u32(s.playback.index) * 2654435761 >> 7, 56, ui.px(56))
@@ -630,13 +656,9 @@ draw_player_bar :: proc(s: ^State, w: f32) {
 		// Laid out by hand so it fits in side at any window width: the volume
 		// slider gives up room before anything else does.
 		ui.row("extras", {}, ui.px(side), ui.fill())
-		volume_w := ui.counter_width(.Regular, 12, "Volume 100%")
-		slider_w := clamp(side - OUTPUT_W - OUTPUT_GAP - volume_w - VOLUME_GAP, 0, VOLUME_W)
-		ui.spacer(ui.px(side - OUTPUT_W - OUTPUT_GAP - volume_w - VOLUME_GAP - slider_w, 0))
+		slider_w := clamp(side - OUTPUT_W - OUTPUT_GAP, 0, VOLUME_W)
+		ui.spacer(ui.px(side - OUTPUT_W - OUTPUT_GAP - slider_w, 0))
 		draw_output_button(s)
-		ui.text_style(.Regular, 12, SECONDARY)
-		ui.label(fmt.tprintf("Volume %d%%", int(math.round(lib.volume * 100))), ui.px(volume_w), ui.fill())
-		ui.spacer(ui.px(VOLUME_GAP))
 		draw_volume(s, slider_w)
 	}
 	ui.spacer(ui.px(16))
@@ -645,7 +667,6 @@ draw_player_bar :: proc(s: ^State, w: f32) {
 TIME_PAD :: 8 // between the times and the progress bar
 OUTPUT_W :: 78 // the Output button
 OUTPUT_GAP :: 12
-VOLUME_GAP :: 8
 VOLUME_W :: 110
 
 // clock formats seconds as m:ss, or h:mm:ss from an hour.
@@ -800,7 +821,7 @@ status_text :: proc(s: ^State) -> string {
 	}
 	t := view_row(s, lib.status_track)
 	if lib.status == .None || t == nil {
-		return "Double-click to play, right-click for more, drag a song onto a playlist"
+		return ""
 	}
 	switch lib.status {
 	case .None:

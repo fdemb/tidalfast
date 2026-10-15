@@ -453,6 +453,122 @@ test_ui_settle_frames_are_limited :: proc(t: ^testing.T) {
 	testing.expectf(t, asked <= 4, "asked for %d frames", asked)
 }
 
+// A 300 by 200 window with 100 rows of 10 pt and the scrollbar in mode.
+@(private = "file")
+bar_frame :: proc(u: ^ui.State, now: ^f64, mode: ui.Scrollbars, events: ..platform.Event) -> (view, row: ^ui.Box, animating: bool) {
+	now^ += 1.0 / 120
+	u.scrollbars = mode
+	ui.begin_frame(u, events, nil, nil, 300, 200, now^)
+	{
+		view = ui.scroll_view("view", ui.fill(), ui.fill())
+		rows := ui.virtual_rows(view, 100, 10)
+		for i in rows.first ..< rows.last {
+			b := ui.box_make(fmt.tprintf("##row%d", i), {.Clickable, .Focusable}, ui.fill(), ui.px(10))
+			if i == rows.first {
+				row = b
+			}
+		}
+	}
+	animating = ui.end_frame()
+	return
+}
+
+@(private = "file")
+bar_settle :: proc(u: ^ui.State, now: ^f64, mode: ui.Scrollbars) -> (view, row: ^ui.Box, settled: bool) {
+	animating: bool
+	for _ in 0 ..< 600 {
+		view, row, animating = bar_frame(u, now, mode)
+		if !animating {
+			return view, row, true
+		}
+	}
+	return
+}
+
+@(test)
+test_ui_scrollbar_floating :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	now := 0.0
+	view, row, settled := bar_settle(&u, &now, .Floating)
+	testing.expect(t, settled)
+	testing.expect_value(t, row.rect.w, f32(300))
+
+	// Scrolling shows it, and then nothing asks for frames until it's
+	// time to hide it.
+	view, _, _ = bar_frame(&u, &now, .Floating, {kind = .Scroll, x = 50, y = 50, dy = -100, precise = true, phase = .Began})
+	view, _, settled = bar_settle(&u, &now, .Floating)
+	testing.expect(t, settled)
+	testing.expect_value(t, view.bar_t, f32(1))
+	testing.expect(t, u.wake > now, "it asks to wake up to hide")
+
+	// It hides once the linger is over, then settles.
+	now += ui.SCROLLBAR_LINGER
+	view, _, settled = bar_settle(&u, &now, .Floating)
+	testing.expect(t, settled)
+	testing.expect_value(t, view.bar_t, f32(0))
+
+	// The mouse coming into the view shows it for a moment, not for as
+	// long as it stays.
+	bar_frame(&u, &now, .Floating, {kind = .Mouse_Move, x = 50, y = 50})
+	view, _, _ = bar_settle(&u, &now, .Floating)
+	testing.expect_value(t, view.bar_t, f32(1))
+	now += ui.SCROLLBAR_LINGER
+	view, _, settled = bar_settle(&u, &now, .Floating)
+	testing.expect(t, settled)
+	testing.expect_value(t, view.bar_t, f32(0))
+
+	// So does the focus moving into it.
+	bar_frame(&u, &now, .Floating, {kind = .Key_Down, key_code = ui.KEY_TAB})
+	view, _, _ = bar_settle(&u, &now, .Floating)
+	testing.expect_value(t, view.bar_t, f32(1))
+	now += ui.SCROLLBAR_LINGER
+	view, _, _ = bar_settle(&u, &now, .Floating)
+	testing.expect_value(t, view.bar_t, f32(0))
+}
+
+@(test)
+test_ui_scrollbar_docked_and_never :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	now := 0.0
+	// Docked takes a gutter from the rows and stays.
+	view, row, settled := bar_settle(&u, &now, .Docked)
+	testing.expect(t, settled)
+	testing.expect_value(t, row.rect.w, f32(300 - ui.SCROLLBAR_TRACK))
+	testing.expect_value(t, view.bar_t, f32(1))
+	now += 10
+	view, _, _ = bar_settle(&u, &now, .Docked)
+	testing.expect_value(t, view.bar_t, f32(1))
+
+	view, row, settled = bar_settle(&u, &now, .Never)
+	testing.expect(t, settled)
+	testing.expect_value(t, row.rect.w, f32(300))
+	testing.expect_value(t, view.bar_t, f32(0))
+}
+
+@(test)
+test_ui_scrollbar_drag :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	now := 0.0
+	bar_settle(&u, &now, .Docked)
+	// The thumb is 196 * 200 / 1000 tall at the top of the track. A press
+	// at the track's bottom centres it there: all the way down.
+	x := f32(300 - ui.SCROLLBAR_TRACK / 2)
+	bar_frame(&u, &now, .Docked, {kind = .Mouse_Move, x = x, y = 199})
+	bar_frame(&u, &now, .Docked, {kind = .Mouse_Down, button = .Left, x = x, y = 199})
+	view, _, _ := bar_frame(&u, &now, .Docked)
+	testing.expect_value(t, view.view_off.y, f32(800))
+	// Dragging back up moves the view with it.
+	bar_frame(&u, &now, .Docked, {kind = .Mouse_Move, x = x, y = 2})
+	view, _, _ = bar_frame(&u, &now, .Docked, {kind = .Mouse_Up, button = .Left, x = x, y = 2})
+	testing.expect_value(t, view.view_off.y, f32(0))
+}
+
 Menu_Frame :: struct {
 	area, a, b: ui.Signal,
 	animating:  bool,

@@ -18,6 +18,7 @@ package app
 
 import "base:runtime"
 import "core:fmt"
+import "core:log"
 import "core:mem"
 import vmem "core:mem/virtual"
 import "core:strings"
@@ -65,7 +66,7 @@ Job_Kind :: enum u8 {
 	Artwork, // a cover for Now Playing: download and decode, keep the pixels
 	Search, // songs, albums, artists and playlists for a query, see search.odin
 	Login_Pkce, // finish a PKCE login with the pasted address, see login.odin
-	Save_Settings, // write the output settings, see settings.odin
+	Save_Settings, // write the settings, see settings.odin
 }
 
 Source :: enum u8 {
@@ -164,6 +165,7 @@ workers_stop :: proc(d: ^Data) {
 @(private = "file")
 worker_main :: proc "c" (arg: rawptr) -> rawptr {
 	context = runtime.default_context()
+	context.logger = app_logger()
 	d := (^Data)(arg)
 	temp_given := false
 	for {
@@ -331,7 +333,7 @@ stream_error_line :: proc(track_id: u64, what: string, err: tidal.Error, allocat
 @(private = "file")
 log_stream_error :: proc(track_id: u64, what: string, err: tidal.Error) {
 	if line := stream_error_line(track_id, what, err, context.temp_allocator); line != "" {
-		fmt.eprintln(line)
+		log.error(line)
 	}
 }
 
@@ -358,7 +360,7 @@ run_job :: proc(d: ^Data, job: Job) -> (res: Result) {
 	case .Save_Settings:
 		if !settings_flush(d) {
 			res.err = .Io
-			res.message = small("Couldn't save the output settings")
+			res.message = small("Couldn't save the settings")
 		}
 	case .Login_Pkce:
 		run_login_pkce(d, job, &res)

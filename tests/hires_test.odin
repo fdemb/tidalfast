@@ -382,6 +382,18 @@ settings_persistence :: proc(t: ^testing.T) {
 	testing.expect_value(t, st, app.Settings{bit_perfect = true})
 	testing.expect(t, !os.exists(fmt.tprintf("%s.tmp", path)))
 
+	// The scrollbar mode goes by name, and a name it doesn't know is the
+	// default.
+	testing.expect(t, app.settings_save(path, {scrollbars = .Docked}))
+	data, _ := os.read_entire_file(path, context.temp_allocator)
+	testing.expect(t, strings.contains(string(data), `"Docked"`))
+	st, _ = app.settings_load(path)
+	testing.expect_value(t, st, app.Settings{scrollbars = .Docked})
+	_ = os.write_entire_file(path, transmute([]u8)string(`{"hog": true, "scrollbars": "Sideways"}`))
+	st, ok = app.settings_load(path)
+	testing.expect(t, ok)
+	testing.expect_value(t, st, app.Settings{hog = true})
+
 	_ = os.write_entire_file(path, transmute([]u8)string("{not json"))
 	st, ok = app.settings_load(path)
 	testing.expect(t, !ok)
@@ -399,7 +411,7 @@ settings_persistence :: proc(t: ^testing.T) {
 	testing.expect(t, ok)
 	testing.expect_value(t, st, changed)
 	testing.expect(t, app.settings_save(path, {bit_perfect = true}))
-	data, _ := os.read_entire_file(path, context.temp_allocator)
+	data, _ = os.read_entire_file(path, context.temp_allocator)
 	testing.expect(t, !strings.contains(string(data), "device_change"))
 	// Hog mode only counts with bit-perfect output.
 	testing.expect_value(t, app.output_of({hog = true}), audio.Output{})
@@ -1226,5 +1238,5 @@ output_menu_says_why :: proc(t: ^testing.T) {
 	pb.status.device.reason_len = copy(pb.status.device.reason[:], "no 24-bit format at 96 kHz")
 	testing.expect_value(t, app.output_description(s), "Not bit-perfect: no 24-bit format at 96 kHz")
 	pb.status.device = {bit_perfect = true, hogged = true, rate = 96000, bits = 32, float = true}
-	testing.expect_value(t, app.output_description(s), "Bit-perfect at 96 kHz, hog mode, no volume or ReplayGain")
+	testing.expect_value(t, app.output_description(s), "Bit-perfect, 96 kHz, hog mode")
 }

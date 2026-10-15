@@ -19,6 +19,7 @@ package app
 import "base:runtime"
 import "core:fmt"
 import vmem "core:mem/virtual"
+import "core:log"
 import "core:strconv"
 import "core:strings"
 import "core:unicode"
@@ -180,7 +181,7 @@ search_stop :: proc(s: ^State) {
 search_send :: proc(s: ^State, q: string) {
 	sr := &s.search
 	sr.due = 0
-	fmt.eprintfln("search: \"%s\" (query %d)", q, sr.gen)
+	log.infof("search: \"%s\" (query %d)", q, sr.gen)
 	if s.data.fake {
 		fake_search(s, q)
 		return
@@ -236,7 +237,7 @@ search_result :: proc(s: ^State, res: ^Result) {
 	sr.found = res.found
 	sr.query = res.job.id
 	q := small_str(&sr.query)
-	fmt.eprintfln("search: \"%s\": %d songs, %d albums, %d artists, %d playlists", q, len(res.rows), len(sr.found.albums), len(sr.found.artists), len(sr.found.playlists))
+	log.infof("search: \"%s\": %d songs, %d albums, %d artists, %d playlists", q, len(res.rows), len(sr.found.albums), len(sr.found.artists), len(sr.found.playlists))
 
 	browse_begin(s)
 	d := &s.data
@@ -456,7 +457,7 @@ draw_found_list :: proc(s: ^State) {
 		f := found_at(s, tab, i)
 		row := ui.row(fmt.tprintf("##found%d", i), {.Clickable, .Draw_Background, .Draw_Hot_Effects}, ui.fill(), ui.px(TRACK_ROW_H))
 		row.radius = 6
-		row.hover_color = {1, 1, 1, 0.05}
+		row_highlight(row, LIST_ROWS, false)
 		ui.accessible(row, .Row, fmt.tprintf("%s, %s", f.name, f.subtitle))
 		if ui.signal(row).clicked {
 			open_found(s, tab, f)
@@ -622,7 +623,7 @@ fake_search :: proc(s: ^State, q: string) {
 	sr.query = small(q)
 	sr.fake_source = .Search
 	sr.fake_title = small(fmt.tprintf("Results for “%s”", q))
-	fmt.eprintfln("search: \"%s\": %d songs, %d albums, %d artists, %d playlists", q, sr.fake_count, sr.fake_counts[0], sr.fake_counts[1], sr.fake_counts[2])
+	log.infof("search: \"%s\": %d songs, %d albums, %d artists, %d playlists", q, sr.fake_count, sr.fake_counts[0], sr.fake_counts[1], sr.fake_counts[2])
 }
 
 // fake_filter lists the fake rows of the album or artist of row at.

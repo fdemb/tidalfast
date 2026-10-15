@@ -11,6 +11,7 @@
 //    proportion, until the overflow is gone or nothing is left to give.
 //    Across it, a child larger than its parent is cut to the parent's size.
 //    Boxes that allow overflow (scroll views) skip this on that axis.
+//    A box's gutter comes off its width before its children get any.
 // 5. Positions: children are placed one after another along the child axis,
 //    shifted by the parent's view_off, and the parent's view_bounds is set
 //    to the size of its content.
@@ -49,6 +50,12 @@ overflow_on :: proc(b: ^Box, axis: Axis) -> bool {
 	return (.Allow_Overflow_X if axis == .X else .Allow_Overflow_Y) in b.flags
 }
 
+// content_size is the room b has for its children, less its gutter.
+@(private)
+content_size :: proc(b: ^Box, axis: Axis) -> f32 {
+	return max(b.fixed_size[axis] - b.gutter, 0) if axis == .X else b.fixed_size[axis]
+}
+
 sizes_standalone :: proc(b: ^Box, axis: Axis) {
 	size := b.pref_size[axis]
 	#partial switch size.kind {
@@ -69,7 +76,7 @@ sizes_upwards :: proc(b: ^Box, axis: Axis) {
 		for p := b.parent; p != nil; p = p.parent {
 			#partial switch p.pref_size[axis].kind {
 			case .Pixels, .Text, .Parent_Pct:
-				known = p.fixed_size[axis]
+				known = content_size(p, axis)
 			case:
 				continue
 			}
@@ -103,7 +110,7 @@ sizes_downwards :: proc(b: ^Box, axis: Axis) {
 }
 
 solve_violations :: proc(b: ^Box, axis: Axis) {
-	allowed := b.fixed_size[axis]
+	allowed := content_size(b, axis)
 	// Pass 2 took them from the size before b's parent shrank it. A fill
 	// inside a shrunk fill would otherwise keep the outer one's first size,
 	// and a strict percentage of it would overflow. A scroll view's

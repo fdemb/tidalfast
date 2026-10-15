@@ -18,6 +18,7 @@ package audio
 import "base:intrinsics"
 import "core:fmt"
 import CF "core:sys/darwin/CoreFoundation"
+import "core:log"
 import "core:sys/posix"
 import "core:time"
 
@@ -339,7 +340,7 @@ device_change_undo :: proc(c: ^Device_Change) -> bool {
 		r := c.orig_rate
 		set(dev, PROP_NOMINAL_RATE, SCOPE_GLOBAL, &r)
 	}
-	fmt.eprintfln("audio: %s was left at %.0f Hz; back to %.0f Hz", device_name(dev), c.rate, c.orig_rate)
+	log.infof("audio: %s was left at %.0f Hz; back to %.0f Hz", device_name(dev), c.rate, c.orig_rate)
 	return true
 }
 
@@ -503,7 +504,7 @@ hal_configure :: proc(h: ^Hal, dev: Audio_Object_ID, rate, channels, bits: int, 
 			h.hogged = set(dev, PROP_HOG_MODE, SCOPE_GLOBAL, &v) == 0 && device_hog_owner(dev) == pid
 		}
 		if !h.hogged {
-			fmt.eprintln("audio: couldn't take the device in hog mode, playing without it")
+			log.warn("audio: couldn't take the device in hog mode, playing without it")
 		}
 	} else if !hog && h.hogged {
 		hal_release_hog(h)
@@ -513,25 +514,25 @@ hal_configure :: proc(h: ^Hal, dev: Audio_Object_ID, rate, channels, bits: int, 
 	}
 	rates := device_available_rates(dev)
 	if !rate_supported(rates, f64(rate)) {
-		fmt.eprintfln("audio: %s can't run at %d Hz", device_name(dev), rate)
+		log.warnf("audio: %s can't run at %d Hz", device_name(dev), rate)
 		return false, fmt.tprintf("the device can't run at %s kHz", khz_text(rate))
 	}
 	want := f64(rate)
 	f, found := pick_physical_format(stream_physical_formats(h.stream), want, channels, bits)
 	if !found {
-		fmt.eprintfln("audio: %s has no format for %d channels of %d-bit at %d Hz", device_name(dev), channels, bits, rate)
+		log.warnf("audio: %s has no format for %d channels of %d-bit at %d Hz", device_name(dev), channels, bits, rate)
 		return false, fmt.tprintf("no %d-bit format at %s kHz", bits, khz_text(rate))
 	}
 	begin := time.tick_now()
 	if device_nominal_rate(dev) != want {
 		if st := set(dev, PROP_NOMINAL_RATE, SCOPE_GLOBAL, &want); st != 0 {
-			fmt.eprintfln("audio: setting the rate to %d Hz failed (%d)", rate, st)
+			log.errorf("audio: setting the rate to %d Hz failed (%d)", rate, st)
 			return false, fmt.tprintf("the device refused %s kHz", khz_text(rate))
 		}
 	}
 	if cur, _ := stream_physical_format(h.stream); !same_format(cur, f) {
 		if st := set(h.stream, PROP_PHYSICAL_FORMAT, SCOPE_GLOBAL, &f); st != 0 {
-			fmt.eprintfln("audio: setting the physical format to %s failed (%d)", format_name(f), st)
+			log.errorf("audio: setting the physical format to %s failed (%d)", format_name(f), st)
 			return false, "the device refused the format"
 		}
 	}
@@ -547,13 +548,13 @@ hal_configure :: proc(h: ^Hal, dev: Audio_Object_ID, rate, channels, bits: int, 
 		if time.tick_since(begin) > HAL_SETTLE_TIMEOUT {
 			switch {
 			case !rate_ok:
-				fmt.eprintfln("audio: the device didn't switch to %d Hz", rate)
+				log.warnf("audio: the device didn't switch to %d Hz", rate)
 				return false, fmt.tprintf("the device stayed off %s kHz", khz_text(rate))
 			case !format_ok:
-				fmt.eprintfln("audio: the device's format is %s, not %s", format_name(pf), format_name(f))
+				log.warnf("audio: the device's format is %s, not %s", format_name(pf), format_name(f))
 				return false, "the device didn't take the format"
 			}
-			fmt.eprintfln("audio: the device takes %s, not 32-bit float", format_name(vf))
+			log.warnf("audio: the device takes %s, not 32-bit float", format_name(vf))
 			return false, "the device doesn't take 32-bit float"
 		}
 		time.sleep(2 * time.Millisecond)
@@ -575,14 +576,14 @@ khz_text :: proc(rate: int) -> string {
 hal_start :: proc(h: ^Hal, io_proc: IO_Proc, client: rawptr) -> bool {
 	if h.io_proc == nil {
 		if st := AudioDeviceCreateIOProcID(h.device, io_proc, client, &h.io_proc); st != 0 {
-			fmt.eprintfln("audio: AudioDeviceCreateIOProcID failed (%d)", st)
+			log.errorf("audio: AudioDeviceCreateIOProcID failed (%d)", st)
 			h.io_proc = nil
 			return false
 		}
 	}
 	if !h.running {
 		if st := AudioDeviceStart(h.device, h.io_proc); st != 0 {
-			fmt.eprintfln("audio: AudioDeviceStart failed (%d)", st)
+			log.errorf("audio: AudioDeviceStart failed (%d)", st)
 			return false
 		}
 		h.running = true
@@ -621,7 +622,7 @@ hal_close :: proc(h: ^Hal, restore: bool) {
 			r := h.orig_rate
 			set(h.device, PROP_NOMINAL_RATE, SCOPE_GLOBAL, &r)
 		}
-		fmt.eprintfln("audio: %s back to %.0f Hz", device_name(h.device), h.orig_rate)
+		log.infof("audio: %s back to %.0f Hz", device_name(h.device), h.orig_rate)
 	}
 	hal_release_hog(h)
 	h^ = {}
@@ -639,6 +640,6 @@ hal_release_hog :: proc(h: ^Hal) {
 	pid := posix.pid_t(-1)
 	set(h.device, PROP_HOG_MODE, SCOPE_GLOBAL, &pid)
 	if device_hog_owner(h.device) == posix.getpid() {
-		fmt.eprintln("audio: hog mode is still ours after releasing it")
+		log.warn("audio: hog mode is still ours after releasing it")
 	}
 }

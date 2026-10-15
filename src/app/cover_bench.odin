@@ -5,7 +5,7 @@ package app
 // then scrolls the track table by itself while covers stream in, and logs
 // the frame times and cover upload times of each phase.
 
-import "core:fmt"
+import "core:log"
 
 import "../ui"
 
@@ -64,7 +64,7 @@ cover_bench_record :: proc(s: ^State, frame_ms: f32) {
 				select_playlist(s, longest + 1)
 			}
 		} else if d.view.loaded_rows >= COVER_BENCH_MIN_ROWS || d.view.done {
-			fmt.eprintfln("bench: covers: %s, %d of %d rows loaded after %d frames", small_str(&d.view.name), d.view.loaded_rows, d.view.count, b.frame)
+			log.infof("bench: covers: %s, %d of %d rows loaded after %d frames", small_str(&d.view.name), d.view.loaded_rows, d.view.count, b.frame)
 			b^ = {running = true, phase = 1}
 		}
 		b.frame += 1
@@ -85,10 +85,10 @@ cover_bench_record :: proc(s: ^State, frame_ms: f32) {
 	if b.frame < phase.frames {
 		return
 	}
-	fmt.eprintfln("bench: covers: %s: ui avg %.3f ms, max %.3f ms; frame avg %.3f ms, max %.3f ms; %d frames; %d covers uploaded, results max %.3f ms a frame, at most %d uploads in a frame (%.3f ms); cache %d covers, %.1f MB",
+	log.infof("bench: covers: %s: ui avg %.3f ms, max %.3f ms; frame avg %.3f ms, max %.3f ms; %d frames; %d covers uploaded, results max %.3f ms a frame, at most %d uploads in a frame (%.3f ms); cache %d covers, %.1f MB",
 		phase.name, b.ui_sum / f64(b.count), b.ui_max, b.frame_sum / f64(b.count), b.frame_max, b.count, b.uploads, b.data_max, b.most_uploads, b.busiest_ms, d.covers.used, f64(d.covers.bytes) / (1 << 20))
 	b^ = {running = b.phase + 1 < len(COVER_BENCH_PHASES), phase = b.phase + 1}
 	if !b.running {
-		fmt.eprintln("bench: done")
+		log.info("bench: done")
 	}
 }

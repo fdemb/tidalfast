@@ -5,7 +5,7 @@ import "core:fmt"
 import "../render"
 import "../text"
 
-ACCENT :: render.Color{0.12, 0.84, 0.38, 1}
+ACCENT :: render.Color{0, 1, 1, 1}
 
 @(private)
 fade :: proc(c: render.Color, a: f32) -> render.Color {

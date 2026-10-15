@@ -1,7 +1,7 @@
 package app
 
-// Output settings: bit-perfect output and hog mode. They live in a small
-// JSON file, ~/Library/Application Support/tidalfast/settings.json, or
+// Settings: bit-perfect output, hog mode and how lists show their
+// scrollbars. They live in a small JSON file, ~/Library/Application Support/tidalfast/settings.json, or
 // wherever TIDALFAST_SETTINGS points. A worker writes it, so a click never
 // waits on the disk. Saves go one at a time and only the newest settings
 // are written (settings_queue).
@@ -10,13 +10,15 @@ package app
 // also says which device and what it had. If the app dies before it puts
 // the device back, the next start does (playback_start).
 //
-// The player bar has a button for them that opens a menu. In bit-perfect
-// mode the button shows what the device plays, such as 24/96.
+// The player bar has a button for the output settings that opens a menu.
+// In bit-perfect mode the button shows what the device plays, such as
+// 24/96. The sidebar has one for the rest.
 
 import "base:runtime"
 import "core:crypto"
 import "core:encoding/json"
 import "core:fmt"
+import "core:log"
 import "core:mem"
 import "core:os"
 import "core:path/filepath"
@@ -31,6 +33,7 @@ Settings :: struct {
 	bit_perfect: bool,
 	hog:         bool,
 	device:      audio.Device_Change, // rate 0 when no device is changed
+	scrollbars:  ui.Scrollbars,
 }
 
 // Settings_File is Settings as the JSON in the file.
@@ -38,6 +41,7 @@ Settings :: struct {
 Settings_File :: struct {
 	bit_perfect:   bool,
 	hog:           bool,
+	scrollbars:    ui.Scrollbars,
 	device_change: Maybe(Device_Change_File) `json:"device_change,omitempty"`,
 }
 
@@ -73,7 +77,7 @@ settings_load :: proc(path: string) -> (st: Settings, ok: bool) {
 		return {}, false
 	}
 	if st, ok = settings_decode_json(data); !ok {
-		fmt.eprintfln("app: %s isn't valid settings, using the defaults", path)
+		log.warnf("app: %s isn't valid settings, using the defaults", path)
 	}
 	return
 }
@@ -84,7 +88,7 @@ settings_decode_json :: proc(data: []u8) -> (st: Settings, ok: bool) {
 	if json.unmarshal(data, &f, allocator = context.temp_allocator) != nil {
 		return {}, false
 	}
-	st = {bit_perfect = f.bit_perfect, hog = f.hog}
+	st = {bit_perfect = f.bit_perfect, hog = f.hog, scrollbars = f.scrollbars}
 	if c, has := f.device_change.?; has && c.rate != 0 && len(c.uid) <= len(st.device.uid) {
 		st.device = {orig_rate = c.orig_rate, orig_format = c.orig_format, rate = c.rate}
 		st.device.uid_len = copy(st.device.uid[:], c.uid)
@@ -104,12 +108,13 @@ settings_save :: proc(path: string, st: Settings) -> bool {
 	f := Settings_File {
 		bit_perfect = st.bit_perfect,
 		hog         = st.hog,
+		scrollbars  = st.scrollbars,
 	}
 	if st.device.rate != 0 {
 		c := st.device
 		f.device_change = Device_Change_File{audio.device_change_uid(&c), c.orig_rate, c.orig_format, c.rate}
 	}
-	data, merr := json.marshal(f, {pretty = true}, context.temp_allocator)
+	data, merr := json.marshal(f, {pretty = true, use_enum_names = true}, context.temp_allocator)
 	if merr != nil {
 		return false
 	}
@@ -148,7 +153,7 @@ settings_queue :: proc(d: ^Data, st: Settings, now := false) {
 	if d.running && !now {
 		push_job(d, {kind = .Save_Settings})
 	} else if !settings_flush(d) {
-		fmt.eprintfln("app: couldn't save the settings to %s", d.settings_path)
+		log.errorf("app: couldn't save the settings to %s", d.settings_path)
 	}
 }
 
@@ -251,16 +256,48 @@ output_description :: proc(s: ^State) -> string {
 	dev := pb.status.device
 	switch {
 	case !pb.settings.bit_perfect:
-		return "The system mixer plays it, with ReplayGain and the volume slider"
+		return "System mixer"
 	case dev.rate == 0:
-		return "Bit-perfect: volume and ReplayGain are off"
+		return "Bit-perfect"
 	case dev.bit_perfect:
 		hog := ", hog mode" if dev.hogged else ""
-		return fmt.tprintf("Bit-perfect at %s kHz%s, no volume or ReplayGain", khz(dev.rate), hog)
+		return fmt.tprintf("Bit-perfect, %s kHz%s", khz(dev.rate), hog)
 	case dev.reason_len > 0:
 		return fmt.tprintf("Not bit-perfect: %s", audio.device_reason(&dev))
 	}
-	return "Not bit-perfect: the system converts it"
+	return "Not bit-perfect"
+}
+
+// draw_settings_button is the sidebar's button for the settings menu.
+draw_settings_button :: proc(s: ^State) {
+	ui.text_style(.Regular, 12, SECONDARY)
+	b := ui.box_make("Settings###settings", {.Clickable, .Focusable, .Draw_Text, .Draw_Hot_Effects, .Draw_Active_Effects}, ui.text_size(), ui.px(26))
+	b.text_pad = 10
+	b.radius = 6
+	ui.accessible(b, .Button, "Settings")
+	if ui.signal(b).clicked {
+		ui.open_menu("settings_menu", {b.rect.x, b.rect.y + b.rect.h + 4})
+	}
+
+	if ui.menu("settings_menu") {
+		pb := &s.playback
+		ui.text_style(.Regular, 11, DIM)
+		heading := ui.label("Scrollbars", ui.fill(), ui.px(24))
+		heading.text_pad = 14
+		ui.text_style(.Regular, 13, TEXT)
+		for mode in ui.Scrollbars {
+			on := pb.settings.scrollbars == mode
+			name := fmt.tprint(mode)
+			item := ui.menu_item(fmt.tprintf("%s %s###scrollbars_%s", "✓" if on else "   ", name, name))
+			ui.accessible(item.box, .Menu_Item, name, selected = on)
+			if item.clicked {
+				st := pb.settings
+				st.scrollbars = mode
+				pb.settings = st
+				settings_queue(&s.data, st)
+			}
+		}
+	}
 }
 
 @(private = "file")

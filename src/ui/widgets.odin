@@ -5,7 +5,7 @@ import "core:math"
 import "../render"
 import "../text"
 
-MENU_BACKGROUND :: render.Color{0.13, 0.15, 0.18, 1}
+MENU_BACKGROUND :: render.Color{0.13, 0.13, 0.13, 1}
 MENU_BORDER :: render.Color{1, 1, 1, 0.08}
 
 // label is a text box without a key: no state, no input. s must live until
@@ -69,13 +69,146 @@ button :: proc(id: string, width: Size = {}, height: Size = {}) -> Signal {
 }
 
 // scroll_view is a clipped box that scrolls its children vertically, and
-// the parent until the end of the scope.
-@(deferred_out = pop_parent_box)
+// the parent until the end of the scope. It has a scrollbar while its
+// content is taller than it, drawn as State.scrollbars says.
+@(deferred_out = scroll_view_end)
 scroll_view :: proc(id: string, width, height: Size, flags: Box_Flags = {}) -> ^Box {
 	b := box_make(id, {.View_Scroll, .Clip, .Allow_Overflow_Y} + flags, width, height)
 	b.child_axis = .Y
+	if b.key != 0 {
+		scrollbar_drag(b)
+		if ctx.scrollbars == .Docked && b.view_bounds.y > b.rect.h {
+			b.gutter = SCROLLBAR_TRACK
+		}
+	}
 	push_parent(b)
 	return b
+}
+
+@(private)
+scroll_view_end :: proc(b: ^Box) {
+	scrollbar(b)
+	pop_parent()
+}
+
+Scrollbars :: enum u8 {
+	Floating, // shows for a moment when the view scrolls, the mouse enters it or it gets the focus
+	Docked, // always shows, in a gutter of its own
+	Never,
+}
+
+SCROLLBAR_W :: 6
+SCROLLBAR_INSET :: 2
+SCROLLBAR_TRACK :: SCROLLBAR_W + 2 * SCROLLBAR_INSET
+SCROLLBAR_MIN_THUMB :: 24
+SCROLLBAR_LINGER :: 1.0 // seconds a floating scrollbar stays after the view stops
+
+@(private)
+Thumb :: struct {
+	y, h, travel, range: f32, // y from the top of the track
+}
+
+@(private)
+thumb_of :: proc(view: ^Box) -> (t: Thumb, ok: bool) {
+	content, h := view.view_bounds.y, view.rect.h
+	if content <= h || h <= 0 {
+		return {}, false
+	}
+	track := h - 2 * SCROLLBAR_INSET
+	t.h = clamp(track * h / content, min(SCROLLBAR_MIN_THUMB, track), track)
+	t.travel = track - t.h
+	t.range = content - h
+	t.y = SCROLLBAR_INSET + t.travel * clamp(view.view_off.y / t.range, 0, 1)
+	return t, true
+}
+
+// scrollbar_drag moves the view with last frame's scrollbar, before the
+// view's children are built for the offset. A press on the thumb drags it
+// from where it was taken; a press beside it centres it on the mouse.
+@(private)
+scrollbar_drag :: proc(view: ^Box) {
+	u := ctx
+	bar := box_lookup(u, key_from_string(view.key, "###scrollbar"))
+	if bar == nil {
+		return
+	}
+	t, ok := thumb_of(view)
+	if !ok {
+		return
+	}
+	sig := signal(bar)
+	if sig.pressed {
+		y := sig.mouse.y - bar.rect.y
+		view.bar_grab = y - t.y if y >= t.y && y < t.y + t.h else t.h / 2
+	}
+	if (sig.held || sig.released) && t.travel > 0 {
+		f := clamp((sig.mouse.y - bar.rect.y - SCROLLBAR_INSET - view.bar_grab) / t.travel, 0, 1)
+		view.view_off.y = f * t.range
+		view.view_off_target.y = view.view_off.y
+	}
+}
+
+// scrollbar builds the view's scrollbar over its right edge, last so it's
+// on top of the rows. A floating one shows when the view moves, the mouse
+// enters it or the focus moves into it, and hides SCROLLBAR_LINGER seconds
+// after, unless the mouse is on the scrollbar.
+// focus_within says whether the focus is on b or a box built inside it
+// this frame.
+@(private)
+focus_within :: proc(u: ^State, b: ^Box) -> bool {
+	f := box_lookup(u, u.focus)
+	if f == nil || f.last_frame != u.frame {
+		return false
+	}
+	for p := f; p != nil; p = p.parent {
+		if p == b {
+			return true
+		}
+	}
+	return false
+}
+
+@(private)
+scrollbar :: proc(view: ^Box) {
+	u := ctx
+	if view.key == 0 {
+		return
+	}
+	hovered := u.input.mouse_inside && rect_contains(view.clip, u.input.mouse)
+	focused := focus_within(u, view)
+	if view.view_off.y != view.bar_seen || (hovered && !view.bar_hovered) || (focused && !view.bar_focused) {
+		view.bar_time = u.time
+	}
+	view.bar_seen = view.view_off.y
+	view.bar_hovered = hovered
+	view.bar_focused = focused
+	t, ok := thumb_of(view)
+	if !ok || u.scrollbars == .Never {
+		view.bar_t = 0
+		return
+	}
+	key := key_from_string(view.key, "###scrollbar")
+	held := u.hot == key || u.active[.Left] == key
+	recent := u.time - view.bar_time < SCROLLBAR_LINGER
+	show := u.scrollbars == .Docked || held || recent
+	if show && !held && u.scrollbars == .Floating {
+		wake_at(view.bar_time + SCROLLBAR_LINGER)
+	}
+	view.bar_t = approach(u, view.bar_t, 1 if show else 0, 1 - math.exp(-u.dt * 12), 0.01)
+
+	flags := Box_Flags{.Floating_X, .Floating_Y}
+	if view.bar_t > 0 {
+		flags += {.Clickable}
+	}
+	bar := box_make("###scrollbar", flags, px(SCROLLBAR_TRACK), px(view.rect.h))
+	bar.fixed_pos = {view.rect.w - SCROLLBAR_TRACK, view.view_off.y}
+	bar.opacity = view.bar_t
+	push_parent(bar)
+	defer pop_parent()
+	thumb := box_make("", {.Floating_X, .Floating_Y, .Draw_Background}, px(SCROLLBAR_W), px(t.h))
+	thumb.fixed_pos = {SCROLLBAR_INSET, t.y}
+	thumb.background = {1, 1, 1, 0.22 + 0.2 * max(bar.hot_t, bar.active_t)}
+	thumb.radius = SCROLLBAR_W / 2
 }
 
 Virtual_Rows :: struct {
@@ -266,7 +399,7 @@ tooltip :: proc(sig: Signal, label: string) {
 	b.text_pad = 8
 	b.background = MENU_BACKGROUND
 	b.border_color = MENU_BORDER
-	b.text_color = {0.95, 0.96, 0.97, 1}
+	b.text_color = {0.95, 0.95, 0.95, 1}
 	b.radius = 5
 	b.open_t = approach(u, b.open_t, 1, 1 - math.exp(-u.dt * 20), 0.01)
 	b.opacity = b.open_t

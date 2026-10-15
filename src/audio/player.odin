@@ -44,6 +44,7 @@ import "base:intrinsics"
 import "base:runtime"
 import "core:c"
 import "core:fmt"
+import "core:log"
 import "core:math"
 import "core:strings"
 import "core:sync"
@@ -232,6 +233,7 @@ Commands :: struct {
 
 Player :: struct {
 	wake_ui:         proc "c" (),
+	logger:          runtime.Logger, // the creator's, for the decode thread
 	thread:          posix.pthread_t,
 	cmd_mutex:       sync.Mutex,
 	cmd:             Commands,
@@ -314,6 +316,7 @@ create :: proc(wake_ui: proc "c" (), volume: f32, capture_path := "", window := 
 	heap := runtime.heap_allocator()
 	p := new(Player, heap)
 	p.wake_ui = wake_ui
+	p.logger = context.logger
 	p.null_output = null_output
 	p.output = output
 	p.capture_fd = -1
@@ -330,7 +333,7 @@ create :: proc(wake_ui: proc "c" (), volume: f32, capture_path := "", window := 
 		if p.capture_fd >= 0 {
 			cap_data := make([]f32, CAPTURE_FRAMES * 8, heap)
 			ring_init(&p.capture, cap_data, CAPTURE_FRAMES, 2)
-			fmt.eprintln("audio: capturing output to", capture_path)
+			log.info("audio: capturing output to", capture_path)
 		}
 	}
 	for &sl in p.slots {
@@ -578,6 +581,7 @@ commands_free :: proc(c: ^Commands) {
 decode_main :: proc "c" (arg: rawptr) -> rawptr {
 	context = runtime.default_context()
 	p := (^Player)(arg)
+	context.logger = p.logger
 	for {
 		if !run_commands(p, true) {
 			break
@@ -833,11 +837,11 @@ check_device :: proc(p: ^Player) {
 	}
 	m, sample := published(p)
 	if lost {
-		fmt.eprintln("audio: the output device went away")
+		log.warn("audio: the output device went away")
 		device_close(p)
 		p.hal = {}
 	} else {
-		fmt.eprintln("audio: the default output changed, moving to it")
+		log.info("audio: the default output changed, moving to it")
 		device_close(p, restore = true)
 	}
 	update_change(p)
@@ -1089,14 +1093,14 @@ after_step :: proc(p: ^Player) {
 	if p.reclock_from != 0 {
 		if first := sync.atomic_load(&p.first_tick); first != 0 && first > p.reclock_from {
 			p.wake_ui()
-			fmt.eprintfln("audio: re-clocked %d -> %d Hz: %.1f ms from the last callback at the old rate to the first at the new; the rate change took %.1f ms", p.reclock_rates[0], p.reclock_rates[1], ticks_ms(first - p.reclock_from), p.hal.settle_ms)
+			log.infof("audio: re-clocked %d -> %d Hz: %.1f ms from the last callback at the old rate to the first at the new; the rate change took %.1f ms", p.reclock_rates[0], p.reclock_rates[1], ticks_ms(first - p.reclock_from), p.hal.settle_ms)
 			p.reclock_from = 0
 		}
 	}
 
 	if id, d, ok := seek_latency(p); ok && id != p.seek_logged {
 		p.seek_logged = id
-		fmt.eprintfln("audio: seek %d: %.1f ms to the first frame from the new position", id, time.duration_milliseconds(d))
+		log.infof("audio: seek %d: %.1f ms to the first frame from the new position", id, time.duration_milliseconds(d))
 	}
 
 	n := sync.atomic_load(&p.pub_mark)
@@ -1119,7 +1123,7 @@ slot_fail :: proc(p: ^Player, sl: ^Slot, http_status: int, msg: string) {
 	e.http_status = http_status
 	e.len = copy(e.buf[:], msg)
 	sync.unlock(&p.status_mutex)
-	fmt.eprintfln("audio: track %d failed: %s", sl.source.serial, msg)
+	log.errorf("audio: track %d failed: %s", sl.source.serial, msg)
 	p.wake_ui()
 }
 
@@ -1584,7 +1588,7 @@ vread :: proc "c" (dec: ^ma.decoder, out: rawptr, n: c.size_t, read: ^c.size_t) 
 			_, res = demux_read(sl.player, sl, skip[:min(i64(len(skip)), sl.vpos - head - dm.fpos)])
 		}
 		if dm.fpos > sl.vpos - head {
-			fmt.eprintfln("audio: the decoder went back in a DASH stream (%d -> %d)", dm.fpos, sl.vpos - head)
+			log.warnf("audio: the decoder went back in a DASH stream (%d -> %d)", dm.fpos, sl.vpos - head)
 			res = .Failed
 		}
 		got := 0
@@ -1720,20 +1724,20 @@ device_open :: proc(p: ^Player, rate, channels, bits: int) -> bool {
 			p.null_ctx = new(ma.context_type, heap)
 			backends := [1]ma.backend{.null}
 			if r := ma.context_init(&backends[0], 1, nil, p.null_ctx); r != .SUCCESS {
-				fmt.eprintfln("audio: no null backend: %v", r)
+				log.errorf("audio: no null backend: %v", r)
 				free(p.null_ctx, heap)
 				p.null_ctx = nil
 				return false
 			}
 		}
 		if r := ma.device_init(p.null_ctx, &cfg, p.device); r != .SUCCESS {
-			fmt.eprintfln("audio: device_init failed: %v", r)
+			log.errorf("audio: device_init failed: %v", r)
 			return false
 		}
 		if !p.null_output {
 			info.rate = int(device_nominal_rate(default_output_device()))
 		}
-		fmt.eprintfln("audio: %s device open at %d Hz, %d channels", "null" if p.null_output else "output", rate, channels)
+		log.infof("audio: %s device open at %d Hz, %d channels", "null" if p.null_output else "output", rate, channels)
 	}
 	p.device_open = true
 	p.device_rate = rate
@@ -1762,7 +1766,7 @@ hal_open :: proc(p: ^Player, rate, channels, bits: int) -> (ok: bool, reason: st
 	ok, reason = hal_configure(&p.hal, dev, rate, channels, bits, p.output.hog)
 	if !ok {
 		hal_close(&p.hal, restore = true)
-		fmt.eprintfln("audio: no bit-perfect output at %d Hz (%s); the system mixer converts it", rate, reason)
+		log.warnf("audio: no bit-perfect output at %d Hz (%s); the system mixer converts it", rate, reason)
 		return
 	}
 	p.hal.channel_map = channel_map_make(channels, device_stereo_channels(dev))
@@ -1770,7 +1774,7 @@ hal_open :: proc(p: ^Player, rate, channels, bits: int) -> (ok: bool, reason: st
 		p.alive_device = dev
 	}
 	p.using_hal = true
-	fmt.eprintfln("audio: bit-perfect output on %s: %s%s, set in %.1f ms", device_name(dev), format_name(p.hal.format), ", hog mode" if p.hal.hogged else "", p.hal.settle_ms)
+	log.infof("audio: bit-perfect output on %s: %s%s, set in %.1f ms", device_name(dev), format_name(p.hal.format), ", hog mode" if p.hal.hogged else "", p.hal.settle_ms)
 	return true, ""
 }
 

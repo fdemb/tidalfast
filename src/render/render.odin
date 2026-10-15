@@ -25,6 +25,7 @@ package render
 
 import "base:runtime"
 import "core:fmt"
+import "core:log"
 import "core:math"
 import "core:mem"
 import "core:os"
@@ -324,7 +325,7 @@ build_pipeline :: proc(r: ^Renderer) -> id {
 	err: id
 	library := msg_proc(proc "c" (id, SEL, id, id, ^id) -> id)(r.device, sel_registerName("newLibraryWithSource:options:error:"), ns_string(SHADER_SOURCE), nil, &err)
 	if library == nil {
-		fmt.eprintln("render: shader compile failed:", error_string(err))
+		log.error("render: shader compile failed:", error_string(err))
 		return nil
 	}
 	defer release(library)
@@ -350,7 +351,7 @@ build_pipeline :: proc(r: ^Renderer) -> id {
 
 	pipeline := msg_proc(proc "c" (id, SEL, id, ^id) -> id)(r.device, sel_registerName("newRenderPipelineStateWithDescriptor:error:"), desc, &err)
 	if pipeline == nil {
-		fmt.eprintln("render: pipeline failed:", error_string(err))
+		log.error("render: pipeline failed:", error_string(err))
 		return nil
 	}
 	return pipeline
@@ -371,7 +372,7 @@ texture_create :: proc(r: ^Renderer, width, height: int, format: Texture_Format,
 			return Texture(u32(i) | u32(generation) << 16)
 		}
 	}
-	fmt.eprintln("render: out of texture slots")
+	log.error("render: out of texture slots")
 	return 0
 }
 
@@ -842,7 +843,7 @@ write_tga :: proc(path: string, pixels: []byte, w, h: uint) {
 	tmp := fmt.tprintf("%s.tmp", path)
 	f, err := os.create(tmp)
 	if err != nil {
-		fmt.eprintln("render: capture failed:", err)
+		log.error("render: capture failed:", err)
 		return
 	}
 	os.write(f, header[:])

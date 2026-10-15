@@ -2,10 +2,12 @@ package tidal
 
 import "base:runtime"
 import "core:c"
+import "core:log"
 import "core:mem"
 import "core:strconv"
 import "core:strings"
 import "core:sync"
+import "core:time"
 import curl "vendor:curl"
 
 Method :: enum {
@@ -34,6 +36,7 @@ curl_once: sync.Once
 // Only transport failures are errors; any HTTP status is returned as-is.
 // With an epoch, the request fails with .Cancelled once the session's
 // auth_epoch is different, before it's sent or while it's in flight.
+// Each exchange is logged at debug level, see url_for_log.
 @(private)
 http_send :: proc(
 	s: ^Session,
@@ -112,19 +115,33 @@ http_send :: proc(
 	curl.easy_setopt(h, .XFERINFOFUNCTION, abort_callback)
 	curl.easy_setopt(h, .XFERINFODATA, &watch)
 
+	start := time.tick_now()
 	code := curl.easy_perform(h)
+	ms := time.duration_milliseconds(time.tick_since(start))
 	if code == .E_ABORTED_BY_CALLBACK {
+		log.debugf("%v %s cancelled after %.0f ms", method, url_for_log(url), ms)
 		delete(sink)
 		return {}, make_error(.Cancelled, "Request cancelled")
 	}
 	if code != .E_OK {
+		log.debugf("%v %s failed after %.0f ms: %s", method, url_for_log(url), ms, curl.easy_strerror(code))
 		delete(sink)
 		return {}, make_error(.Network, "HTTP request failed", detail = string(curl.easy_strerror(code)))
 	}
 
 	status: c.long
 	curl.easy_getinfo(h, .RESPONSE_CODE, &status)
+	log.debugf("%v %s: HTTP %d, %d bytes, %.0f ms", method, url_for_log(url), status, len(sink), ms)
 	return Http_Response{status = int(status), body = sink[:], etag = capture.etag, retry_after = capture.retry_after}, nil
+}
+
+// url_for_log is url without its query and fragment, which can hold what
+// the log mustn't: login codes, tokens, signatures.
+url_for_log :: proc(url: string) -> string {
+	if i := strings.index_any(url, "?#"); i >= 0 {
+		return url[:i]
+	}
+	return url
 }
 
 @(private = "file")

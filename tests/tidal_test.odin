@@ -426,3 +426,10 @@ image_urls :: proc(t: ^testing.T) {
 	_, no_video := tidal.album_video_url(s, al)
 	testing.expect(t, tidal.is_error(no_video, .Asset_Not_Available))
 }
+
+@(test)
+url_for_log_drops_query :: proc(t: ^testing.T) {
+	testing.expect_value(t, tidal.url_for_log("https://login.tidal.com/android/login/auth?code=secret&state=x"), "https://login.tidal.com/android/login/auth")
+	testing.expect_value(t, tidal.url_for_log("https://api.tidal.com/v1/tracks/1#t=secret"), "https://api.tidal.com/v1/tracks/1")
+	testing.expect_value(t, tidal.url_for_log("https://resources.tidal.com/images/a/b/320x320.jpg"), "https://resources.tidal.com/images/a/b/320x320.jpg")
+}

@@ -19,6 +19,7 @@ import "base:runtime"
 import "core:c"
 import "core:fmt"
 import vmem "core:mem/virtual"
+import "core:log"
 import "core:strconv"
 import "core:strings"
 import "core:sync"
@@ -64,6 +65,7 @@ Stream :: struct {
 	header:      Flac_Header,
 	head:        []u8, // the bytes before the first frame, heap
 	has_header:  bool,
+	logger:      runtime.Logger, // stream_init's caller's, for the fetch thread
 }
 
 stream_init :: proc(st: ^Stream, wake: ^sync.Atomic_Sema, window := STREAM_WINDOW) {
@@ -74,6 +76,7 @@ stream_init :: proc(st: ^Stream, wake: ^sync.Atomic_Sema, window := STREAM_WINDO
 	st.released = true
 	st.wake = wake
 	st.length = -1
+	st.logger = context.logger
 	posix.pthread_create(&st.thread, nil, fetch_main, st)
 }
 
@@ -305,6 +308,7 @@ curl_once: sync.Once
 fetch_main :: proc "c" (arg: rawptr) -> rawptr {
 	context = runtime.default_context()
 	st := (^Stream)(arg)
+	context.logger = st.logger
 	sync.once_do(&curl_once, proc() {curl.global_init(curl.GLOBAL_DEFAULT)})
 	h := curl.easy_init()
 	failures := 0
@@ -383,7 +387,7 @@ fetch_main :: proc "c" (arg: rawptr) -> rawptr {
 			st.http_status = t.status if code == .E_OK else 0
 			client_error := t.status >= 400 && t.status < 500 && t.status != 416
 			if failures >= FETCH_RETRIES || client_error {
-				fmt.eprintfln("audio: fetch failed at byte %d: %s", start, msg)
+				log.warnf("audio: fetch failed at byte %d: %s", start, msg)
 				st.failed = true
 				sync.unlock(&st.mutex)
 				sync.atomic_sema_post(st.wake)

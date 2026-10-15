@@ -23,6 +23,7 @@ package app
 
 import "base:runtime"
 import "core:fmt"
+import "core:log"
 import "core:math"
 import vmem "core:mem/virtual"
 import "core:os"
@@ -469,7 +470,7 @@ playback_result :: proc(s: ^State, res: ^Result) {
 	t.gain = audio.replay_gain_linear(rg, mode)
 	t.rate = info.sample_rate
 	t.resolved = true
-	fmt.eprintfln("app: track %d resolved: %s %s%s, %d-bit %d Hz, %s gain %.2f dB -> x%.3f", info.track_id, tidal.quality_name(info.quality), tidal.codec_name(info.codec), fmt.tprintf(" in DASH, %d segments", len(info.segments)) if info.dash else "", info.bit_depth, info.sample_rate, mode, 20 * math.log10(f64(t.gain)), t.gain)
+	log.infof("app: track %d resolved: %s %s%s, %d-bit %d Hz, %s gain %.2f dB -> x%.3f", info.track_id, tidal.quality_name(info.quality), tidal.codec_name(info.codec), fmt.tprintf(" in DASH, %d segments", len(info.segments)) if info.dash else "", info.bit_depth, info.sample_rate, mode, 20 * math.log10(f64(t.gain)), t.gain)
 	if t == &pb.cur {
 		audio.play(pb.player, source_of(pb, t), t.at, pb.paused)
 	} else {

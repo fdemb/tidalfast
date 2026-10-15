@@ -10,6 +10,7 @@ package app
 import "base:runtime"
 import "core:encoding/json"
 import "core:fmt"
+import "core:log"
 import "core:math"
 import "core:mem"
 import vmem "core:mem/virtual"
@@ -282,11 +283,11 @@ api_override :: proc() -> string {
 		return ""
 	}
 	when !ODIN_DEBUG && !MOCK_API {
-		fmt.eprintln("app: TIDALFAST_API is ignored in release builds")
+		log.warn("app: TIDALFAST_API is ignored in release builds")
 		return ""
 	} else {
 		if !is_loopback_url(api) || len(api) > len(Small{}.buf) {
-			fmt.eprintln("app: TIDALFAST_API must be an http(s) URL on 127.0.0.1, ::1 or localhost, ignoring it")
+			log.warn("app: TIDALFAST_API must be an http(s) URL on 127.0.0.1, ::1 or localhost, ignoring it")
 			return ""
 		}
 		return api
@@ -415,7 +416,7 @@ auth_restore :: proc(s: ^tidal.Session, data: []u8, partial := false) -> bool {
 	if st.client_id != "" {
 		pkce := st.client_id == s.config.client_id_pkce
 		if !pkce && st.client_id != s.config.client_id && st.client_id != s.device_client_id {
-			fmt.eprintln("app: the saved login is for a client this build doesn't know")
+			log.warn("app: the saved login is for a client this build doesn't know")
 		}
 		st.is_pkce = pkce
 	}
@@ -471,7 +472,7 @@ auth_changed :: proc(s: ^tidal.Session, data: rawptr) {
 	}
 	bytes := auth_marshal(a, context.temp_allocator)
 	if status := mac.keychain_set(keychain_service(d), KEYCHAIN_ACCOUNT, bytes); status != mac.ERR_SEC_SUCCESS {
-		fmt.eprintfln("app: couldn't save the login to the Keychain (error %d)", status)
+		log.errorf("app: couldn't save the login to the Keychain (error %d)", status)
 	}
 }
 
@@ -1159,7 +1160,7 @@ view_title :: proc(s: ^State) -> string {
 	return small_str(&d.view.name)
 }
 
-view_subtitle :: proc(s: ^State, main_w: f32) -> string {
+view_subtitle :: proc(s: ^State) -> string {
 	d := &s.data
 	if _, subtitle, ok := browse_header(s); ok {
 		return subtitle
@@ -1167,7 +1168,7 @@ view_subtitle :: proc(s: ^State, main_w: f32) -> string {
 	if d.fake {
 		lib := &s.library
 		count := ROW_COUNT if lib.playlist == 0 else 20 + lib.playlist * 37 % 300
-		return fmt.tprintf("Playlist · %d songs · %d px wide", count, int(main_w))
+		return fmt.tprintf("Playlist · %d songs", count)
 	}
 	v := &d.view
 	if d.account == .Restoring {

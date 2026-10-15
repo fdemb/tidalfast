@@ -17,8 +17,8 @@
 // begin_frame, so State survives a hot reload.
 package ui
 
-import "core:fmt"
 import "core:hash"
+import "core:log"
 import "core:math"
 import "core:strings"
 
@@ -97,6 +97,12 @@ Box :: struct {
 	view_off:        [2]f32, // scroll offset drawn
 	view_off_target: [2]f32, // where view_off is easing to
 	built_size:      [2]f32, // the rect size a scroll view's children were built for
+	bar_t:           f32, // a scroll view's scrollbar fading in
+	bar_seen:        f32, // view_off.y when the scrollbar was last built
+	bar_time:        f64, // when view_off.y last moved, or the mouse or the focus came in
+	bar_hovered:     bool, // the mouse was over the view when the scrollbar was last built
+	bar_focused:     bool, // the focus was in the view then
+	bar_grab:        f32, // where in the thumb the mouse took it
 	hot_t:           f32,
 	active_t:        f32,
 	focus_t:         f32,
@@ -114,6 +120,7 @@ Build :: struct {
 	child_axis:                Axis,
 	fixed_pos:                 [2]f32, // relative to the parent
 	fixed_size:                [2]f32,
+	gutter:                    f32, // points at the right that children's widths leave out
 	id:                        string, // as given; must live until end_frame
 	label:                     string, // the part of id before "##"
 	font:                      text.Font,
@@ -296,6 +303,7 @@ State :: struct {
 	pool_miss_last: u64, // the last frame with pool misses
 	pool_logged_at: f64,
 
+	scrollbars:     Scrollbars, // how scroll views show their scrollbars, set by the app
 	debug:          bool, // outline every box, show the key under the mouse
 	animating:      bool, // something is still moving, draw another frame
 }
@@ -913,7 +921,7 @@ end_frame :: proc() -> bool {
 	if u.pool_misses > 0 {
 		// Log when a run of full frames starts, at most once a second.
 		if u.pool_miss_last + 1 != u.frame && u.time - u.pool_logged_at >= 1 {
-			fmt.eprintfln("ui: box pool full (%d boxes), %d keyed boxes built without state", MAX_BOXES, u.pool_misses)
+			log.warnf("ui: box pool full (%d boxes), %d keyed boxes built without state", MAX_BOXES, u.pool_misses)
 			u.pool_logged_at = u.time
 		}
 		u.pool_miss_last = u.frame
