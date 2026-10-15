@@ -241,6 +241,9 @@ State :: struct {
 	text_input:     platform.Text_Input,
 	text_claimed:   bool, // a focused field set text_input this frame
 	text_sent:      u64, // hash of what the shell has
+	// A field took text from the shell, whose mirror applied it its own
+	// way, so the state goes to the shell even if it didn't change.
+	text_resend:    bool,
 	// The shell's clipboard, set with set_clipboard every frame.
 	clipboard_get:  proc "c" (buffer: [^]u8, capacity: uint) -> uint,
 	clipboard_set:  proc "c" (text: [^]u8, length: uint),
@@ -1313,20 +1316,22 @@ copy_to_clipboard :: proc(s: string) {
 	}
 }
 
-// text_input returns the focused text field's state, and whether it
-// differs from what was last returned, so the app tells the shell only
-// about changes. text is nil when no field has the focus.
+// text_input returns the focused text field's state, and whether the shell
+// needs it: it differs from what was last returned, or a field took text
+// or marked text from the shell this frame. text is nil when no field has
+// the focus.
 text_input :: proc(u: ^State) -> (input: platform.Text_Input, changed: bool) {
 	if u.text_claimed {
 		input = u.text_input
 	}
 	h := hash.fnv64a(transmute([]byte)string(input.text[:input.length])) if input.text != nil else 0
-	fields := [7]u64{u64(input.selection_start), u64(input.selection_end), u64(u32(input.marked_start)), u64(u32(input.marked_end)), u64(input.text != nil), u64(transmute(u32)input.caret[0]) << 32 | u64(transmute(u32)input.caret[1]), u64(transmute(u32)input.caret[2]) << 32 | u64(transmute(u32)input.caret[3])}
+	fields := [7]u64{u64(input.selection_start), u64(input.selection_end), u64(u32(input.marked_start)), u64(u32(input.marked_end)), u64(input.text != nil) | u64(input.limit) << 1, u64(transmute(u32)input.caret[0]) << 32 | u64(transmute(u32)input.caret[1]), u64(transmute(u32)input.caret[2]) << 32 | u64(transmute(u32)input.caret[3])}
 	for f in fields {
 		h = (h ~ f) * 1099511628211
 	}
-	changed = h != u.text_sent
+	changed = h != u.text_sent || u.text_resend
 	u.text_sent = h
+	u.text_resend = false
 	return
 }
 

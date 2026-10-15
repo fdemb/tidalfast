@@ -176,7 +176,7 @@ draw_sidebar :: proc(s: ^State) {
 		}
 		sig := ui.signal(item)
 		if sig.clicked {
-			select_playlist(s, i)
+			pending_set(s, {kind = .Playlist, index = i})
 		}
 		ui.spacer(ui.px(10))
 		cover_art(s, .Playlist, entry.image, entry.seed, 40, ui.px(40))
@@ -389,13 +389,15 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 	more.text_color = TEXT
 	more.radius = 6
 	more.opacity = max(row.hot_t, 1 if selected else 0)
+	more_label := fmt.tprintf("More options for %s", track.title)
+	ui.accessible(more, .Button, more_label)
 	more_sig := ui.signal(more)
 	if more_sig.clicked {
 		lib.selected = i
 		lib.menu_row = i
 		ui.open_menu("track_menu", {more.rect.x, more.rect.y + more.rect.h})
 	}
-	ui.tooltip(more_sig, fmt.tprintf("More options for %s", track.title))
+	ui.tooltip(more_sig, more_label)
 	ui.spacer(ui.px(8))
 }
 
@@ -432,23 +434,25 @@ cell :: proc(s: string, width: f32, align: ui.Align) -> ^ui.Box {
 
 // draw_track_menu offers what the row's data allows: the album and artist
 // need their ids (the fake data goes by name), the link a TIDAL track id.
+// Its actions wait for the end of the frame (see Pending): the player bar
+// built above it shows the queue that Play replaces.
 draw_track_menu :: proc(s: ^State) {
 	i := s.library.menu_row
 	row := view_row(s, i)
 	if ui.menu("track_menu") {
 		ui.text_style(.Regular, 13, TEXT)
 		if ui.menu_item("Play").clicked {
-			play(s, i)
+			pending_set(s, {kind = .Play, index = i})
 		}
 		fake := s.data.fake
 		if row != nil && (fake || row.album_id != 0 || row.artist_id != 0) {
 			ui.menu_separator()
 		}
 		if row != nil && (fake || row.album_id != 0) && ui.menu_item("Go to album").clicked {
-			go_to_album(s, row)
+			go_to_album(s, i)
 		}
 		if row != nil && (fake || row.artist_id != 0) && ui.menu_item("Go to artist").clicked {
-			go_to_artist(s, row)
+			go_to_artist(s, i)
 		}
 		if row != nil && row.id > 0 {
 			ui.menu_separator()
@@ -725,6 +729,60 @@ status_text :: proc(s: ^State) -> string {
 		return fmt.tprintf("Copied the link to %s", t.title)
 	}
 	return ""
+}
+
+// Pending is something the frame being built asked for that frees memory
+// the frame still uses. Boxes and the accessibility tree borrow their
+// strings until end_frame: from the open list's arena (its rows, and the
+// row a menu is for), from the search results' arena and from the play
+// queue's. So opening another list, closing the search or replacing the
+// queue waits until the frame is done, and pending_apply does it then.
+// The last one asked for in a frame wins.
+Pending :: struct {
+	kind:   Pending_Kind,
+	source: Source, // .List
+	// .Playlist: the sidebar entry. .Play: the row. .List with the fake
+	// data: the row in State.rows whose album or artist to list.
+	index:  int,
+	id:     Small,
+	name:   Small,
+	image:  Small,
+	hint:   int,
+}
+
+Pending_Kind :: enum u8 {
+	None,
+	Playlist, // open a sidebar entry
+	List, // open an album, an artist or a playlist that isn't in the sidebar
+	Close_Search,
+	Play,
+}
+
+pending_set :: proc(s: ^State, p: Pending) {
+	s.pending = p
+}
+
+// pending_apply does what the last frame asked for. Run it after the frame
+// is drawn; it returns true when it changed something worth a frame.
+pending_apply :: proc(s: ^State) -> bool {
+	p := s.pending
+	s.pending = {}
+	switch p.kind {
+	case .None:
+		return false
+	case .Playlist:
+		search_stop(s)
+		select_playlist(s, p.index)
+	case .List:
+		search_stop(s)
+		open_list(s, &p)
+	case .Close_Search:
+		search_close(s)
+	case .Play:
+		play(s, p.index)
+	}
+	ui.data_changed()
+	return true
 }
 
 mix :: proc(a, b: render.Color, t: f32) -> render.Color {

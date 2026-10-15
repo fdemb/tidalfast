@@ -11,6 +11,7 @@ import "base:runtime"
 import "core:encoding/json"
 import "core:fmt"
 import "core:math"
+import "core:mem"
 import vmem "core:mem/virtual"
 import "core:os"
 import "core:strings"
@@ -111,6 +112,12 @@ Data :: struct {
 	login:          Login,
 	sidebar:        Sidebar,
 	view:           Track_View,
+	// Debug builds and tests keep the last closed list's arena, filled with
+	// POISON, until the next list closes, so a string still borrowed from it
+	// reads as garbage instead of whatever the next list put there.
+	poison:         bool,
+	retired:        vmem.Arena,
+	has_retired:    bool,
 	covers:         cover.Cache,
 	message:        Small, // the last error worth showing
 	evicted:        [64]render.Texture,
@@ -123,6 +130,7 @@ data_start :: proc(s: ^State, shell: ^platform.Shell) {
 	cover.init(&d.covers, COVER_BUDGET)
 	bench := os.get_env("TIDALFAST_BENCH", context.temp_allocator)
 	d.fake = os.get_env("TIDALFAST_FAKE", context.temp_allocator) != "" || (bench != "" && bench != "covers")
+	d.poison = ODIN_DEBUG
 	// Checked even with fake data, so a refused TIDALFAST_API is always
 	// logged.
 	api := api_override()
@@ -197,6 +205,10 @@ data_shutdown :: proc(s: ^State) {
 	sidebar_free(d)
 	if d.view.has_arena {
 		vmem.arena_destroy(&d.view.arena)
+	}
+	if d.has_retired {
+		vmem.arena_destroy(&d.retired)
+		d.has_retired = false
 	}
 }
 
@@ -756,11 +768,24 @@ drop_track_jobs :: proc(job: ^Job, _: rawptr) -> bool {
 	return job.kind == .Tracks
 }
 
+POISON :: 0xdb
+
 view_close :: proc(d: ^Data) {
 	jobs.remove_if(&d.queue, drop_track_jobs, nil)
 	v := &d.view
 	if v.has_arena {
-		vmem.arena_destroy(&v.arena)
+		if d.poison {
+			for b := v.arena.curr_block; b != nil; b = b.prev {
+				mem.set(b.base, POISON, int(b.used))
+			}
+			if d.has_retired {
+				vmem.arena_destroy(&d.retired)
+			}
+			d.retired = v.arena
+			d.has_retired = true
+		} else {
+			vmem.arena_destroy(&v.arena)
+		}
 	}
 	v^ = {gen = v.gen + 1}
 }

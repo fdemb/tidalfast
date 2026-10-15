@@ -72,6 +72,7 @@ State :: struct {
 	data:         Data,
 	playback:     Playback,
 	search:       Search,
+	pending:      Pending, // what the frame being built asked for, done after it
 	access_sent:  u64, // hash of the accessibility tree the shell has
 	scroll:       [2]f32, // the test screens' scroll offset
 	bench:        Bench,
@@ -376,11 +377,13 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input, shell: ^platfor
 		prof_scope(s, "end_frame")
 		render.end_frame(r)
 	}
+	// The frame is done with the strings it borrowed, so a list can close.
+	acted := pending_apply(s)
 	if r.stats != s.last_stats {
 		fmt.eprintfln("render: %d draw calls, %d instances", r.stats.draw_calls, r.stats.instances)
 		s.last_stats = r.stats
 	}
-	return {animating = b32(animating || s.sliding || s.text.needs_redraw), wake_after = ui.wake_after(&s.ui)}
+	return {animating = b32(animating || acted || s.sliding || s.text.needs_redraw), wake_after = ui.wake_after(&s.ui)}
 }
 
 // draw_test_screen exercises the renderer: a grid of shadowed gradient cards

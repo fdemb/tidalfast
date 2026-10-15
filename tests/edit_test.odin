@@ -299,6 +299,60 @@ test_text_field_events :: proc(t: ^testing.T) {
 	testing.expect(t, input.text == nil, "no field has the focus")
 }
 
+// The shell's mirror applies text and marked text before the app sees
+// them, so after the field takes any, the shell hears the field's state
+// even when nothing changed: here a composition and a commit that don't
+// fit a full field. The field's limit goes with it.
+@(test)
+test_text_field_resends_after_text :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer field_ui_destroy(&u)
+	f := new(ui.Text_Field)
+	defer free(f)
+	f.limit = 119
+	now := 0.0
+	bytes: [64]u8
+	frame :: proc(u: ^ui.State, f: ^ui.Text_Field, now: ^f64, bytes: []u8, events: ..platform.Event) {
+		now^ += 0.016
+		ui.begin_frame(u, events, nil, nil, 300, 200, now^, nil, bytes)
+		b := ui.text_field("search", f, "Search", ui.px(200), ui.px(30))
+		if !b.focused {
+			ui.focus_text_field(b.box, f)
+		}
+		ui.end_frame()
+	}
+	frame(&u, f, &now, bytes[:])
+	full_bytes: [119]u8
+	for &c, i in full_bytes {
+		c = '0' + u8(i % 10)
+	}
+	full := string(full_bytes[:])
+	ui.field_set_text(f, full)
+	frame(&u, f, &now, bytes[:])
+	input, changed := ui.text_input(&u)
+	testing.expect(t, changed)
+	testing.expect_value(t, input.limit, u32(119))
+	testing.expect_value(t, input.length, u32(119))
+
+	copy(bytes[:], "に")
+	frame(&u, f, &now, bytes[:], {kind = .Marked_Text, text_length = u32(len("に")), select_start = 3, select_end = 3})
+	testing.expect_value(t, ui.field_text(f), full)
+	testing.expect(t, !f.marked)
+	input, changed = ui.text_input(&u)
+	testing.expect(t, changed, "the shell hears the field after marked text it didn't take")
+	testing.expect_value(t, input.marked_start, -1)
+	testing.expect_value(t, input.selection_start, u32(119))
+	testing.expect_value(t, input.selection_end, u32(119))
+
+	frame(&u, f, &now, bytes[:], {kind = .Text, text_length = u32(len("に"))})
+	_, changed = ui.text_input(&u)
+	testing.expect(t, changed, "and after text it didn't take")
+	frame(&u, f, &now, bytes[:])
+	_, changed = ui.text_input(&u)
+	testing.expect(t, !changed)
+}
+
 // The caret blinks by asking for a frame at its next change, not by
 // animating, and not at all without the keyboard.
 @(test)

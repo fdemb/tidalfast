@@ -413,12 +413,16 @@ static void setup_remote_commands(void) {
 // shell keeps a mirror of the field and applies each edit it sends on to
 // the app to the mirror as well. The app's next state replaces the mirror.
 // The app counts in UTF-8 bytes and AppKit in UTF-16 units; the mirror
-// converts, rounding down to a whole codepoint.
+// converts, rounding down to a whole codepoint. The field cleans what it
+// takes and drops what doesn't fit its limit, and the mirror does the same
+// (field_clean), but the app always sends its state after taking text, so
+// any difference lasts until its next frame.
 
 static struct {
   bool active;
   uint8_t *bytes;
   uint32_t length, capacity;
+  uint32_t limit; // the field's, in bytes; 0 for none
   uint32_t sel_start, sel_end;
   int32_t marked_start, marked_end; // -1 without marked text
   NSRect caret; // view points
@@ -485,6 +489,44 @@ static NSString *plain_string(id string) {
   return [string isKindOfClass:NSAttributedString.class] ? [(NSAttributedString *)string string] : (NSString *)string;
 }
 
+// field_clean does to n bytes of text what the app's field does before it
+// puts them in place of bytes [lo, hi): line breaks and tabs become one
+// space, other control characters and U+FFFD go, and the rest is cut to the
+// room the limit leaves, at a composed character boundary. It writes to out,
+// which has room for n bytes, and returns the length.
+static uint32_t field_clean(const char *text, uint32_t n, uint32_t lo, uint32_t hi, char *out) {
+  const uint8_t *s = (const uint8_t *)text;
+  uint32_t o = 0;
+  for (uint32_t i = 0; i < n;) {
+    uint32_t w = utf8_width(s[i]);
+    if (i + w > n) break;
+    bool line = s[i] == '\n' || s[i] == '\r' || s[i] == '\t' ||
+                (w == 3 && s[i] == 0xe2 && s[i + 1] == 0x80 && (s[i + 2] == 0xa8 || s[i + 2] == 0xa9));
+    bool control = s[i] < 0x20 || s[i] == 0x7f || (w == 3 && s[i] == 0xef && s[i + 1] == 0xbf && s[i + 2] == 0xbd);
+    if (line) {
+      if (o > 0 && out[o - 1] != ' ') out[o++] = ' ';
+    } else if (!control) {
+      memcpy(out + o, s + i, w);
+      o += w;
+    }
+    i += w;
+  }
+  if (!g_ti.limit) return o;
+  uint32_t rest = g_ti.length - (hi - lo);
+  uint32_t room = g_ti.limit > rest ? g_ti.limit - rest : 0;
+  if (o <= room) return o;
+  NSString *str = [[NSString alloc] initWithBytes:out length:o encoding:NSUTF8StringEncoding];
+  uint32_t fits = 0;
+  for (NSUInteger at = 0; at < str.length;) {
+    NSRange r = [str rangeOfComposedCharacterSequenceAtIndex:at];
+    uint32_t bytes = (uint32_t)[[str substringWithRange:r] lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+    if (fits + bytes > room) break;
+    fits += bytes;
+    at = NSMaxRange(r);
+  }
+  return fits;
+}
+
 static void text_insert(id string, NSRange replacement) {
   const char *utf8 = plain_string(string).UTF8String ?: "";
   uint32_t n = (uint32_t)strlen(utf8);
@@ -492,8 +534,14 @@ static void text_insert(id string, NSRange replacement) {
   push_text(&e, utf8, n);
   uint32_t lo, hi;
   edit_range(replacement, &e, &lo, &hi);
-  mirror_replace(lo, hi, utf8, n);
-  g_ti.sel_start = g_ti.sel_end = lo + n;
+  char *clean = malloc(n + 1);
+  uint32_t cn = field_clean(utf8, n, lo, hi, clean);
+  // The field leaves itself alone when nothing goes in and nothing goes.
+  if (cn > 0 || lo != hi) {
+    mirror_replace(lo, hi, clean, cn);
+    g_ti.sel_start = g_ti.sel_end = lo + cn;
+  }
+  free(clean);
   g_ti.marked_start = g_ti.marked_end = -1;
   g_ime_handled = true;
   push_event(e);
@@ -511,12 +559,18 @@ static void text_set_marked(id string, NSRange selected, NSRange replacement) {
   e.select_end = (int32_t)(sel_hi < sel_lo ? sel_lo : sel_hi);
   uint32_t lo, hi;
   edit_range(replacement, &e, &lo, &hi);
-  mirror_replace(lo, hi, utf8, n);
-  if (n > 0) {
+  char *clean = malloc(n + 1);
+  uint32_t cn = field_clean(utf8, n, lo, hi, clean);
+  mirror_replace(lo, hi, clean, cn);
+  free(clean);
+  if (cn > 0) {
+    // The selection was found in the text as given; the field clamps it to
+    // what it kept.
+    uint32_t end = (uint32_t)e.select_end;
     g_ti.marked_start = (int32_t)lo;
-    g_ti.marked_end = (int32_t)(lo + n);
-    g_ti.sel_start = lo + sel_lo;
-    g_ti.sel_end = lo + (uint32_t)e.select_end;
+    g_ti.marked_end = (int32_t)(lo + cn);
+    g_ti.sel_start = lo + (sel_lo < cn ? sel_lo : cn);
+    g_ti.sel_end = lo + (end < cn ? end : cn);
   } else {
     g_ti.marked_start = g_ti.marked_end = -1;
     g_ti.sel_start = g_ti.sel_end = lo;
@@ -551,6 +605,7 @@ static void set_text_input(const Text_Input *ti) {
   g_ti.sel_end = ti->selection_end;
   g_ti.marked_start = ti->marked_start;
   g_ti.marked_end = ti->marked_end;
+  g_ti.limit = ti->limit;
   NSRect caret = NSMakeRect(ti->caret[0], ti->caret[1], ti->caret[2], ti->caret[3]);
   bool moved = !NSEqualRects(caret, g_ti.caret);
   g_ti.caret = caret;

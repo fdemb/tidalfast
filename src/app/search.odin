@@ -143,21 +143,28 @@ drop_search_jobs :: proc(job: ^Job, _: rawptr) -> bool {
 	return job.kind == .Search
 }
 
-// search_edited starts the debounce over. An empty field ends the search.
+// search_edited starts the debounce over. An empty field ends the search
+// once the frame is done.
 @(private = "file")
 search_edited :: proc(s: ^State) {
+	search_stop(s)
+	if search_query(s) == "" {
+		pending_set(s, {kind = .Close_Search})
+		return
+	}
+	s.search.due = s.ui.time + SEARCH_DEBOUNCE
+}
+
+// search_stop forgets the search that's waiting or out: the debounce, the
+// queued job, and the result, which arrives for an older generation.
+search_stop :: proc(s: ^State) {
 	sr := &s.search
 	sr.gen += 1
+	sr.due = 0
+	sr.loading = false
 	if !s.data.fake {
 		jobs.remove_if(&s.data.queue, drop_search_jobs, nil)
 	}
-	if search_query(s) == "" {
-		sr.due = 0
-		sr.loading = false
-		search_close(s)
-		return
-	}
-	sr.due = s.ui.time + SEARCH_DEBOUNCE
 }
 
 @(private = "file")
@@ -181,7 +188,6 @@ search_send :: proc(s: ^State) {
 }
 
 // search_close leaves the results for the sidebar's playlist.
-@(private = "file")
 search_close :: proc(s: ^State) {
 	sr := &s.search
 	showing := sr.fake_source == .Search if s.data.fake else s.data.view.source == .Search
@@ -249,32 +255,39 @@ browse_begin :: proc(s: ^State) {
 }
 
 // open_list opens an album's tracks, an artist's top tracks or a playlist
-// that isn't in the sidebar. The strings may point into the open list,
-// which this closes, so they're copied first.
-open_list :: proc(s: ^State, source: Source, id, name, image: string, hint: int) {
-	a := context.temp_allocator
+// that isn't in the sidebar, for pending_apply. With the fake data it lists
+// the rows of an album or artist.
+open_list :: proc(s: ^State, p: ^Pending) {
+	if s.data.fake {
+		fake_filter(s, p.source, p.index)
+		return
+	}
 	browse_begin(s)
-	view_open(&s.data, source, strings.clone(id, a), strings.clone(name, a), strings.clone(image, a), hint)
+	view_open(&s.data, p.source, small_str(&p.id), small_str(&p.name), small_str(&p.image), p.hint)
 }
 
-// go_to_album opens the album of a track row.
-go_to_album :: proc(s: ^State, row: ^Row) {
-	if s.data.fake {
-		fake_filter(s, .Album, row.album)
+// go_to_album opens the album of row i once the frame is done.
+go_to_album :: proc(s: ^State, i: int) {
+	row := view_row(s, i)
+	if row == nil {
 		return
 	}
-	if row.album_id != 0 {
-		open_list(s, .Album, fmt.tprint(row.album_id), row.album, row.cover, 0)
+	if s.data.fake {
+		pending_set(s, {kind = .List, source = .Album, index = fake_row_index(s, i)})
+	} else if row.album_id != 0 {
+		pending_set(s, {kind = .List, source = .Album, id = small(fmt.tprint(row.album_id)), name = small(row.album), image = small(row.cover)})
 	}
 }
 
-go_to_artist :: proc(s: ^State, row: ^Row) {
-	if s.data.fake {
-		fake_filter(s, .Artist, row.artist)
+go_to_artist :: proc(s: ^State, i: int) {
+	row := view_row(s, i)
+	if row == nil {
 		return
 	}
-	if row.artist_id != 0 {
-		open_list(s, .Artist, fmt.tprint(row.artist_id), row.artist, "", 0)
+	if s.data.fake {
+		pending_set(s, {kind = .List, source = .Artist, index = fake_row_index(s, i)})
+	} else if row.artist_id != 0 {
+		pending_set(s, {kind = .List, source = .Artist, id = small(fmt.tprint(row.artist_id)), name = small(row.artist)})
 	}
 }
 
@@ -412,9 +425,9 @@ found_at :: proc(s: ^State, tab: Search_Tab, i: int) -> Found {
 	#partial switch tab {
 	case .Albums:
 		row := &s.rows[at]
-		return {name = row.album, subtitle = fmt.tprintf("Album · %s", row.artist)}
+		return {id = i64(at), name = row.album, subtitle = fmt.tprintf("Album · %s", row.artist)}
 	case .Artists:
-		return {name = s.rows[at].artist, subtitle = "Artist"}
+		return {id = i64(at), name = s.rows[at].artist, subtitle = "Artist"}
 	case .Playlists:
 		return {id = i64(at), name = PLAYLISTS[at], subtitle = "Playlist"}
 	}
@@ -454,27 +467,36 @@ draw_found_list :: proc(s: ^State) {
 	}
 }
 
+// open_found opens a found album, artist or playlist once the frame is
+// done. With the fake data an album's or artist's id is one of its rows,
+// and a playlist's is its sidebar entry.
 @(private = "file")
 open_found :: proc(s: ^State, tab: Search_Tab, f: Found) {
-	if s.data.fake {
-		#partial switch tab {
-		case .Albums:
-			fake_filter(s, .Album, f.name)
-		case .Artists:
-			fake_filter(s, .Artist, f.name)
-		case .Playlists:
-			select_playlist(s, int(f.id))
-		}
-		return
+	p := Pending {
+		kind  = .List,
+		name  = small(f.name),
+		image = small(f.image),
+		hint  = f.tracks,
 	}
 	#partial switch tab {
 	case .Albums:
-		open_list(s, .Album, fmt.tprint(f.id), f.name, f.image, f.tracks)
+		p.source = .Album
+		p.id = small(fmt.tprint(f.id))
 	case .Artists:
-		open_list(s, .Artist, fmt.tprint(f.id), f.name, f.image, 0)
+		p.source = .Artist
+		p.id = small(fmt.tprint(f.id))
+		p.hint = 0
 	case .Playlists:
-		open_list(s, .Playlist, f.uuid, f.name, f.image, f.tracks)
+		p.source = .Playlist
+		p.id = small(f.uuid)
 	}
+	if s.data.fake {
+		p.index = int(f.id)
+		if tab == .Playlists {
+			p.kind = .Playlist
+		}
+	}
+	pending_set(s, p)
 }
 
 // view_cover is the cover the list header shows, if any.
@@ -573,18 +595,13 @@ fake_search :: proc(s: ^State, q: string) {
 	sr.fake_count = 0
 	sr.fake_counts = {}
 	for &row, i in s.rows {
-		title, artist, album := strings.contains(fold(row.title), needle), strings.contains(fold(row.artist), needle), strings.contains(fold(row.album), needle)
-		if !(title || artist || album) {
+		if !strings.contains(fold(row.title), needle) && !strings.contains(fold(row.artist), needle) && !strings.contains(fold(row.album), needle) {
 			continue
 		}
 		sr.fake[sr.fake_count] = i32(i)
 		sr.fake_count += 1
-		if album {
-			fake_add_found(s, 0, i32(i), proc(r: ^Row) -> string {return r.album})
-		}
-		if artist {
-			fake_add_found(s, 1, i32(i), proc(r: ^Row) -> string {return r.artist})
-		}
+		fake_add_found(s, 0, i32(i), proc(r: ^Row) -> string {return r.album})
+		fake_add_found(s, 1, i32(i), proc(r: ^Row) -> string {return r.artist})
 	}
 	for name, i in PLAYLISTS {
 		if strings.contains(fold(name), needle) && sr.fake_counts[2] < FOUND_MAX {
@@ -599,10 +616,11 @@ fake_search :: proc(s: ^State, q: string) {
 	fmt.eprintfln("search: \"%s\": %d songs, %d albums, %d artists, %d playlists", q, sr.fake_count, sr.fake_counts[0], sr.fake_counts[1], sr.fake_counts[2])
 }
 
-// fake_filter lists the fake rows of one album or artist.
+// fake_filter lists the fake rows of the album or artist of row at.
 @(private = "file")
-fake_filter :: proc(s: ^State, source: Source, name: string) {
+fake_filter :: proc(s: ^State, source: Source, at: int) {
 	sr := &s.search
+	name := s.rows[at].album if source == .Album else s.rows[at].artist
 	title := small(name)
 	sr.fake_count = 0
 	for &row, i in s.rows {
@@ -626,6 +644,12 @@ fake_row :: proc(s: ^State, i: int) -> (row: ^Row, listed: bool) {
 		return nil, true
 	}
 	return &s.rows[sr.fake[i]], true
+}
+
+// fake_row_index is the index in State.rows of row i of the open list.
+fake_row_index :: proc(s: ^State, i: int) -> int {
+	sr := &s.search
+	return int(sr.fake[i]) if sr.fake_source != .None else i
 }
 
 fake_count :: proc(s: ^State) -> (n: int, listed: bool) {

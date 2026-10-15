@@ -137,7 +137,7 @@ Text_Input :: struct {
 	selection_end:   u32,
 	marked_start:    i32, // bytes; -1 without marked text
 	marked_end:      i32,
-	_:               u32,
+	limit:           u32, // most bytes the field takes, 0 for no limit
 	caret:           [4]f32, // x, y, w, h in view points: the marked text, or the caret
 }
 #assert(size_of(Text_Input) == 48)

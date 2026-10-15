@@ -300,6 +300,8 @@ Each job that returns data gets its own virtual-memory arena (`core:mem/virtual`
 
 The open list's arena lives in `State` and is destroyed when another list opens. Pages carry the list's generation number, so a page for a list that's been closed is dropped when it arrives.
 
+The frame's boxes and its accessibility tree borrow strings from the open list, the search results and the play queue until `end_frame`. So nothing a frame does while it's being built may free them. A click that opens another list, closes the search or plays from the track menu goes in `State.pending`, and `pending_apply` does it once the frame is drawn, then asks for the next one. Results from the workers are handled at the start of a frame, before anything borrows from them. Debug builds keep the last closed list's arena, filled with `0xdb`, until the next list closes, so a string still borrowed from it shows up as garbage instead of passing for the next list's data. The tests turn the same thing on.
+
 ### Pages
 
 A list opens with the track count TIDAL gave for it, so the table has its full height straight away and rows not yet loaded show as placeholders. The first page is 50 tracks so it shows sooner. The rest come 100 at a time, two pages in flight. A short page means the list has ended. Pages can arrive out of order, so the earliest end any short page gives stands: an empty page asked for past the end can't raise the count again, and rows past the end are dropped. If the list turns out longer than TIDAL said, full pages keep raising the count and one more page is asked for at a time until a short one.
@@ -455,7 +457,7 @@ The caret blinks every 0.53 s through `ui.wake_at`, only while the window has th
 
 While a text field has the focus, the UI keeps Return, Space, the arrows and Escape for it instead of clicking or moving the focus. Tab still moves the focus.
 
-The shell's view is an `NSTextInputClient`. After each frame the app tells the shell about the focused field through `Shell.set_text_input`: its text, selection and marked range in bytes, and a rect for the marked text or the caret, or nil when no field has the focus. Only changes are sent. While a field has the focus, `keyDown` goes through the view's input context:
+The shell's view is an `NSTextInputClient`. After each frame the app tells the shell about the focused field through `Shell.set_text_input`: its text, selection and marked range in bytes, and a rect for the marked text or the caret, or nil when no field has the focus. It sends changes, and it also sends the state after the field takes text or marked text from the shell, even if nothing changed. While a field has the focus, `keyDown` goes through the view's input context:
 
 - Text it inserts (`insertText`) reaches the app as a `Text` event, and the key doesn't.
 - Marked text (`setMarkedText`, `unmarkText`) reaches it as `Marked_Text` and `Unmark_Text` events, and the key doesn't. While there is marked text every key belongs to the input method.
@@ -463,7 +465,7 @@ The shell's view is an `NSTextInputClient`. After each frame the app tells the s
 
 Event text lives in a byte buffer that comes with the frame's events (`Frame_Input.text`). A text event carries an offset and length into it, and an optional replacement range in bytes, as when the accent menu replaces the letter typed before it.
 
-Input methods ask questions synchronously, often right after `setMarkedText` and before the app has had a frame. So the shell keeps a mirror of the field, applies every edit it sends on to the mirror too, and answers `selectedRange`, `markedRange`, `hasMarkedText` and `attributedSubstringForProposedRange` from it. It converts between the app's UTF-8 bytes and AppKit's UTF-16 units and never lands between a surrogate pair's halves. The app's next state replaces the mirror. `firstRectForCharacterRange` returns the marked text's rect in screen coordinates, so the candidate window opens under the composition. When the app ends a composition itself, as when the field loses the focus, the shell calls `discardMarkedText` so the input method forgets it.
+Input methods ask questions synchronously, often right after `setMarkedText` and before the app has had a frame. So the shell keeps a mirror of the field, applies every edit it sends on to the mirror too, and answers `selectedRange`, `markedRange`, `hasMarkedText` and `attributedSubstringForProposedRange` from it. It converts between the app's UTF-8 bytes and AppKit's UTF-16 units and never lands between a surrogate pair's halves. It cleans text the way the field does and cuts it to the field's limit, which comes in `Text_Input.limit`, at a composed character boundary (`rangeOfComposedCharacterSequenceAtIndex`). So with the search field full at 119 bytes, composing に leaves the mirror as it was, like the field. The app's next state replaces the mirror. That state always comes after the app takes text, so where the mirror's segmentation and the app's disagree, the mirror is wrong for one frame at most. `firstRectForCharacterRange` returns the marked text's rect in screen coordinates, so the candidate window opens under the composition. When the app ends a composition itself, as when the field loses the focus, the shell calls `discardMarkedText` so the input method forgets it.
 
 The clipboard goes through `Shell.set_clipboard` and `Shell.get_clipboard`, which use `NSPasteboard`. `ui.copy_to_clipboard` puts a string on it from anywhere in the UI.
 
@@ -473,7 +475,7 @@ The clipboard goes through `Shell.set_clipboard` and `Shell.get_clipboard`, whic
 - `Frame_Input` (48 bytes) carries the text buffer and whether the window is key.
 - `Frame_Result` (8 bytes) has `wake_after`.
 - `Shell` (64 bytes) adds `set_text_input`, `set_clipboard`, `get_clipboard` and `set_accessibility`.
-- New structs: `Text_Input` (48 bytes) and `Access_Node` (56 bytes).
+- New structs: `Text_Input` (48 bytes) and `Access_Node` (56 bytes). `Text_Input.limit` took the place of a padding field, so a shell or app that leaves it 0 means no limit, and the version stays 3.
 
 ## Search
 
@@ -483,15 +485,17 @@ Every edit raises the query generation and throws out queued Search jobs. Once t
 
 The songs become the open track list, a `Track_View` with source `.Search`. So covers, double-click to play, the queue, the playing row and Enter work as in a playlist, and more songs load as `Tracks` jobs that page through `search` with only tracks, up to TIDAL's 300. The old results stay on screen until the new ones arrive. Tabs above the table switch to the albums, artists and playlists found, shown as rows. A click opens an album's tracks (`albums/{id}/tracks`), an artist's top tracks (`artists/{id}/toptracks`) or a playlist, each as a track list of its own. Picking a sidebar entry goes back to it. Clearing the field, by deleting the text or with Escape, closes the search and opens the sidebar's playlist again if the results were showing.
 
+Opening any list, from the sidebar, the tabs or the track menu, ends a search that's still waiting for its debounce or its answer. The generation goes up and the queued Search job goes, so the answer can't bring the results back over the list. The text stays in the field, and Return searches for it again.
+
 The track menu's Go to album and Go to artist open the same lists, from the row's album and first artist ids. The menu offers them only when the row has those ids. Copy song link puts `https://tidal.com/browse/track/<id>` on the clipboard. Add to queue is gone from the menu until the player has a queue API to call.
 
-With `TIDALFAST_FAKE=1` the search runs over the 10,000 fake rows on the UI thread. It matches title, artist or album, ignoring case, and its albums and artists are the distinct ones among the matches. Going to an album or artist lists the fake rows with that name.
+With `TIDALFAST_FAKE=1` the search runs over the 10,000 fake rows on the UI thread. It matches title, artist or album, ignoring case, and its albums and artists are the distinct albums and artists of the matching songs, up to 50 of each. "Jóga" matches 145 songs by title, from 26 albums and 34 artists. Going to an album or artist lists the fake rows with that name.
 
 ## Accessibility
 
 Boxes say what assistive apps should see with `ui.accessible(box, role, label, value)`. `ui.button`, menus and menu items do it themselves. `end_frame` walks the tree after layout and flattens every box with a role into a list of `Access_Node`s, parents first, with their clipped rects, focus and selection. A box clipped away, and everything inside a clipping box clipped away, stays out, so the virtualized track table only ever gives the rows in view. Keyed boxes use their key as the node id. The rest get one from their parent's id and their place among its nodes, which stays put while the tree does. The app hashes the list and calls `Shell.set_accessibility` only when the hash changes.
 
-What's exposed: the search field (`AXTextField` with the text as its value), the sidebar (`AXList` of `AXRow`s), the track table (`AXTable` whose `AXRow`s are labelled "title, artist, album" and hold one `AXStaticText` each), the search tabs and the found lists, the headings and status line, the player bar's buttons and its two sliders with their values, the login screen's buttons, and context menus.
+What's exposed: the search field (`AXTextField` with the text as its value), the sidebar (`AXList` of `AXRow`s), the track table (`AXTable` whose `AXRow`s are labelled "title, artist, album" and hold one `AXStaticText` each, and the "More options for title" button that opens the track menu, on the selected row), the search tabs and the found lists, the headings and status line, the player bar's buttons and its two sliders with their values, the login screen's buttons, and context menus.
 
 The shell copies the nodes. It makes `NSAccessibilityElement`s from them only once an assistive app has asked the view for its children or hit-tested it, and after every change from then on. So without VoiceOver running a changed tree costs one copy. Elements are kept by node id, so VoiceOver stays on an element while it moves or changes, and frames are turned into screen coordinates when asked for. After a change the shell posts a layout change, a focus change when the focused node is a new one, and a value change for a focused text field. AXPress on a button, row or menu item comes to the app as an `Access_Press` event, which the UI treats as a keyboard click: buttons click, sidebar rows open their playlist and track rows play. Setting the focus comes as `Access_Focus`.
 

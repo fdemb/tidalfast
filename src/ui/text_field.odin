@@ -99,18 +99,21 @@ text_field :: proc(id: string, f: ^Text_Field, placeholder: string, width, heigh
 					take_key(u, e.key)
 				}
 			case .Text:
+				u.text_resend = true
 				if e.replace {
 					field_insert_at(f, e.replace_lo, e.replace_hi, e.text)
 				} else {
 					field_insert(f, e.text)
 				}
 			case .Marked_Text:
+				u.text_resend = true
 				if e.replace {
 					field_set_marked(f, e.text, e.select_lo, e.select_hi, e.replace_lo, e.replace_hi)
 				} else {
 					field_set_marked(f, e.text, e.select_lo, e.select_hi)
 				}
 			case .Unmark_Text:
+				u.text_resend = true
 				field_unmark(f)
 			}
 			f.blink_start = u.time
@@ -161,6 +164,7 @@ text_field :: proc(id: string, f: ^Text_Field, placeholder: string, width, heigh
 			selection_end   = u32(hi),
 			marked_start    = i32(f.marked_start) if f.marked else -1,
 			marked_end      = i32(f.marked_end) if f.marked else -1,
+			limit           = u32(field_limit(f)),
 			caret           = {b.rect.x + FIELD_PAD - f.scroll + cx, b.rect.y + ty, cw, line_h},
 		}
 	}

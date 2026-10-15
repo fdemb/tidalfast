@@ -125,7 +125,7 @@ typedef struct {
   uint32_t selection_end;
   int32_t marked_start; // bytes; -1 without marked text
   int32_t marked_end;
-  uint32_t _pad;
+  uint32_t limit; // most bytes the field takes, 0 for no limit
   float caret[4]; // x, y, w, h in view points: the marked text, or the caret
 } Text_Input;
 _Static_assert(sizeof(Text_Input) == 48, "Text_Input size must match platform.odin");
