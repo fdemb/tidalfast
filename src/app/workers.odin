@@ -21,6 +21,7 @@ import "core:fmt"
 import "core:log"
 import "core:mem"
 import vmem "core:mem/virtual"
+import "core:os"
 import "core:strings"
 import "core:sync"
 import "core:sys/posix"
@@ -575,23 +576,35 @@ fetch_size :: proc(job: Job) -> int {
 run_cover :: proc(d: ^Data, job: Job, res: ^Result) {
 	s := d.session
 	id := job.id
-	url := cover.url(s.config.image_url, small_str(&id), fetch_size(job), context.temp_allocator)
 	heap := runtime.heap_allocator()
-	body, err := tidal.resource_get(s, url, heap)
-	if err != nil {
-		// Not fail: covers carry no token, so a 401 here says nothing about
-		// the login. The cover is marked failed and tried again later.
-		e, _ := err.?
-		res.err = e.kind
-		res.message = small(tidal.error_string(err, context.temp_allocator))
-		return
+	dir, path := cover_file(d, small_str(&id), fetch_size(job))
+	body, cached := cover_read(path)
+	if !cached {
+		url := cover.url(s.config.image_url, small_str(&id), fetch_size(job), context.temp_allocator)
+		err: tidal.Error
+		body, err = tidal.resource_get(s, url, heap)
+		if err != nil {
+			// Not fail: covers carry no token, so a 401 here says nothing
+			// about the login. The cover is marked failed and tried again
+			// later.
+			e, _ := err.?
+			res.err = e.kind
+			res.message = small(tidal.error_string(err, context.temp_allocator))
+			return
+		}
 	}
 	defer delete(body, heap)
 	pixels, w, h, ok := cover.decode(body, int(job.size))
 	if !ok {
+		if cached {
+			os.remove(path)
+		}
 		res.err = .Bad_Response
 		res.message = small("not an image")
 		return
+	}
+	if !cached {
+		cover_write(d, dir, path, body)
 	}
 	res.pixels, res.w, res.h = pixels, w, h
 }

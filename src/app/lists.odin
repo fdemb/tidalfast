@@ -50,6 +50,8 @@ import "../jobs"
 LIST_MEMORY_BUDGET :: 16 << 20
 LIST_MEMORY_MAX :: 64
 LIST_DISK_BUDGET :: 50 << 20
+COVER_DISK_BUDGET :: 50 << 20
+COVER_EVICT_EVERY :: 256 // cover writes between checks of the budget
 DISK_QUEUE :: 64
 
 DAY :: 86400
@@ -84,7 +86,7 @@ Disk_Op :: enum u8 {
 Lists :: struct {
 	memory:  bool, // closed lists are kept, see list_keep
 	root:    string, // heap; "" for no disk cache
-	user:    i64, // whose files: root/<user>
+	user:    i64, // whose files: root/<user>; the workers read it (atomic)
 	entries: [LIST_MEMORY_MAX]List_Entry,
 	count:   int,
 	bytes:   int,
@@ -93,6 +95,7 @@ Lists :: struct {
 	thread:  posix.pthread_t,
 	running: bool,
 	mutex:   sync.Mutex, // a write against sign-out's delete
+	covers_written: int, // cover files written this session (atomic)
 }
 
 // lists_root is where the cache goes: TIDALFAST_CACHE, or the user's
@@ -623,7 +626,7 @@ disk_on :: proc(d: ^Data) -> bool {
 // lists_signed_in points the disk cache at the user's folder and reads the
 // sidebar from it.
 lists_signed_in :: proc(d: ^Data, user: i64) {
-	d.lists.user = user
+	sync.atomic_store(&d.lists.user, user)
 	disk_push(d, {op = .Read})
 }
 
@@ -638,7 +641,8 @@ lists_forget :: proc(d: ^Data) {
 		sync.guard(&d.lists.mutex)
 		os.remove_all(dir)
 	}
-	d.lists.user = 0
+	// After the delete, under the mutex: a cover write checks it there.
+	sync.atomic_store(&d.lists.user, 0)
 }
 
 @(private = "file")
@@ -775,7 +779,7 @@ disk_run :: proc(d: ^Data, job: Job) -> (res: Result, reply: bool) {
 	case .Read:
 	case .Write:
 		if disk_write(dir, path, job.blob) {
-			disk_evict(dir, LIST_DISK_BUDGET)
+			disk_evict(dir, LIST_DISK_BUDGET, ".tfl")
 		}
 	case .Touch:
 		now := time.now()
@@ -848,10 +852,10 @@ disk_write :: proc(dir, path: string, blob: []u8) -> bool {
 	return true
 }
 
-// disk_evict deletes the files in dir opened longest ago until the rest
-// take budget bytes or less, and temp files a crash left. The sidebar
-// stays. It returns how many it deleted.
-disk_evict :: proc(dir: string, budget: int) -> int {
+// disk_evict deletes the files in dir ending in ext opened longest ago
+// until the rest take budget bytes or less, and temp files a crash left.
+// The sidebar stays. It returns how many it deleted.
+disk_evict :: proc(dir: string, budget: int, ext: string) -> int {
 	infos, err := os.read_all_directory_by_path(dir, context.temp_allocator)
 	if err != nil {
 		return 0
@@ -867,7 +871,7 @@ disk_evict :: proc(dir: string, budget: int) -> int {
 			}
 			continue
 		}
-		if !strings.has_suffix(fi.name, ".tfl") {
+		if !strings.has_suffix(fi.name, ext) {
 			continue
 		}
 		total += int(fi.size)
@@ -891,6 +895,54 @@ disk_evict :: proc(dir: string, budget: int) -> int {
 		}
 	}
 	return removed
+}
+
+// Covers. Image ids never change what they show, so a cover file is never
+// stale. The workers read and write them next to the lists, in
+// root/<user>/covers, so sign-out deletes them too.
+
+// cover_file is where a Cover job's JPEG goes, or "" with no disk cache.
+cover_file :: proc(d: ^Data, image: string, size: int) -> (dir, path: string) {
+	user := sync.atomic_load(&d.lists.user)
+	if d.lists.root == "" || user == 0 || image == "" {
+		return "", ""
+	}
+	for c in transmute([]u8)image {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '-') {
+			return "", ""
+		}
+	}
+	dir = fmt.tprintf("%s/%d/covers", d.lists.root, user)
+	return dir, fmt.tprintf("%s/%s-%d.jpg", dir, image, size)
+}
+
+// cover_read reads a cover's JPEG from disk, heap, and marks it used.
+cover_read :: proc(path: string) -> ([]u8, bool) {
+	if path == "" {
+		return nil, false
+	}
+	data, ok := file_read(path, runtime.heap_allocator())
+	if ok {
+		now := time.now()
+		os.change_times(path, now, now)
+	}
+	return data, ok
+}
+
+// cover_write keeps a downloaded JPEG, unless its user signed out since
+// the path was made. Every COVER_EVICT_EVERY writes, starting with the
+// first, the folder is brought back under COVER_DISK_BUDGET.
+cover_write :: proc(d: ^Data, dir, path: string, data: []u8) {
+	if path == "" {
+		return
+	}
+	sync.guard(&d.lists.mutex)
+	if !strings.has_prefix(dir, fmt.tprintf("%s/%d/", d.lists.root, sync.atomic_load(&d.lists.user))) {
+		return
+	}
+	if disk_write(dir, path, data) && sync.atomic_add(&d.lists.covers_written, 1) % COVER_EVICT_EVERY == 0 {
+		disk_evict(dir, COVER_DISK_BUDGET, ".jpg")
+	}
 }
 
 // disk_result takes a disk read: the open list's rows, or the sidebar.

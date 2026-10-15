@@ -276,8 +276,8 @@ disk_cache_evicts_the_oldest :: proc(t: ^testing.T) {
 	testing.expect(t, os.write_entire_file(tmp, blob) == nil)
 	testing.expect(t, os.change_times(tmp, old, old) == nil)
 
-	testing.expect_value(t, app.disk_evict(dir, 10_000), 1) // the temp file only
-	testing.expect_value(t, app.disk_evict(dir, 2500), 3)
+	testing.expect_value(t, app.disk_evict(dir, 10_000, ".tfl"), 1) // the temp file only
+	testing.expect_value(t, app.disk_evict(dir, 2500, ".tfl"), 3)
 	for i in 0 ..< 5 {
 		testing.expectf(t, os.exists(fmt.tprintf("%s/album-%d.tfl", dir, i)) == (i >= 3), "album-%d", i)
 	}
@@ -580,4 +580,38 @@ added_status_goes_with_the_old_sidebar :: proc(t: ^testing.T) {
 	}
 	app.handle_result(s, &res, 0)
 	testing.expect_value(t, app.status_text(s), "")
+}
+
+// Covers go to disk under the user's folder, come back from it, and go
+// with it at sign-out. A download that finishes after the sign-out isn't
+// written.
+@(test)
+covers_on_disk :: proc(t: ^testing.T) {
+	dir := cache_dir("covers")
+	defer delete(dir, runtime.heap_allocator())
+	defer os.remove_all(dir)
+	s := cache_state(dir)
+	defer cache_state_free(s)
+	d := &s.data
+	app.session_open(d)
+
+	cdir, path := app.cover_file(d, "0f1e2d3c-0000-4000-8000-000000000001", 80)
+	testing.expect_value(t, path, fmt.tprintf("%s/7/covers/0f1e2d3c-0000-4000-8000-000000000001-80.jpg", dir))
+	_, odd := app.cover_file(d, "../x", 80)
+	testing.expect_value(t, odd, "")
+	_, cached := app.cover_read(path)
+	testing.expect(t, !cached)
+	jpeg := []u8{0xff, 0xd8, 0xff, 0xe0, 1, 2, 3}
+	app.cover_write(d, cdir, path, jpeg)
+	back, ok := app.cover_read(path)
+	defer delete(back, runtime.heap_allocator())
+	testing.expect(t, ok && slice.equal(back, jpeg))
+
+	app.account_end(s)
+	app.lists_forget(d)
+	testing.expect(t, !os.exists(cdir))
+	app.cover_write(d, cdir, path, jpeg) // from before the sign-out
+	testing.expect(t, !os.exists(cdir))
+	_, none := app.cover_file(d, "0f1e2d3c-0000-4000-8000-000000000001", 80)
+	testing.expect_value(t, none, "")
 }
