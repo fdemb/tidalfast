@@ -64,6 +64,8 @@ Job_Kind :: enum u8 {
 	Stream, // resolve a track's stream URL, see player.odin
 	Artwork, // a cover for Now Playing: download and decode, keep the pixels
 	Search, // songs, albums, artists and playlists for a query, see search.odin
+	Login_Pkce, // finish a hi-res login with the pasted address, see login.odin
+	Save_Settings, // write the output settings, see settings.odin
 }
 
 Source :: enum u8 {
@@ -80,7 +82,7 @@ Job :: struct {
 	source:     Source,
 	once:       bool, // Login_Wait: poll once, to see if TIDAL answers again
 	auth:       u32, // the auth generation it was queued in, see sign_out
-	view:       u32, // Tracks: the view generation it's for; Stream: the track's serial; Search: the query's generation
+	view:       u32, // Tracks: the view generation it's for; Stream: the track's serial; Search: the query's generation; Login_Wait, Login_Pkce: the login attempt
 	offset:     i32,
 	limit:      i32,
 	key:        u64, // Cover: the cache key; Stream: the track id; Artwork: the track's serial
@@ -277,8 +279,18 @@ run_job :: proc(d: ^Data, job: Job) -> (res: Result) {
 	id := job.id
 	switch job.kind {
 	case .None, .Cover, .Artwork:
+	case .Save_Settings:
+		if !settings_flush(d) {
+			res.err = .Io
+			res.message = small("Couldn't save the output settings")
+		}
+	case .Login_Pkce:
+		run_login_pkce(d, job, &res)
 	case .Stream:
-		info, err := tidal.resolve_stream(s, i64(job.key), STREAM_QUALITY, alloc)
+		// Only the PKCE client gets hi-res; the device client would get
+		// LOSSLESS for it anyway.
+		quality := tidal.Quality.Hi_Res_Lossless if tidal.session_is_pkce(s) else tidal.Quality.High_Lossless
+		info, err := tidal.resolve_stream(s, i64(job.key), quality, alloc)
 		if err != nil {
 			fail(&res, err)
 			return
@@ -338,9 +350,40 @@ run_job :: proc(d: ^Data, job: Job) -> (res: Result) {
 	return
 }
 
+// run_login_pkce trades the pasted address's code for tokens. If an
+// earlier try already did, and then loading the account failed or a reload
+// cut it short, the code is spent: it finishes with those tokens instead.
+@(private = "file")
+run_login_pkce :: proc(d: ^Data, job: Job, res: ^Result) {
+	s := d.session
+	attempt := u64(job.view)
+	if attempt != tidal.session_login_attempt(s) {
+		res.err = .Cancelled
+		return
+	}
+	a := tidal.session_auth(s, context.temp_allocator)
+	if a.access_token != "" && a.user_id == 0 && a.is_pkce {
+		if err := tidal.load_oauth_session(s, a.token_type, a.access_token, a.refresh_token, a.expiry_time, true); err != nil {
+			fail_login(res, err)
+			return
+		}
+		auth_changed(s, d)
+		return
+	}
+	sync.guard(&d.pkce_mutex)
+	if err := tidal.login_pkce_complete(s, string(d.pkce_redirect[:d.pkce_len]), attempt); err != nil {
+		fail_login(res, err)
+	}
+}
+
 @(private = "file")
 run_login_wait :: proc(d: ^Data, job: Job, res: ^Result) {
 	s := d.session
+	attempt := u64(job.view)
+	if attempt != tidal.session_login_attempt(s) {
+		res.err = .Cancelled
+		return
+	}
 	if job.not_before != {} {
 		if wait := time.tick_diff(time.tick_now(), job.not_before); wait > 0 && jobs.sleep(&d.queue, wait) {
 			// Stopping for a reload: retry_later puts the job back.
@@ -357,7 +400,7 @@ run_login_wait :: proc(d: ^Data, job: Job, res: ^Result) {
 		return
 	}
 	if a.access_token != "" {
-		err := tidal.load_oauth_session(s, a.token_type, a.access_token, a.refresh_token, a.expiry_time)
+		err := tidal.load_oauth_session(s, a.token_type, a.access_token, a.refresh_token, a.expiry_time, a.is_pkce)
 		if err != nil {
 			fail_login(res, err)
 			return
@@ -377,7 +420,7 @@ run_login_wait :: proc(d: ^Data, job: Job, res: ^Result) {
 		interval    = f64(job.interval),
 		expires_in  = left,
 	}
-	err := tidal.login_device_wait(s, &link, until_expiry = !job.once)
+	err := tidal.login_device_wait(s, &link, until_expiry = !job.once, cancel = &d.device_cancel, attempt = attempt)
 	res.link.interval = f32(link.interval)
 	if err != nil {
 		fail_login(res, err)

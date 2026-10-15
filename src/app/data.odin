@@ -42,7 +42,16 @@ Account :: enum u8 {
 	Signed_In,
 }
 
+// Pkce_Step is where the hi-res (PKCE) login is.
+Pkce_Step :: enum u8 {
+	Off, // the device-code login shows
+	Paste, // the browser has the login page; waiting for its redirect address
+	Exchanging, // a Login_Pkce job is out
+}
+
 Login :: struct {
+	pkce:      Pkce_Step,
+	pkce_note: Small, // why the last paste didn't work
 	link:      Login_Link,
 	requested: bool, // a Login_Start job is out
 	waiting:   bool, // a Login_Wait job is out
@@ -110,6 +119,29 @@ Data :: struct {
 	saved_backoff:  time.Tick,
 	saved_reason:   Small,
 	login:          Login,
+	// The hi-res login's PKCE verifier and client key. A new session on
+	// reload takes them, so a login page opened before it still works.
+	pkce_verifier:  Small,
+	pkce_key:       Small,
+	// The pasted redirect address, for the Login_Pkce job. The UI writes
+	// it only while no such job is out.
+	pkce_mutex:     sync.Mutex,
+	pkce_redirect:  [2048]u8,
+	pkce_len:       int,
+	device_cancel:  bool, // stops a device-code poll once the hi-res login takes over (atomic)
+	// Goes up when a login starts or the user switches between the device
+	// and hi-res logins. Login jobs carry it (Job.view) and the session
+	// drops tokens from an older one, so a late answer to an abandoned login
+	// can't replace the one the user finished.
+	login_attempt:  u32,
+	// The settings file and the newest settings for it, see settings_queue.
+	// The path is Data's own copy, freed after the workers stop.
+	settings_path:    string, // heap
+	settings_mutex:   sync.Mutex, // guards settings_latest and settings_gen
+	settings_latest:  Settings,
+	settings_gen:     u64,
+	settings_write:   sync.Mutex, // held while a save writes the file
+	settings_written: u64, // the settings_gen on disk; under settings_write
 	sidebar:        Sidebar,
 	view:           Track_View,
 	// Debug builds and tests keep the last closed list's arena, filled with
@@ -202,6 +234,8 @@ data_shutdown :: proc(s: ^State) {
 		d.session = nil
 	}
 	delete(d.saved_auth, runtime.heap_allocator())
+	delete(d.settings_path, runtime.heap_allocator())
+	d.settings_path = ""
 	sidebar_free(d)
 	if d.view.has_arena {
 		vmem.arena_destroy(&d.view.arena)
@@ -283,7 +317,13 @@ session_open :: proc(d: ^Data) {
 		s.config.api_oauth2_token = strings.concatenate({base, "oauth2/token"}, a)
 		s.config.api_device_auth = strings.concatenate({base, "oauth2/device_authorization"}, a)
 		s.config.image_url = strings.concatenate({base, "images/%s/%dx%d.jpg"}, a)
+		s.config.api_pkce_auth = strings.concatenate({base, "authorize"}, a)
+		s.config.pkce_uri_redirect = strings.concatenate({base, "android/login/auth"}, a)
 	}
+	if d.pkce_verifier.len > 0 {
+		tidal.session_set_pkce_state(s, small_str(&d.pkce_verifier), small_str(&d.pkce_key))
+	}
+	tidal.session_set_login_attempt(s, u64(d.login_attempt))
 	s.on_auth_change = auth_changed
 	s.on_auth_change_data = d
 	d.session = s
@@ -307,6 +347,7 @@ Stored_Auth :: struct {
 	locale:        string,
 	user_id:       i64,
 	is_pkce:       bool,
+	client_id:     string, // the client the tokens belong to; refreshes must use it
 }
 
 auth_marshal :: proc(a: tidal.Auth, allocator: runtime.Allocator) -> []u8 {
@@ -319,6 +360,7 @@ auth_marshal :: proc(a: tidal.Auth, allocator: runtime.Allocator) -> []u8 {
 		locale        = a.locale,
 		user_id       = a.user_id,
 		is_pkce       = a.is_pkce,
+		client_id     = a.client_id,
 	}
 	if t, ok := a.expiry_time.?; ok {
 		st.expiry = time.to_unix_seconds(t)
@@ -341,6 +383,16 @@ auth_restore :: proc(s: ^tidal.Session, data: []u8, partial := false) -> bool {
 	}
 	if st.user_id == 0 && (!partial || st.access_token == "") {
 		return false
+	}
+	// Items from before the client id was stored go by is_pkce alone. A
+	// client this build doesn't know can't refresh; the first request finds
+	// out and the login starts over.
+	if st.client_id != "" {
+		pkce := st.client_id == s.config.client_id_pkce
+		if !pkce && st.client_id != s.config.client_id && st.client_id != s.device_client_id {
+			fmt.eprintln("app: the saved login is for a client this build doesn't know")
+		}
+		st.is_pkce = pkce
 	}
 	a := tidal.Auth {
 		token_type    = st.token_type,
@@ -459,6 +511,7 @@ sign_out :: proc(s: ^State, why: string) {
 	d.login = {
 		note = small(why),
 	}
+	login_next_attempt(d)
 	sidebar_free(d)
 	view_close(d)
 	playback_stop(s)
@@ -478,6 +531,7 @@ request_login_code :: proc(d: ^Data) {
 		request_login_poll(d)
 		return
 	}
+	sync.atomic_store(&d.device_cancel, false)
 	d.login.requested = push_job(d, {kind = .Login_Start})
 }
 
@@ -495,7 +549,15 @@ request_login_poll :: proc(d: ^Data) {
 	if l.waiting {
 		return
 	}
-	l.waiting = push_job(d, {kind = .Login_Wait, id = l.link.device_code, interval = l.link.interval, deadline = l.deadline, not_before = l.poll_at, once = l.poll_once})
+	l.waiting = push_job(d, {kind = .Login_Wait, view = d.login_attempt, id = l.link.device_code, interval = l.link.interval, deadline = l.deadline, not_before = l.poll_at, once = l.poll_once})
+}
+
+// login_next_attempt starts a new login attempt. Tokens that arrive for an
+// older one are dropped before they reach the session, and its results
+// are ignored.
+login_next_attempt :: proc(d: ^Data) {
+	d.login_attempt += 1
+	tidal.session_set_login_attempt(d.session, u64(d.login_attempt))
 }
 
 request_playlists :: proc(d: ^Data) {
@@ -537,6 +599,14 @@ data_retry :: proc(d: ^Data) {
 			}
 		case .Tracks:
 			view_request_pages(d)
+		case .Login_Pkce:
+			if d.account == .Signed_Out && d.login.pkce == .Exchanging {
+				push_job(d, {kind = .Login_Pkce, view = d.login_attempt})
+			}
+		case .Save_Settings:
+			push_job(d, {kind = .Save_Settings})
+		case .Search:
+			// search_send tries again itself through due.
 		}
 	}
 }
@@ -583,7 +653,7 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 	err, failed := res.err.?
 	// Only jobs that sent the login's tokens can end it. A cover carries no
 	// token, and a login job's .Authentication means the user denied it.
-	if failed && err == .Authentication && res.job.kind != .Cover && res.job.kind != .Login_Start && res.job.kind != .Login_Wait {
+	if failed && err == .Authentication && res.job.kind != .Cover && res.job.kind != .Login_Start && res.job.kind != .Login_Wait && res.job.kind != .Login_Pkce {
 		sign_out(s, "Your TIDAL session ended. Log in again.")
 		return
 	}
@@ -598,7 +668,11 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 			request_playlists(d)
 		} else {
 			d.account = .Signed_Out
-			request_login_code(d)
+			if redirect := pkce_redirect_env(); redirect != "" {
+				pkce_submit(d, redirect)
+			} else {
+				request_login_code(d)
+			}
 		}
 	case .Login_Start:
 		l := &d.login
@@ -616,7 +690,33 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 		}
 		request_login_poll(d)
 	case .Login_Wait:
+		if res.job.view != d.login_attempt {
+			// The user went on to another login. If that's the device login
+			// again, its poll waited for this one to end.
+			l := &d.login
+			l.waiting = false
+			if d.account == .Signed_Out && l.pkce == .Off && l.error.len == 0 {
+				if l.link.device_code.len > 0 {
+					request_login_poll(d)
+				} else {
+					request_login_code(d)
+				}
+			}
+			return
+		}
+		if d.account == .Signed_In {
+			return // the hi-res login finished first
+		}
 		login_wait_done(d, res, err, failed)
+	case .Login_Pkce:
+		if res.job.view != d.login_attempt {
+			return
+		}
+		pkce_done(d, res, failed)
+	case .Save_Settings:
+		if failed {
+			d.message = res.message
+		}
 	case .Playlists:
 		d.sidebar.loading = false
 		if failed {
@@ -680,6 +780,9 @@ login_wait_done :: proc(d: ^Data, res: ^Result, err: tidal.Error_Kind, failed: b
 	l.waiting = false
 	if res.link.interval > 0 {
 		l.link.interval = res.link.interval
+	}
+	if failed && err == .Cancelled && l.pkce != .Off {
+		return // the hi-res login stopped it; going back polls again
 	}
 	if !failed {
 		d.login = {}

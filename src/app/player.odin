@@ -17,6 +17,9 @@ package app
 //
 // With TIDALFAST_FAKE the fake rows play sine tones, 30 s each, so the
 // player bar, queue and gapless switching work without an account.
+//
+// A PKCE login asks for HI_RES_LOSSLESS; a device-code login can only get
+// LOSSLESS. Either may come back as DASH (see tidal.resolve_stream).
 
 import "base:runtime"
 import "core:fmt"
@@ -29,9 +32,7 @@ import "core:strings"
 import "../audio"
 import "../cover"
 import "../platform"
-import "../tidal"
 
-STREAM_QUALITY :: tidal.Quality.High_Lossless // 16/44.1 FLAC
 ARTWORK_SIZE :: 640
 FAKE_TONE_SECONDS :: 30
 
@@ -42,16 +43,19 @@ Queue_Item :: struct {
 
 // Track_Source is a queue entry the player knows or is about to.
 Track_Source :: struct {
-	serial:   u64, // 0 for none
-	queue:    u32, // the queue it's from, see Playback.queue_gen
-	item:     int,
-	track:    i64, // its TIDAL track id, or the fake id
-	resolved: bool, // url and gain are set
-	url:      string, // heap
-	gain:     f32,
-	rate:     int,
-	at:       i64, // where to start, in samples, once resolved
-	retried:  bool, // re-resolved once after the stream URL stopped working
+	serial:    u64, // 0 for none
+	queue:     u32, // the queue it's from, see Playback.queue_gen
+	item:      int,
+	track:     i64, // its TIDAL track id, or the fake id
+	resolved:  bool, // url and gain are set
+	url:       string, // heap; for DASH the initialization segment
+	segments:  []audio.Segment, // DASH; heap, urls too
+	timescale: i64, // DASH: units of the segments' starts per second
+	dash_end:  i64, // DASH: where the last segment ends, in those units
+	gain:      f32,
+	rate:      int,
+	at:        i64, // where to start, in samples, once resolved
+	retried:   bool, // re-resolved once after the stream URL stopped working
 }
 
 Artwork :: struct {
@@ -66,6 +70,8 @@ Playback :: struct {
 	capture:         Small, // TIDALFAST_AUDIO_CAPTURE, for the first player only
 	window:          int, // TIDALFAST_AUDIO_WINDOW_KB, in bytes
 	null_output:     bool, // TIDALFAST_AUDIO_NULL: play to miniaudio's silent null device
+	settings:        Settings, // bit-perfect and hog mode, see settings.odin
+	settings_path:   string, // heap
 
 	// The queue: a snapshot of a list, strings in arena.
 	arena:           vmem.Arena,
@@ -113,7 +119,17 @@ playback_start :: proc(s: ^State, shell: ^platform.Shell) {
 	if v, ok := strconv.parse_f32(os.get_env("TIDALFAST_VOLUME", context.temp_allocator)); ok {
 		s.library.volume = clamp(v, 0, 1)
 	}
-	pb.player = audio.create(shell.request_redraw, s.library.volume, small_str(&pb.capture), pb.window, pb.null_output)
+	pb.settings_path = settings_default_path(runtime.heap_allocator())
+	s.data.settings_path = strings.clone(pb.settings_path, runtime.heap_allocator())
+	pb.settings, _ = settings_load(pb.settings_path)
+	// The app died with a device switched to a track's rate. Put it back
+	// before anything plays.
+	if pb.settings.device.rate != 0 {
+		audio.device_change_undo(&pb.settings.device)
+		pb.settings.device = {}
+		settings_queue(&s.data, pb.settings)
+	}
+	pb.player = audio.create(shell.request_redraw, s.library.volume, small_str(&pb.capture), pb.window, pb.null_output, output_of(pb.settings))
 	pb.volume_sent = s.library.volume
 }
 
@@ -134,7 +150,7 @@ playback_unload :: proc(s: ^State) {
 playback_reload :: proc(s: ^State, shell: ^platform.Shell) {
 	pb := &s.playback
 	pb.set_now_playing = shell.set_now_playing
-	pb.player = audio.create(shell.request_redraw, s.library.volume, window = pb.window, null_output = pb.null_output)
+	pb.player = audio.create(shell.request_redraw, s.library.volume, window = pb.window, null_output = pb.null_output, output = output_of(pb.settings))
 	// The new player's seek ids start again; a pending seek is in resume_sample.
 	pb.seek_id = 0
 	if pb.cur.resolved {
@@ -151,6 +167,11 @@ playback_shutdown :: proc(s: ^State) {
 	pb := &s.playback
 	audio.destroy(pb.player)
 	pb.player = nil
+	// destroy put the device back.
+	if pb.settings.device.rate != 0 {
+		pb.settings.device = {}
+		settings_queue(&s.data, pb.settings, now = true)
+	}
 	if pb.set_now_playing != nil {
 		none: platform.Now_Playing
 		pb.set_now_playing(&none)
@@ -163,6 +184,8 @@ playback_shutdown :: proc(s: ^State) {
 	}
 	artwork_free(&pb.art)
 	artwork_free(&pb.next_art)
+	delete(pb.settings_path, runtime.heap_allocator())
+	pb.settings_path = ""
 }
 
 @(private = "file")
@@ -173,8 +196,20 @@ artwork_free :: proc(a: ^Artwork) {
 
 @(private = "file")
 source_clear :: proc(t: ^Track_Source) {
-	delete(t.url, runtime.heap_allocator())
+	source_forget_url(t)
 	t^ = {}
+}
+
+// source_forget_url frees the track's URLs.
+@(private = "file")
+source_forget_url :: proc(t: ^Track_Source) {
+	heap := runtime.heap_allocator()
+	delete(t.url, heap)
+	for seg in t.segments {
+		delete(seg.url, heap)
+	}
+	delete(t.segments, heap)
+	t.url, t.segments = "", nil
 }
 
 @(private = "file")
@@ -183,7 +218,20 @@ source_of :: proc(pb: ^Playback, t: ^Track_Source) -> audio.Source {
 		hz := 220 * math.pow(2, f32(t.item % 24) / 12)
 		return {kind = .Tone, serial = t.serial, gain = 1, seconds = FAKE_TONE_SECONDS, tone_hz = hz}
 	}
-	return {kind = .Flac, serial = t.serial, url = t.url, gain = t.gain, seconds = f64(pb.items[t.item].seconds)}
+	src := audio.Source {
+		kind    = .Flac,
+		serial  = t.serial,
+		url     = t.url,
+		gain    = t.gain,
+		seconds = f64(pb.items[t.item].seconds),
+	}
+	if len(t.segments) > 0 {
+		src.kind = .Dash
+		src.segments = t.segments
+		src.timescale = t.timescale
+		src.dash_end = t.dash_end
+	}
+	return src
 }
 
 // queue_snapshot copies the open list into the queue.
@@ -253,6 +301,8 @@ playback_stop :: proc(s: ^State) {
 		capture         = pb.capture,
 		window          = pb.window,
 		null_output     = pb.null_output,
+		settings        = pb.settings,
+		settings_path   = pb.settings_path,
 		volume_sent     = pb.volume_sent,
 		serial          = pb.serial,
 		queue_gen       = pb.queue_gen,
@@ -378,11 +428,22 @@ playback_result :: proc(s: ^State, res: ^Result) {
 	info := res.stream
 	mode := audio.queue_gain_mode(pb.entries, t.item)
 	rg := audio.Replay_Gain{info.track_gain, info.track_peak, info.album_gain, info.album_peak}
-	t.url = strings.clone(info.url, runtime.heap_allocator())
+	heap := runtime.heap_allocator()
+	source_forget_url(t)
+	t.url = strings.clone(info.url, heap)
+	if info.dash {
+		t.segments = make([]audio.Segment, len(info.segments), heap)
+		for seg, i in info.segments {
+			t.segments[i] = {strings.clone(seg.url, heap), seg.start}
+		}
+		last := info.segments[len(info.segments) - 1]
+		t.timescale = i64(info.timescale)
+		t.dash_end = last.start + last.length
+	}
 	t.gain = audio.replay_gain_linear(rg, mode)
 	t.rate = info.sample_rate
 	t.resolved = true
-	fmt.eprintfln("app: track %d resolved: %s %s, %d Hz, %s gain %.2f dB -> x%.3f", info.track_id, info.quality, info.codec, info.sample_rate, mode, 20 * math.log10(f64(t.gain)), t.gain)
+	fmt.eprintfln("app: track %d resolved: %s %s%s, %d-bit %d Hz, %s gain %.2f dB -> x%.3f", info.track_id, info.quality, info.codec, fmt.tprintf(" in DASH, %d segments", len(info.segments)) if info.dash else "", info.bit_depth, info.sample_rate, mode, 20 * math.log10(f64(t.gain)), t.gain)
 	if t == &pb.cur {
 		audio.play(pb.player, source_of(pb, t), t.at, pb.paused)
 	} else {
@@ -563,6 +624,12 @@ playback_update :: proc(s: ^State, events: []platform.Event) {
 
 	pb.status = audio.status(pb.player)
 	st := &pb.status
+	// Keep what bit-perfect output changed on the device on disk while it
+	// lasts, so a start after a crash can put it back.
+	if st.change != pb.settings.device {
+		pb.settings.device = st.change
+		settings_queue(&s.data, pb.settings)
+	}
 	if pb.seek_id != 0 && (pb.seek_serial != pb.cur.serial || (st.serial == pb.cur.serial && st.seek_id >= pb.seek_id)) {
 		pb.seek_id = 0
 	}
@@ -603,8 +670,7 @@ playback_update :: proc(s: ^State, events: []platform.Event) {
 			pb.cur.retried = true
 			pb.cur.resolved = false
 			pb.cur.at = st.sample if st.serial == pb.cur.serial else pb.cur.at
-			delete(pb.cur.url, runtime.heap_allocator())
-			pb.cur.url = ""
+			source_forget_url(&pb.cur)
 			pb.serial += 1
 			pb.cur.serial = pb.serial
 			resolve(s, &pb.cur)

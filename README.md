@@ -13,13 +13,15 @@ src/ui/         box tree, layout, input, animation, menus, tooltips and the text
 src/kbts/       kb_text_shape 2.21: C source and Odin bindings
 assets/fonts/   Inter 4.1, static Regular/Medium/SemiBold/Bold, with its OFL licence
 src/tidal/      TIDAL API library, see src/tidal/README.md
-src/audio/      FLAC streaming, decoding and output, the play queue's rules, ReplayGain
+src/audio/      FLAC and DASH streaming, fMP4, decoding, miniaudio and CoreAudio HAL output, the play queue's rules, ReplayGain
 src/jobs/       a thread-safe priority queue for jobs and results
 src/cover/      cover sizes, decoding and the texture cache
-src/mac/        Keychain and opening URLs, called straight from Odin
+src/mac/        Keychain, opening URLs and reading the clipboard, called straight from Odin
 tests/          `odin test tests`
 tests/mock_tidal/  a stand-in TIDAL server for running the app without an account
 tests/audio_check/ compares a capture of the audio output with the source it came from
+tests/bitperfect_check/ checks a bit-perfect capture against integer source WAVs, bit for bit
+tests/dashgen/  cuts FLAC into TIDAL-style DASH (fMP4 segments and an MPD), for the mock and the tests
 examples/cli/   CLI on top of src/tidal
 ```
 
@@ -49,7 +51,9 @@ Environment variables:
 - `TIDALFAST_OVERLAY=1` shows the frame-time overlay from the start.
 - `TIDALFAST_VOLUME=0.2` sets the volume slider at start.
 - `TIDALFAST_AUDIO_NULL=1` plays to miniaudio's null device: the audio callback runs in real time, but nothing reaches the speakers.
-- `TIDALFAST_AUDIO_CAPTURE=path` writes every sample the audio callback hands the device, after ReplayGain and volume, to `path` as a 32-bit float WAV. Only the first player after start captures, not the ones a hot reload makes. The header's sizes are filled in when the app quits; `tests/audio_check` also reads a file whose header still says 0.
+- `TIDALFAST_AUDIO_CAPTURE=path` writes every sample the audio callback hands the device, after ReplayGain and volume, to `path` as a 32-bit float WAV. In bit-perfect mode it's what the HAL IOProc hands CoreAudio. Only the first player after start captures, not the ones a hot reload makes. The header's sizes are filled in when the app quits; `tests/audio_check` and `tests/bitperfect_check` also read a file whose header still says 0. The header has the rate of the first device open; after a rate change the frames carry on at the new rate in the same file.
+- `TIDALFAST_SETTINGS=path` keeps the output settings (bit-perfect, hog mode) in `path` instead of `~/Library/Application Support/tidalfast/settings.json`.
+- `TIDALFAST_PKCE_REDIRECT=url` stands in for the clipboard in the hi-res login (see Login). With no saved login the app finishes the hi-res login with it at start, so a script can log in to `tests/mock_tidal` without a browser. Debug builds only.
 - `TIDALFAST_AUDIO_WINDOW_KB=n` sets how much of each track is kept downloaded (8 MB by default). A small window sends seeks back to the network, for measuring them.
 - `TIDALFAST_NOW_PLAYING_LOG=1` makes the shell print Now Playing as macOS holds it, read back from `MPNowPlayingInfoCenter`, after every update, and every remote command it gets.
 - `TIDALFAST_REMOTE_TEST="8:play,12:seek=10,20:pause,24:next"` makes the shell send those remote commands that many seconds after launch, through the same path as the media keys. The commands are `play`, `pause`, `toggle`, `next`, `previous` and `seek=seconds`.
@@ -256,7 +260,34 @@ Shaping a run costs 60 to 280 µs. Most of it is kb_text_shape, not CoreText: `S
 
 With no saved login the app shows a login screen and asks TIDAL for a device code straight away. It shows the code and `link.tidal.com`. "Open in your browser" opens the link with the code already in it, through LaunchServices (`LSOpenCFURLRef`). The app doesn't open the browser on its own: a window that launches a browser every time it starts without a login is rude, and scripts run it that way too. A worker polls TIDAL (`login_device_wait`) until the user approves, then the library loads. It waits the `interval` TIDAL gave between polls, 5 s longer after each `slow_down`. If the code expires a new one is fetched. If TIDAL can't be reached while the code is still good, the screen says so and the app checks once after 2 s, then 4, 8, 16 and 30 s between tries, never sooner than the interval, and goes back to normal polling as soon as TIDAL answers. A poll that goes back in the queue, after a 429 or a reload, keeps the interval it had reached, `slow_down` included, and waits that long from when it went back. Once a poll has the tokens the code is spent, so if loading the session then fails or waits out a backoff, the next try loads it with those tokens, however long ago the code expired. A 5xx or a 408 counts as not reaching TIDAL, while polling and while loading the session, so it gets the same retries. Anything else stops the login: the screen shows the error and a "Try again" button instead of the code. "Try again" loads the session with the tokens if the login has them, and asks for a new code if it doesn't. If TIDAL refuses the tokens, they go, and "Try again" starts over with a new code.
 
-This is TIDAL's device login for limited-input clients. The Android PKCE login, which hi-res needs, comes with phase 6.
+This is TIDAL's device login for limited-input clients. It never gets hi-res; see below.
+
+### Hi-res login
+
+TIDAL decides the best stream a token gets by the OAuth client it was issued to, not by the subscription alone. "Log in for hi-res" on the login screen runs the PKCE login of TIDAL's Android phone client instead:
+
+1. The app makes a fresh PKCE verifier and client key, keeps them in `Data` so a hot reload doesn't lose them, and opens `login.tidal.com/authorize` in the browser with the client id, the S256 challenge, `appMode=android` and the redirect `https://tidal.com/android/login/auth`. The device-code poll stops meanwhile; "Use a code instead" starts it again.
+2. After the login TIDAL redirects to that address, which shows an "Oops" page. Its address has `?code=...`.
+3. The user copies the address and clicks "Paste the address". The app reads the clipboard with the Pasteboard Manager (`PasteboardCopyItemFlavorData` in HIServices, a C API, so no Obj-C and no ABI change), checks that it starts with the redirect and has a code, and a `Login_Pkce` job trades the code and verifier for tokens.
+
+The paste button stands in for a text field until there is one; once the phase 7 text field is merged, the address should go in a field on this card. `TIDALFAST_PKCE_REDIRECT` replaces the clipboard in debug builds.
+
+The code in the address works once. If the exchange gets the tokens and loading the session then fails, the card says so and offers "Try again", which loads the session with the tokens the exchange got. A hot reload in between keeps them too, and the `Login_Pkce` job that was put back finishes with them. Only when there are no such tokens does it trade a code again.
+
+Each login attempt has a number (`Data.login_attempt`). It goes up when the user switches to the hi-res login or back to the code, and when a sign-out starts a new login. `Login_Wait` and `Login_Pkce` jobs carry the number they were queued with, and the session knows the current one (`tidal.session_set_login_attempt`). A device-code poll that TIDAL approves after the user moved on to the hi-res login has its tokens dropped before they reach the session, so it can't replace a hi-res login that finished first, possibly of another account. Its result is ignored. A poll that was still queued doesn't poll at all.
+
+The Keychain item now also stores `client_id`, the client the tokens were issued to. A refresh has to use it: the mock refuses a PKCE refresh token sent with another client id, and TIDAL rotates refresh tokens per client. Items saved before this go by their `is_pkce` flag. A Stream job asks for `HI_RES_LOSSLESS` when the login is PKCE and `LOSSLESS` otherwise.
+
+What the reference clients say about client ids, checked October 2026:
+
+| client id | flow | what it streams | who uses it |
+|---|---|---|---|
+| `fX2JxdmntZWK0ixT` | device code | `LOSSLESS` at best, 16/44.1 BTS | tidalapi's default `client_id`, and this app's device login; lumitide on Linux and macOS (which says it gets `HIGH` AAC with it) |
+| `4N3n6Q1x95LL5K7p` | device code | `LOSSLESS` 16/44.1 | riptide and tiddl. riptide's notes say asking it for `HI_RES_LOSSLESS` on a `HIRES_LOSSLESS` track with a `HI_RES` subscription returns `LOSSLESS`, 16-bit 44.1 kHz |
+| `6BDSRdpK9hqEBTgU` | PKCE, Android phone | `HI_RES_LOSSLESS`, as DASH | tidalapi's `client_id_pkce`, high-tide (PKCE only, it drops older non-PKCE logins), mare-player. mare-player measured that this client gets the hi-res FLAC tier and issues refresh tokens, and that it serves DASH for both FLAC tiers, `LOSSLESS` included. Its token response names it `TIDAL_Android_2.87.0` |
+| `mhPVJJEBNRzVjr2p` | PKCE, Windows desktop, no secret | lossless FLAC | lumitide on Windows, with the `tidal://login/auth` redirect that only the desktop app can receive |
+
+The PKCE scope is `r_usr+w_usr+w_sub`, as tidalapi sends it. mare-player found TIDAL accepts two redirects for the Android client, `https://tidal.com/android/login/auth` (the browser lands on it, so the user copies it) and `tidal://login/auth` (needs a URL scheme handler). Every other redirect it tried, `http://127.0.0.1` included, gets error 11102, so a local web server can't catch the code. A `tidal://` handler would remove the copy and paste, but needs the shell to register the scheme. Developer-portal credentials don't work at all: the device flow refuses them ("not a Limited Input Device client") and their tokens get 401 from `playbackinfopostpaywall`, per riptide. None of this has been tried against the real TIDAL from here; it's what the reference clients document.
 
 ### Keychain
 
@@ -286,7 +317,7 @@ The plan said v2 (`openapi.tidal.com`). The reference clients show v1 still work
 
 Four worker threads (`WORKERS`) share two queues in `State`, both from `src/jobs`. The jobs queue goes from the UI thread to the workers. The results queue goes back. Each is a fixed array of 256 plain-data items behind a mutex and condition variable. Jobs come out by priority, then oldest first: data (sign-in, playlists, track pages) before visible covers, visible covers before the ones just outside the view. A job a worker has taken keeps its slot until it's done or put back, so a job cut short always has room to go back, however full the UI made the queue meanwhile. Covers leave 16 slots free for data jobs. If the queue refuses a data job anyway, its kind goes in `Data.retry` and the next frame pushes it again; a worker finishing a job frees a slot and asks for that frame. A refused cover stays wanted and is pushed again the same way. A job holds only fixed-size text (a playlist id, an image id, a device code) and numbers, so it never points into memory a view switch or a reload could free. A worker runs a job, pushes the result and calls the shell's `request_redraw`. The next frame takes results right after `ui.begin_frame`.
 
-Kinds of job: `Restore` (read the Keychain), `Login_Start`, `Login_Wait`, `Playlists`, `Tracks` (one page), `Cover`, `Stream` (resolve a track's stream, see Playback), `Artwork` (a cover for Now Playing, kept as pixels) and `Search` (see Search). `Tracks` also pages through search results, an album's tracks and an artist's top tracks.
+Kinds of job: `Restore` (read the Keychain), `Login_Start`, `Login_Wait`, `Login_Pkce` (finish the hi-res login with the pasted address), `Playlists`, `Tracks` (one page), `Cover`, `Stream` (resolve a track's stream, see Playback), `Artwork` (a cover for Now Playing, kept as pixels), `Search` (see Search) and `Save_Settings` (write the output settings, so a click never waits on the disk; see Output settings). `Tracks` also pages through search results, an album's tracks and an artist's top tracks.
 
 Hot reload: `unload` sets the session's abort flag, which makes curl stop any transfer in flight (an `XFERINFOFUNCTION` that checks it) and `login_device_wait` return. Then it stops both queues and joins the workers. A worker whose job was cut short puts it back in the queue where it was. `unload` then copies the session's login state to a heap buffer, keeps the backoff's end and reason in `State`, and destroys the session, since a `tidal.Session` holds allocators and a curl handle pool made by this dylib. `reload` makes a new session, restores the login and the backoff, and starts new workers, which pick up the jobs that were put back. So a reload during a 30 minute anti-abuse hold doesn't end it. A device login that got its tokens but hadn't loaded the session when the reload came keeps them too: `reload` restores tokens without a user only then, and the `Login_Wait` that was put back finishes the login with them. Results that were waiting stay in their queue. A `Login_Wait` job holds the code's expiry as a time, not a duration, so a reload doesn't stretch it.
 
@@ -330,6 +361,8 @@ It answers `/search` too. Tracks of the long playlist match by title or artist, 
 
 It also serves playback (see Playback below). Flags add a delay before every audio response (`-audio-delay=ms`), cap each audio connection's bandwidth (`-audio-rate=KB/s`), leave the SEEKTABLE out of the files (`-seektable=0`) and pick where the generated audio goes (`-audio-dir`).
 
+For hi-res it serves the PKCE login (`/authorize` redirects straight to `/android/login/auth?code=...`, and the token endpoint takes an `authorization_code` grant only with the Android client's id, a verifier and that redirect) and a hi-res test album as liked tracks 4 to 6 (`hires.odin`): "Quiet Noise 16/44.1" as a BTS FLAC, then two 24/96 tracks of 10 and 6 seconds. Those come as DASH (`HI_RES_LOSSLESS`, an MPD with a `SegmentTemplate` and a `SegmentTimeline`, 4 second fMP4 segments under `/dash/`) when a PKCE login asks for `HI_RES_LOSSLESS`, and as the 16/44.1 file otherwise. All three are xorshift noise at about -60 dBFS, made as WAV, encoded with `afconvert` and cut by `tests/dashgen`. `-hires-only` makes them the only liked tracks, so playing through the list never reaches the loud test tones.
+
 ```
 odin build tests/mock_tidal -out:build/mock_tidal
 ./build/mock_tidal -port=8787
@@ -350,11 +383,16 @@ Frame time includes waiting for the next drawable, so its average is the 120 Hz 
 
 ## Playback
 
-`src/audio` plays 16-bit 44.1 kHz FLAC, TIDAL's `LOSSLESS`. `src/app/player.odin` connects it to the queue, the player bar and the shell.
+`src/audio` plays FLAC at any rate and depth: TIDAL's `LOSSLESS` as one FLAC file, and `HI_RES_LOSSLESS` (up to 24-bit 192 kHz) as DASH. `src/app/player.odin` connects it to the queue, the player bar and the shell.
 
 ### Getting a stream
 
-`tidal.resolve_stream(session, track_id, quality)` asks v1 `tracks/{id}/playbackinfopostpaywall` with `playbackmode=STREAM`, `assetpresentation=FULL` and `audioquality=LOSSLESS`. The answer carries a BTS manifest: base64 JSON with `mimeType` (`audio/flac`), `codecs`, `encryptionType` and `urls`. `resolve_stream` returns the first URL, the sample rate and bit depth, and the ReplayGain fields `trackReplayGain`, `trackPeakAmplitude`, `albumReplayGain` and `albumPeakAmplitude`, the names tidalapi, riptide and the other reference clients read. It refuses DASH manifests (hi-res, phase 6), encrypted streams and anything that isn't FLAC. A missing gain is 0 dB and a missing peak 1.0. A track without album gain uses its track gain for both.
+`tidal.resolve_stream(session, track_id, quality)` asks v1 `tracks/{id}/playbackinfopostpaywall` with `playbackmode=STREAM`, `assetpresentation=FULL` and `audioquality=LOSSLESS`, or `HI_RES_LOSSLESS` after a hi-res login. The answer carries one of two manifests:
+
+- BTS (`application/vnd.tidal.bts`): base64 JSON with `mimeType` (`audio/flac`), `codecs`, `encryptionType` and `urls`. `resolve_stream` returns the first URL.
+- DASH (`application/dash+xml`): a base64 MPD with one `Representation` (`codecs="flac"`, `mimeType="audio/mp4"`) and a `SegmentTemplate` with absolute `initialization` and `media` URLs (`$Number$` from `startNumber`, a token in the query) and a `SegmentTimeline`. `dash_info_from_mpd` expands the timeline (`t`, `d`, `r` repeat counts, `r="-1"` up to the next `t` or the end of the period) into segments with their start and length in `timescale` units. `resolve_stream` returns the initialization URL, the segments and the timescale.
+
+Both come with the sample rate and bit depth and the ReplayGain fields `trackReplayGain`, `trackPeakAmplitude`, `albumReplayGain` and `albumPeakAmplitude`, the names tidalapi, riptide and the other reference clients read. It refuses encrypted streams (an `encryptionType` other than `NONE`, or a `ContentProtection` in the MPD) and anything that isn't FLAC, such as the AAC some `HI_RES_LOSSLESS` answers carry. A missing gain is 0 dB and a missing peak 1.0. A track without album gain uses its track gain for both.
 
 Resolving runs as a `Stream` job on the data workers. Stream URLs expire, so when a download fails with a 4xx the app resolves the track once more and carries on from where it was.
 
@@ -364,7 +402,7 @@ Resolving runs as a `Stream` job on the data workers. Stream URLs expire, so whe
 fetch thread per track slot --bytes--> Stream window --> decode thread --float frames--> Pcm_Ring --> audio callback --> device
 ```
 
-- **Fetch.** Each of the two track slots, current and next, has a thread that downloads the file with curl into an 8 MB window. The window slides forward as the decoder reads and keeps 256 KB behind the read position for short seeks back. Each request is an HTTP `Range` from where the window ends. When the window is full the thread blocks on a condition variable, so a paused track holds a connection and uses no CPU. If the server closes the connection, the thread resumes from where it got to. After 5 failures in a row, or a 4xx, the track fails.
+- **Fetch.** Each of the two track slots, current and next, has a thread that downloads the file with curl into an 8 MB window. A DASH track is the initialization segment and then each media segment, fetched one after another into the same window as one run of bytes; see DASH below. The window slides forward as the decoder reads and keeps 256 KB behind the read position for short seeks back. Each request is an HTTP `Range` from where the window ends. When the window is full the thread blocks on a condition variable, so a paused track holds a connection and uses no CPU. If the server closes the connection, the thread resumes from where it got to. After 5 failures in a row, or a 4xx, the track fails.
 - **Decode.** One thread owns the slots and the device. It feeds dr_flac (`ma.decoder` with our own read and seek callbacks) the header bytes and then the file from whatever frame a seek started at, applies the track's ReplayGain and writes float frames into the ring. Commands and arriving bytes wake it through a semaphore. Nothing wakes it when the ring has room: while the device runs it also wakes on a timer, every 250 ms or sooner if a quarter of the ring (`LOW_WATER`) would play in less, and tops the ring up. While nothing plays (paused, stopped, or the queue ended) the device is stopped and it waits on the semaphore with no timeout.
 - **Ring.** `Pcm_Ring` is a single-producer, single-consumer ring of 131,072 frames (3 s at 44.1 kHz) with atomic read and write positions. The decode thread drops everything not yet played by storing a flush position, which the callback skips to on its next call, so the writer never touches the reader's position. A queue of marks next to it says which track or seek starts at which ring position. The callback adopts each mark once it has read past it, so the status describes the frame being played.
 - **Callback.** It copies frames out, ramps the volume over one buffer, adopts marks and publishes the current mark and position. It never locks, allocates, logs, waits or makes a system call, and it doesn't use the Odin context. For the seek latency log it reads `mach_absolute_time`, which reads the commpage. The mark's serial, seek id and end flag and the position go out in their own atomics under a sequence count that is odd while they change, and `status` reads them again if the count was odd or moved, so it never pairs one track's or seek's mark with another's position.
@@ -374,11 +412,11 @@ fetch thread per track slot --bytes--> Stream window --> decode thread --float f
 
 Double-clicking a row copies the open list into the queue and plays from that row. The rows after it follow. Each new queue gets a generation, and a preloaded track is reused only if its generation, row and track id all match, so a row of a new list never plays bytes preloaded for the old one. The play button and the toggle media command start the selected row (or the first) when nothing is loaded, start the queue again from the top once it has played out, and otherwise pause or resume. Signing out, or TIDAL ending the session, stops the player and clears the queue and Now Playing. The volume stays. Next and previous move through the queue and skip rows without a track id. Previous restarts the track instead once it has played 3 seconds. The queue follows the list while its pages load.
 
-About 30 seconds before the current track ends, or once all of it has downloaded, the player asks for the next track. The app resolves it and hands it over with `set_next`, and its fetch thread starts downloading. When the current track's decoder runs out, the decode thread writes the next track's first frames into the ring right after the last ones, with a mark between them, so the device sees one unbroken stream. When the mark plays, the queue moves on. If the next track has a different sample rate or channel count, the decode thread lets the ring play out and reopens the device, which leaves a short gap. Switching rates without that is phase 6.
+About 30 seconds before the current track ends, or once all of it has downloaded, the player asks for the next track. The app resolves it and hands it over with `set_next`, and its fetch thread starts downloading. When the current track's decoder runs out, the decode thread writes the next track's first frames into the ring right after the last ones, with a mark between them, so the device sees one unbroken stream. When the mark plays, the queue moves on. If the next track has a different sample rate or channel count (or bit depth, in bit-perfect mode), the decode thread lets the ring play out and reopens the device, which leaves a short gap. While it waits it wakes as soon as the ring should be empty instead of every 250 ms, so the gap is the device's re-clock and little else (see Bit-perfect output).
 
 ### ReplayGain and volume
 
-A track gets album gain when it plays as part of its album in order: the queue entry before or after it is from the same album, with the track number one away. Otherwise it gets track gain, so a playlist of singles plays at an even level. The factor is `10^(gain/20)`, lowered to `1/peak` if it would push the peak over full scale. The decode thread applies it. The volume slider applies after it, in the callback, as the cube of the slider's position, so half way is about -18 dB.
+In bit-perfect mode neither applies (see below). Otherwise a track gets album gain when it plays as part of its album in order: the queue entry before or after it is from the same album, with the track number one away. Otherwise it gets track gain, so a playlist of singles plays at an even level. The factor is `10^(gain/20)`, lowered to `1/peak` if it would push the peak over full scale. The decode thread applies it. The volume slider applies after it, in the callback, as the cube of the slider's position, so half way is about -18 dB.
 
 ### Seeking
 
@@ -403,7 +441,83 @@ The app calls `Shell.set_now_playing` with the title, artist, album, duration, e
 
 ### Hot reload
 
-The callback, the decode thread and the fetch threads all run dylib code. `unload` destroys the player: it stops and closes the device, joins the threads and frees the decoders. `reload` makes a new player and plays the same tracks from where they were, or from a seek's target if the seek hadn't landed yet; their URLs live in heap memory, not in the dylib. So a reload leaves a short silence, and the next track's download starts over. Moving the callback into the shell would avoid the silence, but the shell would need its own ring and its own marks and positions, and decoding would still stop for the reload. A short silence while developing costs less. Two reloads during playback, one right after a gapless track change, resumed at the right position.
+The callback, the decode thread and the fetch threads all run dylib code. `unload` destroys the player: it stops and closes the device, joins the threads and frees the decoders. In bit-perfect mode that also puts the device back to the rate and format it had and releases hog mode, so a reload never leaves it changed with nobody to restore it. `reload` makes a new player and plays the same tracks from where they were, or from a seek's target if the seek hadn't landed yet; their URLs, and a DASH track's segment URLs, live in heap memory, not in the dylib. So a reload leaves a short silence, and the next track's download starts over. Moving the callback into the shell would avoid the silence, but the shell would need its own ring and its own marks and positions, and decoding would still stop for the reload. A short silence while developing costs less. Two reloads during playback, one right after a gapless track change, resumed at the right position.
+
+### DASH and fMP4
+
+A DASH slot's stream fetches URL 0, the initialization segment, then the media segments in order, each with a plain GET (and a `Range` to resume one the server cut short). Offsets count from 0 at the segment the stream last started from; it can't seek by byte, only start again at a segment (`stream_restart_segment`).
+
+`src/audio/fmp4.odin` parses what's in it. The initialization segment's `moov` box leads to `trak/mdia/minf/stbl/stsd`, whose `fLaC` sample entry holds a `dfLa` box: FLAC's metadata blocks as they'd follow `fLaC` in a file. `parse_mp4_init` returns `"fLaC"` plus those blocks, the last one flagged last, and `mdhd`'s timescale, the track id and `trex`'s defaults. Each media segment is an optional `styp`, a `moof` and an `mdat`. `parse_mp4_moof` reads `tfhd` (track, default sample size, base offset), `tfdt` (the fragment's first sample in the track's timescale) and every `trun`'s sample sizes and data offset, which can carry on from the previous `trun`. A FLAC sample is one FLAC frame.
+
+Data offsets count from the base ISO 14496-12 gives the `traf`: an explicit `base_data_offset` counts from the first byte of the segment file, which the stream records for each segment as it fetches them (`stream_segment_start`); `default-base-is-moof`, or neither flag in the first `traf`, counts from the `moof`. A later `traf` with neither flag would start where the previous `traf`'s data ended, which needs the other tracks' sample sizes, so it's refused with an error that says so.
+
+Segments come from the network, so nothing in a `moof` is trusted. The demuxer reads the header of the `mdat` after each `moof` before parsing it, and every sample must lie inside that `mdat`. A `trun`'s count is checked against its own table and, when the sizes come from defaults, against what's left of the `mdat` (`count * default_size`), all before anything is appended. One fragment holds at most 65,536 samples (a 4 s segment of 192 kHz FLAC has about 190). Box sizes are checked against what holds them, 64-bit sizes above `max(i64)` are refused, and an `mdat` that runs to the end of the segment (size 0) after a `moof` is refused rather than guessed at. A broken box fails the track with the reason in the player bar. `tests/hires_test.odin` checks all of this on hand-made boxes and on 20,000 randomly damaged ones.
+
+The decoder sees the same thing as for a FLAC file: `fLaC` and the metadata blocks (with the sample count zeroed, as for a seek), then frames. The demuxer behind it (`demux_read`) walks the boxes in order, reads each `moof`, then copies its samples out of the `mdat` that follows, and skips any other box. dr_flac decodes 24-bit samples to `v / 2^23` in float, which a 32-bit float holds exactly, so nothing on the way changes a bit.
+
+A seek finds the segment whose start is at or before the target (`dash_segment_index`, a binary search over the timeline's starts converted to samples), starts the stream again at it, decodes from its first frame and drops the frames before the target. The first `moof`'s `tfdt` then says exactly which sample its first frame is, and that, not the MPD's arithmetic, sets how many to drop. A DASH seek always costs one segment request.
+
+### Bit-perfect output
+
+Off, miniaudio plays at the track's rate into an AudioUnit, and CoreAudio converts to whatever rate the device runs at and mixes with other apps. On, `src/audio/coreaudio.odin` takes the device itself through the CoreAudio HAL, which is a C API (`AudioObjectGetPropertyData`, `AudioObjectSetPropertyData`, `AudioDeviceCreateIOProcID`, `AudioDeviceStart`), declared by hand in Odin:
+
+1. At the first track, it remembers the device's nominal rate and its output stream's physical format, to restore them.
+2. With hog mode on, it takes `kAudioDevicePropertyHogMode`. Setting that property toggles it, whatever the value, so it's set only when nobody holds it and released only when this process does.
+3. If `kAudioDevicePropertyAvailableNominalSampleRates` has the track's rate, it sets `kAudioDevicePropertyNominalSampleRate`, and a physical format (`kAudioStreamPropertyPhysicalFormat`) at that rate with the track's channels that holds every bit of the track: signed integers of exactly the track's bit depth if the device has them, then the smallest integer depth above it, then 32-bit float, which holds up to 24 bits exactly. A device with only 16-bit formats has nothing for a 24-bit track. It then polls every 2 ms on the decode thread, for at most 2 s, until the device reports the rate, that physical format, and a 32-bit float virtual format at the rate.
+4. An IOProc fills the device's buffers from the ring (`hal_fill`). Each buffer is checked: one without data is skipped, frames come from the buffer that holds the fewest so every channel gets the same ones, and whatever is left of a buffer, frames the ring didn't have or bytes past the last whole frame, is zeroed. Mono and stereo go on the device's preferred stereo pair (`kAudioDevicePropertyPreferredChannelsForStereo`, read when the device opens), mono on both, and other device channels are silent. One interleaved buffer that already has the ring's layout is written in place; anything else, such as one buffer per channel, goes through a scratch buffer. It keeps the callback's rules: no locks, allocation, logging or system calls.
+
+ReplayGain and the volume slider are skipped: the decode thread doesn't multiply, and the IOProc copies with a gain of exactly 1. No dither, no conversion. The IOProc sees the virtual format, 32-bit float, and the HAL converts that to the physical format. A float holding `v / 2^23` converts to the 24-bit integer `v` exactly, and the same for 16 bits. If any step above fails (a 192 kHz track on speakers that stop at 96, no format deep enough, a format or rate the device refuses or doesn't report back), the device is put back as it was and miniaudio plays that track, converted, with no ReplayGain. The Output menu then says "Not bit-perfect" and why, such as "no 24-bit format at 96 kHz".
+
+The device it uses is the default output when the first track opens it, and it stays that device until the output is restored. While this app hogs it, it's no longer the system's default, so asking again would find another device.
+
+The device gets its rate, format and hog mode back when bit-perfect output is turned off, on a hot reload and when the app quits (`app_shutdown`). The shell turns SIGTERM, SIGINT (Ctrl-C in the terminal) and SIGHUP (the terminal closing) into a normal quit on the main queue, so they reach `app_shutdown` too. Between tracks it isn't restored, only switched.
+
+SIGKILL and a crash can't be caught. macOS releases hog mode with the process, but the nominal rate and physical format stay where the last track set them. So while a device is switched, the settings file also holds a `device_change` record: the device's UID, the rate and physical format it had, and the rate the app set. The decode thread publishes it in the player's status and the app saves it as soon as it changes. On a normal quit it goes away. At the next start, if the record is there, the device with that UID still runs at the rate the app set and nobody has changed it since, the app puts the old rate and format back before anything plays, then drops the record. The record is written a frame or so after the switch, so a crash in that window leaves nothing to restore from.
+
+The decode thread also watches the device. A listener on its `kAudioDevicePropertyDeviceIsAlive` and one on the system's default output only note what changed and wake the decode thread. When the device has gone, as when a USB DAC is unplugged mid-track, the decode thread stops and destroys the dead output without trying to restore anything on it, and plays on from the audible position on whatever is now the default output. If nothing can open, the track fails and the player bar says so. When the default output moves to another device while this one isn't hogged, the device is put back and the track moves to the new default the same way. A hogged device stops being the default, so the default moving then is no reason to leave. miniaudio follows the default output by itself.
+
+Gapless still works at the same rate: the ring doesn't care. A rate change lets the ring play out, stops the IOProc, sets the new rate and starts it again. The player logs the time from the last IOProc call with the old track's frames to the first with the new one's.
+
+### Output settings
+
+The player bar has an "Output" button, left of the volume. In bit-perfect mode it says "Bit-perfect", or the format the device plays, such as `24/96`, in green. It opens a menu with "Bit-perfect output" and, when that's on, "Hog mode", and a line saying what reaches the device. A change goes to the player at once: it closes the device (restoring it) and plays on from the audible position through the new output, since the ring's frames went through the old one's gain. The settings go in `~/Library/Application Support/tidalfast/settings.json` (`{"bit_perfect": true, "hog": false}`, plus `device_change` while a device is switched, see above) and are read when the app starts. Hog mode only counts with bit-perfect output.
+
+Saving goes through `settings_queue`: it makes the settings the newest, with a generation number, and has a worker save them. A save holds a mutex for the whole write, reads the newest settings when it starts, and skips the write if the file already has that generation. So with four workers there's still one write at a time, older settings never land after newer ones, and a burst of clicks makes few writes. Each write goes to a temp file of its own name, which is synced and renamed over the file. The path the workers use is Data's own copy, freed only after the workers have stopped.
+
+### Checking hi-res and bit-perfect output
+
+`tests/bitperfect_check` reads a capture and the integer WAVs the tracks were made from, finds each track in the capture, compares every sample's bits and reports the silence between tracks. Against the mock's hi-res album on a MacBook Air's built-in speakers:
+
+```
+./build/mock_tidal -port=8787 -hires-only
+echo '{"bit_perfect": true, "hog": true}' > /tmp/settings.json
+TIDALFAST_API=http://127.0.0.1:8787 TIDALFAST_KEYCHAIN=tidalfast-p6-test \
+    TIDALFAST_PKCE_REDIRECT='http://127.0.0.1:8787/android/login/auth?code=mock-pkce-code-1' \
+    TIDALFAST_SETTINGS=/tmp/settings.json TIDALFAST_AUDIO_CAPTURE=/tmp/cap.wav \
+    TIDALFAST_REMOTE_TEST=8:play ./build/tidalfast       # Ctrl-C after about 40 s
+odin run tests/bitperfect_check -- /tmp/cap.wav /tmp/tidalfast-mock-audio/hires-{a,b,c}-source.wav
+security delete-generic-password -s tidalfast-p6-test
+```
+
+After the review fixes the same run gave 0 samples different in all three tracks, the 96 to 96 kHz change gapless again, and 480 frames between the 44.1 and 96 kHz tracks. Ctrl-C (SIGINT) after the album put the speakers back to 48 kHz and 32-bit float and released hog mode, and the settings file lost its `device_change`. A run killed with SIGKILL during the 24/96 track left the speakers at 96 kHz with hog mode released and the record on disk; the next start put them back to 48 kHz before anything played and dropped the record. Paused, the app's CPU time didn't move in 10 s.
+
+What it showed:
+
+- The speakers offer 44.1, 48, 88.2 and 96 kHz, all as 2-channel 32-bit float only, and ran at 48 kHz before. A second process reading `kAudioDevicePropertyNominalSampleRate` every 2 ms saw 48000, then 44100 when the 16/44.1 track started, 96000 when the first 24/96 track started, and 48000 again when the app quit, with hog mode held by the app's pid from the first track to the quit and released after.
+- All three tracks reached the IOProc unchanged: 352,800 frames of 16/44.1, then 960,000 and 576,000 frames of 24/96, 0 samples different, in runs with hog mode off and on, and with a pause in the middle.
+- 44.1 to 96 kHz: 36 to 40 ms from the IOProc's last call with 44.1 kHz frames to its first with 96 kHz ones, of which setting the rate took 10 to 15 ms. The 96 to 96 kHz change between the two hi-res tracks was gapless: no frame between them.
+- A hot reload (`./build.sh app`) during the 24/96 track with hog mode on put the speakers back to 48 kHz, then the new player took them back to 96 kHz with hog mode and played on. Quitting restored 48 kHz.
+- Paused, the app used no CPU: its CPU time didn't move in 10 s.
+
+`tests/hires_test.odin` checks the parts without a device: the MPD's timeline with repeat counts and jumps, the `moov`/`dfLa`/`moof`/`trun` parsing (64-bit box sizes, default sizes, `trun`s without a data offset), 24-bit samples through fMP4 and dr_flac with no bit changed, segment lookup for seeks, a DASH track played by the player on the null device in bit-perfect mode with every sample exact and a seek into the second segment starting exactly at its target, turning bit-perfect on mid-track, the PKCE redirect parsing and exchange against the test mock, the Keychain's client id, and the settings file. Since the review it also checks `moof` bounds on hand-made and randomly damaged boxes, both base offset rules and a DASH track with an explicit `base_data_offset` played bit for bit, `hal_fill` against buffer lists of several shapes, the choice of a physical format deep enough, the Output menu's reason, a simulated device loss (`audio.simulate_device_loss`, test builds only), four threads saving settings at once while another reads the file, and the settings path outliving `playback_shutdown`. `tests/login_test.odin` checks that a superseded device login is dropped and that a hi-res login retries with its tokens, before and after a reload.
+
+Not checked here, for want of an account or a DAC:
+
+- That TIDAL still gives the Android client hi-res, and the real MPDs and segments. The MPD parser follows the shape of the TIDAL manifest in `tests/tidal_test.odin`, and a `ContentProtection` or `mp4a` answer is refused rather than played.
+- A device with integer physical formats: picking a 24-bit integer format for a 24-bit track, and falling back with "Not bit-perfect" on a 16-bit-only device, are written and tested only against made-up format lists, since the built-in speakers are float only. So is anything above 96 kHz. A device with more than one output buffer or more channels than the track is tested only with made-up buffer lists.
+- Unplugging a DAC mid-track and the default output changing: the listeners are registered against the real HAL, but the handling is tested only through `simulate_device_loss`, since this machine has no second output to switch to.
+- What a USB DAC does while it re-clocks (some click or mute for longer), and how long it takes.
+- Another app holding hog mode.
 
 ### Without an account
 

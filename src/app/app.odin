@@ -29,7 +29,7 @@ import "../ui"
 
 CLEAR_COLOR :: render.Color{0.10, 0.11, 0.13, 1}
 
-STATE_VERSION :: 11
+STATE_VERSION :: 12
 
 FRAME_HISTORY :: 120
 

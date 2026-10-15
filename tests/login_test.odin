@@ -799,3 +799,129 @@ try_again_keeps_the_tokens :: proc(t: ^testing.T) {
 	testing.expect_value(t, job.kind, app.Job_Kind.Login_Wait)
 	testing.expect_value(t, tidal.session_auth(d.session, context.temp_allocator).access_token, "device-access")
 }
+
+// The user switched from the device login to the PKCE login, which
+// finished. A device-code poll from the abandoned attempt that comes back
+// approved afterwards doesn't touch the session.
+@(test)
+superseded_device_login_is_dropped :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := oauth_session(&m)
+	defer tidal.session_destroy(s)
+
+	tidal.session_set_login_attempt(s, 2)
+	err := tidal.login_pkce_complete(s, "https://tidal.com/android/login/auth?code=c", 2)
+	testing.expect_value(t, err, nil)
+	pkce := tidal.session_auth(s, context.temp_allocator)
+	testing.expect(t, pkce.is_pkce)
+
+	link := tidal.Link_Login {
+		device_code = "dc",
+		interval    = 0.1,
+		expires_in  = 5,
+	}
+	err = tidal.login_device_wait(s, &link, until_expiry = false, attempt = 1)
+	testing.expect(t, tidal.is_error(err, .Cancelled), fmt.tprint(err))
+	a := tidal.session_auth(s, context.temp_allocator)
+	testing.expect_value(t, a.access_token, pkce.access_token)
+	testing.expect_value(t, a.refresh_token, pkce.refresh_token)
+	testing.expect(t, a.is_pkce)
+}
+
+// A device-code poll queued before the user moved to another login never
+// polls, and its result is dropped without an error on screen. If the user
+// came back to the code meanwhile, a poll for the new attempt goes out.
+@(test)
+superseded_login_wait_job :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := mock_data_state(&m)
+	defer data_state_free(s)
+	d := &s.data
+	m.polls = {"ok"}
+	d.account = .Signed_Out
+	d.login.link.device_code = app.small("dc")
+	d.login.link.interval = 0.2
+	d.login.deadline = time.tick_add(time.tick_now(), 300 * time.Second)
+
+	// On to the hi-res login, as pkce_begin does.
+	app.request_login_poll(d)
+	d.login.pkce = .Paste
+	app.login_next_attempt(d)
+	app.workers_start(d)
+	res, ok := wait_result(d, 5 * time.Second)
+	testing.expect(t, ok)
+	app.handle_result(s, &res, 0)
+	app.result_free(&res)
+	testing.expect_value(t, m.poll_count, 0)
+	testing.expect_value(t, d.account, app.Account.Signed_Out)
+	testing.expect(t, !d.login.waiting)
+	testing.expect_value(t, d.login.error.len, 0)
+	testing.expect_value(t, tidal.session_auth(d.session, context.temp_allocator).access_token, "")
+
+	// There and back to the code before the queued poll ran.
+	d.login.pkce = .Off
+	app.request_login_poll(d)
+	app.login_next_attempt(d)
+	res, ok = wait_result(d, 5 * time.Second)
+	testing.expect(t, ok)
+	app.handle_result(s, &res, 0)
+	app.result_free(&res)
+	testing.expect(t, d.login.waiting)
+	res, ok = wait_result(d, 5 * time.Second)
+	testing.expect(t, ok)
+	app.handle_result(s, &res, 0)
+	app.result_free(&res)
+	testing.expect_value(t, m.poll_count, 1)
+	testing.expect_value(t, d.account, app.Account.Signed_In)
+}
+
+// The PKCE exchange worked but loading the session got a 503. Trying again,
+// and trying again after a hot reload, finish with the tokens: the one-use
+// code isn't sent a second time.
+@(test)
+pkce_retry_keeps_the_tokens :: proc(t: ^testing.T) {
+	for reload in ([]bool{false, true}) {
+		m: Mock
+		mock_start(&m)
+		s := mock_data_state(&m)
+		d := &s.data
+		m.polls = {"ok"}
+		m.sessions_fail = 1
+		d.account = .Signed_Out
+		app.pkce_submit(d, fmt.tprintf("%sandroid/login/auth?code=one-use", m.base_url))
+		testing.expect_value(t, d.login.pkce, app.Pkce_Step.Exchanging)
+		app.workers_start(d)
+		res, ok := wait_result(d, 5 * time.Second)
+		testing.expect(t, ok)
+		app.handle_result(s, &res, 0)
+		app.result_free(&res)
+		testing.expect_value(t, d.account, app.Account.Signed_Out)
+		testing.expect(t, app.pkce_has_tokens(d))
+		testing.expect_value(t, m.poll_count, 1)
+
+		if reload {
+			shell := platform.Shell {
+				request_redraw = proc "c" () {},
+			}
+			app.data_unload(s)
+			app.data_reload(s, &shell)
+			testing.expect(t, app.pkce_has_tokens(d))
+		}
+		app.pkce_resume(d)
+		res, ok = wait_result(d, 5 * time.Second)
+		testing.expect(t, ok)
+		app.handle_result(s, &res, 0)
+		app.result_free(&res)
+		testing.expect_value(t, d.account, app.Account.Signed_In)
+		testing.expect_value(t, m.poll_count, 1)
+		testing.expect_value(t, mock_count(&m, "GET /sessions"), 2)
+		testing.expect(t, tidal.session_is_pkce(d.session))
+
+		data_state_free(s)
+		mock_stop(&m)
+	}
+}

@@ -1,7 +1,9 @@
 // The few macOS services the app needs that aren't windows or drawing: the
-// Keychain and opening a URL in the default browser. All of them are C APIs
-// (Security, CoreFoundation, LaunchServices), so they are called straight
-// from Odin without going through the shell, and they're safe on any thread.
+// Keychain, opening a URL in the default browser and reading text from the
+// clipboard. All of them are C APIs (Security, CoreFoundation,
+// LaunchServices, the Pasteboard Manager in HIServices), so they are called
+// straight from Odin without going through the shell, and they're safe on
+// any thread.
 package mac
 
 import "core:strings"
@@ -10,6 +12,7 @@ import "core:sys/posix"
 foreign import CoreFoundation "system:CoreFoundation.framework"
 foreign import Security "system:Security.framework"
 foreign import CoreServices "system:CoreServices.framework"
+foreign import ApplicationServices "system:ApplicationServices.framework"
 
 CFTypeRef :: rawptr
 CFStringRef :: rawptr
@@ -69,6 +72,15 @@ foreign Security {
 @(private, default_calling_convention = "c")
 foreign CoreServices {
 	LSOpenCFURLRef :: proc(url: CFURLRef, launched: ^CFURLRef) -> OSStatus ---
+}
+
+@(private, default_calling_convention = "c")
+foreign ApplicationServices {
+	PasteboardCreate :: proc(name: CFStringRef, pasteboard: ^rawptr) -> OSStatus ---
+	PasteboardSynchronize :: proc(pasteboard: rawptr) -> u32 ---
+	PasteboardGetItemCount :: proc(pasteboard: rawptr, count: ^uint) -> OSStatus ---
+	PasteboardGetItemIdentifier :: proc(pasteboard: rawptr, index: CFIndex, item: ^rawptr) -> OSStatus ---
+	PasteboardCopyItemFlavorData :: proc(pasteboard: rawptr, item: rawptr, flavor: CFStringRef, data: ^CFDataRef) -> OSStatus ---
 }
 
 @(private)
@@ -166,4 +178,34 @@ open_url :: proc(url: string) -> bool {
 	}
 	defer CFRelease(u)
 	return LSOpenCFURLRef(u, nil) == 0
+}
+
+// clipboard_text returns the plain text on the general clipboard, "" if
+// there is none.
+clipboard_text :: proc(allocator := context.allocator) -> string {
+	name := cf_string("com.apple.pasteboard.clipboard")
+	defer CFRelease(name)
+	pb: rawptr
+	if PasteboardCreate(name, &pb) != 0 || pb == nil {
+		return ""
+	}
+	defer CFRelease(pb)
+	PasteboardSynchronize(pb)
+	count: uint
+	if PasteboardGetItemCount(pb, &count) != 0 || count == 0 {
+		return ""
+	}
+	item: rawptr
+	if PasteboardGetItemIdentifier(pb, 1, &item) != 0 {
+		return ""
+	}
+	flavor := cf_string("public.utf8-plain-text")
+	defer CFRelease(flavor)
+	data: CFDataRef
+	if PasteboardCopyItemFlavorData(pb, item, flavor, &data) != 0 || data == nil {
+		return ""
+	}
+	defer CFRelease(data)
+	n := CFDataGetLength(data)
+	return strings.clone(string(CFDataGetBytePtr(data)[:n]), allocator)
 }

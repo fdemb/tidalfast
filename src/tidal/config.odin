@@ -134,14 +134,7 @@ config_make :: proc(
 	}
 
 	// PKCE client authorization. client_id stays the fallback for non-PKCE logins.
-	key: u64
-	crypto.rand_bytes(mem.ptr_to_bytes(&key))
-	c.client_unique_key = fmt.aprintf("%x", key, allocator = allocator)
-
-	verifier_bytes: [32]u8
-	crypto.rand_bytes(verifier_bytes[:])
-	c.code_verifier = base64.encode(verifier_bytes[:], base64.ENC_URL_TABLE, allocator, {.No_Padding})
-
+	c.code_verifier, c.client_unique_key = pkce_new_state(allocator)
 	c.code_challenge = pkce_challenge(c.code_verifier, allocator)
 
 	c.client_id_pkce = double_b64("TmtKRVUxSmtjRXM=", "NWFIRkZRbFJuVlE9PQ==", allocator)
@@ -151,6 +144,18 @@ config_make :: proc(
 		allocator,
 	)
 	return c
+}
+
+// pkce_new_state makes a random PKCE code verifier (32 bytes, unpadded
+// base64url) and client unique key (64 bits in hex).
+pkce_new_state :: proc(allocator := context.allocator) -> (code_verifier, client_unique_key: string) {
+	key: u64
+	crypto.rand_bytes(mem.ptr_to_bytes(&key))
+	client_unique_key = fmt.aprintf("%x", key, allocator = allocator)
+	verifier_bytes: [32]u8
+	crypto.rand_bytes(verifier_bytes[:])
+	code_verifier = base64.encode(verifier_bytes[:], base64.ENC_URL_TABLE, allocator, {.No_Padding})
+	return
 }
 
 // pkce_challenge is the S256 code challenge for a PKCE code verifier:

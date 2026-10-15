@@ -56,6 +56,10 @@ Session :: struct {
 	// once it moves on. Written under `mutex`, read atomically.
 	auth_epoch:           u64,
 
+	// The login attempt under way, see session_set_login_attempt. Under
+	// `mutex`.
+	login_attempt:        u64,
+
 	// Called after a login or token refresh changed the tokens, on the
 	// thread that changed them. Refreshes run one at a time, so calls never
 	// overlap. Set it before the session is shared between threads.
@@ -110,6 +114,7 @@ Auth :: struct {
 	country_code:  string,
 	locale:        string,
 	is_pkce:       bool,
+	client_id:     string, // the OAuth client the tokens are for, which refreshes them
 	user_id:       i64, // 0 when no user is loaded
 	user_kind:     User_Kind,
 	epoch:         u64, // the session's auth_epoch; session_restore ignores it
@@ -128,6 +133,13 @@ session_auth :: proc(s: ^Session, allocator := context.allocator) -> Auth {
 		locale        = strings.clone(s.locale, allocator),
 		is_pkce       = s.is_pkce,
 		epoch         = s.auth_epoch,
+	}
+	if s.is_pkce {
+		a.client_id = strings.clone(s.config.client_id_pkce, allocator)
+	} else if s.device_client_id != "" {
+		a.client_id = strings.clone(s.device_client_id, allocator)
+	} else {
+		a.client_id = strings.clone(s.config.client_id, allocator)
 	}
 	if u, ok := s.user.?; ok {
 		a.user_id = u.id
@@ -176,6 +188,20 @@ session_epoch :: proc(s: ^Session) -> u64 {
 	return sync.atomic_load(&s.auth_epoch)
 }
 
+// session_set_login_attempt names the login attempt now under way. A
+// login given another attempt number drops its tokens before they reach
+// the session, so a device-code poll answered after the user moved on to
+// the PKCE login can't replace that login.
+session_set_login_attempt :: proc(s: ^Session, attempt: u64) {
+	sync.guard(&s.mutex)
+	s.login_attempt = attempt
+}
+
+session_login_attempt :: proc(s: ^Session) -> u64 {
+	sync.guard(&s.mutex)
+	return s.login_attempt
+}
+
 // session_abort makes requests in flight, and any made while it's on, fail
 // with .Cancelled. Safe from any thread.
 session_abort :: proc(s: ^Session, on: bool) {
@@ -217,6 +243,24 @@ session_client_enable_hires :: proc(s: ^Session) {
 	}
 	s.config.client_id = s.config.client_id_pkce
 	s.config.client_secret = s.config.client_secret_pkce
+}
+
+// session_is_pkce says whether the login came from the PKCE client, which
+// TIDAL gives hi-res streams.
+session_is_pkce :: proc(s: ^Session) -> bool {
+	sync.guard(&s.mutex)
+	return s.is_pkce
+}
+
+// session_set_pkce_state replaces the PKCE verifier and client key that
+// config_make generated, so a login URL opened by one session can be
+// finished by another, as after a hot reload.
+session_set_pkce_state :: proc(s: ^Session, code_verifier, client_unique_key: string) {
+	sync.guard(&s.mutex)
+	a := vmem.arena_allocator(&s.arena)
+	s.config.code_verifier = strings.clone(code_verifier, a)
+	s.config.client_unique_key = strings.clone(client_unique_key, a)
+	s.config.code_challenge = pkce_challenge(code_verifier, a)
 }
 
 @(private)

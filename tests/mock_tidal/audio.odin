@@ -38,7 +38,7 @@ Audio_File :: struct {
 	data: []u8,
 }
 
-audio_files: [7]Audio_File
+audio_files: [8]Audio_File // 7 is the hi-res album's 16/44.1 track
 
 audio_prepare :: proc(dir: string, seektable: bool) -> bool {
 	os.make_directory(dir)
