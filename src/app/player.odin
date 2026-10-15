@@ -86,6 +86,8 @@ Playback :: struct {
 	status:          audio.Status,
 	resume_sample:   i64, // position kept across a reload
 	seek_id:         u32, // waiting for this seek to show up in status
+	seek_serial:     u64, // the source it's for; it's dropped once that isn't current
+	seek_sample:     i64,
 	seek_seconds:    f64,
 	dragging:        bool, // the progress bar is held: show the drag position
 	drag_seconds:    f64,
@@ -122,6 +124,9 @@ playback_unload :: proc(s: ^State) {
 	}
 	st := audio.status(pb.player)
 	pb.resume_sample = st.sample if st.serial == pb.cur.serial else pb.cur.at
+	if pb.seek_id != 0 && pb.seek_serial == pb.cur.serial {
+		pb.resume_sample = pb.seek_sample
+	}
 	audio.destroy(pb.player)
 	pb.player = nil
 }
@@ -130,7 +135,10 @@ playback_reload :: proc(s: ^State, shell: ^platform.Shell) {
 	pb := &s.playback
 	pb.set_now_playing = shell.set_now_playing
 	pb.player = audio.create(shell.request_redraw, s.library.volume, window = pb.window, null_output = pb.null_output)
+	// The new player's seek ids start again; a pending seek is in resume_sample.
+	pb.seek_id = 0
 	if pb.cur.resolved {
+		pb.cur.at = pb.resume_sample
 		audio.play(pb.player, source_of(pb, &pb.cur), pb.resume_sample, pb.paused)
 	}
 	if pb.next.resolved {
@@ -466,6 +474,8 @@ playback_seek :: proc(s: ^State, seconds: f64) {
 		return
 	}
 	pb.seek_id = audio.seek(pb.player, pb.cur.serial, sample)
+	pb.seek_serial = pb.cur.serial
+	pb.seek_sample = sample
 	pb.seek_seconds = at
 }
 
@@ -484,7 +494,7 @@ playback_position :: proc(s: ^State) -> f64 {
 	switch {
 	case pb.dragging:
 		return pb.drag_seconds
-	case pb.seek_id != 0:
+	case pb.seek_id != 0 && pb.seek_serial == pb.cur.serial:
 		return pb.seek_seconds
 	case pb.status.serial == pb.cur.serial && (pb.status.rate > 0 || pb.cur.rate > 0):
 		// The player learns the rate from the file a moment after the first
@@ -553,7 +563,7 @@ playback_update :: proc(s: ^State, events: []platform.Event) {
 
 	pb.status = audio.status(pb.player)
 	st := &pb.status
-	if pb.seek_id != 0 && st.serial == pb.cur.serial && st.seek_id >= pb.seek_id {
+	if pb.seek_id != 0 && (pb.seek_serial != pb.cur.serial || (st.serial == pb.cur.serial && st.seek_id >= pb.seek_id)) {
 		pb.seek_id = 0
 	}
 
@@ -563,6 +573,7 @@ playback_update :: proc(s: ^State, events: []platform.Event) {
 		pb.cur = pb.next
 		pb.next = {}
 		pb.index = pb.cur.item
+		pb.seek_id = 0
 		artwork_free(&pb.art)
 		pb.art = pb.next_art
 		pb.next_art = {}

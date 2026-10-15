@@ -655,6 +655,38 @@ login_requeue_keeps_the_interval :: proc(t: ^testing.T) {
 	}
 }
 
+// TIDAL answering 503 to every poll counts as not reaching it: the poll
+// fails at once, and the login checks again after 2 s, then 4 s, instead
+// of polling on as if the code were pending.
+@(test)
+login_5xx_backs_off :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := mock_data_state(&m)
+	defer data_state_free(s)
+	d := &s.data
+	m.polls = {"503", "503", "503", "503", "503", "503", "503", "503"}
+	d.account = .Signed_Out
+	d.login.link.device_code = app.small("dc")
+	d.login.link.interval = 0.2
+	d.login.deadline = time.tick_add(time.tick_now(), 300 * time.Second)
+	app.request_login_poll(d)
+	app.workers_start(d)
+
+	for want_wait in ([]f64{2, 4}) {
+		res, ok := wait_result(d, 5 * time.Second)
+		testing.expect(t, ok)
+		testing.expect_value(t, res.err, tidal.Error_Kind.Network)
+		app.handle_result(s, &res, 0)
+		app.result_free(&res)
+		wait := time.duration_seconds(time.tick_diff(time.tick_now(), d.login.poll_at))
+		testing.expectf(t, wait > want_wait - 0.2 && wait <= want_wait, "the next check is in %.2f s, not %.0f", wait, want_wait)
+		testing.expect(t, d.login.poll_once)
+	}
+	testing.expect_value(t, len(m.poll_times), 2)
+}
+
 @(private = "file")
 now_playing_calls, now_playing_cleared: int
 

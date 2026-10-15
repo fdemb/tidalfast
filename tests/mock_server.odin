@@ -281,6 +281,8 @@ mock_route :: proc(m: ^Mock, req: Mock_Request, target: string) -> (status: int,
 			return 400, `{"status":400,"error":"access_denied"}`, etag
 		case "429":
 			return 429, `{"userMessage":"Too many requests"}`, etag
+		case "503":
+			return 503, `{"status":503,"error":"temporarily_unavailable"}`, etag
 		case "ok":
 			return 200, `{"access_token":"device-access","refresh_token":"device-refresh","token_type":"Bearer","expires_in":3600}`, etag
 		}

@@ -272,8 +272,8 @@ SLOW_DOWN_STEP :: 5
 // link.interval when TIDAL asks it to slow down, so a caller that polls
 // again after an error keeps the slower pace. It returns .Timeout when the
 // code expired, .Authentication if the user denied it, a rate limit as
-// .Too_Many_Requests or .Abuse_Detected (with the backoff started), and
-// transport errors as they come.
+// .Too_Many_Requests or .Abuse_Detected (with the backoff started), a 5xx or
+// a 408 as .Http, and transport errors as they come.
 login_device_wait :: proc(s: ^Session, link: ^Link_Login, until_expiry := true, cancel: ^bool = nil) -> (err: Error) {
 	scratch_begin(context.allocator)
 	epoch := session_epoch(s)
@@ -295,7 +295,7 @@ login_device_wait :: proc(s: ^Session, link: ^Link_Login, until_expiry := true, 
 		if http_ok(resp) && obj != nil {
 			return process_auth_token(s, obj, false, epoch)
 		}
-		if is_rate_limit(resp) {
+		if is_rate_limit(resp) || resp.status >= 500 || resp.status == 408 {
 			return http_error(resp)
 		}
 		// authorization_pending and anything unknown: keep polling, as

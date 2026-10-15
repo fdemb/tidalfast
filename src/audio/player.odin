@@ -184,11 +184,14 @@ Player :: struct {
 	capturing:       bool,
 
 	// Written by the callback (or the decode thread while the device is
-	// stopped), read by anyone. pub_seq is odd while pub_mark and pub_sample
-	// change; see published.
+	// stopped), read by anyone. pub_seq is odd while pub_mark, the current
+	// mark's fields and pub_sample change; see published.
 	cb_gain:         f32,
 	pub_seq:         u64,
 	pub_mark:        u64, // marks adopted so far; the current one is pub_mark-1
+	pub_serial:      u64, // the current mark's serial, seek_id and end
+	pub_mark_seek:   u32,
+	pub_end:         bool,
 	pub_sample:      i64,
 	pub_seek_tick:   u64, // mach_absolute_time of the first frame after the last seek mark
 	pub_seek_id:     u32,
@@ -342,8 +345,9 @@ status :: proc(p: ^Player) -> Status {
 
 // published reads the callback's current mark and position as one pair.
 // The callback makes pub_seq odd before it changes them and even after, so
-// a read that saw an odd or changed count tries again. The mark's slot is
-// only reused after the callback moves past it, which changes the count.
+// a read that saw an odd or changed count tries again. It reads the mark's
+// fields from their own atomics, not from the queue, whose slots the decode
+// thread reuses.
 @(private = "file")
 published :: proc(p: ^Player) -> (m: Mark, sample: i64) {
 	for {
@@ -352,8 +356,9 @@ published :: proc(p: ^Player) -> (m: Mark, sample: i64) {
 			intrinsics.cpu_relax()
 			continue
 		}
-		n := sync.atomic_load(&p.pub_mark)
-		m = p.marks.items[(n - 1) % MARKS] if n > 0 else {}
+		m.serial = sync.atomic_load(&p.pub_serial)
+		m.seek_id = sync.atomic_load(&p.pub_mark_seek)
+		m.end = sync.atomic_load(&p.pub_end)
 		sample = sync.atomic_load(&p.pub_sample)
 		intrinsics.atomic_thread_fence(.Seq_Cst)
 		if sync.atomic_load(&p.pub_seq) == seq {
@@ -1129,6 +1134,9 @@ publish :: proc "contextless" (p: ^Player, rd: u64) -> bool {
 	changed := mark_advance(&p.marks, rd)
 	m := p.marks.cur
 	sync.atomic_store(&p.pub_sample, m.sample + i64(rd - min(rd, m.at)) if !m.end else m.sample)
+	sync.atomic_store(&p.pub_serial, m.serial)
+	sync.atomic_store(&p.pub_mark_seek, m.seek_id)
+	sync.atomic_store(&p.pub_end, m.end)
 	sync.atomic_store(&p.pub_mark, sync.atomic_load(&p.marks.read))
 	sync.atomic_add(&p.pub_seq, 1)
 	return changed

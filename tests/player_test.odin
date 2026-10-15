@@ -206,3 +206,65 @@ toggle_plays_from_idle_and_the_end :: proc(t: ^testing.T) {
 	testing.expect(t, app.playback_playing(s))
 	testing.expect(t, wait_until(s, proc(s: ^app.State) -> bool {return s.playback.status.serial == s.playback.cur.serial && s.playback.status.state == .Playing}))
 }
+
+// A seek sent for track one after the audio moved on to the preloaded
+// track two, before the app saw that. The decoder drops it, and the
+// position must follow track two instead of staying on the target.
+@(test)
+advance_drops_a_pending_seek :: proc(t: ^testing.T) {
+	rows := []app.Row{{title = "One", seconds = 30}, {title = "Two", seconds = 30}}
+	s := fake_player_state(rows)
+	defer free(s)
+	defer app.playback_shutdown(s)
+	pb := &s.playback
+
+	app.playback_play_row(s, 0)
+	testing.expect(t, wait_until(s, proc(s: ^app.State) -> bool {return s.playback.next.resolved}))
+	app.playback_seek(s, app.FAKE_TONE_SECONDS - 0.1)
+	testing.expect(t, wait_until(s, proc(s: ^app.State) -> bool {return s.playback.seek_id == 0}))
+	// Wait for track two without running a frame, so the app still thinks
+	// track one plays.
+	start := time.tick_now()
+	for audio.status(pb.player).serial != pb.next.serial && time.tick_since(start) < 3 * time.Second {
+		time.sleep(5 * time.Millisecond)
+	}
+	testing.expect_value(t, pb.index, 0)
+	app.playback_seek(s, 12)
+
+	testing.expect(t, wait_until(s, proc(s: ^app.State) -> bool {return s.playback.index == 1 && s.playback.status.serial == s.playback.cur.serial}))
+	time.sleep(100 * time.Millisecond)
+	app.playback_update(s, nil)
+	at := app.playback_position(s)
+	testing.expectf(t, at < 5, "track two shows %v s, the seek target meant for track one", at)
+	testing.expect_value(t, pb.seek_id, u32(0))
+}
+
+// A hot reload while a seek is pending resumes at the seek's target, and
+// the position goes back to following the audio.
+@(test)
+reload_keeps_a_pending_seek :: proc(t: ^testing.T) {
+	rows := []app.Row{{title = "One", seconds = 30}, {title = "Two", seconds = 30}}
+	s := fake_player_state(rows)
+	defer free(s)
+	defer app.playback_shutdown(s)
+	pb := &s.playback
+	pb.null_output = true
+	pb.window = audio.STREAM_WINDOW
+
+	app.playback_play_row(s, 0)
+	testing.expect(t, wait_until(s, proc(s: ^app.State) -> bool {return s.playback.status.serial == s.playback.cur.serial}))
+	app.playback_seek(s, 20)
+	app.playback_unload(s)
+	shell := platform.Shell {
+		request_redraw = no_redraw,
+	}
+	app.playback_reload(s, &shell)
+
+	testing.expect(t, wait_until(s, proc(s: ^app.State) -> bool {return s.playback.seek_id == 0 && s.playback.status.serial == s.playback.cur.serial}))
+	at := app.playback_position(s)
+	testing.expectf(t, at >= 20 && at < 21, "after the reload the player is at %v s, not the seek target", at)
+	time.sleep(300 * time.Millisecond)
+	app.playback_update(s, nil)
+	later := app.playback_position(s)
+	testing.expectf(t, later > at, "the position stays at %v s", later)
+}
