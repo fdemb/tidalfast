@@ -44,6 +44,13 @@
 //     -refuse-hires      answer HI_RES_LOSSLESS with 403, so the app falls back to LOSSLESS
 //     -lossless-dash     send the hi-res album's 16/44.1 track as DASH to a PKCE login, at LOSSLESS too
 //
+// Each playlist has a lastUpdated. GET /mock/change?playlist=N adds a track
+// to playlist N and moves its lastUpdated on; /mock/change?liked=1 likes a
+// new track, which goes to the top of the liked tracks. Neither needs a
+// token, so a script can change things while the app runs:
+//
+//     curl 'http://127.0.0.1:8787/mock/change?playlist=1'
+//
 // It never prints tokens or Authorization headers.
 package mock_tidal
 
@@ -110,6 +117,8 @@ Server :: struct {
 	covers_401:    int, // covers answered 401 since the last device login
 	pkce:          bool, // the current tokens came from the PKCE login
 	pkce_codes:    int,
+	changes:       [len(PLAYLISTS)]int, // /mock/change calls per playlist
+	liked_extra:   int, // tracks liked through /mock/change, newest first
 }
 
 server: Server
@@ -420,6 +429,18 @@ route :: proc(req: ^Request) -> Response {
 		return authorize_response(req)
 	case path == "/android/login/auth":
 		return {status = 200, content_type = "text/html", body = transmute([]u8)string("<html><body><h1>Oops</h1><p>Copy this page's address into TIDALfast.</p></body></html>")}
+	case path == "/mock/change":
+		sync.guard(&server.mutex)
+		if p, ok := parse_i(req.query["playlist"] or_else ""); ok && p >= 0 && p < len(PLAYLISTS) {
+			PLAYLISTS[p].tracks += 1
+			server.changes[p] += 1
+			fmt.printfln("mock: playlist %d changed, %d tracks", p, PLAYLISTS[p].tracks)
+		}
+		if "liked" in req.query {
+			server.liked_extra += 1
+			fmt.printfln("mock: a new liked track, %d liked", LIKED + server.liked_extra)
+		}
+		return json_response(200, "{}")
 	}
 
 	sync.mutex_lock(&server.mutex)
@@ -462,11 +483,23 @@ route :: proc(req: ^Request) -> Response {
 		}
 		return playbackinfo_response(id)
 	case path == fmt.tprintf("/users/%d/favorites/tracks", USER_ID):
-		liked := len(HIRES) if server.config.hires_only else LIKED
+		extra := 0 if server.config.hires_only else sync.atomic_load(&server.liked_extra)
+		liked := len(HIRES) if server.config.hires_only else LIKED + extra
 		limit = min(limit, LIKED_LIMIT)
 		b := list_begin(liked, offset, limit)
 		first := true
-		outer: for i in offset ..< min(offset + limit, liked) {
+		outer: for at in offset ..< min(offset + limit, liked) {
+			if at < extra {
+				if !first {
+					strings.write_byte(&b, ',')
+				}
+				first = false
+				fmt.sbprintf(&b, `{{"created":"2026-01-01T10:00:00.000+0000","item":`)
+				write_track(&b, 98, extra - 1 - at)
+				strings.write_byte(&b, '}')
+				continue
+			}
+			i := at - extra
 			if !server.config.hires_only {
 				for u in UNAVAILABLE {
 					if i == u {
@@ -494,13 +527,14 @@ route :: proc(req: ^Request) -> Response {
 		return json_response(200, strings.to_string(b))
 	case path == fmt.tprintf("/users/%d/playlistsAndFavoritePlaylists", USER_ID):
 		b := list_begin(len(PLAYLISTS), offset, limit)
+		sync.guard(&server.mutex)
 		for i in offset ..< min(offset + limit, len(PLAYLISTS)) {
 			if i > offset {
 				strings.write_byte(&b, ',')
 			}
 			pl := PLAYLISTS[i]
-			fmt.sbprintf(&b, `{{"type":"USER_CREATED","created":"%s","playlist":{{"uuid":"%s","title":%q,"numberOfTracks":%d,"numberOfVideos":0,"type":"USER","creator":{{"id":%d}},"squareImage":"%s","image":"%s"}}}}`,
-				date(i), playlist_id(i), pl.name, pl.tracks, USER_ID, image_id(1000 + i), image_id(2000 + i))
+			fmt.sbprintf(&b, `{{"type":"USER_CREATED","created":"%s","playlist":{{"uuid":"%s","title":%q,"numberOfTracks":%d,"numberOfVideos":0,"type":"USER","creator":{{"id":%d}},"squareImage":"%s","image":"%s","lastUpdated":"%s"}}}}`,
+				date(i), playlist_id(i), pl.name, pl.tracks, USER_ID, image_id(1000 + i), image_id(2000 + i), last_updated(i, server.changes[i]))
 		}
 		strings.write_string(&b, "]}")
 		return json_response(200, strings.to_string(b))
@@ -526,7 +560,9 @@ route :: proc(req: ^Request) -> Response {
 		if server.config.page_delay > 0 {
 			time.sleep(time.Duration(server.config.page_delay) * time.Millisecond)
 		}
+		sync.mutex_lock(&server.mutex)
 		total := PLAYLISTS[p].tracks
+		sync.mutex_unlock(&server.mutex)
 		b := list_begin(total, offset, limit)
 		for i in offset ..< min(offset + limit, total) {
 			if i > offset {
@@ -622,6 +658,11 @@ playlist_id :: proc(i: int) -> string {
 
 image_id :: proc(n: int) -> string {
 	return fmt.tprintf("%08x-0000-4000-8000-%012x", n * 2654435761 % 0xffffffff, n)
+}
+
+// last_updated is playlist i's lastUpdated after n changes.
+last_updated :: proc(i, n: int) -> string {
+	return fmt.tprintf("2025-06-%02dT10:%02d:%02d.000+0000", 1 + i % 28, n / 60 % 60, n % 60)
 }
 
 date :: proc(i: int) -> string {
