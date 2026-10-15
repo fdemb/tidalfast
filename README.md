@@ -8,6 +8,7 @@ src/platform/   the ABI between shell and app (shell/platform.h mirrors it)
 src/app/        the hot-reloaded app dylib
 src/render/     Metal renderer
 src/text/       fonts, shaping (kb_text_shape), rasterizing (CoreText), glyph atlas
+src/ui/         box tree, layout, input, animation, menus and tooltips
 src/kbts/       kb_text_shape 2.21: C source and Odin bindings
 assets/fonts/   Inter 4.1, static Regular/Medium/SemiBold/Bold, with its OFL licence
 src/tidal/      TIDAL API library, see src/tidal/README.md
@@ -33,11 +34,11 @@ Environment variables:
 - `TIDALFAST_SPALL=path` writes a [spall](https://gravitymoth.com/spall/) trace of every frame to `path`.
 - `TIDALFAST_LOG_EVENTS=1` prints every input event.
 - `TIDALFAST_CAPTURE=path` writes each presented frame to `path` as a TGA. It's for checking output when you can't take screenshots.
-- `TIDALFAST_BENCH=1` scrolls the text list by itself and logs the CPU time per frame in four phases (see Text below). It keeps asking for frames even when the window is covered.
+- `TIDALFAST_BENCH=1` scrolls the library's track table by itself and logs the CPU time per frame in three phases (see UI below). `TIDALFAST_BENCH=text` does the same for the text test list (see Text). Both keep asking for frames even when the window is covered.
 
 The backtick key toggles the frame-time overlay, which plots the CPU time of the last 120 frames against 120 Hz and 60 Hz lines. Under the plot are the last frame's total CPU time and the time spent building it (ui: everything before `end_frame`), its draw calls (blue dot) and instances (green dot), and the text cache's run count and atlas pages. The app also logs draw calls and instances to stderr whenever they change.
 
-Tab switches between the text test screen (specimen lines and a 10,000-row list) and the phase 1 renderer test screen.
+The app opens on the library screen. Cmd-1 goes back to it, Cmd-2 shows the text test screen (specimen lines and a 10,000-row list) and Cmd-3 the phase 1 renderer test screen. F1 or Cmd-Shift-D outlines every UI box and shows the key, ID and size of the box under the mouse.
 
 To run with Metal's validation layer, set `MTL_DEBUG_LAYER=1 METAL_DEVICE_WRAPPER_TYPE=1`.
 
@@ -139,7 +140,7 @@ At 2x with white text on the app's dark background, the rendered weight sits bet
 
 ### Performance
 
-`TIDALFAST_BENCH=1` on the 10,000-row list (about 25 rows in view, four labels each, plus the specimen panel and overlay, about 1,500 glyph instances), release build, Apple M1, 120 Hz display link. ui is the time spent building the frame, before `end_frame`:
+`TIDALFAST_BENCH=text` on the 10,000-row list (about 25 rows in view, four labels each, plus the specimen panel and overlay, about 1,500 glyph instances), release build, Apple M1, 120 Hz display link. ui is the time spent building the frame, before `end_frame`:
 
 | phase | what | ui avg | ui max |
 |---|---|---|---|
@@ -151,6 +152,68 @@ At 2x with white text on the app's dark background, the rendered weight sits bet
 The debug build is about five times slower (2.5 ms warm, 2.7 ms cold). The list itself takes about 0.1 to 0.25 ms warm. Cold frames are dominated by kb_text_shape, which costs about 0.4 µs per character (17 µs for "Bohemian Rhapsody (feat. Kendrick Lamar)"), and by CoreText shaping for Arabic and emoji runs (about 15 µs). The cold maximum is the phase's first frame, which jumps 1,000 rows and shapes about 80 runs at once. The warm maximum is a cache sweep, which runs every 256 frames and is counted in ui. An idle window still uses no CPU.
 
 The scripts phase adds Thai, Devanagari, Georgian, Armenian, Ethiopic, Tamil, Khmer and Sinhala, none of which the prewarmed fonts cover, and logs each line's first frame and when it's first drawn with its font. With fonts loaded on the UI thread, those first frames took 5.8 to 21.9 ms. With the loader they take 0.4 to 2.1 ms, and the text appears one or two frames later, 8 to 18 ms after the line was added. The phase maximum is the frame after that, when CoreText rasterizes the new font's first glyphs within the raster budget.
+
+## UI
+
+`src/ui` is an immediate-mode UI after Ryan Fleury's box UI in raddebugger. Each frame the app builds a tree of boxes. `end_frame` lays it out, draws it with `render` and `text`, and records where every box landed. The next frame tests input against those rects, so a click goes to what was on screen.
+
+```odin
+ui.begin_frame(&s.ui, events, r, &s.text, w, h, time)
+{
+	ui.row("body", {}, ui.fill(), ui.fill())          // parent until the end of the scope
+	ui.label("Your Library", ui.text_size(), ui.px(52))
+	if ui.button("Play##play").clicked { play() }
+}
+animating := ui.end_frame()                             // goes to the shell as Frame_Result.animating
+```
+
+### Boxes and keys
+
+A box built with an ID string is keyed by an FNV-1a hash of the string, seeded with the key of its nearest keyed ancestor, so `"##row12"` in two lists gives two keys. `"Play##row12"` shows "Play" and hashes the whole string. `"Pause###play"` hashes only `"###play"`, so a label can change without the box losing its state. Keyed boxes come from a pool of 8,192 in the persistent arena, found through a 4,096-bucket chained hash table, with a free list. Each one keeps its rect, clipped rect, content size, scroll offset and animation values. `begin_frame` frees every box that wasn't built in the previous frame. A box with no ID (`ui.label`, spacers) lives in the frame arena for one frame and has no state. A key built twice in one frame makes the second box keyless instead.
+
+`State` and every box are plain data: pointers into the persistent arena and the frame arena, no procedure pointers. The renderer and text pointers and the tree are set again by `begin_frame`, and the package keeps its current `State` in a thread-local pointer that `begin_frame` sets, so a hot reload carries the UI over. Strings given to boxes must live until `end_frame`. That holds for literals, the persistent arena and `fmt.tprintf`.
+
+### Sizes and layout
+
+Each box has a size per axis: `px(n)`, `text_size(pad)` (the label's width or line height plus `pad`), `pct(f)` of the nearest ancestor with a size of its own, or `children_sum()`. `fill()` is `pct(1, 0)`. Each size has a strictness: how much of it the box keeps when its parent has too little room. `layout.odin` runs Fleury's five passes per axis: standalone sizes (pixels, text), upwards-dependent (percentages, skipping ancestors sized by their children), downwards-dependent (children sums), violations, then positions. When the children along a box's child axis don't fit, each gives up `size * (1 - strictness)` in proportion until the overflow is gone. Across the axis a child larger than its parent is cut to fit. Scroll views allow overflow on their scroll axis and skip that step. A box with `Floating_X`/`Floating_Y` sits at `fixed_pos` outside the flow. So a row of `px(44)`, `fill()` and `px(56)` gives the middle box whatever is left.
+
+### Input
+
+`process_events` folds the frame's events into `Input` and walks them in order. The hit list from the last layout holds every keyed box that is clickable, focusable or scrolls, with its clipped rect, in drawing order. The hot box is the last clickable one under the mouse, so children beat parents and the floating layer beats everything. A press makes the hot box active for that button. A release over the active box is a click. While the left button is held only the active box can be hot. `ui.signal(box)` reports hovering, held, pressed, released, clicked, double-clicked (from the shell's click count), right-clicked (on mouse down, as macOS menus do, control-click included), dragging (past 4 pt) with the drag delta, and scroll. A clickable box also counts as hovering while its clickable child is hot, so a row stays lit under its own "more" button.
+
+Keyboard: Tab and Shift-Tab move the focus through focusable boxes in drawing order. Up and Down move it among focusable boxes with the same keyed parent, and within an open menu. Enter and Space click the focused box (`Signal.keyboard` says it came from a key). Escape closes the menu, or else drops the focus. A press moves the focus to the box clicked, or its nearest focusable ancestor. Keys the UI doesn't use wait in a list for `ui.key_pressed(code, modifiers)`. Focus from the keyboard draws a ring; focus from a click doesn't.
+
+### Scrolling
+
+A trackpad gesture scrolls the view it started over until the next gesture, momentum included. A mouse wheel scrolls whatever is under the mouse. Trackpad deltas move the view straight away. macOS sends the momentum phase as more deltas, so the UI adds no inertia of its own. Wheel lines (16 pt each) move a target that the view eases toward. Both are clamped to the content size from the last layout. `ui.virtual_rows(view, count, row_h)` builds only the rows in view, `floor(offset / row_h)` to `ceil((offset + height) / row_h)`, with a spacer above and below for the rest.
+
+### Animation and redraws
+
+`hot_t`, `active_t`, `focus_t`, `open_t` and the scroll offset ease toward their targets with `v += (target - v) * (1 - exp(-dt * k))`. The step is capped at 1/30 s, so the first frame after a long idle doesn't jump to the end. A value within its epsilon snaps to the target. Anything still moving sets `animating`, which `end_frame` returns and the app passes to the shell. A new keyed box asks for one more frame, since it has no rect to test input against yet, and so does a hot box that changed under a still mouse. Tooltips keep frames coming during their half-second delay. Once everything settles, no more frames are asked for and the window goes back to 0% CPU.
+
+### Floating layer
+
+`ui.floating()` makes a second root the parent until the end of the scope. It is laid out after the main tree, drawn after it with no clip from it, and its boxes come last in the hit list, so they get input first. Menus, tooltips and the drag ghost live there. `ui.open_menu(id, pos)` opens a context menu and `if ui.menu(id) { ui.menu_item(...) }` builds it while it's open or fading out. The deferred end of `ui.menu` runs at the end of the `if`, so the items must go inside its block. A left click outside the menu closes it and goes no further; a right click closes it and goes on, so it can open another. A menu flips above the mouse when there's no room below. `ui.tooltip(signal, text)` shows text by the mouse once the box has been hovered for 0.5 s.
+
+### Drawing
+
+Box flags pick what's drawn, in this order: shadow, background (optionally a vertical gradient), the hover and press overlays faded by `hot_t` and `active_t`, border, focus ring, label, then the children inside the box's clip if it has `Clip`. `opacity` multiplies the box and everything in it. A label is centred vertically, aligned left, centre or right inside `text_pad`, and truncated with an ellipsis to the box's width. A box whose clipped rect is empty draws nothing itself. Labels are shaped when drawn, through the text cache, unless the box is sized by its text, in which case layout shapes it first. Nothing in the UI allocates outside the frame arena after `ui.init`.
+
+### The library screen
+
+`src/app/library.odin` follows spotifast's layout and dark palette: a sidebar of 32 fake playlists, 250 pt wide by default, resized with a 5 pt handle between 210 and 600 pt (it stops growing once the main view would go below 360 pt). Next to it is the main view with the playlist header and the 10,000-row track table, and the 88 pt player bar runs along the bottom. Rows are 56 pt. The columns follow spotifast's `columns`, measured on the main view's width: #, cover and title always. Album shows above 560 pt (28% of the width, 140 to 360 pt), date added above 760 and added by above 920. Duration and the "more" button always show. Hovering lights a row; a click selects it; a double-click "plays" it, which updates the player bar. A right click or the "more" button opens a context menu. Dragging a row onto a playlist shows a ghost and a drop highlight. With the table focused, the arrow keys, Page Up/Down and Home/End move the selection and scroll it into view, and Enter plays it. The prev, play/pause and next buttons and the volume slider work on the fake state. Covers are gradients until phase 4.
+
+### Performance
+
+`TIDALFAST_BENCH=1`, release build, Apple M1, 1100×700 window, overlay on. About 10 rows and 1,000 to 1,800 instances in view. ui is everything before `render.end_frame`:
+
+| phase | what | ui avg | ui max |
+|---|---|---|---|
+| warm | back and forth over rows already built | 0.72 ms | 1.4 to 1.8 ms |
+| cold | 3 new rows a frame | 1.1 ms | 11.7 ms |
+| jump | a new page every frame | 1.0 to 1.3 ms | 4.4 ms |
+
+With the overlay off, warm is 0.53 to 0.60 ms. Of a warm frame, building the tree takes about 0.13 ms, layout about 0.1 ms, and drawing labels about 0.37 ms (89 labels, so about 4 µs each, inside `text.draw_run` and `render.push`). The cold maximum is the phase's first frame. It jumps 2,000 rows and meets Arabic, CJK and emoji titles in Medium 14 for the first time. Shaping those runs through CoreText costs 0.2 to 2.3 ms each the first time a fallback face is used at a weight, and about 0.25 ms after that in the app (20 to 80 µs in a standalone test program).
 
 ## Hot reload
 

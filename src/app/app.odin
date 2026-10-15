@@ -25,10 +25,11 @@ import "core:time"
 import "../platform"
 import "../render"
 import "../text"
+import "../ui"
 
 CLEAR_COLOR :: render.Color{0.10, 0.11, 0.13, 1}
 
-STATE_VERSION :: 5
+STATE_VERSION :: 6
 
 FRAME_HISTORY :: 120
 
@@ -66,8 +67,9 @@ State :: struct {
 	ui_ms:        f32, // last frame's time building the frame, before end_frame
 	show_overlay: bool,
 	log_events:   bool,
-	input:        Input,
-	scroll:       [2]f32, // the test lists' offset
+	ui:           ui.State,
+	library:      Library,
+	scroll:       [2]f32, // the test screens' scroll offset
 	bench:        Bench,
 	slide_start:  f64,
 	sliding:      bool,
@@ -230,7 +232,19 @@ start :: proc(s: ^State, shell: ^platform.Shell) {
 		fmt.eprintln("app: text init failed")
 	}
 	s.rows = make_rows()
-	s.bench.running = os.get_env("TIDALFAST_BENCH", context.temp_allocator) != ""
+	ui.init(&s.ui)
+	library_init(&s.library)
+	// TIDALFAST_BENCH=1 scrolls the library's track table, =text the text
+	// test screen's list.
+	switch os.get_env("TIDALFAST_BENCH", context.temp_allocator) {
+	case "":
+	case "text":
+		s.bench.running = true
+		s.screen = .Text
+	case:
+		s.bench.running = true
+		s.bench.ui = true
+	}
 	s.checker = make_checker(&s.renderer)
 	s.half_white = render.texture_create(&s.renderer, 1, 1, .RGBA8)
 	render.texture_update(&s.renderer, s.half_white, {128, 128, 128, 128}, 0, 0, 1, 1)
@@ -252,10 +266,8 @@ prof_end :: proc(s: ^State, _: string, _ := #caller_location) {
 	}
 }
 
-KEY_GRAVE :: 50 // kVK_ANSI_Grave
-KEY_TAB :: 48 // kVK_Tab
-
 Screen :: enum u8 {
+	Library,
 	Text,
 	Shapes,
 }
@@ -263,37 +275,45 @@ Screen :: enum u8 {
 SLIDE_SECONDS :: 0.6
 
 update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input) -> platform.Frame_Result {
-	input_begin_frame(&s.input)
-	for e in input.events[:input.event_count] {
-		if s.log_events {
+	events := input.events[:input.event_count]
+	if s.log_events {
+		for e in events {
 			fmt.eprintfln("event: %v", e)
 		}
-		input_apply(&s.input, e)
-		if e.kind == .Key_Down && e.key_code == KEY_GRAVE && !e.repeat {
-			s.show_overlay = !s.show_overlay
-		}
-		if e.kind == .Key_Down && e.key_code == KEY_TAB && !e.repeat {
-			s.screen = .Shapes if s.screen == .Text else .Text
-		}
 	}
-	if .Left in s.input.pressed {
-		s.slide_start = input.time
-		s.sliding = true
-	}
-	s.scroll += s.input.scroll
-
 	w, h := input.width, input.height
 	r := &s.renderer
 	render.begin_frame(r, w, h, input.scale, CLEAR_COLOR)
 	ui_begin := time.tick_now()
 	text.begin_frame(&s.text, r)
+	ui.begin_frame(&s.ui, events, r, &s.text, w, h, input.time)
+
+	// Backtick toggles the frame-time overlay. Cmd-1, 2 and 3 switch between
+	// the library and the phase 2 and phase 1 test screens.
+	if ui.key_pressed(ui.KEY_GRAVE) {
+		s.show_overlay = !s.show_overlay
+	}
+	for key, screen in ([Screen]u32{.Library = ui.KEY_1, .Text = ui.KEY_2, .Shapes = ui.KEY_3}) {
+		if ui.key_pressed(key, {.Command}) {
+			s.screen = screen
+		}
+	}
+	ui_input := &s.ui.input
+	if s.screen == .Shapes && .Left in ui_input.pressed {
+		s.slide_start = input.time
+		s.sliding = true
+	}
+	s.scroll += ui_input.scroll
 
 	switch s.screen {
+	case .Library:
+		draw_library(s, w, h)
 	case .Text:
 		draw_text_screen(s, w, h)
 	case .Shapes:
 		draw_test_screen(s, w, h)
 	}
+	animating := ui.end_frame()
 
 	if s.sliding {
 		t := f32((input.time - s.slide_start) / SLIDE_SECONDS)
@@ -307,9 +327,9 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input) -> platform.Fra
 		}
 	}
 
-	if s.input.mouse_inside {
-		size: f32 = 14 if mouse_down(s.input) else 10
-		m := s.input.mouse
+	if s.screen != .Library && ui_input.mouse_inside {
+		size: f32 = 14 if ui.mouse_down(ui_input^) else 10
+		m := ui_input.mouse
 		render.push_rect(r, {m.x - size / 2, m.y - size / 2, size, size}, {1, 1, 1, 0.8}, size / 2)
 	}
 
@@ -326,7 +346,7 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input) -> platform.Fra
 		fmt.eprintfln("render: %d draw calls, %d instances", r.stats.draw_calls, r.stats.instances)
 		s.last_stats = r.stats
 	}
-	return {animating = b32(s.sliding || s.text.needs_redraw)}
+	return {animating = b32(animating || s.sliding || s.text.needs_redraw)}
 }
 
 // draw_test_screen exercises the renderer: a grid of shadowed gradient cards

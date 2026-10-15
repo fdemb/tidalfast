@@ -3,16 +3,21 @@ package app
 import "core:fmt"
 import "core:strings"
 
-// Rows for the text test list: song titles and artists in several scripts,
-// mixed into ROW_COUNT rows. The strings are copied into the persistent
-// arena, since literals live in the dylib's image.
+// Fake tracks for the test screens and the library table: song titles and
+// artists in several scripts, mixed into ROW_COUNT rows with made-up albums,
+// dates and durations. The strings are copied into the persistent arena,
+// since literals live in the dylib's image.
 
 ROW_COUNT :: 10_000
 
 Row :: struct {
 	title:    string,
 	artist:   string,
+	album:    string,
+	added:    string, // date added
+	added_by: string,
 	duration: string,
+	seconds:  int,
 }
 
 @(private = "file")
@@ -119,6 +124,42 @@ ARTISTS := [?]string {
 }
 
 @(private = "file")
+ALBUMS := [?]string {
+	"Kind of Blue",
+	"Music Has the Right to Children",
+	"Sgt. Pepper's Lonely Hearts Club Band",
+	"A Night at the Opera",
+	"Nevermind",
+	"OK Computer",
+	"Mezzanine",
+	"Windowlicker EP",
+	"Hurry Up, We're Dreaming",
+	"Rumours",
+	"Post",
+	"Ágætis byrjun",
+	"Second Toughest in the Infants",
+	"Discovery",
+	"Gruppa krovi",
+	"Symphony No. 9 \"Choral\"",
+	"THE BOOK",
+	"Pocket Lover",
+	"Love Yourself: Her",
+	"Palette",
+	"Nour El Ein",
+	"Diwân",
+	"The Marshall Mathers LP",
+	"VIDA",
+	"夜に駆ける",
+	"Shades of Yemen",
+}
+
+@(private = "file")
+ADDED_BY := [?]string{"filip", "Ola", "Kuba", "Marta", "Tomek", "Zosia"}
+
+@(private = "file")
+MONTHS := [?]string{"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"}
+
+@(private = "file")
 SUFFIXES := [?]string{"", "", "", "", " (Remastered 2011)", " - Live at Wembley", " (feat. Kendrick Lamar)", " [Extended Mix]", " (Demo)"}
 
 make_rows :: proc() -> []Row {
@@ -129,7 +170,12 @@ make_rows :: proc() -> []Row {
 		suffix := SUFFIXES[(h >> 20) % len(SUFFIXES)]
 		row.title = fmt.aprintf("%s%s", title, suffix)
 		row.artist = strings.clone(ARTISTS[(h >> 14) % len(ARTISTS)])
+		row.album = strings.clone(ALBUMS[(h >> 11) % len(ALBUMS)])
+		row.added_by = strings.clone(ADDED_BY[(h >> 26) % len(ADDED_BY)])
+		day := (h >> 3) % 28 + 1
+		row.added = fmt.aprintf("%s %d, %d", MONTHS[(h >> 17) % 12], day, 2016 + (ROW_COUNT - i) * 9 / ROW_COUNT)
 		seconds := 95 + int(h >> 4) % 400
+		row.seconds = seconds
 		row.duration = fmt.aprintf("%d:%02d", seconds / 60, seconds % 60)
 	}
 	return rows

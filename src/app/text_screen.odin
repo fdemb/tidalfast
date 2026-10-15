@@ -51,7 +51,7 @@ draw_text_screen :: proc(s: ^State, w, h: f32) {
 		line(s, x, &y, .Medium, 13, str, box_w)
 		y += 6
 	}
-	if s.bench.running && BENCH_PHASES[s.bench.phase].name == "scripts" {
+	if s.bench.running && !s.bench.ui && BENCH_PHASES[s.bench.phase].name == "scripts" {
 		b := &s.bench
 		count := min(b.frame / SCRIPT_FRAMES + 1, len(BENCH_SCRIPTS))
 		if b.frame % SCRIPT_FRAMES == 0 {
@@ -76,7 +76,7 @@ draw_list :: proc(s: ^State, list: render.Rect) {
 	render.push_rect(r, list, {0.10, 0.10, 0.12, 1})
 
 	max_offset := max(f32(ROW_COUNT * ROW_H) - list.h, 0)
-	if s.bench.running {
+	if s.bench.running && !s.bench.ui {
 		s.scroll.y = -bench_offset(s, list.h)
 	}
 	s.scroll.y = clamp(s.scroll.y, -max_offset, 0)
@@ -116,6 +116,7 @@ draw_list :: proc(s: ^State, list: render.Rect) {
 // frames, logging the frame that adds it.
 Bench :: struct {
 	running:    bool,
+	ui:         bool, // the library's track table instead of the text list
 	phase:      int,
 	frame:      int,
 	count:      int,
@@ -137,6 +138,11 @@ Bench_Phase :: struct {
 	skip:   int, // frames not measured, while the cache warms up
 }
 
+// The library bench: warm scrolls back and forth over rows already built,
+// cold scrolls 3 rows a frame into rows never seen, jump shows a new page
+// every frame.
+UI_BENCH_PHASES := [?]Bench_Phase{{"settle", 60, 60}, {"warm", 360, 120}, {"cold", 300, 0}, {"jump", 200, 0}}
+
 BENCH_PHASES := [?]Bench_Phase{{"settle", 60, 60}, {"warm", 360, 120}, {"cold", 300, 0}, {"jump", 200, 0}, {"scripts", SCRIPT_FRAMES * len(BENCH_SCRIPTS), 0}}
 
 SCRIPT_FRAMES :: 30
@@ -144,8 +150,23 @@ SCRIPT_FRAMES :: 30
 // Scripts the specimen lines and the list don't use.
 BENCH_SCRIPTS := [?]string{"Thai: เพลงรัก", "Devanagari: प्रेम गीत", "Georgian: სიყვარული", "Armenian: Սեր", "Ethiopic: ፍቅር", "Tamil: காதல்", "Khmer: ស្នេហា", "Sinhala: ආදරය"}
 
+bench_phases :: proc(b: ^Bench) -> []Bench_Phase {
+	return UI_BENCH_PHASES[:] if b.ui else BENCH_PHASES[:]
+}
+
 bench_offset :: proc(s: ^State, page: f32) -> f32 {
 	f := f32(s.bench.frame)
+	if s.bench.ui {
+		switch UI_BENCH_PHASES[s.bench.phase].name {
+		case "warm":
+			return 600 + 600 * (1 - math.cos(f * 2 * math.PI / 120))
+		case "cold":
+			return 2000 * TRACK_ROW_H + f * 3 * TRACK_ROW_H
+		case "jump":
+			return 4000 * TRACK_ROW_H + f * page
+		}
+		return 0
+	}
 	switch BENCH_PHASES[s.bench.phase].name {
 	case "warm":
 		return 300 + 300 * (1 - math.cos(f * 2 * math.PI / 120))
@@ -161,7 +182,8 @@ bench_offset :: proc(s: ^State, page: f32) -> f32 {
 
 bench_record :: proc(s: ^State, frame_ms: f32) {
 	b := &s.bench
-	phase := BENCH_PHASES[b.phase]
+	phases := bench_phases(b)
+	phase := phases[b.phase]
 	if b.frame >= phase.skip {
 		b.count += 1
 		b.ui_sum += f64(s.ui_ms)
@@ -182,7 +204,7 @@ bench_record :: proc(s: ^State, frame_ms: f32) {
 		fmt.eprintfln("bench: %s: ui avg %.3f ms, max %.3f ms; frame avg %.3f ms, max %.3f ms; %d frames, %d runs shaped, %d glyphs rasterized",
 			phase.name, b.ui_sum / f64(b.count), b.ui_max, b.frame_sum / f64(b.count), b.frame_max, b.count, b.shaped, b.rasterized)
 	}
-	b^ = {running = b.phase + 1 < len(BENCH_PHASES), phase = b.phase + 1}
+	b^ = {running = b.phase + 1 < len(phases), phase = b.phase + 1, ui = b.ui}
 	if !b.running {
 		fmt.eprintln("bench: done")
 	}
