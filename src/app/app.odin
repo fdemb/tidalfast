@@ -8,7 +8,8 @@
 // pointer, so they are rebuilt from the arenas on every call instead of being
 // stored. If State changes layout, bump STATE_VERSION. On a size or version
 // mismatch the new code calls the old code's release proc from the header,
-// then resets State.
+// then resets State. State from a build without this header (no magic) is
+// reset without calling anything.
 package app
 
 import "base:runtime"
@@ -23,16 +24,22 @@ import "core:time"
 
 import "../platform"
 import "../render"
+import "../text"
 
 CLEAR_COLOR :: render.Color{0.10, 0.11, 0.13, 1}
 
-STATE_VERSION :: 3
+STATE_VERSION :: 5
 
 FRAME_HISTORY :: 120
+
+// "TFSTATE1". Builds before it had a different header or none, so anything
+// else at the start of State is unreadable and its release isn't trusted.
+STATE_MAGIC :: 0x3145_5441_5453_4654
 
 // State_Header starts State in every version of the app, so a new version
 // can read an old one's header. Never change it.
 State_Header :: struct {
+	magic:   u64,
 	version: u32,
 	size:    int,
 	// Frees everything the State behind this header owns, using the code that
@@ -47,16 +54,21 @@ State :: struct {
 	arena:        mem.Arena, // the rest of the persistent block
 	frame_arena:  mem.Arena, // reset at the start of every frame
 	renderer:     render.Renderer,
+	text:         text.State,
+	rows:         []Row,
+	screen:       Screen,
 	checker:      render.Texture,
 	half_white:   render.Texture, // RGBA8, one texel {128, 128, 128, 128}
 	half_cover:   render.Texture, // R8, one texel 128
 	last_stats:   render.Stats,
 	frame_count:  u64,
 	frame_ms:     [FRAME_HISTORY]f32,
+	ui_ms:        f32, // last frame's time building the frame, before end_frame
 	show_overlay: bool,
 	log_events:   bool,
 	input:        Input,
-	scroll:       [2]f32, // the test list's offset
+	scroll:       [2]f32, // the test lists' offset
+	bench:        Bench,
 	slide_start:  f64,
 	sliding:      bool,
 	profiling:    bool,
@@ -89,6 +101,14 @@ app_init :: proc "c" (m: ^platform.Memory, shell: ^platform.Shell) {
 app_reload :: proc "c" (m: ^platform.Memory, shell: ^platform.Shell) {
 	context = runtime.default_context()
 	s := (^State)(m.persistent)
+	if s.magic != STATE_MAGIC {
+		// Whatever is there may hold pointers where release would be. Leak it.
+		fmt.eprintln("app: state from a build without a state header, resetting without releasing it")
+		s = state_reset(m)
+		context = app_context(s)
+		start(s, shell)
+		return
+	}
 	if s.version != STATE_VERSION || s.size != size_of(State) {
 		fmt.eprintfln("app: state changed (version %d, %d bytes) -> (version %d, %d bytes), resetting", s.version, s.size, STATE_VERSION, size_of(State))
 		if s.release != nil {
@@ -104,12 +124,14 @@ app_reload :: proc "c" (m: ^platform.Memory, shell: ^platform.Shell) {
 	if !render.reload(&s.renderer) {
 		fmt.eprintln("app: shader rebuild failed, drawing with the previous shaders")
 	}
+	text.reload(&s.text, shell.request_redraw)
 	fmt.eprintfln("app: reloaded at frame %d, clear colour %v", s.frame_count, CLEAR_COLOR)
 }
 
 app_unload :: proc "c" (m: ^platform.Memory) {
 	context = runtime.default_context()
 	s := (^State)(m.persistent)
+	text.unload(&s.text)
 	if s.profiling {
 		spall.buffer_flush(&s.spall_ctx, &s.spall_buf)
 	}
@@ -123,6 +145,7 @@ app_shutdown :: proc "c" (m: ^platform.Memory) {
 		spall.buffer_destroy(&s.spall_ctx, &s.spall_buf)
 		posix.close(posix.FD(s.spall_ctx.fd))
 	}
+	text.destroy(&s.text, &s.renderer)
 	render.destroy(&s.renderer)
 }
 
@@ -138,14 +161,28 @@ app_frame :: proc "c" (m: ^platform.Memory, shell: ^platform.Shell, input: ^plat
 		prof_scope(s, "frame")
 		result = update_and_draw(s, input)
 	}
-	s.frame_ms[s.frame_count % FRAME_HISTORY] = f32(time.duration_milliseconds(time.tick_since(begin)))
+	frame_ms := f32(time.duration_milliseconds(time.tick_since(begin)))
+	s.frame_ms[s.frame_count % FRAME_HISTORY] = frame_ms
 	s.frame_count += 1
+	if s.text.needs_redraw {
+		// Glyphs left over from the raster budget or a full atlas. The
+		// display link may be paused (window covered), so ask directly.
+		shell.request_redraw()
+	}
+	if s.bench.running {
+		bench_record(s, frame_ms)
+		// Draw again straight away even if the window is covered and the
+		// display link is paused.
+		shell.request_redraw()
+		result.animating = true
+	}
 	return result
 }
 
 state_reset :: proc(m: ^platform.Memory) -> ^State {
 	s := (^State)(m.persistent)
 	s^ = {}
+	s.magic = STATE_MAGIC
 	s.version = STATE_VERSION
 	s.size = size_of(State)
 	s.release = app_shutdown
@@ -189,6 +226,11 @@ start :: proc(s: ^State, shell: ^platform.Shell) {
 	if !render.init(&s.renderer, shell.metal_device, shell.metal_layer) {
 		fmt.eprintln("app: renderer init failed")
 	}
+	if !text.init(&s.text, shell.request_redraw) {
+		fmt.eprintln("app: text init failed")
+	}
+	s.rows = make_rows()
+	s.bench.running = os.get_env("TIDALFAST_BENCH", context.temp_allocator) != ""
 	s.checker = make_checker(&s.renderer)
 	s.half_white = render.texture_create(&s.renderer, 1, 1, .RGBA8)
 	render.texture_update(&s.renderer, s.half_white, {128, 128, 128, 128}, 0, 0, 1, 1)
@@ -211,6 +253,12 @@ prof_end :: proc(s: ^State, _: string, _ := #caller_location) {
 }
 
 KEY_GRAVE :: 50 // kVK_ANSI_Grave
+KEY_TAB :: 48 // kVK_Tab
+
+Screen :: enum u8 {
+	Text,
+	Shapes,
+}
 
 SLIDE_SECONDS :: 0.6
 
@@ -224,6 +272,9 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input) -> platform.Fra
 		if e.kind == .Key_Down && e.key_code == KEY_GRAVE && !e.repeat {
 			s.show_overlay = !s.show_overlay
 		}
+		if e.kind == .Key_Down && e.key_code == KEY_TAB && !e.repeat {
+			s.screen = .Shapes if s.screen == .Text else .Text
+		}
 	}
 	if .Left in s.input.pressed {
 		s.slide_start = input.time
@@ -234,8 +285,15 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input) -> platform.Fra
 	w, h := input.width, input.height
 	r := &s.renderer
 	render.begin_frame(r, w, h, input.scale, CLEAR_COLOR)
+	ui_begin := time.tick_now()
+	text.begin_frame(&s.text, r)
 
-	draw_test_screen(s, w, h)
+	switch s.screen {
+	case .Text:
+		draw_text_screen(s, w, h)
+	case .Shapes:
+		draw_test_screen(s, w, h)
+	}
 
 	if s.sliding {
 		t := f32((input.time - s.slide_start) / SLIDE_SECONDS)
@@ -258,6 +316,7 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input) -> platform.Fra
 	if s.show_overlay {
 		draw_frame_overlay(s, w)
 	}
+	s.ui_ms = f32(time.duration_milliseconds(time.tick_since(ui_begin)))
 
 	{
 		prof_scope(s, "end_frame")
@@ -267,7 +326,7 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input) -> platform.Fra
 		fmt.eprintfln("render: %d draw calls, %d instances", r.stats.draw_calls, r.stats.instances)
 		s.last_stats = r.stats
 	}
-	return {animating = b32(s.sliding)}
+	return {animating = b32(s.sliding || s.text.needs_redraw)}
 }
 
 // draw_test_screen exercises the renderer: a grid of shadowed gradient cards
@@ -373,17 +432,19 @@ hsv :: proc(h, s, v: f32) -> render.Color {
 
 // draw_frame_overlay draws the CPU time of the last FRAME_HISTORY frames as
 // bars, newest on the right, with lines at 120 Hz and 60 Hz budgets. Under
-// the bars are the last frame's draw calls (blue) and instances (green).
+// the bars: the last frame's CPU time in total and building the frame (the
+// UI, before end_frame), then its draw calls (blue), instances (green), and
+// the text cache's runs and atlas pages.
 draw_frame_overlay :: proc(s: ^State, view_width: f32) {
 	BAR_W :: 2
 	PX_PER_MS :: 4
 	PANEL_H :: 80
-	panel_w := f32(FRAME_HISTORY * BAR_W)
+	panel_w := f32(FRAME_HISTORY * BAR_W) + 16
 	x0 := view_width - panel_w - 12
 	y0 := f32(12)
 	r := &s.renderer
 
-	render.push_rect(r, {x0, y0, panel_w, PANEL_H + 22}, {0, 0, 0, 0.6}, 6)
+	render.push_rect(r, {x0, y0, panel_w, PANEL_H + 42}, {0, 0, 0, 0.6}, 6)
 	for i in 0 ..< FRAME_HISTORY {
 		// Oldest first, starting just after the newest entry.
 		ms := s.frame_ms[(s.frame_count + u64(i)) % FRAME_HISTORY]
@@ -394,51 +455,22 @@ draw_frame_overlay :: proc(s: ^State, view_width: f32) {
 		} else if ms > 1000.0 / 120 {
 			color = {0.95, 0.80, 0.25, 1}
 		}
-		render.push_rect(r, {x0 + f32(i * BAR_W), y0 + PANEL_H - bar_h, BAR_W - 0.5, bar_h}, color)
+		render.push_rect(r, {x0 + 8 + f32(i * BAR_W), y0 + PANEL_H - bar_h, BAR_W - 0.5, bar_h}, color)
 	}
 	for budget_ms in ([2]f32{1000.0 / 120, 1000.0 / 60}) {
 		render.push_rect(r, {x0, y0 + PANEL_H - budget_ms * PX_PER_MS, panel_w, 1}, {1, 1, 1, 0.35})
 	}
 
+	t := &s.text
 	y := y0 + PANEL_H + 6
-	render.push_rect(r, {x0 + 8, y + 2, 6, 6}, {0.35, 0.60, 1, 1}, 3)
-	draw_number(r, x0 + 20, y, s.last_stats.draw_calls)
-	render.push_rect(r, {x0 + 80, y + 2, 6, 6}, {0.30, 0.85, 0.40, 1}, 3)
-	draw_number(r, x0 + 92, y, s.last_stats.instances)
-}
-
-// draw_number draws n in seven-segment digits, 10 points tall. It stands in
-// for text until phase 2.
-draw_number :: proc(r: ^render.Renderer, x, y: f32, n: int) {
-	// Segment bits a to g: top, top right, bottom right, bottom, bottom left,
-	// top left, middle.
-	segments := [10]u8{0x3f, 0x06, 0x5b, 0x4f, 0x66, 0x6d, 0x7d, 0x07, 0x7f, 0x6f}
-	W :: 6
-	H :: 10
-	T :: 1.5
-	digits: [20]u8
-	count := 0
-	for v := max(n, 0); count == 0 || v > 0; v /= 10 {
-		digits[count] = u8(v % 10)
-		count += 1
-	}
-	color := render.Color{1, 1, 1, 0.9}
-	for i in 0 ..< count {
-		dx := x + f32(i) * (W + 3)
-		bits := segments[digits[count - 1 - i]]
-		rects := [7]render.Rect{
-			{dx, y, W, T},
-			{dx + W - T, y, T, H / 2},
-			{dx + W - T, y + H / 2, T, H / 2},
-			{dx, y + H - T, W, T},
-			{dx, y + H / 2, T, H / 2},
-			{dx, y, T, H / 2},
-			{dx, y + H / 2 - T / 2, W, T},
-		}
-		for rect, seg in rects {
-			if bits & (1 << u8(seg)) != 0 {
-				render.push_rect(r, rect, color)
-			}
-		}
-	}
+	ms := s.frame_ms[(s.frame_count + FRAME_HISTORY - 1) % FRAME_HISTORY]
+	line := fmt.tprintf("frame %.2f ms   ui %.2f ms", ms, s.ui_ms)
+	text.draw(t, r, .Medium, 11, {x0 + 8, y}, {1, 1, 1, 0.9}, line)
+	y += 16
+	render.push_rect(r, {x0 + 8, y + 4, 6, 6}, {0.35, 0.60, 1, 1}, 3)
+	text.draw(t, r, .Regular, 11, {x0 + 18, y}, {1, 1, 1, 0.9}, fmt.tprint(s.last_stats.draw_calls))
+	render.push_rect(r, {x0 + 60, y + 4, 6, 6}, {0.30, 0.85, 0.40, 1}, 3)
+	text.draw(t, r, .Regular, 11, {x0 + 70, y}, {1, 1, 1, 0.9}, fmt.tprint(s.last_stats.instances))
+	runs := fmt.tprintf("%d runs, %d pages", t.stats.runs, t.stats.pages)
+	text.draw(t, r, .Regular, 11, {x0 + panel_w - 8 - text.measure(t, .Regular, 11, runs).width, y}, {1, 1, 1, 0.6}, runs)
 }

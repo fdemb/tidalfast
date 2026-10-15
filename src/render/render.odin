@@ -21,6 +21,7 @@
 // sRGB.
 package render
 
+import "base:runtime"
 import "core:fmt"
 import "core:math"
 import "core:mem"
@@ -110,6 +111,9 @@ Texture_Slot :: struct {
 	generation: u16,
 	format:     Texture_Format,
 	mipmapped:  bool,
+	// The retained command buffer that last regenerated the mips. It reads
+	// the whole base level, so the next CPU write waits for it.
+	mip_cmd:    id,
 }
 
 Stats :: struct {
@@ -296,6 +300,7 @@ destroy :: proc(r: ^Renderer) {
 		release(buf)
 	}
 	for slot in r.textures {
+		release(slot.mip_cmd)
 		release(slot.texture)
 	}
 	release(r.pipeline)
@@ -363,15 +368,16 @@ texture_create :: proc(r: ^Renderer, width, height: int, format: Texture_Format,
 // texture_update copies pixels into the region (x, y, w, h). Rows are tightly
 // packed. R8 pixels are linear coverage. RGBA8 and BGRA8 pixels are sRGB with
 // alpha premultiplied in sRGB space, which is what a premultiplied
-// CGBitmapContext or stb_image plus a multiply gives you. Before upload,
-// translucent texels are rewritten as sRGB encodings of premultiplied linear
-// colour (white at 50% becomes 188 rather than 128), so the texture filters
-// and blends like a solid colour of the same alpha. Opaque and fully
-// transparent texels pass through unchanged. A copy is made in
-// context.temp_allocator only if some texel is translucent. The upload
-// happens at once on the CPU, so don't overwrite texels a frame still in
-// flight samples; writing into unused space, as an atlas does, is fine.
-texture_update :: proc(r: ^Renderer, t: Texture, pixels: []byte, x, y, w, h: int) {
+// CGBitmapContext or stb_image plus a multiply gives you. Unless converted is
+// set, translucent texels go through convert_premultiplied first, in a copy
+// in context.temp_allocator made only if some texel is translucent. Pass
+// converted = true for pixels already run through convert_premultiplied, as
+// a decode worker can do.
+//
+// The upload happens at once on the CPU, so don't overwrite texels a frame
+// still in flight samples; writing into unused space, as an atlas does, is
+// fine. A mipmapped texture first waits for its last mip generation.
+texture_update :: proc(r: ^Renderer, t: Texture, pixels: []byte, x, y, w, h: int, converted := false) {
 	slot := texture_slot(r, t)
 	if slot == nil {
 		return
@@ -379,8 +385,14 @@ texture_update :: proc(r: ^Renderer, t: Texture, pixels: []byte, x, y, w, h: int
 	bpp := 1 if slot.format == .R8 else 4
 	assert(len(pixels) >= w * h * bpp)
 	pixels := pixels
-	if bpp == 4 {
-		pixels = premultiplied_linear(pixels[:w * h * 4])
+	if bpp == 4 && !converted && has_translucent(pixels[:w * h * 4]) {
+		pixels = slice_clone(pixels[:w * h * 4])
+		convert_premultiplied(pixels)
+	}
+	if slot.mip_cmd != nil {
+		msg(slot.mip_cmd, "waitUntilCompleted")
+		release(slot.mip_cmd)
+		slot.mip_cmd = nil
 	}
 	region := Region{{uint(x), uint(y), 0}, {uint(w), uint(h), 1}}
 	msg_proc(proc "c" (id, SEL, Region, uint, rawptr, uint))(slot.texture, sel_registerName("replaceRegion:mipmapLevel:withBytes:bytesPerRow:"), region, 0, raw_data(pixels), uint(w * bpp))
@@ -392,31 +404,66 @@ texture_update :: proc(r: ^Renderer, t: Texture, pixels: []byte, x, y, w, h: int
 		msg_id(blit, "generateMipmapsForTexture:", slot.texture)
 		msg(blit, "endEncoding")
 		msg(cmd, "commit")
+		slot.mip_cmd = msg(cmd, "retain")
 	}
 }
 
-// premultiplied_linear returns pixels with each translucent texel's colour
-// channels c replaced by encode(decode(c / a) * a), or pixels itself when
-// every texel is opaque or empty.
 @(private)
-premultiplied_linear :: proc(pixels: []byte) -> []byte {
-	out: []byte
-	for i := 0; i < len(pixels); i += 4 {
+slice_clone :: proc(pixels: []byte) -> []byte {
+	out := make([]byte, len(pixels), context.temp_allocator)
+	copy(out, pixels)
+	return out
+}
+
+@(private)
+has_translucent :: proc(pixels: []byte) -> bool {
+	for i := 3; i < len(pixels); i += 4 {
+		if pixels[i] != 0 && pixels[i] != 255 {
+			return true
+		}
+	}
+	return false
+}
+
+// convert_premultiplied rewrites premultiplied sRGB texels (RGBA or BGRA) in
+// place as sRGB encodings of premultiplied linear colour: each translucent
+// texel's colour channels c become encode(decode(c / a) * a), so white at
+// 50% becomes 188 rather than 128 and the texture filters and blends like a
+// solid colour of the same alpha. Opaque and fully transparent texels stay
+// as they are. It touches no renderer state, so it can run on any thread.
+convert_premultiplied :: proc(pixels: []byte) {
+	for i := 0; i + 3 < len(pixels); i += 4 {
 		a := pixels[i + 3]
 		if a == 0 || a == 255 {
 			continue
 		}
-		if out == nil {
-			out = make([]byte, len(pixels), context.temp_allocator)
-			copy(out, pixels)
-		}
-		alpha := f32(a) / 255
-		for c in 0 ..< 3 {
-			straight := min(f32(pixels[i + c]) / 255 / alpha, 1)
-			out[i + c] = u8(math.round(srgb_from_linear(linear_from_srgb(straight) * alpha) * 255))
+		row := &premultiplied_lut[a]
+		pixels[i] = row[pixels[i]]
+		pixels[i + 1] = row[pixels[i + 1]]
+		pixels[i + 2] = row[pixels[i + 2]]
+	}
+}
+
+// premultiplied_exact is what convert_premultiplied does to channel c of a
+// texel with alpha a, 0 < a < 255, computed directly.
+premultiplied_exact :: proc(c, a: u8) -> u8 {
+	alpha := f32(a) / 255
+	straight := min(f32(c) / 255 / alpha, 1)
+	return u8(math.round(srgb_from_linear(linear_from_srgb(straight) * alpha) * 255))
+}
+
+// premultiplied_lut[a][c] is premultiplied_exact(c, a) for translucent a.
+// Built when the image loads; each loaded dylib has its own.
+premultiplied_lut: [256][256]u8
+
+@(init, private)
+build_premultiplied_lut :: proc "contextless" () {
+	context = runtime.default_context()
+	for a in 1 ..< 255 {
+		for c in 0 ..< 256 {
+			premultiplied_lut[a][c] = premultiplied_exact(u8(c), u8(a))
 		}
 	}
-	return out if out != nil else pixels
 }
 
 // texture_destroy frees the texture. Metal keeps it alive until the command
@@ -427,6 +474,7 @@ texture_destroy :: proc(r: ^Renderer, t: Texture) {
 		return
 	}
 	release(slot.texture)
+	release(slot.mip_cmd)
 	slot^ = {generation = slot.generation + 1}
 }
 

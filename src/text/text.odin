@@ -1,0 +1,1335 @@
+// Text: Inter loaded from memory into kb_text_shape and CoreText, shaping
+// with kb_text_shape, rasterizing with CoreText into glyph atlases, and
+// drawing through the rect renderer.
+//
+// A string goes through shape (cached by string, font and size), then
+// draw_run turns each shaped glyph into a textured rect, rasterizing glyphs
+// the atlas doesn't have yet. Positions are in points; glyph bitmaps are
+// rasterized at physical pixel sizes and placed on whole pixels, with one of
+// four bitmaps per glyph for the fractional x position.
+//
+// Characters Inter lacks go to a fallback font that CTFontCreateForString
+// picks. Its file is loaded into kb_text_shape too, so both sides see the
+// same glyph IDs. Fallbacks load on a worker thread (loader.odin). Some macOS fonts (Geeza Pro for Arabic, Apple Color Emoji)
+// carry only Apple's morx shaping tables, which kb_text_shape can't read.
+// Runs in those fonts are shaped by CoreText instead, which still gets them
+// the right glyphs from the same file.
+//
+// kb_text_shape splits text into runs of one direction, script and font,
+// but its bidi resolution is incomplete, so shape_uncached picks the
+// paragraph direction, fixes up neutrals, numbers and brackets a run at a
+// time and orders the runs itself.
+//
+// State is plain data plus CF object pointers, so it survives a hot reload.
+// The kb_text_shape context keeps a pointer to the library's allocator
+// function, so reload places it afresh. The font loader thread runs dylib
+// code, so unload stops it and reload starts it.
+package text
+
+import "core:hash"
+import "core:mem"
+import "core:slice"
+import "core:unicode"
+
+import "../kbts"
+
+import "../render"
+
+Font :: enum u8 {
+	Regular,
+	Medium,
+	Semibold,
+	Bold,
+}
+
+@(private)
+FONT_FILES := [Font][]byte {
+	.Regular  = #load("../../assets/fonts/Inter-Regular.ttf"),
+	.Medium   = #load("../../assets/fonts/Inter-Medium.ttf"),
+	.Semibold = #load("../../assets/fonts/Inter-SemiBold.ttf"),
+	.Bold     = #load("../../assets/fonts/Inter-Bold.ttf"),
+}
+
+MAX_FACES :: 32 // also kb_text_shape's font stack limit
+SIZED_FONTS :: 8
+FALLBACK_CAPACITY :: 4096
+RUN_CAPACITY :: 8192 // slots; the cache holds at most half that
+GLYPH_POOL :: 1 << 18
+SHAPER_MEMORY :: 8 << 20
+// A cached run nobody drew for this many frames is dropped at the next sweep.
+EVICT_AFTER :: 600
+SWEEP_EVERY :: 256
+BASE_SIZE :: 16
+
+ELLIPSIS :: "…"
+
+// A shaped glyph. Runs store glyphs in visual order, left to right.
+Glyph :: struct {
+	pen:     f32, // points from the run's left edge
+	advance: f32,
+	offset:  [2]f32, // points, y down
+	// Codepoint index of the first codepoint of the grapheme cluster the
+	// glyph belongs to. A cluster's glyphs are next to each other.
+	cluster: u32,
+	id:      u16,
+	face:    u8,
+	space:   bool,
+}
+
+// A shaped string. Pointers returned by shape stay valid until the next
+// begin_frame.
+Run :: struct {
+	key:       u64, // 0 marks an empty cache slot
+	glyphs:    []Glyph,
+	width:     f32, // points
+	ascent:    f32,
+	descent:   f32,
+	size:      f32,
+	font:      Font,
+	rtl:       bool, // paragraph direction
+	// Shaped while a font it needs was loading: those characters have no
+	// glyph or draw blank. shape reshapes it once State.generation moves on.
+	pending:   bool,
+	generation: u64,
+	last_used: u64,
+}
+
+Metrics :: struct {
+	width:     f32, // points, after truncation
+	height:    f32, // ascent + descent
+	ascent:    f32,
+	truncated: bool,
+}
+
+Face :: struct {
+	kb:               kbts.font,
+	ct:               CTFontRef, // at BASE_SIZE
+	name:             u64, // hash of the PostScript name
+	units_per_em:     f32,
+	ascent, descent:  f32, // in em
+	color:            bool, // colour bitmaps (emoji): drawn from the BGRA atlas
+	coretext_shaping: bool, // morx without GSUB: kb_text_shape can't shape it
+	file:             []byte,
+	mapped:           bool,
+	blob:             rawptr, // kb_text_shape's parsed tables, malloc'd
+	sized:            [SIZED_FONTS]Sized_Font,
+	sized_next:       int,
+}
+
+Sized_Font :: struct {
+	size: f32,
+	font: CTFontRef,
+}
+
+// What fallback_cache knows about a character for a font, or about a font
+// CoreText picked by name: a face index, NO_FACE or PENDING.
+Fallback :: struct {
+	key:  u64, // fallback_key or font_key; 0 is empty
+	face: i8,
+}
+
+NO_FACE :: -1
+PENDING :: -2 // asked the loader
+
+Stats :: struct {
+	shaped:     int, // runs shaped this frame (cache misses)
+	rasterized: int, // glyphs rasterized this frame
+	runs:       int, // runs in the cache
+	pages:      int, // atlas pages
+}
+
+State :: struct {
+	faces:           [MAX_FACES]Face,
+	face_count:      int,
+	// Fallback faces found so far for each font, in the order found.
+	fallbacks:       [Font][MAX_FACES]u8,
+	fallback_counts: [Font]int,
+	fallback_cache:  []Fallback,
+	fallback_used:   int,
+	loader:          Loader,
+	// Goes up whenever loaded fonts arrive, so pending runs reshape.
+	generation:      u64,
+	// Whether each font has each BMP codepoint, two bits apiece: 0 not
+	// asked yet, 1 yes, 2 no. kb_text_shape's cmap lookup is slow enough
+	// (half a microsecond in Inter) to matter once per character.
+	coverage:        [Font][]u8,
+
+	shaper_memory:   []byte,
+	shaper:          ^kbts.shape_context,
+
+	runs:            []Run, // open addressing on Run.key
+	run_count:       int,
+	pool:            []Glyph, // glyphs of cached runs, compacted by sweep
+	pool_used:       int,
+	cache_full:      bool, // a run didn't fit; sweep hard next frame
+
+	frame:           u64,
+	last_sweep:      u64,
+	atlas:           Atlas,
+	stats:           Stats,
+	// Some glyph wasn't drawn this frame: the atlas was full (begin_frame
+	// resets it) or the raster budget ran out. Draw another frame.
+	needs_redraw:    bool,
+}
+
+// init loads the Inter faces, allocates the caches from context.allocator,
+// which must outlive the State (the persistent arena), and starts the font
+// loader. wake is called from the loader thread when fonts arrive.
+init :: proc(t: ^State, wake: proc "c" () = nil) -> bool {
+	t.fallback_cache = make([]Fallback, FALLBACK_CAPACITY)
+	for &c in t.coverage {
+		c = make([]u8, 0x10000 / 4)
+	}
+	t.runs = make([]Run, RUN_CAPACITY)
+	t.pool = make([]Glyph, GLYPH_POOL)
+	t.shaper_memory = make([]byte, SHAPER_MEMORY)
+	t.shaper = kbts.PlaceShapeContextFixedMemory(t.shaper_memory)
+	atlas_init(&t.atlas)
+
+	for font in Font {
+		// The #load data lives in this dylib's image, so take a copy.
+		data := make([]byte, len(FONT_FILES[font]))
+		copy(data, FONT_FILES[font])
+		cf_data := CFDataCreate(nil, raw_data(data), len(data))
+		desc := CTFontManagerCreateFontDescriptorFromData(cf_data)
+		ct := CTFontCreateWithFontDescriptor(desc, BASE_SIZE, nil)
+		cf_release(desc)
+		cf_release(cf_data)
+		face := &t.faces[font]
+		ok := ct != nil && load_face(face, ct, data, 0, false)
+		cf_release(ct)
+		if !ok {
+			return false
+		}
+		t.face_count += 1
+		t.loader.known[font] = {face.name, face.kb}
+		t.loader.primary[font] = face.ct
+	}
+	t.loader.known_count = len(Font)
+	t.loader.wake = wake
+	loader_start(&t.loader)
+	for font in Font {
+		for r in PREWARM {
+			fallback_face(t, font, r)
+		}
+	}
+	return true
+}
+
+// reload places the shaping context afresh, since it holds a pointer into
+// the previous dylib's copy of kb_text_shape, and starts the font loader
+// with this dylib's code. Fonts are plain data and stay.
+reload :: proc(t: ^State, wake: proc "c" () = nil) {
+	t.shaper = kbts.PlaceShapeContextFixedMemory(t.shaper_memory)
+	t.loader.wake = wake
+	loader_start(&t.loader)
+}
+
+// unload stops the font loader thread before its code goes away.
+unload :: proc(t: ^State) {
+	loader_stop(&t.loader)
+}
+
+destroy :: proc(t: ^State, r: ^render.Renderer) {
+	l := &t.loader
+	loader_stop(l)
+	for i in 0 ..< l.request_count {
+		cf_release(l.requests[(l.request_head + i) % LOAD_QUEUE].ct)
+	}
+	for &res in l.results[:l.result_count] {
+		cf_release(res.ct)
+		free_face(&res.face)
+	}
+	for &face in t.faces[:t.face_count] {
+		free_face(&face)
+	}
+	atlas_destroy(&t.atlas, r)
+	t^ = {}
+}
+
+// begin_frame drops runs that haven't been drawn for a while and resets
+// the atlas if it filled up last frame. Call it once per frame, before any
+// shape or draw.
+begin_frame :: proc(t: ^State, r: ^render.Renderer) {
+	t.frame += 1
+	t.stats = {}
+	t.needs_redraw = false
+	take_loaded(t)
+	if t.cache_full || t.run_count > RUN_CAPACITY / 2 * 3 / 4 || t.pool_used > GLYPH_POOL * 3 / 4 {
+		sweep(t, 1)
+	} else if t.frame - t.last_sweep >= SWEEP_EVERY {
+		sweep(t, EVICT_AFTER)
+	}
+	atlas_begin_frame(&t.atlas, r)
+	t.stats.runs = t.run_count
+	t.stats.pages = t.atlas.page_count
+}
+
+// shape returns the shaped run for s, from the cache when it can.
+shape :: proc(t: ^State, font: Font, size: f32, s: string) -> ^Run {
+	key := run_key(s, font, size)
+	slot, found := run_slot(t.runs, key)
+	if found {
+		run := &t.runs[slot]
+		run.last_used = t.frame
+		if !run.pending || run.generation == t.generation {
+			return run
+		}
+	}
+
+	t.stats.shaped += 1
+	shaped := shape_uncached(t, font, size, s)
+	shaped.key = key
+	shaped.last_used = t.frame
+	// Shaping never touches the run table, so slot is still key's slot. A
+	// pending run being replaced leaves its old glyphs for the next sweep.
+	if (found || t.run_count < RUN_CAPACITY / 2) && t.pool_used + len(shaped.glyphs) <= len(t.pool) {
+		glyphs := t.pool[t.pool_used:][:len(shaped.glyphs)]
+		copy(glyphs, shaped.glyphs)
+		t.pool_used += len(glyphs)
+		shaped.glyphs = glyphs
+		t.runs[slot] = shaped
+		if !found {
+			t.run_count += 1
+		}
+		return &t.runs[slot]
+	}
+	// No room: hand out a run that lives until the end of the frame.
+	t.cache_full = true
+	run := new(Run, context.temp_allocator)
+	run^ = shaped
+	return run
+}
+
+measure :: proc(t: ^State, font: Font, size: f32, s: string) -> Metrics {
+	run := shape(t, font, size, s)
+	return {width = run.width, height = run.ascent + run.descent, ascent = run.ascent}
+}
+
+// line_height is ascent plus descent of the font at size, in points.
+line_height :: proc(t: ^State, font: Font, size: f32) -> f32 {
+	face := &t.faces[font]
+	return (face.ascent + face.descent) * size
+}
+
+// run_key hashes the string, font and size into a cache key. It is never 0.
+run_key :: proc(s: string, font: Font, size: f32) -> u64 {
+	h := hash.fnv64a(transmute([]byte)s)
+	h ~= u64(font) << 32 | u64(transmute(u32)size)
+	h = mix64(h)
+	return h if h != 0 else 1
+}
+
+// mix64 is the splitmix64 finalizer. fnv64a's low bits are weak, and the
+// tables index with them.
+mix64 :: proc(x: u64) -> u64 {
+	x := x
+	x = (x ~ (x >> 30)) * 0xbf58476d1ce4e5b9
+	x = (x ~ (x >> 27)) * 0x94d049bb133111eb
+	return x ~ (x >> 31)
+}
+
+@(private)
+run_slot :: proc(runs: []Run, key: u64) -> (int, bool) {
+	mask := len(runs) - 1
+	for i := int(key) & mask;; i = (i + 1) & mask {
+		if runs[i].key == key {
+			return i, true
+		}
+		if runs[i].key == 0 {
+			return i, false
+		}
+	}
+}
+
+// sweep drops runs not used in the last max_age frames, compacts the glyph
+// pool and rebuilds the table.
+@(private)
+sweep :: proc(t: ^State, max_age: u64) {
+	t.last_sweep = t.frame
+	t.cache_full = false
+	survivors := make([dynamic]Run, 0, t.run_count, context.temp_allocator)
+	for run in t.runs {
+		if run.key != 0 && t.frame - run.last_used <= max_age {
+			append(&survivors, run)
+		}
+	}
+	// Glyphs only ever move down the pool, so in pool order no run's glyphs
+	// are overwritten before they've moved.
+	slice.sort_by(survivors[:], proc(a, b: Run) -> bool {
+		return uintptr(raw_data(a.glyphs)) < uintptr(raw_data(b.glyphs))
+	})
+	mem.zero_slice(t.runs)
+	t.run_count = 0
+	t.pool_used = 0
+	for &run in survivors {
+		glyphs := t.pool[t.pool_used:][:len(run.glyphs)]
+		copy(glyphs, run.glyphs)
+		t.pool_used += len(glyphs)
+		run.glyphs = glyphs
+		slot, _ := run_slot(t.runs, run.key)
+		t.runs[slot] = run
+		t.run_count += 1
+	}
+}
+
+// One kb_text_shape run before reordering: a stretch of one direction,
+// script and font, in logical order.
+@(private)
+Piece :: struct {
+	face:       int,
+	rtl:        bool,
+	start, end: int, // codepoints
+	first:      int, // into the glyph buffer
+	count:      int,
+	width:      f32,
+}
+
+@(private)
+shape_uncached :: proc(t: ^State, font: Font, size: f32, s: string) -> Run {
+	runes := make([dynamic]rune, 0, len(s), context.temp_allocator)
+	for r in s {
+		append(&runes, r)
+	}
+
+	// Find fallback faces for whatever Inter doesn't have. Only the ones
+	// this string needs go on the font stack: kb_text_shape is slower with
+	// more fonts to choose from. Characters whose font is still loading get
+	// Inter's missing glyph, which draw_run leaves blank.
+	primary := &t.faces[font]
+	needed: bit_set[0 ..< MAX_FACES]
+	pending := false
+	for r in runes {
+		if has_codepoint(t, font, r) || ignorable(r) {
+			continue
+		}
+		face := in_fallbacks(t, font, r)
+		if face < 0 {
+			face = fallback_face(t, font, r)
+		}
+		if face >= 0 {
+			needed += {face}
+		} else if face == PENDING {
+			pending = true
+		}
+	}
+
+	paragraph_rtl := paragraph_is_rtl(runes[:])
+	ctx := t.shaper
+	pieces: [dynamic]Piece
+	pieces.allocator = context.temp_allocator
+	glyphs: [dynamic]Glyph
+	glyphs.allocator = context.temp_allocator
+	cps: [dynamic]int // each glyph's codepoint index
+	cps.allocator = context.temp_allocator
+	codes: [dynamic]rune // each glyph's codepoint as kb_text_shape reports it
+	codes.allocator = context.temp_allocator
+	for _ in 0 ..< 2 {
+		clear(&pieces)
+		clear(&glyphs)
+		clear(&cps)
+		clear(&codes)
+		// The top of the stack wins: fallbacks first, earliest found
+		// highest, then the primary font.
+		pushed := 1
+		for i := t.fallback_counts[font] - 1; i >= 0; i -= 1 {
+			if int(t.fallbacks[font][i]) in needed {
+				_ = kbts.ShapePushFont(ctx, &t.faces[t.fallbacks[font][i]].kb)
+				pushed += 1
+			}
+		}
+		_ = kbts.ShapePushFont(ctx, &primary.kb)
+		kbts.ShapeBegin(ctx, .KBTS_DIRECTION_RTL if paragraph_rtl else .KBTS_DIRECTION_LTR, .DONT_KNOW)
+		kbts.ShapeUtf32(ctx, runes[:])
+		kbts.ShapeEnd(ctx)
+		cursor := 0
+		for {
+			run, ok := kbts.ShapeRun(ctx)
+			if !ok {
+				break
+			}
+			face := face_of(t, run.Font)
+			piece := Piece{face = face, rtl = run.Direction == .KBTS_DIRECTION_RTL, first = len(glyphs)}
+			scale := size / t.faces[face].units_per_em
+			x: f32
+			for g in kbts.GlyphIteratorNext(&run.Glyphs) {
+				append(&glyphs, Glyph{
+					pen = x,
+					advance = f32(g.AdvanceX) * scale,
+					offset = {f32(g.OffsetX) * scale, -f32(g.OffsetY) * scale},
+					id = g.Id,
+					face = u8(face),
+					space = g.Codepoint == ' ' || g.Codepoint == 0xa0 || g.Codepoint == 0x3000,
+				})
+				append(&cps, int(g.UserIdOrCodepointIndex))
+				append(&codes, g.Codepoint)
+				x += f32(g.AdvanceX) * scale
+			}
+			piece.count = len(glyphs) - piece.first
+			piece.width = x
+			if piece.count > 0 {
+				piece.start = claim_codepoints(cps[piece.first:], codes[piece.first:], piece.rtl, runes[:], &cursor)
+				append(&pieces, piece)
+			}
+		}
+		for _ in 0 ..< pushed {
+			_ = kbts.ShapePopFont(ctx)
+		}
+		if kbts.ShapeError(ctx) == .NONE {
+			break
+		}
+		// Out of memory or a bad font. Start the context over and try once
+		// more; a second failure leaves whatever was shaped.
+		t.shaper = kbts.PlaceShapeContextFixedMemory(t.shaper_memory)
+		ctx = t.shaper
+	}
+	// Each piece runs up to the next one's first codepoint.
+	for &piece, i in pieces {
+		piece.end = max(pieces[i + 1].start if i + 1 < len(pieces) else len(runes), piece.start)
+	}
+
+	// Pieces in morx-only fonts get reshaped by CoreText.
+	for &piece in pieces {
+		if !t.faces[piece.face].coretext_shaping || piece.end <= piece.start {
+			continue
+		}
+		piece.first = len(glyphs)
+		piece.width = coretext_shape(t, piece.face, runes[:], piece.start, piece.end, size, &glyphs, &cps, &pending)
+		piece.count = len(glyphs) - piece.first
+	}
+
+	// kb_text_shape gives each run a direction but resolves neutrals at the
+	// end of the text and brackets around text of the other direction
+	// wrongly, and has no embedding levels. So spaces and brackets at the
+	// ends of runs become runs of their own, and resolve_levels redoes the
+	// neutral and number rules over whole runs.
+	peel(t, &pieces, &glyphs, &cps, runes[:])
+	kinds := make([]Bidi_Kind, len(pieces), context.temp_allocator)
+	rtl := make([]bool, len(pieces), context.temp_allocator)
+	brackets := make([]rune, len(pieces), context.temp_allocator)
+	for piece, i in pieces {
+		strong_rtl: bool
+		kinds[i], strong_rtl = bidi_kind(runes[piece.start:piece.end])
+		rtl[i] = strong_rtl if kinds[i] == .Strong else piece.rtl
+		if piece.end - piece.start == 1 && mirror(runes[piece.start]) != runes[piece.start] {
+			brackets[i] = runes[piece.start]
+		}
+	}
+	levels := make([]u8, len(pieces), context.temp_allocator)
+	resolve_levels(kinds, rtl, brackets, paragraph_rtl, levels)
+	for &piece, i in pieces {
+		if rtl[i] != piece.rtl {
+			piece.rtl = rtl[i]
+			flip(t, &piece, glyphs[:], cps[:], runes[:])
+		}
+	}
+	order := make([]int, len(pieces), context.temp_allocator)
+	visual_order(levels, order)
+
+	clusters := grapheme_starts(runes[:])
+	out := make([]Glyph, len(glyphs), context.temp_allocator)
+	n := 0
+	x: f32
+	for i in order {
+		piece := pieces[i]
+		for g, j in glyphs[piece.first:][:piece.count] {
+			out[n] = g
+			out[n].pen += x
+			out[n].cluster = u32(clusters[cps[piece.first + j]])
+			n += 1
+		}
+		x += piece.width
+	}
+	return {
+		glyphs = out[:n],
+		width = x,
+		ascent = primary.ascent * size,
+		descent = primary.descent * size,
+		size = size,
+		font = font,
+		rtl = paragraph_rtl,
+		pending = pending,
+		generation = t.generation,
+	}
+}
+
+// paragraph_is_rtl applies rules P2 and P3 of the Unicode bidi algorithm:
+// the paragraph is right to left if its first strong character (L, R or
+// AL), skipping text between an isolate initiator and its PDI, is R or AL.
+// Without one it is left to right.
+paragraph_is_rtl :: proc(runes: []rune) -> bool {
+	isolates := 0
+	for r in runes {
+		switch r {
+		case 0x2066 ..= 0x2068: // LRI, RLI, FSI
+			isolates += 1
+			continue
+		case 0x2069: // PDI
+			isolates = max(isolates - 1, 0)
+			continue
+		}
+		if isolates > 0 {
+			continue
+		}
+		#partial switch bidi_class(r) {
+		case .L:
+			return false
+		case .R, .AL:
+			return true
+		}
+	}
+	return false
+}
+
+// bidi_class is r's Unicode bidi class as kb_text_shape's table has it,
+// except that the table leaves out the ranges UnicodeData.txt lists as
+// First/Last pairs (Han, Hangul syllables, Tangut) and calls them NI. The
+// letters there are L.
+bidi_class :: proc(r: rune) -> kbts.Bidi_Class {
+	class := kbts.bidi_class(r)
+	if class == .NI && r >= 0x3400 && unicode.is_letter(r) {
+		return .L
+	}
+	return class
+}
+
+// claim_codepoints sets the codepoint index of each glyph of one
+// kb_text_shape run, given in visual order. kb_text_shape's indices aren't
+// always right: Apple SD Gothic Neo's Hangul comes back all 0. So, going in
+// logical order from cursor (the first codepoint no earlier glyph took), an
+// index is kept if it moves forward or names a codepoint equal to the
+// glyph's, as with a reordered Indic vowel sign. Otherwise the glyph takes
+// the next codepoint equal to its own, or failing that (a ligature part or
+// a decomposed mark) the previous glyph's. Returns the lowest index.
+@(private)
+claim_codepoints :: proc(cps: []int, codes: []rune, rtl: bool, runes: []rune, cursor: ^int) -> int {
+	LOOKAHEAD :: 8
+	start := len(runes)
+	last := -1
+	n := len(cps)
+	for k in 0 ..< n {
+		i := n - 1 - k if rtl else k
+		idx := cps[i]
+		if idx < 0 || idx >= len(runes) || (idx < cursor^ && runes[idx] != codes[i]) {
+			idx = -1
+			for j in cursor^ ..< min(cursor^ + LOOKAHEAD, len(runes)) {
+				if runes[j] == codes[i] {
+					idx = j
+					break
+				}
+			}
+			if idx < 0 {
+				idx = last if last >= 0 else min(cursor^, len(runes) - 1)
+			}
+		}
+		cps[i] = idx
+		cursor^ = max(cursor^, idx + 1)
+		last = idx
+		start = min(start, idx)
+	}
+	return start
+}
+
+// grapheme_starts returns, for each codepoint, the index of the first
+// codepoint of its grapheme cluster, from kb_text_shape's segmentation.
+grapheme_starts :: proc(runes: []rune) -> []int {
+	starts := make([]int, len(runes), context.temp_allocator)
+	simple := true
+	for r, i in runes {
+		starts[i] = i
+		// Below U+0300 every codepoint but CR LF is a cluster of its own.
+		simple &&= r < 0x300 && r != '\r'
+	}
+	if simple || len(runes) == 0 {
+		return starts
+	}
+	boundary := make([]bool, len(runes) + 1, context.temp_allocator)
+	state: kbts.break_state
+	kbts.BreakBegin(&state, .DONT_KNOW, .STRICT, {})
+	for r, i in runes {
+		kbts.BreakAddCodepoint(&state, r, 1, b32(i == len(runes) - 1))
+		for b in kbts.Break(&state) {
+			if .GRAPHEME in b.Flags && b.Position >= 0 && int(b.Position) <= len(runes) {
+				boundary[b.Position] = true
+			}
+		}
+	}
+	kbts.BreakEnd(&state)
+	for b in kbts.Break(&state) {
+		if .GRAPHEME in b.Flags && b.Position >= 0 && int(b.Position) <= len(runes) {
+			boundary[b.Position] = true
+		}
+	}
+	for i in 1 ..< len(runes) {
+		if !boundary[i] {
+			starts[i] = starts[i - 1]
+		}
+	}
+	return starts
+}
+
+// peel splits spaces and brackets at either logical end of a run into
+// one-glyph runs of their own, as long as each is a glyph to itself.
+@(private)
+peel :: proc(t: ^State, pieces: ^[dynamic]Piece, glyphs: ^[dynamic]Glyph, cps: ^[dynamic]int, runes: []rune) {
+	peelable :: proc(r: rune) -> bool {
+		return r == ' ' || r == 0xa0 || mirror(r) != r
+	}
+	// split moves the glyph at visual index g out of p into a new piece.
+	split :: proc(p: ^Piece, glyphs: ^[dynamic]Glyph, cps: ^[dynamic]int, g: int) -> Piece {
+		glyph := glyphs[g]
+		cp := cps[g]
+		if g == p.first {
+			for &other in glyphs[p.first + 1:][:p.count - 1] {
+				other.pen -= glyph.advance
+			}
+			p.first += 1
+		}
+		p.count -= 1
+		p.width -= glyph.advance
+		glyph.pen = 0
+		append(glyphs, glyph)
+		append(cps, cp)
+		return {face = p.face, rtl = p.rtl, start = cp, end = cp + 1, first = len(glyphs) - 1, count = 1, width = glyph.advance}
+	}
+	// edge returns the visual index of the glyph for codepoint cp if it is
+	// at the visual end where logical `first` or last lands and no other
+	// glyph shares it.
+	edge :: proc(p: Piece, cps: []int, cp: int, first: bool) -> (int, bool) {
+		at_left := first != p.rtl
+		g := p.first if at_left else p.first + p.count - 1
+		inner := g + 1 if at_left else g - 1
+		return g, cps[g] == cp && cps[inner] != cp
+	}
+
+	for i := 0; i < len(pieces); i += 1 {
+		if t.faces[pieces[i].face].coretext_shaping {
+			continue
+		}
+		for pieces[i].count > 1 && pieces[i].end - pieces[i].start > 1 && peelable(runes[pieces[i].end - 1]) {
+			g, ok := edge(pieces[i], cps[:], pieces[i].end - 1, false)
+			if !ok {
+				break
+			}
+			piece := split(&pieces[i], glyphs, cps, g)
+			pieces[i].end -= 1
+			inject_at(pieces, i + 1, piece)
+		}
+		for pieces[i].count > 1 && pieces[i].end - pieces[i].start > 1 && peelable(runes[pieces[i].start]) {
+			g, ok := edge(pieces[i], cps[:], pieces[i].start, true)
+			if !ok {
+				break
+			}
+			piece := split(&pieces[i], glyphs, cps, g)
+			pieces[i].start += 1
+			inject_at(pieces, i, piece)
+			i += 1
+		}
+	}
+}
+
+// flip reverses a run of neutrals whose direction resolve_levels changed,
+// and swaps brackets for their mirror images or back. Other glyphs keep
+// their IDs: CoreText may have merged an emoji sequence into one.
+@(private)
+flip :: proc(t: ^State, piece: ^Piece, glyphs: []Glyph, cps: []int, runes: []rune) {
+	gs := glyphs[piece.first:][:piece.count]
+	cs := cps[piece.first:][:piece.count]
+	slice.reverse(gs)
+	slice.reverse(cs)
+	x: f32
+	for &g, i in gs {
+		g.pen = x
+		x += g.advance
+		r := runes[cs[i]]
+		if mirror(r) == r {
+			continue
+		}
+		if piece.rtl {
+			r = mirror(r)
+		}
+		if id := kbts.CodepointToGlyphId(&t.faces[g.face].kb, r); id != 0 {
+			g.id = u16(id)
+		}
+	}
+}
+
+// mirror returns the bracket that faces the other way, or r.
+mirror :: proc(r: rune) -> rune {
+	switch r {
+	case '(': return ')'
+	case ')': return '('
+	case '[': return ']'
+	case ']': return '['
+	case '{': return '}'
+	case '}': return '{'
+	case '<': return '>'
+	case '>': return '<'
+	case '«': return '»'
+	case '»': return '«'
+	}
+	return r
+}
+
+Bidi_Kind :: enum u8 {
+	Strong, // has a strong character (L, R, AL), which sets its direction
+	Number, // digits (EN, AN) but nothing strong
+	Neutral, // spaces, punctuation, symbols, emoji
+	Bracket, // a bracket whose direction N0 settled
+}
+
+// bidi_kind classes a run, and for a strong run says whether its first
+// strong character is right to left. kb_text_shape's run direction isn't
+// used for that: it calls Han and Hangul neutral, so a CJK run next to
+// Arabic could come back right to left.
+bidi_kind :: proc(runes: []rune) -> (kind: Bidi_Kind, rtl: bool) {
+	kind = .Neutral
+	for r in runes {
+		#partial switch bidi_class(r) {
+		case .L:
+			return .Strong, false
+		case .R, .AL:
+			return .Strong, true
+		case .EN, .AN:
+			kind = .Number
+		}
+	}
+	return kind, false
+}
+
+// resolve_levels sets each run's embedding level, and the direction of
+// neutral runs, from the runs' kinds and directions (strong runs' own,
+// kb_text_shape's for the rest).
+// brackets[i] is the bracket a run consists of, or 0. It applies the Unicode
+// bidi rules a run at a time:
+//   - W7: a number after left-to-right text (or at the start of a
+//     left-to-right paragraph) is left-to-right; otherwise it counts as
+//     right-to-left to the neutrals around it.
+//   - N0: a bracket pair takes the paragraph's direction if the text inside
+//     has it, else the other direction if the text inside and the text
+//     before the pair both have that.
+//   - N1, N2: other neutrals take the direction of the text on both sides
+//     if that agrees, else the paragraph's. The paragraph's direction
+//     stands in at either end.
+//   - I1, I2: right-to-left is level 1; left-to-right is level 0, or 2 in
+//     a right-to-left paragraph; numbers after right-to-left text are 2.
+// kinds and rtl are changed in place.
+resolve_levels :: proc(kinds: []Bidi_Kind, rtl: []bool, brackets: []rune, paragraph_rtl: bool, levels: []u8) {
+	// The direction each run shows its neighbours.
+	acts_rtl := make([]bool, len(kinds), context.temp_allocator)
+	strong_rtl := paragraph_rtl
+	for kind, i in kinds {
+		#partial switch kind {
+		case .Strong:
+			strong_rtl = rtl[i]
+			acts_rtl[i] = rtl[i]
+		case .Number:
+			acts_rtl[i] = strong_rtl
+			rtl[i] = false
+		}
+	}
+
+	// N0, pairs in order of their opening bracket.
+	Pair :: struct {
+		open, close: int,
+	}
+	pairs := make([dynamic]Pair, context.temp_allocator)
+	stack := make([dynamic]int, context.temp_allocator)
+	for b, i in brackets {
+		switch b {
+		case '(', '[', '{', '<', '«':
+			append(&stack, i)
+		case ')', ']', '}', '>', '»':
+			#reverse for open, depth in stack {
+				if mirror(brackets[open]) == b {
+					append(&pairs, Pair{open, i})
+					resize(&stack, depth)
+					break
+				}
+			}
+		}
+	}
+	slice.sort_by(pairs[:], proc(a, b: Pair) -> bool {return a.open < b.open})
+	for p in pairs {
+		same, other := false, false
+		for j in p.open + 1 ..< p.close {
+			if kinds[j] != .Neutral {
+				same |= acts_rtl[j] == paragraph_rtl
+				other |= acts_rtl[j] != paragraph_rtl
+			}
+		}
+		if !same && !other {
+			continue
+		}
+		dir := paragraph_rtl
+		if !same {
+			before := paragraph_rtl
+			for j := p.open - 1; j >= 0; j -= 1 {
+				if kinds[j] != .Neutral {
+					before = acts_rtl[j]
+					break
+				}
+			}
+			dir = before
+		}
+		for i in ([2]int{p.open, p.close}) {
+			kinds[i] = .Bracket
+			rtl[i] = dir
+			acts_rtl[i] = dir
+		}
+	}
+
+	for kind, i in kinds {
+		if kind != .Neutral {
+			continue
+		}
+		before, after := paragraph_rtl, paragraph_rtl
+		for j := i - 1; j >= 0; j -= 1 {
+			if kinds[j] != .Neutral {
+				before = acts_rtl[j]
+				break
+			}
+		}
+		for j in i + 1 ..< len(kinds) {
+			if kinds[j] != .Neutral {
+				after = acts_rtl[j]
+				break
+			}
+		}
+		rtl[i] = before if before == after else paragraph_rtl
+	}
+	for kind, i in kinds {
+		switch {
+		case kind == .Number:
+			levels[i] = 2 if acts_rtl[i] || paragraph_rtl else 0
+		case rtl[i]:
+			levels[i] = 1
+		case:
+			levels[i] = 2 if paragraph_rtl else 0
+		}
+	}
+}
+
+// visual_order fills order with run indices left to right, by rule L2 of
+// the Unicode bidi algorithm: from the highest level down to 1, reverse
+// every stretch of runs at that level or above. Glyphs within a run are
+// already in visual order.
+visual_order :: proc(levels: []u8, order: []int) {
+	top: u8
+	for level, i in levels {
+		order[i] = i
+		top = max(top, level)
+	}
+	for level := top; level >= 1; level -= 1 {
+		for i := 0; i < len(order); {
+			if levels[order[i]] < level {
+				i += 1
+				continue
+			}
+			j := i
+			for j < len(order) && levels[order[j]] >= level {
+				j += 1
+			}
+			slice.reverse(order[i:j])
+			i = j
+		}
+	}
+}
+
+// truncate picks the glyphs that fit in max_width with an ellipsis
+// ellipsis_width wide at the logical end: the right for a left-to-right
+// paragraph, the left for a right-to-left one. It keeps or drops whole
+// grapheme clusters, so a mark never outlives its base. Glyphs [first,
+// last) stay; draw them shifted right by shift and the ellipsis at
+// ellipsis_x. Spaces next to the ellipsis go too. width is the result's
+// width.
+truncate :: proc(glyphs: []Glyph, run_width, max_width, ellipsis_width: f32, rtl: bool) -> (first, last: int, shift, ellipsis_x, width: f32) {
+	if run_width <= max_width {
+		return 0, len(glyphs), 0, 0, run_width
+	}
+	avail := max_width - ellipsis_width
+	if !rtl {
+		for last < len(glyphs) {
+			end := cluster_end(glyphs, last)
+			if right_edge(glyphs[last:end]) > avail {
+				break
+			}
+			last = end
+		}
+		for last > 0 && glyphs[last - 1].space {
+			last = cluster_start(glyphs, last - 1)
+		}
+		ellipsis_x = right_edge(glyphs[:last])
+		return 0, last, 0, ellipsis_x, ellipsis_x + ellipsis_width
+	}
+	cut := run_width - avail
+	first = len(glyphs)
+	for first > 0 {
+		start := cluster_start(glyphs, first - 1)
+		if left_edge(glyphs[start:first], run_width) < cut {
+			break
+		}
+		first = start
+	}
+	for first < len(glyphs) && glyphs[first].space {
+		first = cluster_end(glyphs, first)
+	}
+	start := left_edge(glyphs[first:], run_width)
+	shift = ellipsis_width - start
+	return first, len(glyphs), shift, 0, ellipsis_width + run_width - start
+}
+
+// cluster_end returns the index after the last glyph of glyphs[i]'s cluster.
+@(private)
+cluster_end :: proc(glyphs: []Glyph, i: int) -> int {
+	j := i + 1
+	for j < len(glyphs) && glyphs[j].cluster == glyphs[i].cluster {
+		j += 1
+	}
+	return j
+}
+
+// cluster_start returns the index of the first glyph of glyphs[i]'s cluster.
+@(private)
+cluster_start :: proc(glyphs: []Glyph, i: int) -> int {
+	j := i
+	for j > 0 && glyphs[j - 1].cluster == glyphs[i].cluster {
+		j -= 1
+	}
+	return j
+}
+
+@(private)
+right_edge :: proc(glyphs: []Glyph) -> (x: f32) {
+	for g in glyphs {
+		x = max(x, g.pen + g.advance)
+	}
+	return
+}
+
+// left_edge returns the smallest pen in glyphs, or empty if there are none.
+@(private)
+left_edge :: proc(glyphs: []Glyph, empty: f32) -> f32 {
+	x := empty
+	for g in glyphs {
+		x = min(x, g.pen)
+	}
+	return x
+}
+
+// Fonts
+
+@(private)
+face_of :: proc(t: ^State, f: ^kbts.font) -> int {
+	for &face, i in t.faces[:t.face_count] {
+		if &face.kb == f {
+			return i
+		}
+	}
+	return 0
+}
+
+@(private)
+face_named :: proc(t: ^State, name: u64) -> int {
+	for face, i in t.faces[:t.face_count] {
+		if face.name == name {
+			return i
+		}
+	}
+	return NO_FACE
+}
+
+// collection_index returns the index of the face in a .ttc whose name
+// table is byte for byte the one CoreText reports for ct, or 0.
+collection_index :: proc(data: []byte, ct: CTFontRef) -> int {
+	name := CTFontCopyTable(ct, table_tag("name"), 0)
+	defer cf_release(name)
+	if name == nil {
+		return 0
+	}
+	want := CFDataGetBytePtr(name)[:CFDataGetLength(name)]
+	return collection_index_of_table(data, table_tag("name"), want)
+}
+
+// collection_index_of_table returns the index of the first face in a font
+// collection whose table `tag` equals want, or 0.
+collection_index_of_table :: proc(data: []byte, tag: u32, want: []byte) -> int {
+	be32 :: proc(data: []byte, at: int) -> int {
+		if at < 0 || at + 4 > len(data) {
+			return -1
+		}
+		return int(data[at]) << 24 | int(data[at + 1]) << 16 | int(data[at + 2]) << 8 | int(data[at + 3])
+	}
+	count := be32(data, 8)
+	for i in 0 ..< count {
+		offset := be32(data, 12 + 4 * i)
+		if offset < 0 || offset + 12 > len(data) {
+			break
+		}
+		tables := int(data[offset + 4]) << 8 | int(data[offset + 5])
+		for j in 0 ..< tables {
+			record := offset + 12 + 16 * j
+			if be32(data, record) != int(tag) {
+				continue
+			}
+			at, size := be32(data, record + 8), be32(data, record + 12)
+			if at >= 0 && size == len(want) && at + size <= len(data) && mem.compare(data[at:][:size], want) == 0 {
+				return i
+			}
+		}
+	}
+	return 0
+}
+
+@(private)
+font_name_hash :: proc(ct: CTFontRef) -> u64 {
+	name := CTFontCopyPostScriptName(ct)
+	defer cf_release(name)
+	buf: [256]u8
+	return hash.fnv64a(transmute([]byte)cf_string(name, buf[:]))
+}
+
+@(private)
+has_codepoint :: proc(t: ^State, font: Font, r: rune) -> bool {
+	if r >= 0x10000 {
+		return kbts.CodepointToGlyphId(&t.faces[font].kb, r) != 0
+	}
+	cell := &t.coverage[font][r >> 2]
+	shift := u8(r & 3) * 2
+	known := (cell^ >> shift) & 3
+	if known == 0 {
+		known = 1 if kbts.CodepointToGlyphId(&t.faces[font].kb, r) != 0 else 2
+		cell^ |= known << shift
+	}
+	return known == 1
+}
+
+// in_fallbacks returns the first of font's fallback faces that has r, or
+// -1.
+@(private)
+in_fallbacks :: proc(t: ^State, font: Font, r: rune) -> int {
+	for face in t.fallbacks[font][:t.fallback_counts[font]] {
+		if kbts.CodepointToGlyphId(&t.faces[face].kb, r) != 0 {
+			return int(face)
+		}
+	}
+	return -1
+}
+
+// fallback_face returns the fallback face for r under font: a face index,
+// NO_FACE if no font has it, or PENDING while the loader looks. The first
+// time it asks the loader.
+@(private)
+fallback_face :: proc(t: ^State, font: Font, r: rune) -> int {
+	key := fallback_key(font, r)
+	if face, ok := cached_face(t, key); ok {
+		return face
+	}
+	if load_request(&t.loader, {font = font, codepoint = r}) {
+		cache_face(t, key, PENDING)
+	}
+	return PENDING
+}
+
+// run_font_face returns the face for a font CoreText picked for part of a
+// run, by its name hash, asking the loader for it the first time.
+@(private)
+run_font_face :: proc(t: ^State, ct: CTFontRef, name: u64) -> int {
+	if face := face_named(t, name); face >= 0 {
+		return face
+	}
+	key := font_key(name)
+	if face, ok := cached_face(t, key); ok {
+		return face
+	}
+	CFRetain(ct)
+	if !load_request(&t.loader, {ct = ct, name = name}) {
+		cf_release(ct)
+		return PENDING
+	}
+	cache_face(t, key, PENDING)
+	return PENDING
+}
+
+// take_loaded adds the faces the loader found to the font table and the
+// fallback cache, and moves the generation on so pending runs reshape.
+@(private)
+take_loaded :: proc(t: ^State) {
+	results: [LOAD_RESULTS]Load_Result
+	n := take_results(&t.loader, &results)
+	for &res in results[:n] {
+		face := NO_FACE
+		if res.found != 0 {
+			face = face_named(t, res.found)
+			if face < 0 && res.loaded && t.face_count < MAX_FACES {
+				face = t.face_count
+				t.faces[face] = res.face
+				t.face_count += 1
+				res.loaded = false
+			}
+		}
+		if res.loaded {
+			free_face(&res.face)
+		}
+		if res.ct != nil {
+			cache_face(t, font_key(res.name), face)
+			cf_release(res.ct)
+			continue
+		}
+		// CoreText hands back the font itself (or another Inter) when
+		// nothing has the character.
+		if face < len(Font) {
+			face = NO_FACE
+		}
+		cache_face(t, fallback_key(res.font, res.codepoint), face)
+		list := &t.fallbacks[res.font]
+		if face >= 0 && !slice.contains(list[:t.fallback_counts[res.font]], u8(face)) {
+			list[t.fallback_counts[res.font]] = u8(face)
+			t.fallback_counts[res.font] += 1
+		}
+	}
+	if n > 0 {
+		t.generation += 1
+	}
+}
+
+@(private)
+fallback_key :: proc(font: Font, r: rune) -> u64 {
+	return (u64(font) + 1) << 32 | u64(r)
+}
+
+@(private)
+font_key :: proc(name: u64) -> u64 {
+	return name | 1 << 63
+}
+
+@(private)
+cached_face :: proc(t: ^State, key: u64) -> (int, bool) {
+	slot, found := fallback_slot(t, key)
+	return int(t.fallback_cache[slot].face), found
+}
+
+// cache_face records face for key. A new key is dropped once the cache is
+// three quarters full.
+@(private)
+cache_face :: proc(t: ^State, key: u64, face: int) {
+	slot, found := fallback_slot(t, key)
+	if !found {
+		if t.fallback_used >= len(t.fallback_cache) * 3 / 4 {
+			return
+		}
+		t.fallback_used += 1
+	}
+	t.fallback_cache[slot] = {key, i8(face)}
+}
+
+@(private)
+fallback_slot :: proc(t: ^State, key: u64) -> (int, bool) {
+	mask := len(t.fallback_cache) - 1
+	slot := int(mix64(key)) & mask
+	for t.fallback_cache[slot].key != 0 {
+		if t.fallback_cache[slot].key == key {
+			return slot, true
+		}
+		slot = (slot + 1) & mask
+	}
+	return slot, false
+}
+
+// ignorable is true for characters that draw nothing on their own, so a
+// missing glyph for them needs no fallback font.
+@(private)
+ignorable :: proc(r: rune) -> bool {
+	switch r {
+	case 0 ..< 0x20, 0x7f ..= 0x9f, 0x200b ..= 0x200f, 0x202a ..= 0x202e, 0x2060 ..= 0x2069, 0xfe00 ..= 0xfe0f, 0xfeff, 0xe0000 ..= 0xe0fff:
+		return true
+	}
+	return false
+}
+
+// sized_font returns face's CTFont at size, keeping the last few sizes.
+@(private)
+sized_font :: proc(face: ^Face, size: f32) -> CTFontRef {
+	for s in face.sized {
+		if s.font != nil && s.size == size {
+			return s.font
+		}
+	}
+	slot := &face.sized[face.sized_next]
+	face.sized_next = (face.sized_next + 1) % SIZED_FONTS
+	cf_release(slot.font)
+	slot^ = {size, CTFontCreateCopyWithAttributes(face.ct, CGFloat(size), nil, nil)}
+	return slot.font
+}
+
+// coretext_shape shapes runes[start:end], all one direction and one
+// script, with CoreText in face at size, and appends the glyphs in visual
+// order with their codepoint indices. Glyphs CoreText takes from a font
+// still loading are left blank (ID 0) and set pending. Returns the width in
+// points.
+@(private)
+coretext_shape :: proc(t: ^State, face: int, runes: []rune, start, end: int, size: f32, out: ^[dynamic]Glyph, cps: ^[dynamic]int, pending: ^bool) -> f32 {
+	font := sized_font(&t.faces[face], size)
+	str := CFStringCreateWithBytes(nil, ([^]u8)(raw_data(runes[start:])), (end - start) * 4, CF_STRING_ENCODING_UTF32LE, false)
+	defer cf_release(str)
+	keys := [1]rawptr{kCTFontAttributeName}
+	values := [1]rawptr{font}
+	attrs := CFDictionaryCreate(nil, &keys[0], &values[0], 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks)
+	defer cf_release(attrs)
+	attributed := CFAttributedStringCreate(nil, str, attrs)
+	defer cf_release(attributed)
+	line := CTLineCreateWithAttributedString(attributed)
+	defer cf_release(line)
+
+	// CoreText reports UTF-16 indices into str.
+	rune_at := make([dynamic]int, 0, 2 * (end - start), context.temp_allocator)
+	for r, i in runes[start:end] {
+		append(&rune_at, start + i)
+		if r >= 0x10000 {
+			append(&rune_at, start + i)
+		}
+	}
+
+	Placed :: struct {
+		glyph: Glyph,
+		cp:    int,
+	}
+	placed := make([dynamic]Placed, context.temp_allocator)
+	width: f32
+	runs := CTLineGetGlyphRuns(line)
+	for i in 0 ..< CFArrayGetCount(runs) {
+		run := CFArrayGetValueAtIndex(runs, i)
+		n := CTRunGetGlyphCount(run)
+		ids := make([]CGGlyph, n, context.temp_allocator)
+		positions := make([]CGPoint, n, context.temp_allocator)
+		advances := make([]CGSize, n, context.temp_allocator)
+		indices := make([]CFIndex, n, context.temp_allocator)
+		CTRunGetGlyphs(run, {}, raw_data(ids))
+		CTRunGetPositions(run, {}, raw_data(positions))
+		CTRunGetAdvances(run, {}, raw_data(advances))
+		CTRunGetStringIndices(run, {}, raw_data(indices))
+		run_face := face
+		if run_font := CFDictionaryGetValue(CTRunGetAttributes(run), kCTFontAttributeName); run_font != nil && !CFEqual(run_font, font) {
+			run_face = run_font_face(t, run_font, font_name_hash(run_font))
+			if run_face == PENDING {
+				pending^ = true
+			}
+		}
+		for j in 0 ..< n {
+			g := Glyph{pen = f32(positions[j].x), advance = f32(advances[j].width), offset = {0, -f32(positions[j].y)}, id = ids[j], face = u8(face)}
+			if run_face >= 0 {
+				g.face = u8(run_face)
+			} else {
+				g.id = 0
+			}
+			append(&placed, Placed{g, rune_at[clamp(indices[j], 0, len(rune_at) - 1)]})
+			width = max(width, f32(positions[j].x + advances[j].width))
+		}
+	}
+	slice.stable_sort_by(placed[:], proc(a, b: Placed) -> bool {return a.glyph.pen < b.glyph.pen})
+	for p in placed {
+		append(out, p.glyph)
+		append(cps, p.cp)
+	}
+	return width
+}

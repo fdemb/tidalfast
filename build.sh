@@ -26,6 +26,17 @@ fi
 
 mkdir -p build
 
+# kb_text_shape's C source lives in src/kbts next to its bindings, which
+# link build/kbts/kb_text_shape.a. Rebuilt when the source is newer. The .c
+# file adds one export, tidalfast_bidi_class.
+if [ ! -f build/kbts/kb_text_shape.a ] || [ src/kbts/kb_text_shape.h -nt build/kbts/kb_text_shape.a ] || [ src/kbts/kb_text_shape.c -nt build/kbts/kb_text_shape.a ]; then
+	mkdir -p build/kbts
+	cc -O2 -fPIC -c src/kbts/kb_text_shape.c -o build/kbts/kb_text_shape.o
+	rm -f build/kbts/kb_text_shape.a
+	ar -rcs build/kbts/kb_text_shape.a build/kbts/kb_text_shape.o
+	rm build/kbts/kb_text_shape.o
+fi
+
 # Build to a temp name and rename, so the shell's watcher never sees a half
 # written dylib.
 odin build src/app -build-mode:dll -out:build/app.tmp.dylib -vet -strict-style $odin_flags
