@@ -372,6 +372,8 @@ A refresh fetches the list into a second `Track_View` (`Data.refresh`) while the
 
 `list_edited` puts the app's own edits into the kept copies and their files with the version TIDAL answers, so the next launch doesn't fetch the list again: a track added to a playlist goes at the end, a liked track on top of Liked Songs, a removed one goes. Nothing calls it yet, because the app makes no edits on TIDAL: dropping a row on a playlist only says it was added.
 
+Covers go to disk too, as the JPEGs TIDAL sent, in `covers/` in the same folder, named by image id and size. An image id always shows the same picture, so a cover file is never stale. The workers read and write them themselves, around the download. A cover file that doesn't decode is deleted. The folder has a 50 MB budget of its own, checked at the first cover written each session and every 256 after; the files used longest ago go first. Sign-out deletes them with the lists, and a download that finishes after it isn't written.
+
 A file is a header (magic, format version, the list's kind and id, its version, when it was fetched and TIDAL's count), then fixed-size records, then the text their strings point into, with an FNV-1a sum of everything after the header. Loading reads the whole file into the list's arena and points the rows' strings into it, with no copy. A file of another format version, with a wrong sum or sizes, or for another list is deleted when it's read, and the list comes from TIDAL. Writes go to a temp file that's renamed into place. Files hold names, ids, image ids and counts only: never tokens, headers or URLs. The log names lists by kind and TIDAL id, at debug level.
 
 ### Rate limits
@@ -382,7 +384,7 @@ A file is a header (magic, format version, the list's kind and id, its version, 
 
 1. Drawing a cover asks the cache (`src/cover`) for it at the size it's drawn at on this display, in pixels: the box's points times the backing scale. Track rows are 40 pt, so 80x80 at 2x; the 92 pt header is 184x184 and the 56 pt Now Playing cover 112x112. `pick_size` picks what to download: the smallest size TIDAL serves that's at least that many pixels, so 80x80 for rows, 320x320 for the header, and 160x160 for the sidebar's playlist images, the smallest TIDAL has for playlists. Rows within 4 of the view ask for theirs too, at a lower priority.
 2. After the frame is built, `covers_schedule` queues a job for each cover asked for this frame with no job yet. Queued covers that weren't asked for this frame, because their rows scrolled away, come out of the queue. A worker that already has one finishes it, and the cover stays in the cache.
-3. The worker downloads the JPEG, decodes it with `stb_image`, scales it to the drawn size with `stb_image_resize` (filtering in linear light) when the two differ, and runs `render.convert_premultiplied` on the pixels, so the upload can pass `converted = true`.
+3. The worker reads the JPEG from disk if it has it (see The list cache), or downloads it and keeps it there. It decodes it with `stb_image`, scales it to the drawn size with `stb_image_resize` (filtering in linear light) when the two differ, and runs `render.convert_premultiplied` on the pixels, so the upload can pass `converted = true`.
 4. The UI thread copies it into a slot of a shared page. Uploads stop for the frame after 2 ms; what's left waits for the next frame.
 5. A page is one RGBA8 texture holding a grid of covers of one pixel size, up to 8x8 and at most 640 texels across (one cover per page if it's wider): 64 row covers in 1.6 MB, 9 header covers in 1.2 MB. Every cover is drawn at exactly its pixel size, so no page needs mipmaps. A new cover takes a free slot of its size, or opens a page while the pages stay within 8 MB, or else takes the slot of the least recently drawn cover of its size. That cover can't have been drawn in the last three frames, which the GPU may still be drawing, so overwriting its slot never shows in a frame. If every cover of that size was drawn lately, a page opens over the budget, and after the frame the cache gives back whole pages until it's within budget again: the page whose newest cover was drawn longest ago first, never one with a cover drawn this frame. The cache keeps up to 2,048 entries.
 
@@ -820,30 +822,32 @@ Startup, in ms since the process started. Run 1 is on its own. The other 9 runs 
 
 | mark | fake run 1 | fake median (min to max) | mock run 1 | mock median (min to max) |
 |---|---|---|---|---|
-| main | 9.2 | 9.8 (6.7 to 15.3) | 14.1 | 11.2 (5.0 to 12.2) |
-| launched | 94.3 | 86.7 (82.5 to 92.4) | 94.8 | 93.8 (89.6 to 103.7) |
-| dylib | 365.2 | 117.3 (112.8 to 123.3) | 125.1 | 126.9 (121.1 to 135.4) |
-| init | 396.7 | 129.3 (124.9 to 135.3) | 133.3 | 135.5 (129.6 to 144.0) |
-| window | 406.5 | 134.3 (128.6 to 139.1) | 137.9 | 139.5 (132.9 to 149.0) |
-| first_frame | 461.9 | 179.5 (172.7 to 186.3) | 180.6 | 186.8 (178.3 to 197.0) |
-| library | 461.9 | 179.5 (172.7 to 186.3) | 225.8 | 191.8 (182.6 to 200.8) |
-| tracks | 466.4 | 188.6 (179.5 to 192.6) | 454.8 | 417.3 (407.9 to 428.8) |
+| main | 7.5 | 4.8 (4.8 to 4.9) | 7.4 | 4.8 (4.7 to 7.1) |
+| launched | 79.6 | 76.9 (76.1 to 77.9) | 87.9 | 77.7 (76.7 to 87.7) |
+| dylib | 364.7 | 118.3 (115.9 to 122.6) | 129.3 | 118.8 (113.9 to 130.1) |
+| init | 397.9 | 130.2 (127.9 to 134.5) | 137.5 | 126.8 (121.9 to 138.1) |
+| window | 401.2 | 132.1 (129.7 to 137.1) | 139.3 | 128.7 (123.7 to 139.9) |
+| first_frame | 433.0 | 154.2 (152.0 to 158.9) | 159.5 | 150.4 (144.9 to 161.4) |
+| library | 433.0 | 154.3 (152.0 to 159.0) | 178.9 | 158.7 (153.2 to 169.7) |
+| tracks | 440.1 | 162.6 (160.4 to 167.4) | 412.1 | 182.4 (177.9 to 194.5) |
 
-At `tracks` the footprint is 56 MB with the fake data and 93 MB with the mock, gpu 27 and 41 MB.
+At `tracks` the footprint is 50 MB with the fake data and 70 MB with the mock, gpu 27 and 29 MB.
 
-The fake run 1 came straight after a build, so it includes macOS checking the new dylib's signature: `dylib` at 365 ms instead of 117. Later launches open the same file and skip that. The mock's run 1 also logs in.
+The fake run 1 came straight after a build, so it includes macOS checking the new dylib's signature: `dylib` at 365 ms instead of 118. Later launches open the same file and skip that. The mock's run 1 also logs in, and starts with an empty list cache. The later mock runs read the sidebar, Liked Songs and its covers from the cache (see The list cache), so their `tracks` came at 182 ms. Before the cache it was 417 ms, about what run 1 still takes: on the mock most of it was waiting for covers.
 
 Memory, MB. `-runs` applies to startup; the memory scenario ran once with each setup, and earlier runs of the same build with two or three runs each were within 1 MB of these:
 
 | stage | fake footprint | resident | gpu | mock footprint | resident | gpu | mock covers |
 |---|---|---|---|---|---|---|---|
-| startup_idle | 66.4 | 111.9 | 27.3 | 69.4 | 116.6 | 28.9 | 22 |
-| list_open | 66.5 | 111.9 | 27.3 | 71.6 | 118.2 | 30.2 | 37 |
-| scrolled | 72.6 | 120.7 | 28.4 | 78.0 | 124.6 | 35.8 | 257 (7.4 MB of pages) |
-| playing | 78.3 | 124.2 | 28.4 | 83.0 | 126.5 | 35.5 | 195 |
-| idle_after | 73.9 | 122.7 | 28.4 | 78.7 | 126.0 | 35.5 | 195 |
+| startup_idle | 67.6 | 107.6 | 27.3 | 66.6 | 111.9 | 28.9 | 22 |
+| list_open | 76.8 | 107.6 | 39.5 | 69.5 | 114.1 | 30.2 | 37 |
+| scrolled | 85.1 | 116.4 | 40.5 | 75.9 | 121.6 | 35.0 | 257 (7.4 MB of pages) |
+| playing | 88.0 | 120.0 | 40.5 | 90.0 | 131.9 | 35.5 | 195 |
+| idle_after | 83.5 | 118.6 | 40.5 | 84.1 | 129.8 | 35.5 | 195 |
 
-The peak footprint was 93 MB with the fake data and 110 MB with the mock, both while scrolling, when the layer has three drawables. Fallback fonts: 601 MB mapped, 23 MB of it resident.
+The peak footprint was 88 MB with the fake data and 96 MB with the mock, both while playing. Fallback fonts: 601 MB mapped, 23 MB of it resident.
+
+The fake data's gpu is 12 MB higher than in the baseline before this one from `list_open` on, one drawable's worth: the layer held three at those samples. The fake data doesn't use the list cache, and the build before the cache, measured the same day, showed the same, so it isn't the cache. Against that build, one memory run each and before covers went to disk, the mock's footprint was within 0.4 MB up to `scrolled` and 2 MB higher at `playing` and `idle_after`. About 0.6 MB of that is Liked Songs, kept in memory while the long playlist is open; the rest wasn't tracked down.
 
 Before the memory work (the previous baseline, same machine) the footprint was 104 MB at `startup_idle` with the fake data and 114 MB with the mock, 174 MB on the mock after scrolling and 185 MB after playing, with a 198 MB peak, and `tracks` came at 312 and 581 ms. What took it down, in the order it went in, measured each time against the build before:
 
