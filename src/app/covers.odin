@@ -30,6 +30,7 @@ cover_art :: proc(s: ^State, kind: cover.Kind, id: string, seed: u32, size: f32,
 		} else {
 			b.background = SURFACE_ACTIVE
 			e := cover_want(s, kind, id, size, PRIORITY_COVER)
+			measure_count_cover(s, e != nil && e.state == .Ready)
 			if e != nil && e.state == .Ready {
 				ui.parent(b)
 				img := ui.box_make("", {}, ui.fill(), ui.fill())

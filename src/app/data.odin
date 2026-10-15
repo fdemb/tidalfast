@@ -266,17 +266,22 @@ data_shutdown :: proc(s: ^State) {
 	}
 }
 
+// MOCK_API lets an optimized build read TIDALFAST_API and
+// TIDALFAST_PKCE_REDIRECT. Only `./build.sh measure` sets it, for
+// tools/measure's runs against tests/mock_tidal; the release build never does.
+MOCK_API :: #config(TIDALFAST_MOCK_API, false)
+
 // api_override returns TIDALFAST_API if the app may use it, else "". It
 // sends every request, login and cover to that URL instead of TIDAL, for
 // running against tests/mock_tidal. The login goes to that server too, so
-// it's only honoured in debug builds and only for this machine: anywhere
-// else could collect the tokens of whoever logs in.
+// it's only honoured in debug builds (and MOCK_API ones) and only for this
+// machine: anywhere else could collect the tokens of whoever logs in.
 api_override :: proc() -> string {
 	api := os.get_env("TIDALFAST_API", context.temp_allocator)
 	if api == "" {
 		return ""
 	}
-	when !ODIN_DEBUG {
+	when !ODIN_DEBUG && !MOCK_API {
 		fmt.eprintln("app: TIDALFAST_API is ignored in release builds")
 		return ""
 	} else {

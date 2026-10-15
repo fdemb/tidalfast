@@ -3,6 +3,8 @@
 # ./build.sh app          rebuild only the app dylib; a running shell reloads it
 # ./build.sh release      optimized build, hot reload watcher off
 # ./build.sh release app  optimized app dylib only
+# ./build.sh measure      what tools/measure runs: an optimized app in build/measure/app that
+#                         also reads TIDALFAST_API, the mock server and the measure tool
 set -eu
 cd "$(dirname "$0")"
 
@@ -12,7 +14,8 @@ for arg in "$@"; do
 	case "$arg" in
 	release) mode=release ;;
 	app) target=app ;;
-	*) echo "usage: $0 [release] [app]" >&2; exit 1 ;;
+	measure) target=measure ;;
+	*) echo "usage: $0 [release] [app] | $0 measure" >&2; exit 1 ;;
 	esac
 done
 
@@ -24,7 +27,7 @@ else
 	clang_flags="-g -O0"
 fi
 
-mkdir -p build
+mkdir -p build build/measure
 
 # kb_text_shape's C source lives in src/kbts next to its bindings, which
 # link build/kbts/kb_text_shape.a. Rebuilt when the source is newer. The .c
@@ -35,6 +38,19 @@ if [ ! -f build/kbts/kb_text_shape.a ] || [ src/kbts/kb_text_shape.h -nt build/k
 	rm -f build/kbts/kb_text_shape.a
 	ar -rcs build/kbts/kb_text_shape.a build/kbts/kb_text_shape.o
 	rm build/kbts/kb_text_shape.o
+fi
+
+if [ "$target" = measure ]; then
+	mkdir -p build/measure/app
+	odin build src/app -build-mode:dll -out:build/measure/app/app.dylib -vet -strict-style -o:speed -define:TIDALFAST_MOCK_API=true
+	if [ ! -f build/measure/app/tidalfast ] || [ shell/shell.m -nt build/measure/app/tidalfast ] || [ shell/platform.h -nt build/measure/app/tidalfast ]; then
+		clang shell/shell.m -o build/measure/app/tidalfast -fobjc-arc -mmacosx-version-min=14.0 \
+			-Wall -Wno-unused-parameter -O2 -DHOT_RELOAD=0 \
+			-framework Cocoa -framework Metal -framework QuartzCore -framework CoreServices -framework MediaPlayer
+	fi
+	odin build tests/mock_tidal -out:build/measure/mock_tidal -o:speed
+	odin build tools/measure -out:build/measure/measure -vet -strict-style
+	exit 0
 fi
 
 # Build to a temp name and rename, so the shell's watcher never sees a half
@@ -53,4 +69,8 @@ if [ "$target" = all ] && { [ ! -f build/tidalfast ] || [ shell/shell.m -nt buil
 	clang shell/shell.m -o build/tidalfast -fobjc-arc -mmacosx-version-min=14.0 \
 		-Wall -Wno-unused-parameter $clang_flags \
 		-framework Cocoa -framework Metal -framework QuartzCore -framework CoreServices -framework MediaPlayer
+fi
+
+if [ "$target" = all ]; then
+	odin build tools/measure -out:build/measure/measure -vet -strict-style
 fi

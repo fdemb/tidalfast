@@ -396,11 +396,11 @@ pkce_failure :: proc(res: ^Result) -> Small {
 	return res.message
 }
 
-// pkce_redirect_env is TIDALFAST_PKCE_REDIRECT in debug builds: with no
-// saved login, the PKCE login finishes with it at start, for testing
-// against tests/mock_tidal.
+// pkce_redirect_env is TIDALFAST_PKCE_REDIRECT in debug and MOCK_API
+// builds: with no saved login, the PKCE login finishes with it at start,
+// for testing against tests/mock_tidal.
 pkce_redirect_env :: proc() -> string {
-	if !ODIN_DEBUG {
+	if !ODIN_DEBUG && !MOCK_API {
 		return ""
 	}
 	return os.get_env("TIDALFAST_PKCE_REDIRECT", context.temp_allocator)

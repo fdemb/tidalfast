@@ -336,6 +336,7 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 		loading_row(i, cols)
 		return
 	}
+	s.measure.rows += 1
 	row := ui.row(fmt.tprintf("##track%d", i), {.Clickable, .Draw_Background, .Draw_Hot_Effects}, ui.fill(), ui.px(TRACK_ROW_H))
 	row.radius = 6
 	row.hover_color = {1, 1, 1, 0.05}

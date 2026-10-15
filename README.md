@@ -46,14 +46,14 @@ It needs macOS 14 or later, Odin and the Xcode command line tools. `build.sh` re
 Environment variables:
 
 - `TIDALFAST_FAKE=1` shows the fake library from phases 2 and 3 instead of logging in to TIDAL, for working on the UI without an account. Its rows play sine tones. `TIDALFAST_BENCH=1` and `=text` imply it.
-- `TIDALFAST_API=url` sends every request, the login and cover downloads to `url` instead of TIDAL, for running against `tests/mock_tidal`. The login then goes in the Keychain under `tidalfast-mock`, so it never replaces a real one. Only debug builds read it, and only for `http` or `https` on `127.0.0.1`, `[::1]` or `localhost`. Anything else is ignored with a line on stderr. Whoever runs the server at `url` gets the tokens of the account that logs in, so a release build never sends them anywhere but TIDAL.
+- `TIDALFAST_API=url` sends every request, the login and cover downloads to `url` instead of TIDAL, for running against `tests/mock_tidal`. The login then goes in the Keychain under `tidalfast-mock`, so it never replaces a real one. Only debug builds and the `./build.sh measure` build read it, and only for `http` or `https` on `127.0.0.1`, `[::1]` or `localhost`. Anything else is ignored with a line on stderr. Whoever runs the server at `url` gets the tokens of the account that logs in, so a release build never sends them anywhere but TIDAL.
 - `TIDALFAST_KEYCHAIN=name` keeps the mock login under `name` instead of `tidalfast-mock`. It only works together with `TIDALFAST_API`, and never with `tidalfast`. A build that reads an item another build wrote makes the Keychain ask for access, so test runs can give a build its own item.
 - `TIDALFAST_OVERLAY=1` shows the frame-time overlay from the start.
 - `TIDALFAST_VOLUME=0.2` sets the volume slider at start.
 - `TIDALFAST_AUDIO_NULL=1` plays to miniaudio's null device: the audio callback runs in real time, but nothing reaches the speakers.
 - `TIDALFAST_AUDIO_CAPTURE=path` writes every sample the audio callback hands the device, after ReplayGain and volume, to `path` as a 32-bit float WAV. In bit-perfect mode it's what the HAL IOProc hands CoreAudio. Only the first player after start captures, not the ones a hot reload makes. The header's sizes are filled in when the app quits; `tests/audio_check` and `tests/bitperfect_check` also read a file whose header still says 0. The header has the rate of the first device open; after a rate change the frames carry on at the new rate in the same file.
 - `TIDALFAST_SETTINGS=path` keeps the output settings (bit-perfect, hog mode) in `path` instead of `~/Library/Application Support/tidalfast/settings.json`.
-- `TIDALFAST_PKCE_REDIRECT=url`: with no saved login the app finishes the PKCE login (see Login) with this address at start, so a script can log in to `tests/mock_tidal` without a browser. Debug builds only.
+- `TIDALFAST_PKCE_REDIRECT=url`: with no saved login the app finishes the PKCE login (see Login) with this address at start, so a script can log in to `tests/mock_tidal` without a browser. Debug and `./build.sh measure` builds only.
 - `TIDALFAST_AUDIO_WINDOW_KB=n` sets how much of each track is kept downloaded (8 MB by default). A small window sends seeks back to the network, for measuring them.
 - `TIDALFAST_NOW_PLAYING_LOG=1` makes the shell print Now Playing as macOS holds it, read back from `MPNowPlayingInfoCenter`, after every update, and every remote command it gets.
 - `TIDALFAST_REMOTE_TEST="8:play,12:seek=10,20:pause,24:next"` makes the shell send those remote commands that many seconds after launch, through the same path as the media keys. The commands are `play`, `pause`, `toggle`, `next`, `previous` and `seek=seconds`.
@@ -62,8 +62,9 @@ Environment variables:
 - `TIDALFAST_SHELL_TEST="2:key=cmd+f;3:mark=にほんご;4:commit=日本語;6:ax-dump"` runs steps against the shell's own entry points that many seconds after launch, for checking text input and accessibility without a person at the keyboard. Steps are separated by semicolons. `key=cmd+shift+z` sends a key down and up. `mark=text`, `commit=text` and `unmark` call the view's `setMarkedText`, `insertText` and `unmarkText` the way an input method does, and `ime` prints what the view answers to NSTextInputClient's questions. `ax-dump` prints the window's accessibility tree as AppKit hands it to an assistive app, and `ax-press=label` sends AXPress to the first element whose label or value starts with `label`. `mark-range=l,n,text` and `commit-range=l,n,text` give a replacement range in UTF-16 units, and `commit-marked=text` replaces whatever `markedRange` answers. `clean=hex` prints what the shell's `field_sanitize` makes of the bytes, in hex. Commands joined with `|` run together with no frame between them. `capture=path` copies the last `TIDALFAST_CAPTURE` frame to `path`, and `quit` quits. The comment above `setup_shell_test` in `shell.m` lists them.
 - `TIDALFAST_CAPTURE=path` writes each presented frame to `path` as a TGA. It's for checking output when you can't take screenshots. Each frame goes to a temp file that's renamed over `path`, so copying `path` while the app runs gives a whole frame.
 - `TIDALFAST_BENCH=1` scrolls the library's track table by itself and logs the CPU time per frame in three phases (see UI below). `TIDALFAST_BENCH=text` does the same for the text test list (see Text). `TIDALFAST_BENCH=covers` does it on live data while covers stream in (see TIDAL data). All of them keep asking for frames even when the window is covered.
+- `TIDALFAST_MEASURE=1` prints startup marks and memory samples to stderr as `measure: {...}` lines. `=startup` also quits once the first track rows and their covers are drawn, and `=memory` runs the memory scenario and quits. `tools/measure` sets it; see Measuring RAM and startup.
 
-The backtick key toggles the frame-time overlay. It's off unless `TIDALFAST_OVERLAY` or `TIDALFAST_BENCH` is set; the benches draw it so their numbers include it. It plots the CPU time of the last 120 frames against 120 Hz and 60 Hz lines. Under the plot are the last frame's total CPU time and the time spent building it (ui: everything before `end_frame`), its draw calls (blue dot) and instances (green dot), and the text cache's run count and atlas pages. The app also logs draw calls and instances to stderr whenever they change.
+The backtick key toggles the frame-time overlay. It's off unless `TIDALFAST_OVERLAY` or `TIDALFAST_BENCH` is set; the benches draw it so their numbers include it. It plots the CPU time of the last 120 frames against 120 Hz and 60 Hz lines. Under the plot are the last frame's total CPU time and the time spent building it (ui: everything before `end_frame`), its draw calls (blue dot) and instances (green dot), the text cache's run count and atlas pages, the keyed boxes in use, and the process's memory footprint (ram) and Metal's allocations (gpu), see Measuring RAM and startup. The app also logs draw calls and instances to stderr whenever they change.
 
 The app opens on the library screen, or the login screen when there's no saved login. Cmd-F or Cmd-L focuses the search field (see Search). Cmd-1 goes back to the library, Cmd-2 shows the text test screen (specimen lines and a 10,000-row list) and Cmd-3 the phase 1 renderer test screen. F1 or Cmd-Shift-D outlines every UI box and shows the key, ID and size of the box under the mouse.
 
@@ -695,3 +696,116 @@ If the app returns `animating = true`, the view's `CADisplayLink` adds a frame e
 While the link runs, a pending redraw waits for the next tick instead of drawing straight away. Drawing between ticks would present more than once per refresh, and with sustained input that runs out of drawables and blocks the main thread in `nextDrawable`. The wait has a limit: if no tick arrives within two refresh intervals of the last one, as when the display sleeps, a timer wakes the run loop and the observer draws directly. The same happens at once when the link is paused. So explicit redraws still happen while the window is hidden or the display is off. Resizes are the exception and always draw synchronously, so the window never shows a stretched frame.
 
 The shell merges mouse moves, and scroll events in the same phase, into one event with the summed delta. Phase changes such as a gesture beginning or ending keep their own event. The queue grows as needed and never drops an event, so the app never misses a button or key release.
+
+## Measuring RAM and startup
+
+```
+./build.sh measure
+./build/measure/measure startup     # 10 cold launches with the fake data, then 10 against the mock
+./build/measure/measure memory      # the memory scenario, once with each
+./build/measure/measure all         # both
+./build/measure/measure compare docs/measure-baseline.json build/measure/20261015-114141.json
+```
+
+`./build.sh measure` builds an optimized app in `build/measure/app` (its own shell and dylib, hot reload off), `tests/mock_tidal` and the tool. The app is the release build plus `TIDALFAST_MOCK_API`, which lets it read `TIDALFAST_API` and `TIDALFAST_PKCE_REDIRECT`. The real release build never reads them (see TIDAL data), so it can't run against the mock.
+
+Each run is a cold launch with `TIDALFAST_MEASURE` set, `TIDALFAST_AUDIO_NULL=1` and a settings file of its own, so bit-perfect output is off and your settings stay as they are. Other `TIDALFAST_` variables in your environment are dropped. The tool prints a table per scenario and setup, writes `build/measure/<time>.json`, and keeps each run's stderr in `build/measure/logs-<time>/`. Flags: `-runs=N`, `-setup=fake` or `mock` or `fake,mock`, `-app=path`, `-timeout=seconds` and `-out=path`.
+
+The setups:
+
+- `fake` runs with `TIDALFAST_FAKE=1`: no account, no network, 10,000 fake rows.
+- `mock` starts its own `mock_tidal` on a free loopback port and logs in with `TIDALFAST_PKCE_REDIRECT` under a Keychain item called `tidalfast-measure-` and a random suffix. So the first run logs in and later runs read the login from the Keychain, as you would. The tool deletes the item at the end with `security delete-generic-password`. Deleting it from the tool itself fails with -25244, because the item's access list names the app.
+- `-real` runs `build/tidalfast` against your own account and your `tidalfast` Keychain item. Build it with `./build.sh release` first. It's for you to run by hand: macOS may ask for Keychain access, and the memory scenario plays a track from your longest list to the null device.
+
+`measure compare a.json b.json` prints every number in both files with its change. A time or size that changed by 10% and at least 1 ms or MB is marked `worse` or `better`. Startup times move a few percent from run to run, so compare medians from the same machine.
+
+### What the app prints
+
+With `TIDALFAST_MEASURE` set, the shell and the app print lines like these to stderr:
+
+```
+measure: {"mark":"main","ms":10.4}
+measure: {"mark":"tracks","ms":312.1,"footprint":84210000,"resident":137700000,"gpu":32100000,...}
+measure: {"sample":"scrolled","ms":31291.9,...,"fonts_mapped_bytes":630429612,"fonts_resident":31195136}
+```
+
+`ms` is milliseconds since the kernel started the process (`p_starttime` from `sysctl` `KERN_PROC_PID`), so time spent in dyld before `main` counts. The lines never hold tokens or addresses. `=1` prints the marks and nothing more. `=startup` quits once it reaches `tracks`. `=memory` runs the memory scenario and quits. The tool sets the mode.
+
+The startup marks, in order:
+
+| mark | what has happened |
+|---|---|
+| `main` | the shell's `main` started: dyld has loaded the executable and its frameworks |
+| `launched` | `applicationDidFinishLaunching`: AppKit is set up |
+| `dylib` | the app dylib is copied and opened |
+| `init` | the app's `init` returned: renderer, shaders, Inter, caches, workers |
+| `window` | the window is ordered front |
+| `first_frame` | the first frame is committed and its drawable presented |
+| `library` | the first frame with the sidebar's playlists (fake: the first frame) |
+| `tracks` | the first frame with track rows and every cover on screen ready |
+
+"Presented" means the app called `presentDrawable` and committed. The frame reaches the display a vsync or two later.
+
+Samples carry the same memory numbers as the marks plus the mapped fonts. The memory scenario takes one after each of these stages:
+
+1. `startup_idle`: the library is up and its covers are in, then 5 s with nothing happening.
+2. `list_open`: the longest list is open with every row loaded: the mock's 3,000-track playlist, or the fake data's 10,000 rows. 3 s to settle.
+3. `scrolled`: the bench's auto-scroll went through it (`TIDALFAST_BENCH=covers` on the mock: 600 rows one a frame, then 1,200 four a frame; the library bench on the fake data), covers loading as it went. 3 s to settle.
+4. `playing`: 30 s after playback started on the first playable row.
+5. `idle_after`: playback stopped, then 10 s, which shows what stays allocated.
+
+Then it quits through SIGTERM, the same path as Ctrl-C, so shutdown runs.
+
+### The numbers
+
+- **footprint** is `phys_footprint` from `task_info(TASK_VM_INFO)`. It's what Activity Monitor's Memory column shows and what macOS counts against the app under memory pressure: dirty memory the app owns, compressed or swapped memory included. On Apple silicon it includes Metal's allocations, since the GPU uses the same RAM. So gpu is part of footprint, not on top of it.
+- **resident** is the pages in RAM right now, clean ones included. That takes in the code of the app and every framework it touched, and mapped files. Pages of a mapped file that nobody wrote to are clean: the kernel can drop them and read them back from disk, so they count toward resident but not footprint.
+- **gpu** is the Metal device's `currentAllocatedSize`: glyph atlas pages, cover textures with their mips, instance buffers, the drawables' textures.
+- **fonts map** and **fonts res** are the fallback fonts the text loader mapped with `mmap`, and how much of them is resident (from `mincore`). Apple Color Emoji alone is 180 MB of file, but only the pages of glyphs drawn get read in. Those pages count toward resident and not footprint.
+- The rest is the app's own accounting: `arena` (the persistent arena's used bytes), `frame_peak` (the frame arena's high-water mark), `atlas_pages`, `runs` (shaped runs in the text cache), `covers` and `cover_bytes` (the cover cache's textures, base level only), `rows` and `view_bytes` (the open list and its arena).
+
+Measuring costs nothing with `TIDALFAST_MEASURE` unset: the app counts drawn rows and covers in the frame it's building, which is two additions each. With it set, marks and samples come from frames that happen anyway. Only the memory scenario starts a thread, which samples once a second (`tick` lines) and wakes the UI when a stage's wait is over. A sample costs a few milliseconds because of `mincore` over 600 MB of fonts, so marks leave that out. An idle window shows 0 CPU time over 10 s with it unset and with `=1`.
+
+The frame-time overlay (backtick) shows footprint and gpu under the frame times.
+
+### Baseline
+
+`docs/measure-baseline.json`, from `./build/measure/measure all` on a MacBook Air (M1, 8 GB, MacBookAir10,1), macOS 27.0.1, 1100x700 window at 2x. MB is 2^20 bytes.
+
+Startup, in ms since the process started. Run 1 is on its own. The other 9 runs give the median and range.
+
+| mark | fake run 1 | fake median (min to max) | mock run 1 | mock median (min to max) |
+|---|---|---|---|---|
+| main | 7.2 | 10.4 (7.9 to 11.9) | 11.5 | 10.1 (7.7 to 13.9) |
+| launched | 92.3 | 98.0 (86.6 to 100.5) | 98.7 | 99.3 (91.1 to 102.5) |
+| dylib | 231.2 | 234.1 (227.9 to 247.3) | 338.3 | 261.5 (248.0 to 274.3) |
+| init | 249.5 | 249.9 (244.0 to 270.2) | 354.5 | 285.7 (272.8 to 295.8) |
+| window | 254.8 | 255.4 (249.4 to 275.8) | 359.7 | 291.4 (278.6 to 303.1) |
+| first_frame | 301.6 | 306.2 (300.1 to 334.5) | 408.8 | 345.5 (330.2 to 353.3) |
+| library | 301.6 | 306.3 (300.1 to 334.5) | 464.0 | 351.1 (337.9 to 361.4) |
+| tracks | 308.9 | 312.1 (304.8 to 338.9) | 695.0 | 581.4 (548.6 to 595.5) |
+
+At `tracks` the footprint is 80 MB with the fake data and 118 MB with the mock, gpu 31 and 47 MB.
+
+The baseline's fake run 1 came after earlier runs of the same build, so it shows no first-run cost. Straight after a build the first launch reaches `main` at about 170 to 300 ms instead of 10, while macOS checks the new binary's signature. The mock's run 1 also logs in.
+
+Memory, MB:
+
+| stage | fake footprint | resident | gpu | mock footprint | resident | gpu | mock covers |
+|---|---|---|---|---|---|---|---|
+| startup_idle | 104.0 | 134.2 | 43.3 | 113.7 | 144.0 | 47.2 | 22 |
+| list_open | 104.0 | 134.2 | 43.3 | 116.3 | 146.2 | 49.2 | 37 |
+| scrolled | 110.0 | 139.9 | 47.3 | 173.6 | 194.6 | 102.8 | 608 (21.5 MB) |
+| playing | 115.8 | 143.7 | 47.3 | 189.5 | 208.2 | 103.3 | 610 |
+| idle_after | 111.6 | 142.5 | 47.3 | 184.4 | 206.1 | 103.3 | 610 |
+
+The peak footprint was 128 MB with the fake data and 198 MB with the mock. Fallback fonts: 601 MB mapped, 29 to 30 MB of it resident.
+
+What stands out:
+
+- Between `launched` and `dylib` the shell spends about 140 ms. It copies the dylib to a temp file and opens the copy, so hot reload can replace the original, and it does that in release builds too. A file macOS hasn't seen gets its signature checked on every `dlopen`: opening a fresh copy of `app.dylib` takes about 100 ms, opening the same file again takes 7 to 9 ms. Opening the dylib in place when hot reload is off would save about 90 ms of the 310.
+- From `main` to `launched` is about 85 ms of AppKit setup before the app's code runs.
+- Covers dominate memory growth on the mock. During the scroll gpu went up 54 MB for 571 more covers, about 96 KB each, while the cover cache grew by 18.6 MB of base levels, about 33 KB each (most are 80x80, 25 KB). Mips add a third, so most of the rest is likely Metal rounding each small texture's allocation up. Footprint rose by the same amount, since GPU memory is part of it.
+- Playback adds about 6 MB of footprint with the fake data and 16 MB on the mock, and 10 s after it stops only 4 to 5 MB of that is gone.
+- The 43 MB of GPU memory before any cover loads isn't broken down here. A coverage atlas page alone is 4 MB.
+- The persistent arena holds 23 MB in every setup and doesn't grow.

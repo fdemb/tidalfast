@@ -430,3 +430,39 @@ map_file :: proc(path: cstring) -> ([]byte, bool) {
 	}
 	return ([^]byte)(p)[:size], true
 }
+
+foreign import system "system:System.framework"
+
+@(default_calling_convention = "c")
+foreign system {
+	@(private)
+	mincore :: proc(addr: rawptr, length: uint, vec: [^]u8) -> i32 ---
+}
+
+// mapped_fonts counts the fallback font files mapped with mmap, their bytes
+// and how many of those bytes are in RAM. Mapped files count toward the
+// process's resident size but not its footprint: the kernel can drop their
+// pages and read them back from the file. UI thread only.
+mapped_fonts :: proc(t: ^State) -> (count, mapped, resident: int) {
+	page := uintptr(posix.sysconf(._PAGESIZE))
+	vec: [1024]u8
+	for &face in t.faces[:t.face_count] {
+		if !face.mapped {
+			continue
+		}
+		count += 1
+		mapped += len(face.file)
+		end := uintptr(raw_data(face.file)) + uintptr(len(face.file))
+		for at := uintptr(raw_data(face.file)) &~ (page - 1); at < end; {
+			n := min(int((end - at + page - 1) / page), len(vec))
+			if mincore(rawptr(at), uint(n) * uint(page), &vec[0]) != 0 {
+				break
+			}
+			for v in vec[:n] {
+				resident += int(page) if v & 1 != 0 else 0
+			}
+			at += uintptr(n) * page
+		}
+	}
+	return
+}

@@ -29,7 +29,7 @@ import "../ui"
 
 CLEAR_COLOR :: render.Color{0.10, 0.11, 0.13, 1}
 
-STATE_VERSION :: 13
+STATE_VERSION :: 14
 
 FRAME_HISTORY :: 120
 
@@ -76,6 +76,7 @@ State :: struct {
 	access_sent:  u64, // hash of the accessibility tree the shell has
 	scroll:       [2]f32, // the test screens' scroll offset
 	bench:        Bench,
+	measure:      Measure,
 	slide_start:  f64,
 	sliding:      bool,
 	profiling:    bool,
@@ -136,6 +137,7 @@ app_reload :: proc "c" (m: ^platform.Memory, shell: ^platform.Shell) {
 	ui.cancel_pointer(&s.ui)
 	data_reload(s, shell)
 	playback_reload(s, shell)
+	measure_reload(s, shell)
 	fmt.eprintfln("app: reloaded at frame %d, clear colour %v", s.frame_count, CLEAR_COLOR)
 }
 
@@ -144,6 +146,7 @@ app_unload :: proc "c" (m: ^platform.Memory) {
 	s := (^State)(m.persistent)
 	context = app_context(s)
 	text.unload(&s.text)
+	measure_unload(s)
 	playback_unload(s)
 	data_unload(s)
 	if s.profiling {
@@ -159,6 +162,7 @@ app_shutdown :: proc "c" (m: ^platform.Memory) {
 		spall.buffer_destroy(&s.spall_ctx, &s.spall_buf)
 		posix.close(posix.FD(s.spall_ctx.fd))
 	}
+	measure_unload(s)
 	playback_shutdown(s)
 	data_shutdown(s)
 	search_shutdown(s)
@@ -181,6 +185,7 @@ app_frame :: proc "c" (m: ^platform.Memory, shell: ^platform.Shell, input: ^plat
 	frame_ms := f32(time.duration_milliseconds(time.tick_since(begin)))
 	s.frame_ms[s.frame_count % FRAME_HISTORY] = frame_ms
 	s.frame_count += 1
+	measure_frame(s)
 	if s.text.needs_redraw {
 		// Glyphs left over from the raster budget or a full atlas. The
 		// display link may be paused (window covered), so ask directly.
@@ -222,6 +227,7 @@ app_context :: proc(s: ^State) -> runtime.Context {
 }
 
 start :: proc(s: ^State, shell: ^platform.Shell) {
+	measure_start(s, shell)
 	// Off unless asked for. The benches draw it, so their numbers include it.
 	bench := os.get_env("TIDALFAST_BENCH", context.temp_allocator)
 	s.show_overlay = os.get_env("TIDALFAST_OVERLAY", context.temp_allocator) != "" || bench != ""
@@ -276,6 +282,7 @@ start :: proc(s: ^State, shell: ^platform.Shell) {
 	s.half_cover = render.texture_create(&s.renderer, 1, 1, .R8)
 	render.texture_update(&s.renderer, s.half_cover, {128}, 0, 0, 1, 1)
 	fmt.eprintfln("app: started, clear colour %v", CLEAR_COLOR)
+	measure_mark(s, .Init)
 }
 
 @(deferred_in = prof_end)
@@ -310,6 +317,7 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input, shell: ^platfor
 	r := &s.renderer
 	render.begin_frame(r, w, h, input.scale, CLEAR_COLOR)
 	ui_begin := time.tick_now()
+	measure_frame_begin(s)
 	text.begin_frame(&s.text, r)
 	ui.begin_frame(&s.ui, events, r, &s.text, w, h, input.time, ui.hardware_buttons(), input.text[:input.text_length])
 	ui.set_window_key(&s.ui, bool(input.key_window))
@@ -492,7 +500,8 @@ hsv :: proc(h, s, v: f32) -> render.Color {
 // the bars: the last frame's CPU time in total and building the frame (the
 // UI, before end_frame), then its draw calls (blue), instances (green), and
 // the text cache's runs and atlas pages, then the keyed boxes in use, in red
-// when the pool ran out this frame.
+// when the pool ran out this frame, then the process's memory footprint (as
+// Activity Monitor shows it) and what Metal has allocated on the GPU.
 draw_frame_overlay :: proc(s: ^State, view_width: f32) {
 	BAR_W :: 2
 	PX_PER_MS :: 4
@@ -502,7 +511,7 @@ draw_frame_overlay :: proc(s: ^State, view_width: f32) {
 	y0 := f32(12)
 	r := &s.renderer
 
-	render.push_rect(r, {x0, y0, panel_w, PANEL_H + 58}, {0, 0, 0, 0.6}, 6)
+	render.push_rect(r, {x0, y0, panel_w, PANEL_H + 74}, {0, 0, 0, 0.6}, 6)
 	for i in 0 ..< FRAME_HISTORY {
 		// Oldest first, starting just after the newest entry.
 		ms := s.frame_ms[(s.frame_count + u64(i)) % FRAME_HISTORY]
@@ -538,4 +547,7 @@ draw_frame_overlay :: proc(s: ^State, view_width: f32) {
 	} else {
 		text.draw(t, r, .Regular, 11, {x0 + 8, y}, {1, 1, 1, 0.6}, fmt.tprintf("boxes %d/%d", used, capacity))
 	}
+	y += 16
+	pm := process_memory(r)
+	text.draw(t, r, .Regular, 11, {x0 + 8, y}, {1, 1, 1, 0.9}, fmt.tprintf("ram %.1f MB   gpu %.1f MB", f64(pm.footprint) / (1 << 20), f64(pm.gpu) / (1 << 20)))
 }

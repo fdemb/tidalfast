@@ -20,6 +20,8 @@
 #include <stdatomic.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/sysctl.h>
+#include <sys/time.h>
 
 #include "platform.h"
 
@@ -65,6 +67,32 @@ static CADisplayLink *g_display_link;
 
 static void update_display_link(void);
 static void access_frame_done(void);
+
+// TIDALFAST_MEASURE: the shell's startup marks, in the format the app's
+// measure.odin prints, in milliseconds since the kernel started the process.
+static bool g_measure;
+static int64_t g_process_start_us;
+
+static void measure_mark(const char *name) {
+  if (!g_measure) return;
+  struct timeval now;
+  gettimeofday(&now, NULL);
+  int64_t us = (int64_t)now.tv_sec * 1000000 + now.tv_usec - g_process_start_us;
+  fprintf(stderr, "measure: {\"mark\":\"%s\",\"ms\":%.1f}\n", name, us / 1000.0);
+}
+
+static void measure_init(void) {
+  const char *measure = getenv("TIDALFAST_MEASURE");
+  g_measure = measure && *measure;
+  if (!g_measure) return;
+  struct kinfo_proc info;
+  size_t size = sizeof(info);
+  int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()};
+  struct timeval start = {0};
+  if (sysctl(mib, 4, &info, &size, NULL, 0) == 0) start = info.kp_proc.p_starttime;
+  else gettimeofday(&start, NULL);
+  g_process_start_us = (int64_t)start.tv_sec * 1000000 + start.tv_usec;
+}
 
 static void request_redraw(void) {
   atomic_store(&g_needs_redraw, true);
@@ -1312,6 +1340,7 @@ static void setup_shell_test(void) {
 @implementation App_Delegate
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
+  measure_mark("launched");
   NSRect frame = NSMakeRect(0, 0, 1100, 700);
   g_window = [[NSWindow alloc]
       initWithContentRect:frame
@@ -1362,6 +1391,7 @@ static void setup_shell_test(void) {
     [NSApp terminate:nil];
     return;
   }
+  measure_mark("dylib");
   g_wake_timer = CFRunLoopTimerCreate(NULL, CFAbsoluteTimeGetCurrent() + 1e9, 1e9, 0, 0, wake_timer_fired, NULL);
   CFRunLoopAddTimer(g_main_run_loop, g_wake_timer, kCFRunLoopCommonModes);
   [(Metal_View *)g_view update_drawable_size];
@@ -1384,6 +1414,7 @@ static void setup_shell_test(void) {
   [g_window makeKeyAndOrderFront:nil];
   [g_window makeFirstResponder:g_view];
   [NSApp activateIgnoringOtherApps:YES];
+  measure_mark("window");
   setup_shell_test();
   request_redraw();
 }
@@ -1419,6 +1450,8 @@ static NSMenu *main_menu(void) {
 
 int main(int argc, const char *argv[]) {
   @autoreleasepool {
+    measure_init();
+    measure_mark("main");
     g_start_time = CACurrentMediaTime();
     g_main_run_loop = CFRunLoopGetMain();
 
