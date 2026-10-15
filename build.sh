@@ -52,5 +52,5 @@ if [ "$target" = all ] && { [ ! -f build/tidalfast ] || [ shell/shell.m -nt buil
 	echo "$mode" > build/shell-mode
 	clang shell/shell.m -o build/tidalfast -fobjc-arc -mmacosx-version-min=14.0 \
 		-Wall -Wno-unused-parameter $clang_flags \
-		-framework Cocoa -framework Metal -framework QuartzCore -framework CoreServices
+		-framework Cocoa -framework Metal -framework QuartzCore -framework CoreServices -framework MediaPlayer
 fi

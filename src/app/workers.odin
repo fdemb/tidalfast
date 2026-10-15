@@ -61,6 +61,8 @@ Job_Kind :: enum u8 {
 	Playlists, // the sidebar: liked songs count, playlists made or followed
 	Tracks, // one page of a track list
 	Cover, // download and decode one cover
+	Stream, // resolve a track's stream URL, see player.odin
+	Artwork, // a cover for Now Playing: download and decode, keep the pixels
 }
 
 Source :: enum u8 {
@@ -74,10 +76,10 @@ Job :: struct {
 	source:     Source,
 	once:       bool, // Login_Wait: poll once, to see if TIDAL answers again
 	auth:       u32, // the auth generation it was queued in, see sign_out
-	view:       u32, // Tracks: the view generation it's for
+	view:       u32, // Tracks: the view generation it's for; Stream: the track's serial
 	offset:     i32,
 	limit:      i32,
-	key:        u64, // Cover: the cache key
+	key:        u64, // Cover: the cache key; Stream: the track id; Artwork: the track's serial
 	size:       u16, // Cover: pixels across
 	interval:   f32, // Login_Wait: seconds between polls
 	deadline:   time.Tick, // Login_Wait: when the code expires
@@ -118,6 +120,7 @@ Result :: struct {
 	link:        Login_Link,
 	pixels:      []u8, // from cover.decode
 	w, h:        int,
+	stream:      tidal.Stream_Info, // strings in arena
 }
 
 workers_start :: proc(d: ^Data) {
@@ -253,7 +256,7 @@ fail :: proc(res: ^Result, err: tidal.Error) {
 run_job :: proc(d: ^Data, job: Job) -> (res: Result) {
 	res.job = job
 	s := d.session
-	if job.kind == .Cover {
+	if job.kind == .Cover || job.kind == .Artwork {
 		run_cover(d, job, &res)
 		return
 	}
@@ -268,7 +271,14 @@ run_job :: proc(d: ^Data, job: Job) -> (res: Result) {
 	alloc := vmem.arena_allocator(res.arena)
 	id := job.id
 	switch job.kind {
-	case .None, .Cover:
+	case .None, .Cover, .Artwork:
+	case .Stream:
+		info, err := tidal.resolve_stream(s, i64(job.key), STREAM_QUALITY, alloc)
+		if err != nil {
+			fail(&res, err)
+			return
+		}
+		res.stream = info
 	case .Restore:
 		res.signed_in = auth_load(d, &res)
 	case .Login_Start:
@@ -431,6 +441,11 @@ row_from_track :: proc(t: tidal.Track, alloc: mem.Allocator) -> (row: Row) {
 		row.added = fmt.aprintf("%s %d, %d", MONTHS[int(m) - 1], day, y, allocator = alloc)
 	}
 	row.seconds = t.duration
+	row.id = t.id
+	row.track = t.track_num
+	if t.album != nil {
+		row.album_id = t.album.id
+	}
 	row.duration = fmt.aprintf("%d:%02d", t.duration / 60, t.duration % 60, allocator = alloc)
 	return
 }

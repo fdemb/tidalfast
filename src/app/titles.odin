@@ -19,6 +19,9 @@ Row :: struct {
 	duration: string,
 	cover:    string, // album cover image id, "" in the fake data
 	seconds:  int,
+	id:       i64, // TIDAL track id, 0 in the fake data
+	album_id: i64,
+	track:    int, // number on its album
 }
 
 @(private = "file")

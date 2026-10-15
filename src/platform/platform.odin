@@ -2,7 +2,7 @@
 // this file field for field. Change both together and bump ABI_VERSION.
 package platform
 
-ABI_VERSION :: 1
+ABI_VERSION :: 2
 
 Event_Kind :: enum u32 {
 	None,
@@ -15,6 +15,18 @@ Event_Kind :: enum u32 {
 	Key_Up,
 	Modifiers_Changed,
 	Resize,
+	Media, // key_code is a Media_Command, dx the position for .Seek
+}
+
+// Media keys, Control Center and headphones, from MPRemoteCommandCenter.
+Media_Command :: enum u32 {
+	None,
+	Play,
+	Pause,
+	Toggle,
+	Next,
+	Previous,
+	Seek,
 }
 
 Mouse_Button :: enum u32 {
@@ -73,14 +85,40 @@ Memory :: struct {
 	frame_size:      uint,
 }
 
-// What the shell gives the app. The Metal objects and request_redraw belong
+Now_Playing_State :: enum u32 {
+	Stopped,
+	Playing,
+	Paused,
+}
+
+// What macOS shows in Control Center and on the lock screen. The shell
+// copies everything before set_now_playing returns.
+Now_Playing :: struct {
+	title:          cstring, // nil clears Now Playing
+	artist:         cstring,
+	album:          cstring,
+	duration:       f64, // seconds
+	elapsed:        f64,
+	state:          Now_Playing_State,
+	artwork_width:  u32,
+	artwork_height: u32,
+	_:              u32,
+	artwork:        [^]u8, // RGBA8 sRGB, premultiplied, or nil
+	artwork_key:    u64, // the shell rebuilds the artwork only when this changes
+}
+#assert(size_of(Now_Playing) == 72)
+
+// What the shell gives the app. The Metal objects and the procedures belong
 // to the shell, so they stay valid across reloads and the app may keep them.
 Shell :: struct {
-	metal_device:   rawptr, // id<MTLDevice>
-	metal_layer:    rawptr, // CAMetalLayer*
+	metal_device:    rawptr, // id<MTLDevice>
+	metal_layer:     rawptr, // CAMetalLayer*
 	// Safe from any thread. Wakes the main run loop and draws one frame.
-	request_redraw: proc "c" (),
+	request_redraw:  proc "c" (),
+	// Main thread only.
+	set_now_playing: proc "c" (info: ^Now_Playing),
 }
+#assert(size_of(Shell) == 32)
 
 Frame_Input :: struct {
 	events:        [^]Event,

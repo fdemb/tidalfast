@@ -92,7 +92,10 @@ Data :: struct {
 	// Goes up with every sign_out. Jobs carry the one they were queued in,
 	// and results from an older one are dropped.
 	auth_gen:       u32,
-	retry:          bit_set[Job_Kind; u8], // pushes the queue refused, tried again next frame
+	retry:          bit_set[Job_Kind; u16], // pushes the queue refused, tried again next frame
+	// Stream and Artwork jobs the queue refused. Their parameters can't be
+	// rebuilt from the kind, so they're kept whole and pushed again.
+	held:           [4]Held_Job,
 	refresh_errors: int, // token refreshes in a row that failed without ending the login (atomic)
 	keychain_mutex: sync.Mutex, // orders a sign-out's delete against the workers' saves
 	session:        ^tidal.Session, // made by this dylib, so closed on unload
@@ -131,6 +134,11 @@ data_start :: proc(s: ^State, shell: ^platform.Shell) {
 	d.api = small(api)
 	d.mock = api != ""
 	d.keychain = small(KEYCHAIN_MOCK_SERVICE if d.mock else KEYCHAIN_SERVICE)
+	if d.mock {
+		if name := os.get_env("TIDALFAST_KEYCHAIN", context.temp_allocator); name != "" && name != KEYCHAIN_SERVICE {
+			d.keychain = small(name)
+		}
+	}
 	session_open(d)
 	d.account = .Restoring
 	push_job(d, {kind = .Restore})
@@ -269,6 +277,9 @@ session_open :: proc(d: ^Data) {
 	d.session = s
 }
 
+// keychain_service is where the login goes. Against a mock server,
+// TIDALFAST_KEYCHAIN can name another item, so test runs of differently
+// signed builds don't share one and the Keychain doesn't ask for access.
 keychain_service :: proc(d: ^Data) -> string {
 	return small_str(&d.keychain)
 }
@@ -375,6 +386,11 @@ auth_changed :: proc(s: ^tidal.Session, data: rawptr) {
 	}
 }
 
+Held_Job :: struct {
+	job:      Job,
+	priority: u8,
+}
+
 // push_job queues job for the current login. If the queue is full the
 // kind goes in d.retry, and data_update tries again next frame. A worker
 // finishing a job frees a slot and asks for that frame.
@@ -382,10 +398,28 @@ push_job :: proc(d: ^Data, job: Job, priority: u8 = PRIORITY_DATA) -> bool {
 	job := job
 	job.auth = d.auth_gen
 	if !jobs.push(&d.queue, job, priority) {
-		d.retry += {job.kind}
+		if job.kind == .Stream || job.kind == .Artwork {
+			hold_job(d, job, priority)
+		} else {
+			d.retry += {job.kind}
+		}
 		return false
 	}
 	return true
+}
+
+// hold_job keeps a refused playback job for the next frame. When the list is
+// full the oldest goes, since its track has most likely moved on.
+@(private = "file")
+hold_job :: proc(d: ^Data, job: Job, priority: u8) {
+	for &h in d.held {
+		if h.job.kind == .None {
+			h = {job, priority}
+			return
+		}
+	}
+	copy(d.held[:], d.held[1:])
+	d.held[len(d.held) - 1] = {job, priority}
 }
 
 @(private = "file")
@@ -402,6 +436,7 @@ sign_out :: proc(s: ^State, why: string) {
 	d := &s.data
 	d.auth_gen += 1
 	d.retry = {}
+	d.held = {}
 	jobs.remove_if(&d.queue, drop_account_job, nil)
 	tidal.session_clear_auth(d.session)
 	{
@@ -457,6 +492,13 @@ request_playlists :: proc(d: ^Data) {
 // data_retry pushes again what the queue refused last frame, if it's still
 // wanted.
 data_retry :: proc(d: ^Data) {
+	held := d.held
+	d.held = {}
+	for h in held {
+		if h.job.kind != .None && h.job.auth == d.auth_gen {
+			push_job(d, h.job, h.priority)
+		}
+	}
 	kinds := d.retry
 	d.retry = {}
 	for kind in kinds {
@@ -589,6 +631,8 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 		}
 		view_add_rows(v, int(res.job.offset), res.rows, len(res.rows) < int(res.job.limit))
 		view_request_pages(d)
+	case .Stream, .Artwork:
+		playback_result(s, res)
 	case .Cover:
 		key := res.job.key
 		if failed || res.pixels == nil {
@@ -768,6 +812,9 @@ view_add_rows :: proc(v: ^Track_View, offset: int, rows: []Row, last: bool) {
 			duration = strings.clone(r.duration, a),
 			cover    = strings.clone(r.cover, a),
 			seconds  = r.seconds,
+			id       = r.id,
+			album_id = r.album_id,
+			track    = r.track,
 		}
 		v.loaded_rows += int(!v.loaded[offset + i])
 		v.loaded[offset + i] = true

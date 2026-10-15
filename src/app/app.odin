@@ -29,7 +29,7 @@ import "../ui"
 
 CLEAR_COLOR :: render.Color{0.10, 0.11, 0.13, 1}
 
-STATE_VERSION :: 9
+STATE_VERSION :: 10
 
 FRAME_HISTORY :: 120
 
@@ -70,6 +70,7 @@ State :: struct {
 	ui:           ui.State,
 	library:      Library,
 	data:         Data,
+	playback:     Playback,
 	scroll:       [2]f32, // the test screens' scroll offset
 	bench:        Bench,
 	slide_start:  f64,
@@ -131,6 +132,7 @@ app_reload :: proc "c" (m: ^platform.Memory, shell: ^platform.Shell) {
 	// The old dylib may have missed a release.
 	ui.cancel_pointer(&s.ui)
 	data_reload(s, shell)
+	playback_reload(s, shell)
 	fmt.eprintfln("app: reloaded at frame %d, clear colour %v", s.frame_count, CLEAR_COLOR)
 }
 
@@ -139,6 +141,7 @@ app_unload :: proc "c" (m: ^platform.Memory) {
 	s := (^State)(m.persistent)
 	context = app_context(s)
 	text.unload(&s.text)
+	playback_unload(s)
 	data_unload(s)
 	if s.profiling {
 		spall.buffer_flush(&s.spall_ctx, &s.spall_buf)
@@ -153,6 +156,7 @@ app_shutdown :: proc "c" (m: ^platform.Memory) {
 		spall.buffer_destroy(&s.spall_ctx, &s.spall_buf)
 		posix.close(posix.FD(s.spall_ctx.fd))
 	}
+	playback_shutdown(s)
 	data_shutdown(s)
 	text.destroy(&s.text, &s.renderer)
 	render.destroy(&s.renderer)
@@ -249,6 +253,7 @@ start :: proc(s: ^State, shell: ^platform.Shell) {
 	ui.init(&s.ui)
 	library_init(&s.library)
 	data_start(s, shell)
+	playback_start(s, shell)
 	// TIDALFAST_BENCH=1 scrolls the library's track table, =text the text
 	// test screen's list.
 	switch bench {
@@ -303,6 +308,7 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input) -> platform.Fra
 	text.begin_frame(&s.text, r)
 	ui.begin_frame(&s.ui, events, r, &s.text, w, h, input.time, ui.hardware_buttons())
 	data_update(s, input.time)
+	playback_update(s, events)
 
 	// Backtick toggles the frame-time overlay. Cmd-1, 2 and 3 switch between
 	// the library and the phase 2 and phase 1 test screens.

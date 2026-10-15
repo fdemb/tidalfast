@@ -20,6 +20,7 @@ TEXT :: render.Color{0xf2 / 255.0, 0xf4 / 255.0, 0xf6 / 255.0, 1}
 SECONDARY :: render.Color{0xa9 / 255.0, 0xb1 / 255.0, 0xbc / 255.0, 1}
 DIM :: render.Color{0x6e / 255.0, 0x77 / 255.0, 0x84 / 255.0, 1}
 ACCENT :: render.Color{0x1e / 255.0, 0xd7 / 255.0, 0x60 / 255.0, 1}
+PLAYBACK_ERROR :: render.Color{0xf0 / 255.0, 0x8a / 255.0, 0x6c / 255.0, 1}
 
 SIDEBAR_MIN :: 210
 SIDEBAR_MAX :: 600
@@ -36,8 +37,7 @@ Library :: struct {
 	drag_from_w:   f32, // sidebar width when the handle was pressed
 	playlist:      int,
 	selected:      int, // track row, -1 for none
-	playing:       int, // -1 for nothing
-	paused:        bool,
+	playing:       int, // the row playing in this list, -1 for none
 	volume:        f32,
 	menu_row:      int, // the row the context menu is for
 	drop_target:   int, // the playlist under a dragged row this frame, -1 for none
@@ -466,19 +466,25 @@ draw_player_bar :: proc(s: ^State, w: f32) {
 	side := clamp(w * 0.3, 200, 420)
 	ui.spacer(ui.px(16))
 
+	item := playback_item(s)
 	{
 		ui.row("now_playing", {}, ui.px(side), ui.fill())
 		title, artist := "Nothing playing", "Double-click a song to play it"
-		if row := view_row(s, lib.playing); row != nil {
-			title, artist = row.title, row.artist
-			cover_art(s, .Album, row.cover, u32(lib.playing) * 2654435761 >> 7, 56, ui.px(56))
+		if item != nil {
+			title, artist = item.title, item.artist
+			cover_art(s, .Album, item.cover, u32(s.playback.index) * 2654435761 >> 7, 56, ui.px(56))
 			ui.spacer(ui.px(12))
 		}
 		ui.column("", {}, ui.fill(), ui.fill())
 		ui.spacer(ui.fill())
 		ui.text_style(.Medium, 14, TEXT)
 		ui.label(title, ui.fill(), ui.px(20))
-		ui.text_style(.Regular, 12, SECONDARY)
+		// A track that couldn't play says why in place of the artist.
+		color := SECONDARY
+		if msg := small_str(&s.playback.message); msg != "" {
+			artist, color = msg, PLAYBACK_ERROR
+		}
+		ui.text_style(.Regular, 12, color)
 		ui.label(artist, ui.fill(), ui.px(18))
 		ui.spacer(ui.fill())
 	}
@@ -490,21 +496,21 @@ draw_player_bar :: proc(s: ^State, w: f32) {
 			ui.row("", {}, ui.fill(), ui.px(36))
 			ui.spacer(ui.fill())
 			prev := skip_button("prev", false)
-			if prev.clicked && lib.playing > 0 {
-				play(s, lib.playing - 1)
+			if prev.clicked {
+				playback_previous(s)
 			}
 			ui.tooltip(prev, "Previous")
 			ui.spacer(ui.px(16))
-			playing := lib.playing >= 0 && !lib.paused
+			playing := playback_playing(s)
 			sig := play_button(playing)
 			if sig.clicked {
-				toggle_play(s)
+				playback_toggle(s)
 			}
 			ui.tooltip(sig, "Pause" if playing else "Play")
 			ui.spacer(ui.px(16))
 			next := skip_button("next", true)
-			if next.clicked && lib.playing >= 0 {
-				play(s, min(lib.playing + 1, view_count(s) - 1))
+			if next.clicked {
+				playback_next(s)
 			}
 			ui.tooltip(next, "Next")
 			ui.spacer(ui.fill())
@@ -513,21 +519,16 @@ draw_player_bar :: proc(s: ^State, w: f32) {
 		{
 			ui.row("", {}, ui.fill(), ui.px(16))
 			ui.text_style(.Regular, 11, DIM)
-			total := "0:00"
-			if row := view_row(s, lib.playing); row != nil {
-				total = row.duration
-			}
-			at := ui.label("0:00", ui.px(44), ui.fill())
+			duration := playback_duration(s)
+			at := ui.label(clock(playback_position(s)), ui.px(44), ui.fill())
 			at.text_align = .Right
 			at.text_pad = 8
-			{
-				ui.column("", {}, ui.fill(), ui.fill())
-				ui.spacer(ui.px(6))
-				track := ui.box_make("", {.Draw_Background}, ui.fill(), ui.px(4))
-				track.background = SURFACE_ACTIVE
-				track.radius = 2
+			draw_progress(s, duration, item != nil)
+			left := "0:00"
+			if item != nil {
+				left = fmt.tprintf("-%s", clock(max(duration - playback_position(s), 0)))
 			}
-			end := ui.label(total, ui.px(44), ui.fill())
+			end := ui.label(left, ui.px(44), ui.fill())
 			end.text_pad = 8
 		}
 	}
@@ -540,6 +541,44 @@ draw_player_bar :: proc(s: ^State, w: f32) {
 		draw_volume(s)
 	}
 	ui.spacer(ui.px(16))
+}
+
+// clock formats seconds as m:ss, or h:mm:ss from an hour.
+clock :: proc(seconds: f64) -> string {
+	t := int(max(seconds, 0))
+	if t >= 3600 {
+		return fmt.tprintf("%d:%02d:%02d", t / 3600, t / 60 % 60, t % 60)
+	}
+	return fmt.tprintf("%d:%02d", t / 60, t % 60)
+}
+
+// draw_progress is the seek bar. Pressing or dragging shows that position
+// straight away; letting go seeks there.
+draw_progress :: proc(s: ^State, duration: f64, active: bool) {
+	pb := &s.playback
+	slider := ui.column("progress", {.Clickable} if active else {}, ui.fill(), ui.fill())
+	sig := ui.signal(slider)
+	if active && duration > 0 && slider.rect.w > 0 && (sig.held || sig.released) {
+		frac := clamp((sig.mouse.x - slider.rect.x) / slider.rect.w, 0, 1)
+		pb.drag_seconds = f64(frac) * duration
+		pb.dragging = !sig.released
+		if sig.released {
+			playback_seek(s, pb.drag_seconds)
+		}
+	} else if !sig.held {
+		pb.dragging = false
+	}
+	frac := f32(0)
+	if duration > 0 {
+		frac = f32(clamp(playback_position(s) / duration, 0, 1))
+	}
+	ui.spacer(ui.px(6))
+	track := ui.row("", {.Draw_Background}, ui.fill(), ui.px(4))
+	track.background = SURFACE_ACTIVE
+	track.radius = 2
+	level := ui.box_make("", {.Draw_Background}, ui.pct(frac, 1), ui.fill())
+	level.background = mix(SECONDARY, ACCENT, max(slider.hot_t, slider.active_t))
+	level.radius = 2
 }
 
 // The transport glyphs are Inter's triangles and plain rects: the media
@@ -611,6 +650,7 @@ draw_volume :: proc(s: ^State) {
 	sig := ui.signal(slider)
 	if (sig.held || sig.released) && slider.rect.w > 0 {
 		lib.volume = clamp((sig.mouse.x - slider.rect.x) / slider.rect.w, 0, 1)
+		playback_set_volume(s, lib.volume)
 	}
 	ui.spacer(ui.fill())
 	{
@@ -628,18 +668,8 @@ play :: proc(s: ^State, i: int) {
 	if view_row(s, i) == nil {
 		return
 	}
-	s.library.playing = i
-	s.library.paused = false
+	playback_play_row(s, i)
 	set_status(s, .Playing, i)
-}
-
-toggle_play :: proc(s: ^State) {
-	lib := &s.library
-	if lib.playing < 0 {
-		play(s, lib.selected if lib.selected >= 0 else 0)
-		return
-	}
-	lib.paused = !lib.paused
 }
 
 set_status :: proc(s: ^State, status: Status, track: int, list := -1) {

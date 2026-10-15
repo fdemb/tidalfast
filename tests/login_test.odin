@@ -370,11 +370,11 @@ refused_pushes_are_retried :: proc(t: ^testing.T) {
 	app.view_open(d, .Playlist, "pl", "pl", "", 300)
 	testing.expect(t, !d.sidebar.loading)
 	testing.expect_value(t, d.view.in_flight, 0)
-	testing.expect_value(t, d.retry, bit_set[app.Job_Kind; u8]{.Playlists, .Tracks})
+	testing.expect_value(t, d.retry, bit_set[app.Job_Kind; u16]{.Playlists, .Tracks})
 
 	// Still full: nothing changes and the retries stay wanted.
 	app.data_retry(d)
-	testing.expect_value(t, d.retry, bit_set[app.Job_Kind; u8]{.Playlists, .Tracks})
+	testing.expect_value(t, d.retry, bit_set[app.Job_Kind; u16]{.Playlists, .Tracks})
 
 	for _ in 0 ..< 3 {
 		jobs.try_pop(&d.queue)
@@ -382,7 +382,7 @@ refused_pushes_are_retried :: proc(t: ^testing.T) {
 	app.data_retry(d)
 	testing.expect(t, d.sidebar.loading)
 	testing.expect_value(t, d.view.in_flight, 2)
-	testing.expect_value(t, d.retry, bit_set[app.Job_Kind; u8]{})
+	testing.expect_value(t, d.retry, bit_set[app.Job_Kind; u16]{})
 }
 
 @(private = "file")
