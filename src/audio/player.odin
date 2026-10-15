@@ -129,6 +129,8 @@ Status :: struct {
 	underruns:   u64,
 	bits:        int, // the audible source's bit depth, 0 if unknown
 	device:      Device_Info,
+	change:      Device_Change, // what bit-perfect output has changed on a device, rate 0 for nothing
+	losses:      u32, // times the output device went away or moved and the output reopened
 }
 
 // Device_Info describes the open output.
@@ -138,6 +140,24 @@ Device_Info :: struct {
 	rate:        int, // the device's rate, 0 when closed
 	bits:        int, // the physical format's bits per sample
 	float:       bool, // the physical format is floating point
+	// Why bit-perfect output was asked for and isn't in use.
+	reason:      [64]u8,
+	reason_len:  int,
+}
+
+device_reason :: proc(d: ^Device_Info) -> string {
+	return string(d.reason[:d.reason_len])
+}
+
+// Device_Watch is where the CoreAudio listeners leave their news for the
+// decode thread. A listener may still be running while it's removed, so
+// the watch is never freed, and player goes to nil before removal.
+@(private)
+Device_Watch :: struct {
+	player:          ^Player, // atomic
+	device_changed:  bool, // the HAL device's alive state changed (atomic)
+	default_changed: bool, // the system's default output changed (atomic)
+	lost_for_test:   bool, // simulate_device_loss (atomic)
 }
 
 Error_Info :: struct {
@@ -229,6 +249,8 @@ Player :: struct {
 	output:          Output,
 	hal:             Hal,
 	hal_scratch:     []f32, // for devices whose buffers don't match the ring's layout
+	watch:           ^Device_Watch, // heap, never freed
+	alive_device:    Audio_Object_ID, // the device whose alive state is listened to, 0 for none
 	using_hal:       bool, // the open device is hal, not miniaudio's
 	device_open:     bool,
 	device_running:  bool,
@@ -293,6 +315,11 @@ create :: proc(wake_ui: proc "c" (), volume: f32, capture_path := "", window := 
 	p.scratch = make([]f32, CHUNK * 8, heap)
 	p.hal_scratch = make([]f32, HAL_MAX_FRAMES * 8, heap)
 	p.device = new(ma.device, heap)
+	p.watch = new(Device_Watch, heap)
+	p.watch.player = p
+	if !null_output {
+		listen(SYSTEM_OBJECT, PROP_DEFAULT_OUTPUT, device_listener, p.watch)
+	}
 	if capture_path != "" {
 		p.capture_fd = posix.open(strings.clone_to_cstring(capture_path, context.temp_allocator), {.WRONLY, .CREAT, .TRUNC}, {.IRUSR, .IWUSR, .IRGRP, .IROTH})
 		if p.capture_fd >= 0 {
@@ -324,6 +351,10 @@ destroy :: proc(p: ^Player) {
 	sync.atomic_store(&p.cmd_pending, true)
 	sync.atomic_sema_post(&p.sema)
 	posix.pthread_join(p.thread)
+	sync.atomic_store(&p.watch.player, nil)
+	if !p.null_output {
+		unlisten(SYSTEM_OBJECT, PROP_DEFAULT_OUTPUT, device_listener, p.watch)
+	}
 	heap := runtime.heap_allocator()
 	for &sl in p.slots {
 		slot_close(&sl)
@@ -404,6 +435,15 @@ set_output :: proc(p: ^Player, o: Output) {
 	p.cmd.output = o
 	sync.unlock(&p.cmd_mutex)
 	post(p)
+}
+
+when ODIN_TEST {
+	// simulate_device_loss makes the decode thread act as if the output
+	// device had gone away, as the alive listener would.
+	simulate_device_loss :: proc(p: ^Player) {
+		sync.atomic_store(&p.watch.lost_for_test, true)
+		sync.atomic_sema_post(&p.sema)
+	}
 }
 
 // set_volume takes the slider's 0 to 1. The callback ramps to it over one
@@ -524,6 +564,7 @@ decode_main :: proc "c" (arg: rawptr) -> rawptr {
 		if !run_commands(p, true) {
 			break
 		}
+		check_device(p)
 		busy := step(p)
 		after_step(p)
 		free_all(context.temp_allocator)
@@ -727,6 +768,91 @@ do_set_output :: proc(p: ^Player, o: Output) {
 		do_seek(p, m.serial, sample, m.seek_id, 0)
 	}
 	p.wake_ui()
+}
+
+// device_listener is the CoreAudio listener for the default output and the
+// HAL device's alive state. It only notes what changed and wakes the
+// decode thread, which runs check_device.
+@(private = "file")
+device_listener :: proc "c" (id: Audio_Object_ID, count: u32, addresses: [^]Property_Address, client: rawptr) -> OS_Status {
+	w := (^Device_Watch)(client)
+	for a in addresses[:count] {
+		if a.selector == PROP_DEFAULT_OUTPUT {
+			sync.atomic_store(&w.default_changed, true)
+		} else {
+			sync.atomic_store(&w.device_changed, true)
+		}
+	}
+	if pl := sync.atomic_load(&w.player); pl != nil {
+		sync.atomic_sema_post(&pl.sema)
+	}
+	return 0
+}
+
+// check_device acts on what the listeners saw. If the HAL device went
+// away, its output closes with nothing restored: there's nothing left to
+// restore. If the system's default output moved to another device while
+// this one isn't hogged, the device is put back and let go. Hogging a
+// device takes it out of the system's choices, so the default moving then
+// is no reason to leave. miniaudio follows the default output by itself. Either way the track plays on from the audible position on the
+// default output as it is now; if that can't open, the track fails and the
+// player bar says so.
+@(private = "file")
+check_device :: proc(p: ^Player) {
+	w := p.watch
+	changed := sync.atomic_exchange(&w.device_changed, false)
+	moved := sync.atomic_exchange(&w.default_changed, false)
+	lost := sync.atomic_exchange(&w.lost_for_test, false)
+	if !p.device_open {
+		return
+	}
+	if p.using_hal {
+		lost = lost || (changed && !device_alive(p.hal.device))
+		moved = moved && !p.hal.hogged && default_output_device() != p.hal.device
+	} else {
+		moved = false
+	}
+	if !lost && !moved {
+		return
+	}
+	m, sample := published(p)
+	if lost {
+		fmt.eprintln("audio: the output device went away")
+		device_close(p)
+		p.hal = {}
+	} else {
+		fmt.eprintln("audio: the default output changed, moving to it")
+		device_close(p, restore = true)
+	}
+	update_change(p)
+	sync.lock(&p.status_mutex)
+	p.st.losses += 1
+	sync.unlock(&p.status_mutex)
+	if m.serial != 0 && !m.end {
+		do_seek(p, m.serial, sample, m.seek_id, 0)
+	}
+	p.wake_ui()
+}
+
+// update_change publishes what bit-perfect output has changed on the
+// device, for the app to keep on disk.
+@(private = "file")
+update_change :: proc(p: ^Player) {
+	c: Device_Change
+	h := &p.hal
+	if h.device != 0 && h.has_orig && h.rate != 0 {
+		c.uid_len = copy(c.uid[:], device_uid(h.device))
+		c.orig_rate = h.orig_rate
+		c.orig_format = h.orig_format
+		c.rate = f64(h.rate)
+	}
+	sync.lock(&p.status_mutex)
+	changed := c != p.st.change
+	p.st.change = c
+	sync.unlock(&p.status_mutex)
+	if changed {
+		p.wake_ui()
+	}
 }
 
 @(private = "file")
@@ -1187,17 +1313,29 @@ demux_read :: proc(p: ^Player, sl: ^Slot, dst: []u8) -> (n: int, res: Read_Resul
 				return n, rr
 			}
 			assert(got == int(size))
-			frag, fst := parse_mp4_moof(dm.box[:], &dm.init, &dm.samples)
+			// The samples must be in the mdat right after the moof, which
+			// bounds how many there can be.
+			mdat, mr := read_box_header(p, sl, dm.pos + size)
+			if mr != .Ok {
+				if mr == .Eof {
+					slot_fail(p, sl, 0, "a moof box without its mdat")
+					return n, .Failed
+				}
+				return n, mr
+			}
+			if mdat.kind != mp4_fourcc("mdat") || mdat.size < 0 || mdat.size > max(i64) / 2 - (dm.pos + size) {
+				slot_fail(p, sl, 0, "a moof box isn't followed by an mdat of known size")
+				return n, .Failed
+			}
+			moof_at := dm.pos - stream_segment_start(st, dm.pos)
+			frag, fst := parse_mp4_moof(dm.box[:], &dm.init, &dm.samples, size + i64(mdat.header), size + mdat.size, moof_at)
 			if fst != .Ok {
-				slot_fail(p, sl, 0, "a moof box is broken")
+				slot_fail(p, sl, 0, fmt.tprintf("a moof box is broken: %s", frag.reason))
 				return n, .Failed
 			}
 			dm.moof = dm.pos
 			dm.pos += size
-			dm.covered = dm.pos
-			for smp in dm.samples {
-				dm.covered = max(dm.covered, dm.moof + smp.offset + i64(smp.size))
-			}
+			dm.covered = dm.pos + mdat.size
 			if !dm.synced && frag.has_base_time && dm.init.timescale > 0 {
 				// The fragment says which sample it starts at.
 				first := i64(frag.base_time) * i64(sl.rate) / i64(dm.init.timescale)
@@ -1224,6 +1362,10 @@ demux_read :: proc(p: ^Player, sl: ^Slot, dst: []u8) -> (n: int, res: Read_Resul
 		case:
 			if size < 0 {
 				return n, .Eof
+			}
+			if size > max(i64) / 2 - dm.pos {
+				slot_fail(p, sl, 0, "an MP4 box is too big")
+				return n, .Failed
 			}
 			dm.pos += size
 		}
@@ -1537,7 +1679,11 @@ device_open :: proc(p: ^Player, rate, channels, bits: int) -> bool {
 		bits = 32,
 		float = true,
 	}
-	if p.output.bit_perfect && !p.null_output && hal_open(p, rate, channels, bits) {
+	hal_ok, reason := false, ""
+	if p.output.bit_perfect && !p.null_output {
+		hal_ok, reason = hal_open(p, rate, channels, bits)
+	}
+	if hal_ok {
 		info = {
 			bit_perfect = true,
 			hogged      = p.hal.hogged,
@@ -1546,6 +1692,7 @@ device_open :: proc(p: ^Player, rate, channels, bits: int) -> bool {
 			float       = p.hal.format.format_flags & FLAG_FLOAT != 0,
 		}
 	} else {
+		info.reason_len = copy(info.reason[:], reason)
 		cfg := ma.device_config_init(.playback)
 		cfg.playback.format = .f32
 		cfg.playback.channels = u32(channels)
@@ -1579,34 +1726,36 @@ device_open :: proc(p: ^Player, rate, channels, bits: int) -> bool {
 	sync.lock(&p.status_mutex)
 	p.st.device = info
 	sync.unlock(&p.status_mutex)
+	update_change(p)
 	capture_begin(p, rate, channels)
 	return true
 }
 
 // hal_open readies the default output device for bit-perfect playback. On
-// failure the device is put back as it was, and miniaudio plays instead.
+// failure the device is put back as it was, and miniaudio plays instead;
+// reason says why.
 @(private = "file")
-hal_open :: proc(p: ^Player, rate, channels, bits: int) -> bool {
+hal_open :: proc(p: ^Player, rate, channels, bits: int) -> (ok: bool, reason: string) {
 	// The device the last track played on, until the output is restored.
 	// While we hog it, it is no longer the system's default output, so
 	// asking for the default again would find another device.
 	dev := p.hal.device if p.hal.device != 0 else default_output_device()
-	if !hal_configure(&p.hal, dev, rate, channels, bits, p.output.hog) {
+	// The IOProc writes the virtual format, 32-bit float, and the HAL
+	// converts it to the physical one: exact for an integer format at least
+	// as deep as the source, or 32-bit float for up to 24 bits.
+	ok, reason = hal_configure(&p.hal, dev, rate, channels, bits, p.output.hog)
+	if !ok {
 		hal_close(&p.hal, restore = true)
-		fmt.eprintfln("audio: no bit-perfect output at %d Hz; the system mixer converts it", rate)
-		return false
+		fmt.eprintfln("audio: no bit-perfect output at %d Hz (%s); the system mixer converts it", rate, reason)
+		return
 	}
-	// The IOProc sees the virtual format. The HAL converts it to the
-	// physical one, which is exact for 32-bit float holding 24-bit values.
-	vf, ok := stream_virtual_format(p.hal.stream)
-	if !ok || vf.format_flags & FLAG_FLOAT == 0 || vf.bits != 32 {
-		hal_close(&p.hal, restore = true)
-		fmt.eprintln("audio: the device doesn't take 32-bit float; the system mixer converts it")
-		return false
+	p.hal.channel_map = channel_map_make(channels, device_stereo_channels(dev))
+	if listen(dev, PROP_ALIVE, device_listener, p.watch) {
+		p.alive_device = dev
 	}
 	p.using_hal = true
 	fmt.eprintfln("audio: bit-perfect output on %s: %s%s, set in %.1f ms", device_name(dev), format_name(p.hal.format), ", hog mode" if p.hal.hogged else "", p.hal.settle_ms)
-	return true
+	return true, ""
 }
 
 // device_close stops and closes the device. With restore, a device that
@@ -1614,6 +1763,10 @@ hal_open :: proc(p: ^Player, rate, channels, bits: int) -> bool {
 // without it they stay for the next track.
 @(private = "file")
 device_close :: proc(p: ^Player, restore := false) {
+	if p.alive_device != 0 {
+		unlisten(p.alive_device, PROP_ALIVE, device_listener, p.watch)
+		p.alive_device = 0
+	}
 	if p.device_open {
 		if p.using_hal {
 			hal_close(&p.hal, restore)
@@ -1631,6 +1784,7 @@ device_close :: proc(p: ^Player, restore := false) {
 	}
 	if restore {
 		hal_close(&p.hal, true)
+		update_change(p)
 	}
 }
 
@@ -1675,42 +1829,12 @@ audio_callback :: proc "c" (device: ^ma.device, output, input: rawptr, frame_cou
 }
 
 // hal_io_proc is the HAL's IOProc: the ring's frames as they are, into
-// the device's buffers. Usually that's one interleaved buffer with the
-// ring's channels, written in place. Otherwise the frames go through
-// hal_scratch, channel by channel, with silence on channels the source
-// doesn't have. It keeps the callback's rules: no locks, allocation or
-// system calls.
+// the device's buffers (hal_fill). It keeps the callback's rules: no locks,
+// allocation or system calls.
 @(private = "file")
 hal_io_proc :: proc "c" (device: Audio_Object_ID, now: rawptr, input: ^Audio_Buffer_List, input_time: rawptr, output: ^Audio_Buffer_List, output_time: rawptr, client: rawptr) -> OS_Status {
 	p := (^Player)(client)
-	if output == nil || output.count == 0 || output.buffers[0].channels == 0 {
-		return 0
-	}
-	bufs := ([^]Audio_Buffer)(&output.buffers[0])[:output.count]
-	ch := u64(p.pcm.channels)
-	frames := u64(bufs[0].size) / (u64(bufs[0].channels) * size_of(f32))
-	direct := len(bufs) == 1 && u64(bufs[0].channels) == ch
-	out := ([^]f32)(bufs[0].data) if direct else raw_data(p.hal_scratch)
-	if !direct {
-		frames = min(frames, u64(len(p.hal_scratch)) / ch)
-	}
-	n := ring_read(&p.pcm, out, frames, 1, 1)
-	for i in n * ch ..< frames * ch {
-		out[i] = 0
-	}
-	if !direct {
-		c := u64(0) // the source channel of the buffer's first channel
-		for b in bufs {
-			dst := ([^]f32)(b.data)
-			bch := u64(b.channels)
-			for i in 0 ..< frames {
-				for k in 0 ..< bch {
-					dst[i * bch + k] = out[i * ch + c + k] if c + k < ch else 0
-				}
-			}
-			c += bch
-		}
-	}
+	frames, n, out := hal_fill(output, &p.pcm, p.hal_scratch, &p.hal.channel_map)
 	after_render(p, out, frames, n)
 	return 0
 }

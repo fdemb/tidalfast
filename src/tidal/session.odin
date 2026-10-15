@@ -56,6 +56,10 @@ Session :: struct {
 	// once it moves on. Written under `mutex`, read atomically.
 	auth_epoch:           u64,
 
+	// The login attempt under way, see session_set_login_attempt. Under
+	// `mutex`.
+	login_attempt:        u64,
+
 	// Called after a login or token refresh changed the tokens, on the
 	// thread that changed them. Refreshes run one at a time, so calls never
 	// overlap. Set it before the session is shared between threads.
@@ -182,6 +186,20 @@ session_clear_auth :: proc(s: ^Session) {
 // session_epoch returns the session's auth epoch, see session_clear_auth.
 session_epoch :: proc(s: ^Session) -> u64 {
 	return sync.atomic_load(&s.auth_epoch)
+}
+
+// session_set_login_attempt names the login attempt now under way. A
+// login given another attempt number drops its tokens before they reach
+// the session, so a device-code poll answered after the user moved on to
+// the PKCE login can't replace that login.
+session_set_login_attempt :: proc(s: ^Session, attempt: u64) {
+	sync.guard(&s.mutex)
+	s.login_attempt = attempt
+}
+
+session_login_attempt :: proc(s: ^Session) -> u64 {
+	sync.guard(&s.mutex)
+	return s.login_attempt
 }
 
 // session_abort makes requests in flight, and any made while it's on, fail

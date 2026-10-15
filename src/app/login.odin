@@ -149,6 +149,22 @@ pkce_card :: proc(s: ^State) {
 		line("Logging you in…", .Regular, 14, 20, SECONDARY)
 		return
 	}
+	if pkce_has_tokens(d) {
+		// The code is spent; the tokens it got finish the login.
+		line("TIDAL accepted the login, but your account didn't load.", .Regular, 14, 20, SECONDARY)
+		ui.spacer(ui.px(18))
+		{
+			ui.row("", {}, ui.fill(), ui.px(40))
+			ui.spacer(ui.fill())
+			if pill_button("pkce_retry", "Try again", 160, ACCENT, PANEL) {
+				pkce_resume(d)
+			}
+			ui.spacer(ui.fill())
+		}
+		ui.spacer(ui.px(12))
+		line(small_str(&l.pkce_note), .Regular, 12, 18, PLAYBACK_ERROR)
+		return
+	}
 	line("Log in on the TIDAL page in your browser.", .Regular, 14, 20, SECONDARY)
 	line("It ends on a page that says Oops.", .Regular, 14, 20, SECONDARY)
 	line("Copy that page's address, then come back here.", .Regular, 14, 20, SECONDARY)
@@ -179,6 +195,7 @@ pkce_card :: proc(s: ^State) {
 		if pill_button("back", "Use a code instead", 180, SURFACE_ACTIVE, TEXT) {
 			l.pkce = .Off
 			l.pkce_note = {}
+			login_next_attempt(d)
 			sync.atomic_store(&d.device_cancel, false)
 			if l.link.device_code.len > 0 {
 				request_login_poll(d)
@@ -202,6 +219,7 @@ pkce_begin :: proc(d: ^Data) {
 		d.pkce_key = small(key)
 	}
 	tidal.session_set_pkce_state(d.session, small_str(&d.pkce_verifier), small_str(&d.pkce_key))
+	login_next_attempt(d)
 	sync.atomic_store(&d.device_cancel, true)
 	l.pkce = .Paste
 	l.pkce_note = {}
@@ -229,7 +247,26 @@ pkce_submit :: proc(d: ^Data, text: string) {
 	sync.atomic_store(&d.device_cancel, true)
 	l.pkce = .Exchanging
 	l.pkce_note = {}
-	if !push_job(d, {kind = .Login_Pkce}) {
+	if !push_job(d, {kind = .Login_Pkce, view = d.login_attempt}) {
+		l.pkce = .Paste
+		l.pkce_note = small("Busy. Try again.")
+	}
+}
+
+// pkce_has_tokens says whether a hi-res login got its tokens but hasn't
+// loaded the account yet.
+pkce_has_tokens :: proc(d: ^Data) -> bool {
+	return login_has_tokens(d) && tidal.session_is_pkce(d.session)
+}
+
+// pkce_resume finishes a hi-res login with the tokens it already has. The
+// Login_Pkce job sees them and loads the account instead of trading the
+// spent code again.
+pkce_resume :: proc(d: ^Data) {
+	l := &d.login
+	l.pkce = .Exchanging
+	l.pkce_note = {}
+	if !push_job(d, {kind = .Login_Pkce, view = d.login_attempt}) {
 		l.pkce = .Paste
 		l.pkce_note = small("Busy. Try again.")
 	}
@@ -245,9 +282,12 @@ pkce_done :: proc(d: ^Data, res: ^Result, failed: bool) {
 		request_playlists(d)
 		return
 	}
-	// The next try opens the login page again, with a new verifier.
 	l.pkce = .Paste
 	l.pkce_note = res.message
+	if pkce_has_tokens(d) {
+		return // "Try again" finishes with the tokens
+	}
+	// The next try opens the login page again, with a new verifier.
 	d.pkce_verifier, d.pkce_key = {}, {}
 }
 

@@ -129,13 +129,17 @@ finish_login :: proc(s: ^Session) -> (err: Error) {
 }
 
 // Stores the tokens of an OAuth token response, then loads the session.
-// Nothing is stored if the login was cleared after epoch.
+// Nothing is stored if the login was cleared after epoch, or if attempt is
+// given and another login attempt has started since.
 @(private = "file")
-process_auth_token :: proc(s: ^Session, obj: json.Object, is_pkce: bool, epoch: u64) -> Error {
+process_auth_token :: proc(s: ^Session, obj: json.Object, is_pkce: bool, epoch: u64, attempt: Maybe(u64)) -> Error {
 	{
 		sync.guard(&s.mutex)
 		if s.auth_epoch != epoch {
 			return make_error(.Cancelled, "The login was cleared during the login")
+		}
+		if a, ok := attempt.?; ok && a != s.login_attempt {
+			return make_error(.Cancelled, "Another login replaced this one")
 		}
 		set_owned(s, &s.access_token, jstr(obj, "access_token"))
 		s.expiry_time = time.time_add(time.now(), time.Duration(ji64(obj, "expires_in")) * time.Second)
@@ -266,6 +270,9 @@ SLOW_DOWN_STEP :: 5
 // login_device_wait polls TIDAL until the user approves the device code,
 // then logs in. With until_expiry = false it checks once. Blocks; run it on
 // a worker thread in a UI. Setting cancel^ to true (atomically) stops it.
+// With attempt, it stops once the session's login attempt is another (see
+// session_set_login_attempt), and tokens that arrive after that are
+// dropped.
 //
 // It waits link.interval seconds between polls and adds SLOW_DOWN_STEP to
 // link.interval when TIDAL asks it to slow down, so a caller that polls
@@ -273,7 +280,7 @@ SLOW_DOWN_STEP :: 5
 // code expired, .Authentication if the user denied it, a rate limit as
 // .Too_Many_Requests or .Abuse_Detected (with the backoff started), and
 // transport errors as they come.
-login_device_wait :: proc(s: ^Session, link: ^Link_Login, until_expiry := true, cancel: ^bool = nil) -> (err: Error) {
+login_device_wait :: proc(s: ^Session, link: ^Link_Login, until_expiry := true, cancel: ^bool = nil, attempt: Maybe(u64) = nil) -> (err: Error) {
 	scratch_begin(context.allocator)
 	epoch := session_epoch(s)
 	expiry := link.expires_in if until_expiry else 1
@@ -292,7 +299,7 @@ login_device_wait :: proc(s: ^Session, link: ^Link_Login, until_expiry := true, 
 	for expiry > 0 {
 		resp, obj := post_form(s, s.config.api_oauth2_token, form, epoch, context.temp_allocator) or_return
 		if http_ok(resp) && obj != nil {
-			return process_auth_token(s, obj, false, epoch)
+			return process_auth_token(s, obj, false, epoch, attempt)
 		}
 		if is_rate_limit(resp) {
 			return http_error(resp)
@@ -314,7 +321,11 @@ login_device_wait :: proc(s: ^Session, link: ^Link_Login, until_expiry := true, 
 		}
 		deadline := time.tick_add(time.tick_now(), time.Duration(link.interval * f64(time.Second)))
 		for time.tick_diff(time.tick_now(), deadline) > 0 {
-			if (cancel != nil && sync.atomic_load(cancel)) || sync.atomic_load(&s.abort) || session_epoch(s) != epoch {
+			superseded := false
+			if a, ok := attempt.?; ok {
+				superseded = a != session_login_attempt(s)
+			}
+			if (cancel != nil && sync.atomic_load(cancel)) || sync.atomic_load(&s.abort) || session_epoch(s) != epoch || superseded {
 				return make_error(.Cancelled, "Login cancelled")
 			}
 			time.sleep(100 * time.Millisecond)
@@ -352,8 +363,9 @@ pkce_login_url :: proc(s: ^Session, allocator := context.allocator) -> string {
 }
 
 // login_pkce_complete finishes a PKCE login with the URL of the "Oops" page
-// the browser was redirected to after login.
-login_pkce_complete :: proc(s: ^Session, url_redirect: string) -> (err: Error) {
+// the browser was redirected to after login. With attempt, the tokens are
+// dropped if another login attempt started meanwhile.
+login_pkce_complete :: proc(s: ^Session, url_redirect: string, attempt: Maybe(u64) = nil) -> (err: Error) {
 	scratch_begin(context.allocator)
 	// w_usr=WRITE_USR, r_usr=READ_USR_DATA, w_sub=WRITE_SUBSCRIPTION
 	SCOPE_DEFAULT :: "r_usr+w_usr+w_sub"
@@ -383,7 +395,7 @@ login_pkce_complete :: proc(s: ^Session, url_redirect: string) -> (err: Error) {
 	if obj == nil {
 		return make_error(.Authentication, "Wrong one-time authorization code", resp.status)
 	}
-	return process_auth_token(s, obj, true, epoch)
+	return process_auth_token(s, obj, true, epoch, attempt)
 }
 
 // pkce_redirect_code takes the authorization code out of the address TIDAL

@@ -118,8 +118,15 @@ playback_start :: proc(s: ^State, shell: ^platform.Shell) {
 		s.library.volume = clamp(v, 0, 1)
 	}
 	pb.settings_path = settings_default_path(runtime.heap_allocator())
-	s.data.settings_path = pb.settings_path
+	s.data.settings_path = strings.clone(pb.settings_path, runtime.heap_allocator())
 	pb.settings, _ = settings_load(pb.settings_path)
+	// The app died with a device switched to a track's rate. Put it back
+	// before anything plays.
+	if pb.settings.device.rate != 0 {
+		audio.device_change_undo(&pb.settings.device)
+		pb.settings.device = {}
+		settings_queue(&s.data, pb.settings)
+	}
 	pb.player = audio.create(shell.request_redraw, s.library.volume, small_str(&pb.capture), pb.window, pb.null_output, output_of(pb.settings))
 	pb.volume_sent = s.library.volume
 }
@@ -152,6 +159,11 @@ playback_shutdown :: proc(s: ^State) {
 	pb := &s.playback
 	audio.destroy(pb.player)
 	pb.player = nil
+	// destroy put the device back.
+	if pb.settings.device.rate != 0 {
+		pb.settings.device = {}
+		settings_queue(&s.data, pb.settings, now = true)
+	}
 	if pb.set_now_playing != nil {
 		none: platform.Now_Playing
 		pb.set_now_playing(&none)
@@ -166,7 +178,6 @@ playback_shutdown :: proc(s: ^State) {
 	artwork_free(&pb.next_art)
 	delete(pb.settings_path, runtime.heap_allocator())
 	pb.settings_path = ""
-	s.data.settings_path = ""
 }
 
 @(private = "file")
@@ -603,6 +614,12 @@ playback_update :: proc(s: ^State, events: []platform.Event) {
 
 	pb.status = audio.status(pb.player)
 	st := &pb.status
+	// Keep what bit-perfect output changed on the device on disk while it
+	// lasts, so a start after a crash can put it back.
+	if st.change != pb.settings.device {
+		pb.settings.device = st.change
+		settings_queue(&s.data, pb.settings)
+	}
 	if pb.seek_id != 0 && st.serial == pb.cur.serial && st.seek_id >= pb.seek_id {
 		pb.seek_id = 0
 	}

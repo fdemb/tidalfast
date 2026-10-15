@@ -651,13 +651,19 @@ int main(int argc, const char *argv[]) {
     App_Delegate *delegate = [App_Delegate new];
     app.delegate = delegate;
 
-    // Quit cleanly on SIGTERM, so `kill` still runs the app's shutdown.
-    signal(SIGTERM, SIG_IGN);
-    dispatch_source_t sigterm = dispatch_source_create(DISPATCH_SOURCE_TYPE_SIGNAL, SIGTERM, 0, dispatch_get_main_queue());
-    dispatch_source_set_event_handler(sigterm, ^{
-      [NSApp terminate:nil];
-    });
-    dispatch_resume(sigterm);
+    // Quit cleanly on SIGTERM, SIGINT (Ctrl-C) and SIGHUP (the terminal
+    // closing), so they still run the app's shutdown, which puts back an
+    // audio device that bit-perfect output changed.
+    static dispatch_source_t quit_signals[3];
+    int signals[3] = {SIGTERM, SIGINT, SIGHUP};
+    for (int i = 0; i < 3; i++) {
+      signal(signals[i], SIG_IGN);
+      quit_signals[i] = dispatch_source_create(DISPATCH_SOURCE_TYPE_SIGNAL, signals[i], 0, dispatch_get_main_queue());
+      dispatch_source_set_event_handler(quit_signals[i], ^{
+        [NSApp terminate:nil];
+      });
+      dispatch_resume(quit_signals[i]);
+    }
 
     [app run];
   }

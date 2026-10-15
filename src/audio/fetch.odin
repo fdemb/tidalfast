@@ -44,6 +44,7 @@ Stream :: struct {
 	seg_urls:    []cstring, // heap, owned
 	seg_next:    int, // the segment being fetched
 	seg_base:    i64, // the offset its first byte lands at
+	seg_starts:  []i64, // each segment's first offset once known, -1 before; heap
 	failed:      bool, // gave up after FETCH_RETRIES
 	http_status: int, // of the last failed response, 0 for transport errors
 	error:       [96]u8,
@@ -91,8 +92,13 @@ stream_open_segments :: proc(st: ^Stream, urls: []string) {
 	stream_clear_locked(st)
 	heap := runtime.heap_allocator()
 	st.seg_urls = make([]cstring, len(urls), heap)
+	st.seg_starts = make([]i64, len(urls), heap)
 	for u, i in urls {
 		st.seg_urls[i] = strings.clone_to_cstring(u, heap)
+		st.seg_starts[i] = -1
+	}
+	if len(urls) > 0 {
+		st.seg_starts[0] = 0
 	}
 	st.dash = true
 	st.active = true
@@ -106,6 +112,12 @@ stream_restart_segment :: proc(st: ^Stream, index: int) {
 	sync.guard(&st.mutex)
 	st.seg_next = clamp(index, 0, len(st.seg_urls))
 	st.seg_base = 0
+	for &v in st.seg_starts {
+		v = -1
+	}
+	if st.seg_next < len(st.seg_starts) {
+		st.seg_starts[st.seg_next] = 0
+	}
 	st.win_start, st.win_end, st.read_pos = 0, 0, 0
 	st.length = -1
 	if st.seg_next == len(st.seg_urls) {
@@ -133,9 +145,11 @@ stream_clear_locked :: proc(st: ^Stream) {
 		delete(u, heap)
 	}
 	delete(st.seg_urls, heap)
+	delete(st.seg_starts, heap)
 	st.url = nil
 	st.head = nil
 	st.seg_urls = nil
+	st.seg_starts = nil
 	st.dash = false
 	st.seg_next, st.seg_base = 0, 0
 	st.has_header = false
@@ -220,6 +234,20 @@ stream_read :: proc(st: ^Stream, offset: i64, dst: []u8, interrupt: proc(data: r
 		}
 		sync.atomic_sema_wait_with_timeout(st.wake, 100 * time.Millisecond)
 	}
+}
+
+// stream_segment_start is the offset where the DASH segment holding
+// offset starts, 0 if that isn't known. An explicit base_data_offset in a
+// moof counts from there.
+stream_segment_start :: proc(st: ^Stream, offset: i64) -> i64 {
+	sync.guard(&st.mutex)
+	start := i64(0)
+	for v in st.seg_starts {
+		if v >= 0 && v <= offset {
+			start = v
+		}
+	}
+	return start
 }
 
 // stream_done says whether the whole file has arrived.
@@ -311,6 +339,9 @@ fetch_main :: proc "c" (arg: rawptr) -> rawptr {
 			failures = 0
 			st.seg_next += 1
 			st.seg_base = st.win_end
+			if st.seg_next < len(st.seg_starts) {
+				st.seg_starts[st.seg_next] = st.win_end
+			}
 			if st.seg_next == len(st.seg_urls) {
 				st.length = st.win_end
 				sync.atomic_sema_post(st.wake)
