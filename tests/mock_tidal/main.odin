@@ -5,7 +5,8 @@
 //
 // It serves the device-code login (approved a few seconds after the code is
 // first polled), token refresh with rotated refresh tokens, the session and
-// user, liked tracks, a list of playlists with one long one, their tracks,
+// user, 1433 liked tracks (100 a page at most, three of them unavailable
+// and left out of their pages as TIDAL does), a list of playlists with one long one, their tracks,
 // generated JPEG covers at any size under /images, and playback: LOSSLESS
 // playbackinfopostpaywall answers whose BTS manifest points at FLAC files
 // under /audio, served with Range support (see audio.odin). The first three
@@ -61,7 +62,12 @@ import "core:time"
 import stbi "vendor:stb/image"
 
 USER_ID :: 123
-LIKED :: 240
+LIKED :: 1433
+LIKED_LIMIT :: 100 // the most liked tracks a page gives, whatever the request asks
+// Liked tracks that can't be played. TIDAL counts them in
+// totalNumberOfItems but leaves them out of their page, so that page comes
+// back short.
+UNAVAILABLE :: [?]int{120, 777, 1400}
 
 Config :: struct {
 	port:            int,
@@ -457,11 +463,21 @@ route :: proc(req: ^Request) -> Response {
 		return playbackinfo_response(id)
 	case path == fmt.tprintf("/users/%d/favorites/tracks", USER_ID):
 		liked := len(HIRES) if server.config.hires_only else LIKED
+		limit = min(limit, LIKED_LIMIT)
 		b := list_begin(liked, offset, limit)
-		for i in offset ..< min(offset + limit, liked) {
-			if i > offset {
+		first := true
+		outer: for i in offset ..< min(offset + limit, liked) {
+			if !server.config.hires_only {
+				for u in UNAVAILABLE {
+					if i == u {
+						continue outer
+					}
+				}
+			}
+			if !first {
 				strings.write_byte(&b, ',')
 			}
+			first = false
 			fmt.sbprintf(&b, `{{"created":"%s","item":`, date(i))
 			if server.config.hires_only {
 				write_hires_track(&b, i)

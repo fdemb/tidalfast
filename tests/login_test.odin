@@ -404,23 +404,23 @@ view_keeps_the_earliest_end :: proc(t: ^testing.T) {
 	// back before the short one.
 	app.view_open(d, .Playlist, "pl", "pl", "", 160)
 	v := &d.view
-	app.view_add_rows(v, 0, fake_rows(50), false)
-	app.view_add_rows(v, 150, nil, true)
+	app.view_add_rows(v, 0, 50, fake_rows(50))
+	app.view_add_rows(v, 150, 100, nil)
 	testing.expect_value(t, v.count, 150)
-	app.view_add_rows(v, 50, fake_rows(70), true)
+	app.view_add_rows(v, 50, 100, fake_rows(70))
 	testing.expect_value(t, v.count, 120)
 	// A late empty page past the end doesn't bring placeholders back.
-	app.view_add_rows(v, 150, nil, true)
-	app.view_add_rows(v, 250, nil, true)
+	app.view_add_rows(v, 150, 100, nil)
+	app.view_add_rows(v, 250, 100, nil)
 	testing.expect_value(t, v.count, 120)
 	testing.expect_value(t, v.loaded_rows, 120)
 
 	// The other order.
 	app.view_open(d, .Playlist, "pl", "pl", "", 160)
-	app.view_add_rows(v, 50, fake_rows(70), true)
-	app.view_add_rows(v, 150, nil, true)
+	app.view_add_rows(v, 50, 100, fake_rows(70))
+	app.view_add_rows(v, 150, 100, nil)
 	testing.expect_value(t, v.count, 120)
-	app.view_add_rows(v, 0, fake_rows(50), false)
+	app.view_add_rows(v, 0, 50, fake_rows(50))
 	testing.expect_value(t, v.count, 120)
 	testing.expect_value(t, v.loaded_rows, 120)
 }
@@ -438,14 +438,14 @@ view_grows_past_the_count :: proc(t: ^testing.T) {
 	for _ in 0 ..< 2 {
 		job, _ := jobs.try_pop(&d.queue)
 		v.in_flight -= 1
-		app.view_add_rows(v, int(job.offset), fake_rows(int(job.limit)), false)
+		app.view_add_rows(v, int(job.offset), int(job.limit), fake_rows(int(job.limit)))
 	}
 	testing.expect_value(t, v.count, 150)
 	app.view_request_pages(d)
 	job, _ := jobs.try_pop(&d.queue)
 	testing.expect_value(t, job.offset, 150)
 	v.in_flight -= 1
-	app.view_add_rows(v, 150, fake_rows(80), true)
+	app.view_add_rows(v, 150, 100, fake_rows(80))
 	testing.expect_value(t, v.count, 230)
 	testing.expect(t, v.done)
 	app.view_request_pages(d)

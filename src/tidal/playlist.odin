@@ -56,7 +56,8 @@ item_order_name :: proc(order: Maybe(Item_Order)) -> string {
 	return ITEM_ORDER_NAMES[o] if ok else ""
 }
 
-// playlist_tracks returns the playlist's tracks.
+// playlist_tracks returns a page of the playlist's tracks and how many
+// tracks TIDAL says it has.
 playlist_tracks :: proc(
 	s: ^Session,
 	playlist_id: string,
@@ -67,6 +68,7 @@ playlist_tracks :: proc(
 	allocator := context.allocator,
 ) -> (
 	tracks: []Track,
+	total: int,
 	err: Error,
 ) {
 	scratch_begin(allocator)
@@ -78,7 +80,7 @@ playlist_tracks :: proc(
 	add_order(&params, item_order_name(order), order_direction)
 	obj := request_object(s, {method = .GET, path = fmt.tprintf("playlists/%s/tracks", playlist_id), params = params[:]}, context.temp_allocator) or_return
 	p := parser_make(s, allocator)
-	return map_items(&p, obj, Track, parse_track_in_album), nil
+	return map_items(&p, obj, Track, parse_track_in_album), jint(obj, "totalNumberOfItems"), nil
 }
 
 // playlist_tracks_paginated fetches all tracks, 50 per request, two

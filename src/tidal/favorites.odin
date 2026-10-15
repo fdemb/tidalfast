@@ -194,13 +194,15 @@ order_name :: proc(names: [$E]string, order: Maybe(E)) -> string {
 	return names[o] if ok else ""
 }
 
+// favorites_list returns one page and the total TIDAL gives for the whole
+// list.
 @(private = "file")
-favorites_list :: proc(s: ^Session, kind: string, params: []Param, $T: typeid, parse: proc(p: ^Parser, obj: json.Object) -> T, allocator: Allocator) -> (items: []T, err: Error) {
+favorites_list :: proc(s: ^Session, kind: string, params: []Param, $T: typeid, parse: proc(p: ^Parser, obj: json.Object) -> T, allocator: Allocator) -> (items: []T, total: int, err: Error) {
 	scratch_begin(allocator)
 	base := favorites_base(s) or_return
 	obj := request_object(s, {method = .GET, path = fmt.tprintf("%s/%s", base, kind), params = params}, context.temp_allocator) or_return
 	p := parser_make(s, allocator)
-	return map_items(&p, obj, T, parse), nil
+	return map_items(&p, obj, T, parse), jint(obj, "totalNumberOfItems"), nil
 }
 
 @(private = "file")
@@ -220,7 +222,8 @@ favorites_paginated :: proc(s: ^Session, kind: string, order: string, direction:
 }
 
 favorites_artists :: proc(s: ^Session, limit := 50, offset := 0, order: Maybe(Artist_Order) = nil, order_direction: Maybe(Order_Direction) = nil, allocator := context.allocator) -> ([]Artist, Error) {
-	return favorites_list(s, "artists", list_params(limit, offset, order_name(ARTIST_ORDER_NAMES, order), order_direction), Artist, parse_artist, allocator)
+	items, _, err := favorites_list(s, "artists", list_params(limit, offset, order_name(ARTIST_ORDER_NAMES, order), order_direction), Artist, parse_artist, allocator)
+	return items, err
 }
 
 favorites_artists_count :: proc(s: ^Session) -> (int, Error) {
@@ -232,7 +235,8 @@ favorites_artists_paginated :: proc(s: ^Session, order: Maybe(Artist_Order) = ni
 }
 
 favorites_albums :: proc(s: ^Session, limit := 50, offset := 0, order: Maybe(Album_Order) = nil, order_direction: Maybe(Order_Direction) = nil, allocator := context.allocator) -> ([]Album, Error) {
-	return favorites_list(s, "albums", list_params(limit, offset, order_name(ALBUM_ORDER_NAMES, order), order_direction), Album, parse_album_simple, allocator)
+	items, _, err := favorites_list(s, "albums", list_params(limit, offset, order_name(ALBUM_ORDER_NAMES, order), order_direction), Album, parse_album_simple, allocator)
+	return items, err
 }
 
 favorites_albums_count :: proc(s: ^Session) -> (int, Error) {
@@ -243,7 +247,10 @@ favorites_albums_paginated :: proc(s: ^Session, order: Maybe(Album_Order) = nil,
 	return favorites_paginated(s, "albums", order_name(ALBUM_ORDER_NAMES, order), order_direction, Album, parse_album_simple, allocator)
 }
 
-favorites_tracks :: proc(s: ^Session, limit := 50, offset := 0, order: Maybe(Item_Order) = nil, order_direction: Maybe(Order_Direction) = nil, allocator := context.allocator) -> ([]Track, Error) {
+// favorites_tracks returns one page of liked tracks and how many there are
+// in all. TIDAL leaves tracks that can't be played out of a page but counts
+// them in the total, so a page can come back short before the end.
+favorites_tracks :: proc(s: ^Session, limit := 50, offset := 0, order: Maybe(Item_Order) = nil, order_direction: Maybe(Order_Direction) = nil, allocator := context.allocator) -> (tracks: []Track, total: int, err: Error) {
 	return favorites_list(s, "tracks", list_params(limit, offset, order_name(ITEM_ORDER_NAMES, order), order_direction), Track, parse_track_in_album, allocator)
 }
 
@@ -257,7 +264,8 @@ favorites_tracks_paginated :: proc(s: ^Session, order: Maybe(Item_Order) = nil, 
 }
 
 favorites_videos :: proc(s: ^Session, limit := 50, offset := 0, order: Maybe(Video_Order) = nil, order_direction: Maybe(Order_Direction) = nil, allocator := context.allocator) -> ([]Video, Error) {
-	return favorites_list(s, "videos", list_params(limit, offset, order_name(VIDEO_ORDER_NAMES, order), order_direction), Video, parse_video_simple, allocator)
+	items, _, err := favorites_list(s, "videos", list_params(limit, offset, order_name(VIDEO_ORDER_NAMES, order), order_direction), Video, parse_video_simple, allocator)
+	return items, err
 }
 
 favorites_videos_count :: proc(s: ^Session) -> (int, Error) {

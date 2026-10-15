@@ -3,6 +3,7 @@ package ui
 import "core:math"
 
 import "../render"
+import "../text"
 
 MENU_BACKGROUND :: render.Color{0.13, 0.15, 0.18, 1}
 MENU_BORDER :: render.Color{1, 1, 1, 0.08}
@@ -14,6 +15,39 @@ label :: proc(s: string, width: Size = {}, height: Size = {}) -> ^Box {
 	b.id = s
 	b.label = s
 	return b
+}
+
+// text_width is how wide s is in font at size. Without a text system
+// (headless tests) it guesses from the length.
+text_width :: proc(font: text.Font, size: f32, s: string) -> f32 {
+	u := ctx
+	if u == nil || u.texts == nil {
+		return f32(len(s)) * size * 0.6
+	}
+	return text.measure(u.texts, font, size, s).width
+}
+
+// counter_width is how wide a counter in the shape of pattern can get, such
+// as "-3:45" for a time left: every digit is taken as the widest digit.
+// Inter's digits differ in width, so a label this wide never cuts off
+// any value with the same pattern.
+counter_width :: proc(font: text.Font, size: f32, pattern: string) -> f32 {
+	widest := u8('0')
+	best: f32
+	for d in u8('0') ..= '9' {
+		digit := [1]u8{d}
+		if w := text_width(font, size, string(digit[:])); w > best {
+			best, widest = w, d
+		}
+	}
+	buf: [64]u8
+	n := copy(buf[:], pattern)
+	for &c in buf[:n] {
+		if c >= '0' && c <= '9' {
+			c = widest
+		}
+	}
+	return math.ceil(text_width(font, size, string(buf[:n])))
 }
 
 // spacer takes size along the parent's child axis and nothing across it.

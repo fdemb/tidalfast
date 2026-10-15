@@ -79,7 +79,7 @@ Playback :: struct {
 	items:           []Queue_Item,
 	entries:         []audio.Queue_Entry,
 	loaded:          int, // rows loaded when the snapshot was taken
-	list:            int, // sidebar entry the queue came from
+	list_key:        u64, // list_key of the list the queue came from
 	view_gen:        u32,
 	queue_gen:       u32, // goes up each time a new list replaces the queue
 	fake:            bool,
@@ -104,6 +104,14 @@ Playback :: struct {
 	art:             Artwork, // the current track's, for Now Playing
 	next_art:        Artwork, // the next track's, fetched with its stream
 	np_key:          u64, // what was last sent to Now Playing
+
+	// The row of the open list found holding the current track, for when
+	// the queue's index doesn't (see playing_row), and what it was found in.
+	found_row:       int,
+	found_track:     i64,
+	found_gen:       u32,
+	found_loaded:    int,
+	found_count:     int,
 }
 
 playback_start :: proc(s: ^State, shell: ^platform.Shell) {
@@ -247,7 +255,7 @@ queue_snapshot :: proc(s: ^State) {
 	pb.items = make([]Queue_Item, n, a)
 	pb.entries = make([]audio.Queue_Entry, n, a)
 	pb.fake = s.data.fake
-	pb.list = s.library.playlist
+	pb.list_key = list_key(s)
 	pb.view_gen = s.data.view.gen
 	pb.loaded = s.data.view.loaded_rows
 	for i in 0 ..< n {
@@ -696,17 +704,95 @@ playback_update :: proc(s: ^State, events: []platform.Event) {
 		}
 	}
 
-	// Keep the queue in step with its list while pages arrive.
+	// Keep the queue in step with its list while pages arrive. A page that
+	// came back short moves the rows after it up, and the queue's tracks
+	// with them.
 	if !pb.fake && pb.index >= 0 && pb.view_gen == s.data.view.gen && pb.loaded != s.data.view.loaded_rows {
 		index := pb.index
 		queue_snapshot(s)
-		pb.index = index
+		pb.index = queue_find(pb, pb.cur.track, index)
+		pb.cur.item = pb.index
+		if pb.next.serial != 0 {
+			pb.next.item = queue_find(pb, pb.next.track, pb.next.item)
+		}
 	}
-	s.library.playing = -1
-	if pb.index >= 0 && pb.list == s.library.playlist && (pb.fake || pb.view_gen == s.data.view.gen) {
-		s.library.playing = pb.index
-	}
+	s.library.playing = playing_row(s)
 	update_now_playing(s)
+}
+
+// queue_find is the queue entry holding track: at, if it does, or else the
+// nearest one before it, where a gap closing in the list moved it.
+@(private = "file")
+queue_find :: proc(pb: ^Playback, track: i64, at: int) -> int {
+	if at >= 0 && at < len(pb.entries) && pb.entries[at].id == track {
+		return at
+	}
+	for i := min(at, len(pb.entries) - 1); i >= 0; i -= 1 {
+		if pb.entries[i].id == track {
+			return i
+		}
+	}
+	return at
+}
+
+// list_key names the open list: its kind and TIDAL id, or the search's
+// query. A list opened again gets the same key, a different one another.
+list_key :: proc(s: ^State) -> u64 {
+	h: u64 = 14695981039346656037
+	fnv :: proc(h: u64, b: u8) -> u64 {
+		return (h ~ u64(b)) * 1099511628211
+	}
+	if s.data.fake {
+		sr := &s.search
+		h = fnv(h, u8(sr.fake_source))
+		if sr.fake_source == .None {
+			h = fnv(fnv(h, u8(s.library.playlist)), u8(s.library.playlist >> 8))
+		}
+		for b in transmute([]u8)small_str(&sr.fake_title) {
+			h = fnv(h, b)
+		}
+		return h
+	}
+	v := &s.data.view
+	if v.source == .None {
+		return 0
+	}
+	h = fnv(h, u8(v.source))
+	for b in transmute([]u8)small_str(&v.id) {
+		h = fnv(h, b)
+	}
+	return h
+}
+
+// playing_row is the row of the open list that plays, or -1. Only the list
+// the queue came from has one, so the same track in another list isn't
+// lit. It's the queue's index while that row holds the track. After the
+// list was opened again its rows may differ, so it's the first row with
+// the track's id, looked for once each time the rows change.
+playing_row :: proc(s: ^State) -> int {
+	pb := &s.playback
+	if pb.index < 0 || pb.index >= len(pb.entries) || pb.list_key != list_key(s) {
+		return -1
+	}
+	if pb.fake {
+		return pb.index
+	}
+	track := pb.entries[pb.index].id
+	if row := view_row(s, pb.index); row != nil && row.id == track {
+		return pb.index
+	}
+	v := &s.data.view
+	if pb.found_track != track || pb.found_gen != v.gen || pb.found_loaded != v.loaded_rows || pb.found_count != v.count {
+		pb.found_track, pb.found_gen, pb.found_loaded, pb.found_count = track, v.gen, v.loaded_rows, v.count
+		pb.found_row = -1
+		for i in 0 ..< min(v.count, len(v.loaded)) {
+			if v.loaded[i] && v.rows[i].id == track {
+				pb.found_row = i
+				break
+			}
+		}
+	}
+	return pb.found_row
 }
 
 // update_now_playing tells macOS what plays when the track, its state, its

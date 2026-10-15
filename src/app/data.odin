@@ -91,10 +91,20 @@ Track_View :: struct {
 	loaded:      []bool,
 	loaded_rows: int,
 	count:       int, // rows shown, loaded or not
-	next_offset: int,
+	next_offset: int, // in TIDAL's offsets, which count the gaps
 	in_flight:   int,
 	done:        bool,
 	error:       Small,
+	gaps:        [dynamic]Gap, // in arena, by offset
+	longest:     int, // seconds, of the longest track loaded
+}
+
+// Gap is where a page came back short before the end of its list: TIDAL
+// leaves out tracks that can't be played but still counts them. The rows
+// after it move up, so row i is at TIDAL's offset i plus the gaps before it.
+Gap :: struct {
+	offset:  int, // the page's
+	missing: int,
 }
 
 Data :: struct {
@@ -764,7 +774,7 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 			v.done = true
 			return
 		}
-		view_add_rows(v, int(res.job.offset), res.rows, len(res.rows) < int(res.job.limit))
+		view_add_rows(v, int(res.job.offset), int(res.job.limit), res.rows, res.total)
 		view_request_pages(d)
 	case .Stream, .Artwork:
 		playback_result(s, res)
@@ -943,30 +953,44 @@ view_reserve :: proc(v: ^Track_View, n: int) {
 	v.rows, v.loaded = rows, loaded
 }
 
-// view_add_rows copies a page into the view. A short page ends the list,
-// and the earliest end found stands: pages arrive out of order, and an
-// empty page asked for past the end mustn't bring back rows a short page
-// before it cut. Rows past the end are dropped. Until the end is known, a
-// full page past the count TIDAL gave grows the list.
-view_add_rows :: proc(v: ^Track_View, offset: int, rows: []Row, last: bool) {
+// view_add_rows copies the page asked for at offset with limit into the
+// view. total is the list's length TIDAL gave with the page, or -1.
+//
+// With a total, the page that reaches it ends the list, and a short page
+// before that is a gap (see Gap): the rows after it move up. Without one, a
+// short page ends the list. Pages arrive out of order either way, so the
+// earliest end found stands: an empty page asked for past the end mustn't
+// bring back rows a short page before it cut. Rows past the end are
+// dropped. Until the end is known, a full page past the count TIDAL gave
+// grows the list.
+view_add_rows :: proc(v: ^Track_View, offset, limit: int, rows: []Row, total := -1) {
 	rows := rows
-	end := offset + len(rows)
+	last := len(rows) < limit
+	if total >= 0 {
+		last = offset + limit >= total || len(rows) == 0
+		v.hint = total
+	}
+	start := view_row_at(v, offset)
+	if !last && len(rows) < limit {
+		view_close_gap(v, offset, start, limit, len(rows))
+	}
+	end := start + len(rows)
 	if last && (!v.done || end < v.count) {
 		v.done = true
 		v.count = end
 	}
 	if v.done {
-		rows = rows[:clamp(v.count - offset, 0, len(rows))]
+		rows = rows[:clamp(v.count - start, 0, len(rows))]
 	} else {
 		v.count = max(v.count, end)
 	}
-	view_reserve(v, offset + len(rows))
+	view_reserve(v, start + len(rows))
 	if !v.has_arena {
 		return
 	}
 	a := vmem.arena_allocator(&v.arena)
 	for r, i in rows {
-		v.rows[offset + i] = {
+		v.rows[start + i] = {
 			title    = strings.clone(r.title, a),
 			artist   = strings.clone(r.artist, a),
 			album    = strings.clone(r.album, a),
@@ -979,9 +1003,58 @@ view_add_rows :: proc(v: ^Track_View, offset: int, rows: []Row, last: bool) {
 			artist_id = r.artist_id,
 			track    = r.track,
 		}
-		v.loaded_rows += int(!v.loaded[offset + i])
-		v.loaded[offset + i] = true
+		v.loaded_rows += int(!v.loaded[start + i])
+		v.loaded[start + i] = true
+		v.longest = max(v.longest, r.seconds)
 	}
+}
+
+// view_row_at is the row that TIDAL's offset lands on, past the gaps
+// before it.
+view_row_at :: proc(v: ^Track_View, offset: int) -> int {
+	row := offset
+	for g in v.gaps {
+		if g.offset >= offset {
+			break
+		}
+		row -= g.missing
+	}
+	return row
+}
+
+// view_close_gap records that the page at offset, whose rows start at row,
+// came back with got of the limit rows asked for, and moves the rows of
+// later pages up to close the gap. It's rare, so it counts the loaded rows
+// again.
+@(private = "file")
+view_close_gap :: proc(v: ^Track_View, offset, row, limit, got: int) {
+	missing := limit - got
+	from := row + limit
+	to := row + got
+	used := min(v.count, len(v.rows))
+	if from < used {
+		copy(v.rows[to:], v.rows[from:used])
+		copy(v.loaded[to:], v.loaded[from:used])
+	}
+	v.count = max(v.count - missing, to)
+	for i in v.count ..< used {
+		v.loaded[i] = false
+	}
+	v.loaded_rows = 0
+	for l in v.loaded[:min(v.count, len(v.loaded))] {
+		v.loaded_rows += int(l)
+	}
+	if !v.has_arena {
+		return
+	}
+	if v.gaps == nil {
+		v.gaps = make([dynamic]Gap, vmem.arena_allocator(&v.arena))
+	}
+	i := 0
+	for i < len(v.gaps) && v.gaps[i].offset < offset {
+		i += 1
+	}
+	inject_at(&v.gaps, i, Gap{offset, missing})
 }
 
 // view_request_pages keeps PAGES_IN_FLIGHT pages loading until a short page

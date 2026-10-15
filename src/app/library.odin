@@ -214,6 +214,9 @@ draw_sidebar_handle :: proc(s: ^State, window_w: f32) {
 draw_main_view :: proc(s: ^State, main_w: f32) {
 	lib := &s.library
 	cols := track_columns(main_w)
+	// Durations are m:ss however long, so the widest has the longest
+	// track's count of minute digits.
+	cols.duration = max(cols.duration, ui.counter_width(.Regular, 13, fmt.tprintf("%d:00", max(s.data.view.longest / 60, 10))) + 2 * CELL_PAD)
 	ui.column("main", {.Clip}, ui.fill(), ui.fill())
 
 	{
@@ -287,7 +290,7 @@ header_cell :: proc(label: string, width: f32, align: ui.Align) {
 		return
 	}
 	b := ui.label(label, ui.px(width), ui.fill())
-	b.text_pad = 12
+	b.text_pad = CELL_PAD
 	b.text_align = align
 }
 
@@ -430,10 +433,12 @@ cell :: proc(s: string, width: f32, align: ui.Align) -> ^ui.Box {
 		return nil
 	}
 	b := ui.label(s, ui.px(width), ui.fill())
-	b.text_pad = 12
+	b.text_pad = CELL_PAD
 	b.text_align = align
 	return b
 }
+
+CELL_PAD :: 12
 
 // list_gen tells the open list from the lists before it.
 list_gen :: proc(s: ^State) -> u64 {
@@ -534,11 +539,13 @@ draw_player_bar :: proc(s: ^State, w: f32) {
 	line.background = OUTLINE
 	ui.row("", {}, ui.fill(), ui.fill())
 	side := clamp(w * 0.3, 200, 420)
+	// Below about 670 pt the title gives up room before the progress bar.
+	title_side := clamp(w * 0.3, 150, 420)
 	ui.spacer(ui.px(16))
 
 	item := playback_item(s)
 	{
-		ui.row("now_playing", {}, ui.px(side), ui.fill())
+		ui.row("now_playing", {}, ui.px(title_side), ui.fill())
 		title, artist := "Nothing playing", "Double-click a song to play it"
 		if item != nil {
 			title, artist = item.title, item.artist
@@ -597,32 +604,48 @@ draw_player_bar :: proc(s: ^State, w: f32) {
 		}
 		ui.spacer(ui.px(6))
 		{
+			// The times keep the width of the longest value the track can
+			// show, so they never cut off or push the bar around; the bar
+			// takes what's left.
 			ui.row("", {}, ui.fill(), ui.px(16))
 			ui.text_style(.Regular, 11, DIM)
 			duration := playback_duration(s)
-			at := ui.label(clock(playback_position(s)), ui.px(44), ui.fill())
+			position := playback_position(s)
+			longest := clock(max(duration, position))
+			at := ui.label(clock(position), ui.px(ui.counter_width(.Regular, 11, longest) + 2 * TIME_PAD), ui.fill())
 			at.text_align = .Right
-			at.text_pad = 8
-			draw_progress(s, duration, item != nil)
+			at.text_pad = TIME_PAD
+			draw_progress(s, position, duration, item != nil)
 			left := "0:00"
 			if item != nil {
-				left = fmt.tprintf("-%s", clock(max(duration - playback_position(s), 0)))
+				left = fmt.tprintf("-%s", clock(max(duration - position, 0)))
 			}
-			end := ui.label(left, ui.px(44), ui.fill())
-			end.text_pad = 8
+			end := ui.label(left, ui.px(ui.counter_width(.Regular, 11, fmt.tprintf("-%s", longest)) + 2 * TIME_PAD), ui.fill())
+			end.text_pad = TIME_PAD
 		}
 	}
 
 	{
+		// Laid out by hand so it fits in side at any window width: the volume
+		// slider gives up room before anything else does.
 		ui.row("extras", {}, ui.px(side), ui.fill())
-		ui.spacer(ui.fill())
+		volume_w := ui.counter_width(.Regular, 12, "Volume 100%")
+		slider_w := clamp(side - OUTPUT_W - OUTPUT_GAP - volume_w - VOLUME_GAP, 0, VOLUME_W)
+		ui.spacer(ui.px(side - OUTPUT_W - OUTPUT_GAP - volume_w - VOLUME_GAP - slider_w, 0))
 		draw_output_button(s)
 		ui.text_style(.Regular, 12, SECONDARY)
-		ui.label(fmt.tprintf("Volume %d%%", int(math.round(lib.volume * 100))), ui.px(84), ui.fill())
-		draw_volume(s)
+		ui.label(fmt.tprintf("Volume %d%%", int(math.round(lib.volume * 100))), ui.px(volume_w), ui.fill())
+		ui.spacer(ui.px(VOLUME_GAP))
+		draw_volume(s, slider_w)
 	}
 	ui.spacer(ui.px(16))
 }
+
+TIME_PAD :: 8 // between the times and the progress bar
+OUTPUT_W :: 78 // the Output button
+OUTPUT_GAP :: 12
+VOLUME_GAP :: 8
+VOLUME_W :: 110
 
 // clock formats seconds as m:ss, or h:mm:ss from an hour.
 clock :: proc(seconds: f64) -> string {
@@ -633,12 +656,21 @@ clock :: proc(seconds: f64) -> string {
 	return fmt.tprintf("%d:%02d", t / 60, t % 60)
 }
 
+// progress_fraction is how much of the bar is filled: position over
+// duration, both in seconds at the track's own rate, kept to [0, 1].
+progress_fraction :: proc(position, duration: f64) -> f32 {
+	if duration <= 0 || math.is_nan(position) {
+		return 0
+	}
+	return f32(clamp(position / duration, 0, 1))
+}
+
 // draw_progress is the seek bar. Pressing or dragging shows that position
 // straight away; letting go seeks there.
-draw_progress :: proc(s: ^State, duration: f64, active: bool) {
+draw_progress :: proc(s: ^State, position, duration: f64, active: bool) {
 	pb := &s.playback
 	slider := ui.column("progress", {.Clickable} if active else {}, ui.fill(), ui.fill())
-	ui.accessible(slider, .Slider, "Position", fmt.tprintf("%s of %s", clock(playback_position(s)), clock(duration)))
+	ui.accessible(slider, .Slider, "Position", fmt.tprintf("%s of %s", clock(position), clock(duration)))
 	sig := ui.signal(slider)
 	if active && duration > 0 && slider.rect.w > 0 && (sig.held || sig.released) {
 		frac := clamp((sig.mouse.x - slider.rect.x) / slider.rect.w, 0, 1)
@@ -650,10 +682,7 @@ draw_progress :: proc(s: ^State, duration: f64, active: bool) {
 	} else if !sig.held {
 		pb.dragging = false
 	}
-	frac := f32(0)
-	if duration > 0 {
-		frac = f32(clamp(playback_position(s) / duration, 0, 1))
-	}
+	frac := progress_fraction(playback_position(s), duration)
 	ui.spacer(ui.px(6))
 	track := ui.row("", {.Draw_Background}, ui.fill(), ui.px(4))
 	track.background = SURFACE_ACTIVE
@@ -728,9 +757,9 @@ skip_stop :: proc() {
 
 // draw_volume is a slider: press or drag along it to set the volume. A
 // press and release in one frame still counts, at the release.
-draw_volume :: proc(s: ^State) {
+draw_volume :: proc(s: ^State, width: f32) {
 	lib := &s.library
-	slider := ui.column("volume", {.Clickable}, ui.px(110), ui.fill())
+	slider := ui.column("volume", {.Clickable}, ui.px(width), ui.fill())
 	ui.accessible(slider, .Slider, "Volume", fmt.tprintf("%d%%", int(math.round(lib.volume * 100))))
 	sig := ui.signal(slider)
 	if (sig.held || sig.released) && slider.rect.w > 0 {

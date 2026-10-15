@@ -5,8 +5,9 @@
 //    size of its own (Pixels, Text or Parent_Pct). Children_Sum ancestors
 //    are skipped, since their size isn't known yet.
 // 3. Downwards-dependent: Children_Sum, after the children.
-// 4. Violations: children that don't fit their parent shrink. Along the
-//    child axis each child gives up its size times (1 - strictness), in
+// 4. Violations: a parent's size is final by the time its children are
+//    solved, so percentages of it are taken again from that size. Then
+//    children that don't fit their parent shrink. Along the child axis each child gives up its size times (1 - strictness), in
 //    proportion, until the overflow is gone or nothing is left to give.
 //    Across it, a child larger than its parent is cut to the parent's size.
 //    Boxes that allow overflow (scroll views) skip this on that axis.
@@ -103,6 +104,17 @@ sizes_downwards :: proc(b: ^Box, axis: Axis) {
 
 solve_violations :: proc(b: ^Box, axis: Axis) {
 	allowed := b.fixed_size[axis]
+	// Pass 2 took them from the size before b's parent shrank it. A fill
+	// inside a shrunk fill would otherwise keep the outer one's first size,
+	// and a strict percentage of it would overflow. A scroll view's
+	// percentages are of the view, not of the content.
+	if kind := b.pref_size[axis].kind; overflow_on(b, axis) || (kind != .Children_Sum && kind != .Null) {
+		for c := b.first; c != nil; c = c.next {
+			if c.pref_size[axis].kind == .Parent_Pct {
+				c.fixed_size[axis] = allowed * c.pref_size[axis].value
+			}
+		}
+	}
 	if !overflow_on(b, axis) {
 		if axis != b.child_axis {
 			for c := b.first; c != nil; c = c.next {
@@ -126,13 +138,6 @@ solve_violations :: proc(b: ^Box, axis: Axis) {
 						c.fixed_size[axis] -= c.fixed_size[axis] * (1 - c.pref_size[axis].strictness) * take
 					}
 				}
-			}
-		}
-	} else {
-		// A scroll view's percentages are of the view, not of the content.
-		for c := b.first; c != nil; c = c.next {
-			if c.pref_size[axis].kind == .Parent_Pct {
-				c.fixed_size[axis] = allowed * c.pref_size[axis].value
 			}
 		}
 	}

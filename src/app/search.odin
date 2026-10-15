@@ -246,7 +246,7 @@ search_result :: proc(s: ^State, res: ^Result) {
 	v.id = sr.query
 	v.name = small(fmt.tprintf("Results for “%s”", q))
 	v.has_arena = vmem.arena_init_growing(&v.arena) == nil
-	view_add_rows(v, 0, res.rows, len(res.rows) < SEARCH_PAGE)
+	view_add_rows(v, 0, SEARCH_PAGE, res.rows)
 	v.next_offset = SEARCH_PAGE
 	view_request_pages(d)
 }

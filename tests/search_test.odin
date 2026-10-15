@@ -110,7 +110,7 @@ open_test_list :: proc(s: ^app.State) {
 		r = {title = titles[i], artist = "Some Artist", album = "Some Album", duration = "3:00", id = i64(100 + i), album_id = 10, artist_id = 20, seconds = 180}
 	}
 	app.view_open(&s.data, .Playlist, "uuid", "A playlist", "", len(rows))
-	app.view_add_rows(&s.data.view, 0, rows, true)
+	app.view_add_rows(&s.data.view, 0, len(rows), rows, len(rows))
 }
 
 // Go to album and Go to artist from the track menu close the list the menu

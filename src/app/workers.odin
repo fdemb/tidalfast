@@ -120,6 +120,7 @@ Result :: struct {
 	message:     Small,
 	arena:       ^vmem.Arena, // owns rows, playlists and their strings
 	rows:        []Row,
+	total:       int, // Tracks: the list's length TIDAL gave with the page, -1 if it didn't
 	playlists:   []Sidebar_Item,
 	liked_count: int,
 	signed_in:   bool, // Restore found tokens
@@ -344,11 +345,12 @@ run_job :: proc(d: ^Data, job: Job) -> (res: Result) {
 	case .Tracks:
 		tracks: []tidal.Track
 		err: tidal.Error
+		res.total = -1
 		#partial switch job.source {
 		case .Liked:
-			tracks, err = tidal.favorites_tracks(s, int(job.limit), int(job.offset), .Date, .Descending, alloc)
+			tracks, res.total, err = tidal.favorites_tracks(s, int(job.limit), int(job.offset), .Date, .Descending, alloc)
 		case .Playlist:
-			tracks, err = tidal.playlist_tracks(s, small_str(&id), int(job.limit), int(job.offset), allocator = alloc)
+			tracks, res.total, err = tidal.playlist_tracks(s, small_str(&id), int(job.limit), int(job.offset), allocator = alloc)
 		case:
 			tracks, err = more_tracks(s, job, alloc)
 		}

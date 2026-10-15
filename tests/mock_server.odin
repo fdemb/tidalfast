@@ -291,6 +291,8 @@ mock_route :: proc(m: ^Mock, req: Mock_Request, target: string) -> (status: int,
 		return 200, `{"id":123,"username":"user","firstName":"F","lastName":"L","email":"u@example.com"}`, etag
 	case req.path == "/users/123/subscription":
 		return 200, `{}`, etag
+	case req.path == "/users/123/favorites/tracks":
+		return 200, mock_liked_page(req.query["offset"] or_else "0", req.query["limit"] or_else "50"), etag
 	case req.path == "/echo":
 		return 200, `{}`, etag
 	case req.path == "/refused":
@@ -370,4 +372,36 @@ mock_route :: proc(m: ^Mock, req: Mock_Request, target: string) -> (status: int,
 		return 200, fmt.tprintf(`{{"uuid":"pl","title":"pl","numberOfTracks":%d,"numberOfVideos":%d,"type":"USER"}}`, tracks, videos), etag
 	}
 	return 404, `{"userMessage":"not found"}`, etag
+}
+
+MOCK_LIKED :: 1433
+MOCK_LIKED_LIMIT :: 100
+// Liked tracks TIDAL counts but leaves out of their pages, since they
+// can't be played. Track i has id i + 1.
+MOCK_UNAVAILABLE :: [?]int{120, 777, 1400}
+
+// mock_liked_page answers users/123/favorites/tracks as TIDAL does: at
+// most MOCK_LIKED_LIMIT a page, the unavailable tracks left out, and
+// totalNumberOfItems counting them.
+mock_liked_page :: proc(offset_s, limit_s: string) -> string {
+	offset, _ := strconv.parse_int(offset_s)
+	limit, _ := strconv.parse_int(limit_s)
+	limit = min(limit, MOCK_LIKED_LIMIT)
+	b := strings.builder_make(context.temp_allocator)
+	fmt.sbprintf(&b, `{{"limit":%d,"offset":%d,"totalNumberOfItems":%d,"items":[`, limit, offset, MOCK_LIKED)
+	first := true
+	outer: for i in offset ..< min(offset + limit, MOCK_LIKED) {
+		for u in MOCK_UNAVAILABLE {
+			if i == u {
+				continue outer
+			}
+		}
+		if !first {
+			strings.write_byte(&b, ',')
+		}
+		first = false
+		fmt.sbprintf(&b, `{{"created":"2024-01-01T10:00:00.000+0000","item":{{"id":%d,"title":"Liked %d","duration":%d,"artist":{{"id":1,"name":"A"}},"artists":[{{"id":1,"name":"A"}}],"album":{{"id":2,"title":"B","cover":""}}}}}}`, i + 1, i, 180 + i % 60)
+	}
+	strings.write_string(&b, "]}")
+	return strings.to_string(b)
 }

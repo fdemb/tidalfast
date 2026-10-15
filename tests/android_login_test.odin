@@ -254,7 +254,7 @@ aac_stream_message :: proc(t: ^testing.T) {
 		r.id = i64(1000 + i)
 		r.seconds = 30
 	}
-	app.view_add_rows(&d.view, 0, rows, true)
+	app.view_add_rows(&d.view, 0, len(rows), rows, len(rows))
 
 	stream_job :: proc(d: ^app.Data) -> (app.Job, bool) {
 		_, queued := queued_kinds(d)

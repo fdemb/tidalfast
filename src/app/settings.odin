@@ -201,7 +201,7 @@ draw_output_button :: proc(s: ^State) {
 		}
 	}
 	output_pill(s, label, color)
-	ui.spacer(ui.px(12))
+	ui.spacer(ui.px(OUTPUT_GAP))
 
 	if ui.menu("output_menu", 300) {
 		ui.text_style(.Regular, 13, TEXT)
@@ -228,7 +228,7 @@ draw_output_button :: proc(s: ^State) {
 // output_pill is the button, centred in a column as tall as the bar.
 @(private = "file")
 output_pill :: proc(s: ^State, label: string, color: render.Color) {
-	ui.column("", {}, ui.px(78), ui.fill())
+	ui.column("", {}, ui.px(OUTPUT_W), ui.fill())
 	ui.spacer(ui.fill())
 	ui.text_style(.Semibold, 11, color)
 	b := ui.box_make(fmt.tprintf("%s###output", label), {.Clickable, .Focusable, .Draw_Background, .Draw_Border, .Draw_Hot_Effects, .Draw_Active_Effects, .Draw_Text}, ui.fill(), ui.px(24))
