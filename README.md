@@ -81,7 +81,7 @@ Colours are sRGB with straight alpha, as a design tool shows them. The drawable 
 Textures come from `texture_create`, `texture_update` and `texture_destroy`. A `Texture` handle carries a generation, so a stale handle draws solid colour. The zero handle is a 1x1 white texture and means "no texture". Formats:
 
 - `R8` is linear coverage for the glyph atlas. The texture swizzle makes it sample as premultiplied white.
-- `RGBA8` and `BGRA8` take sRGB colour with alpha premultiplied in sRGB space. That's what a premultiplied `CGBitmapContext` produces, so CoreGraphics output (emoji, decoded images) goes in as is. Pass `mipmapped = true` for cover art. Every update then regenerates the mips.
+- `RGBA8` and `BGRA8` take sRGB colour with alpha premultiplied in sRGB space. That's what a premultiplied `CGBitmapContext` produces, so CoreGraphics output (emoji, decoded images) goes in as is. Pass `mipmapped = true` for a texture drawn smaller than it is. Every update then regenerates the mips.
 
 Colour textures are stored as `_sRGB` formats, and the GPU decodes sRGB before it filters. Uploading premultiplied sRGB bytes directly would decode `alpha * c` instead of giving `alpha * decode(c)`, which makes every translucent texel too dark: 50% white over black came out as 128 instead of 188. So each translucent texel is rewritten as the sRGB encoding of its premultiplied linear colour, `encode(decode(c / a) * a)`. The sample is then premultiplied linear, the same thing the shader makes from a solid colour, and filtering and mipmapping average the right values. Opaque and fully transparent texels don't change, so opaque cover art costs only a scan. The test screen has a black strip with 50% white three ways (an `RGBA8` texel, an `R8` texel and a solid rect), and all three read 188 in a capture.
 
@@ -346,15 +346,17 @@ A list opens with the track count TIDAL gave for it, so the table has its full h
 
 ### Covers
 
-1. Drawing a cover asks the cache (`src/cover`) for it at the size it's shown on this display: `pick_size` takes the smallest size TIDAL serves that's at least the box's points times the backing scale. Track rows are 40 pt, so 80x80 at 2x. The 92 pt header asks for 320x320, and the sidebar's playlist images start at 160x160, the smallest TIDAL has for playlists. Rows within 4 of the view ask for theirs too, at a lower priority.
+1. Drawing a cover asks the cache (`src/cover`) for it at the size it's drawn at on this display, in pixels: the box's points times the backing scale. Track rows are 40 pt, so 80x80 at 2x; the 92 pt header is 184x184 and the 56 pt Now Playing cover 112x112. `pick_size` picks what to download: the smallest size TIDAL serves that's at least that many pixels, so 80x80 for rows, 320x320 for the header, and 160x160 for the sidebar's playlist images, the smallest TIDAL has for playlists. Rows within 4 of the view ask for theirs too, at a lower priority.
 2. After the frame is built, `covers_schedule` queues a job for each cover asked for this frame with no job yet. Queued covers that weren't asked for this frame, because their rows scrolled away, come out of the queue. A worker that already has one finishes it, and the cover stays in the cache.
-3. The worker downloads the JPEG, decodes it with `stb_image`, and runs `render.convert_premultiplied` on the pixels, so the upload can pass `converted = true`.
-4. The UI thread uploads it as a mipmapped RGBA8 texture. Uploads stop for the frame after 2 ms; what's left waits for the next frame.
-5. The cache keeps up to 2,048 covers within 48 MB of texture memory, counting the mips. Over that, it destroys the least recently drawn textures, never one drawn in the current frame.
+3. The worker downloads the JPEG, decodes it with `stb_image`, scales it to the drawn size with `stb_image_resize` (filtering in linear light) when the two differ, and runs `render.convert_premultiplied` on the pixels, so the upload can pass `converted = true`.
+4. The UI thread copies it into a slot of a shared page. Uploads stop for the frame after 2 ms; what's left waits for the next frame.
+5. A page is one RGBA8 texture holding a grid of covers of one pixel size, up to 8x8 and at most 640 texels across (one cover per page if it's wider): 64 row covers in 1.6 MB, 9 header covers in 1.2 MB. Every cover is drawn at exactly its pixel size, so no page needs mipmaps. A new cover takes a free slot of its size, or opens a page while the pages stay within 8 MB, or else takes the slot of the least recently drawn cover of its size. That cover can't have been drawn in the last three frames, which the GPU may still be drawing, so overwriting its slot never shows in a frame. If every cover of that size was drawn lately, a page opens over the budget, and after the frame the cache gives back whole pages until it's within budget again: the page whose newest cover was drawn longest ago first, never one with a cover drawn this frame. The cache keeps up to 2,048 entries.
+
+One texture per cover cost far more than its pixels. With 571 covers loaded, Metal's allocations grew about 96 KB a cover for 25 KB of 80x80 pixels and a third more of mips. Pages also let a batch of covers share a draw call; see Renderer.
 
 A cover shows a flat placeholder until its texture arrives, then fades in over 0.25 s. The fade asks for frames only until it finishes. A cover that failed is tried again once it has left the screen and comes back, or after 30 s. That includes a 401: cover downloads send no token, so their answer says nothing about the login.
 
-Texture uploads don't wait on the GPU. A new texture has no earlier mip generation to wait for, which is the only thing `texture_update` waits on.
+Texture uploads don't wait on the GPU. Pages have no mips, and a mip generation is the only thing `texture_update` waits on.
 
 ### The mock server
 
@@ -760,9 +762,9 @@ Then it quits through SIGTERM, the same path as Ctrl-C, so shutdown runs.
 
 - **footprint** is `phys_footprint` from `task_info(TASK_VM_INFO)`. It's what Activity Monitor's Memory column shows and what macOS counts against the app under memory pressure: dirty memory the app owns, compressed or swapped memory included. On Apple silicon it includes Metal's allocations, since the GPU uses the same RAM. So gpu is part of footprint, not on top of it.
 - **resident** is the pages in RAM right now, clean ones included. That takes in the code of the app and every framework it touched, and mapped files. Pages of a mapped file that nobody wrote to are clean: the kernel can drop them and read them back from disk, so they count toward resident but not footprint.
-- **gpu** is the Metal device's `currentAllocatedSize`: glyph atlas pages, cover textures with their mips, instance buffers, the drawables' textures.
+- **gpu** is the Metal device's `currentAllocatedSize`: glyph atlas pages, cover pages, instance buffers, the drawables' textures.
 - **fonts map** and **fonts res** are the fallback fonts the text loader mapped with `mmap`, and how much of them is resident (from `mincore`). Apple Color Emoji alone is 180 MB of file, but only the pages of glyphs drawn get read in. Those pages count toward resident and not footprint.
-- The rest is the app's own accounting: `arena` (the persistent arena's used bytes), `frame_peak` (the frame arena's high-water mark), `atlas_pages`, `runs` (shaped runs in the text cache), `covers` and `cover_bytes` (the cover cache's textures, base level only), `rows` and `view_bytes` (the open list and its arena).
+- The rest is the app's own accounting: `arena` (the persistent arena's used bytes), `frame_peak` (the frame arena's high-water mark), `atlas_pages`, `runs` (shaped runs in the text cache), `covers` and `cover_bytes` (the cover cache's entries and its pages' bytes), `rows` and `view_bytes` (the open list and its arena).
 
 Measuring costs nothing with `TIDALFAST_MEASURE` unset: the app counts drawn rows and covers in the frame it's building, which is two additions each. With it set, marks and samples come from frames that happen anyway. Only the memory scenario starts a thread, which samples once a second (`tick` lines) and wakes the UI when a stage's wait is over. A sample costs a few milliseconds because of `mincore` over 600 MB of fonts, so marks leave that out. An idle window shows 0 CPU time over 10 s with it unset and with `=1`.
 

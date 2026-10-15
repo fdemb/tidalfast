@@ -128,6 +128,7 @@ Build :: struct {
 	active_color:              render.Color,
 	radius:                    f32,
 	texture:                   render.Texture, // drawn over the background, rounded by radius
+	texture_src:               render.Rect, // texels of texture to draw; zero for all of it
 	opacity:                   f32, // multiplies the box and everything inside it
 	run:                       ^text.Run,
 	text_size:                 [2]f32, // the label's size with padding, measured in end_frame

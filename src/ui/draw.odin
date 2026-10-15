@@ -43,7 +43,7 @@ draw_box :: proc(u: ^State, b: ^Box, alpha: f32) {
 		}
 	}
 	if b.texture != 0 {
-		render.push_image(r, rect, b.texture, tint = {1, 1, 1, a}, radius = b.radius)
+		render.push_image(r, rect, b.texture, b.texture_src, tint = {1, 1, 1, a}, radius = b.radius)
 	}
 	if .Draw_Hot_Effects in b.flags && b.hot_t > 0 {
 		render.push_rect(r, rect, fade(b.hover_color, a * b.hot_t), b.radius)

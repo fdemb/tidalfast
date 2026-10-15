@@ -693,6 +693,9 @@ snap :: proc(r: ^Renderer, rect: Rect) -> [4]f32 {
 // end_frame encodes the frame and presents it. The caller must be inside an
 // autorelease pool; the shell wraps every frame in one.
 end_frame :: proc(r: ^Renderer) {
+	// Counts frames that drew nothing too, so frame_index - FRAMES_IN_FLIGHT
+	// is always a frame the GPU has finished once begin_frame returns.
+	defer r.frame_index += 1
 	if r.pipeline == nil || r.width <= 0 || r.height <= 0 {
 		return
 	}
@@ -746,7 +749,6 @@ end_frame :: proc(r: ^Renderer) {
 	// commandBuffer returns an autoreleased object; keep it until begin_frame
 	// comes back to this slot.
 	r.in_flight[r.slot] = msg(cmd, "retain")
-	r.frame_index += 1
 	r.stats = {draw_calls, r.instance_count}
 
 	if capture != nil {

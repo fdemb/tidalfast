@@ -30,7 +30,7 @@ import "../ui"
 KEYCHAIN_SERVICE :: "tidalfast"
 KEYCHAIN_MOCK_SERVICE :: "tidalfast-mock" // with TIDALFAST_API
 KEYCHAIN_ACCOUNT :: "auth"
-COVER_BUDGET :: 48 << 20 // texture bytes
+COVER_BUDGET :: 8 << 20 // cover page bytes: a few screens of covers, see cover.place
 UPLOAD_BUDGET :: 2 * time.Millisecond // cover uploads per frame
 PAGES_IN_FLIGHT :: 2
 LOGIN_RETRY_MAX :: 30 // seconds between polls while TIDAL can't be reached
@@ -806,12 +806,24 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 			cover.set_failed(&d.covers, key, now)
 			return
 		}
-		r := &s.renderer
-		t := render.texture_create(r, res.w, res.h, .RGBA8, mipmapped = true)
-		render.texture_update(r, t, res.pixels, 0, 0, res.w, res.h, converted = true)
-		if !cover.set_ready(&d.covers, key, t, res.w, res.h, now) {
-			render.texture_destroy(r, t)
+		// The worker scaled it to the entry's size. Nil from place: the
+		// entry is gone or every page is in use; failed covers are retried.
+		e := cover.lookup(&d.covers, key)
+		page: ^cover.Page
+		if e != nil && res.w == int(e.px) && res.h == int(e.px) {
+			e, page = cover.place(&d.covers, key, s.frame_count, now)
 		}
+		if page == nil {
+			cover.set_failed(&d.covers, key, now)
+			return
+		}
+		r := &s.renderer
+		if page.texture == 0 {
+			_, side := cover.page_layout(int(page.px))
+			page.texture = render.texture_create(r, side, side, .RGBA8)
+		}
+		src := cover.src(&d.covers, e)
+		render.texture_update(r, page.texture, res.pixels, int(src.x), int(src.y), res.w, res.h, converted = true)
 		d.bench.uploads += 1
 		d.bench.frame_uploads += 1
 	}

@@ -134,46 +134,101 @@ cover_size_matches_display :: proc(t: ^testing.T) {
 	testing.expect_value(t, url, "https://resources.tidal.com/images/9a56f482/e9cf/46c3/bb21/82710e7854d4/80x80.jpg")
 }
 
-// Adds a cover, marks it uploaded with a made-up texture handle, as the app
-// does when a result arrives.
+// Adds a cover of px and places it, as the app does when its pixels
+// arrive, giving a new page a made-up texture handle.
 @(private = "file")
-add_ready :: proc(c: ^cover.Cache, id: string, frame: u64) -> u64 {
-	e := cover.want(c, .Album, id, 80, frame, 1)
-	key := e.key
-	cover.set_ready(c, key, render.Texture(frame), 80, 80, 0)
-	return key
+add_ready :: proc(c: ^cover.Cache, id: string, px: int, frame: u64) -> ^cover.Entry {
+	e := cover.want(c, .Album, id, px, px, frame, 1)
+	placed, page := cover.place(c, e.key, frame, 0)
+	if page != nil && page.texture == 0 {
+		page.texture = render.Texture(1000 + frame)
+	}
+	return placed
 }
 
 @(test)
-cover_cache_evicts_least_recently_used :: proc(t: ^testing.T) {
+cover_pages_fill_then_reuse_the_least_recently_used :: proc(t: ^testing.T) {
 	c := new(cover.Cache, context.temp_allocator)
-	cover.init(c, 3 * cover.texture_bytes(80, 80))
-	a := add_ready(c, "a", 1)
-	b := add_ready(c, "b", 2)
-	add_ready(c, "c", 3)
-	// a is drawn again, so b is now the oldest.
-	cover.want(c, .Album, "a", 80, 4, 1)
-	add_ready(c, "d", 5)
-	testing.expect_value(t, c.bytes, 4 * cover.texture_bytes(80, 80))
+	cols, side := cover.page_layout(80)
+	testing.expect_value(t, cols, 8)
+	testing.expect_value(t, side, 640)
+	slots := cols * cols
+	cover.init(c, 2 * cover.page_bytes(80))
 
-	out: [8]render.Texture
-	n := cover.evict(c, 5, out[:])
-	testing.expect_value(t, n, 1)
-	testing.expect_value(t, out[0], render.Texture(2))
-	testing.expect(t, cover.lookup(c, b) == nil)
-	testing.expect(t, cover.lookup(c, a) != nil)
-	testing.expect_value(t, c.bytes, 3 * cover.texture_bytes(80, 80))
-	testing.expect_value(t, c.used, 3)
-
-	// Nothing drawn in the current frame is evicted, even over budget.
-	c.budget = 0
-	for id in ([]string{"a", "c", "d"}) {
-		cover.want(c, .Album, id, 80, 6, 1)
+	// Two pages' worth fit the budget: slots in order, the second page
+	// opened when the first is full.
+	for i in 0 ..< 2 * slots {
+		e := add_ready(c, fmt.tprint(i), 80, u64(i + 1))
+		testing.expect_value(t, int(e.page), i / slots)
+		testing.expect_value(t, int(e.slot), i % slots)
 	}
-	testing.expect_value(t, cover.evict(c, 6, out[:]), 0)
-	testing.expect_value(t, cover.evict(c, 7, out[:]), 3)
-	testing.expect_value(t, c.used, 0)
-	testing.expect_value(t, c.bytes, 0)
+	testing.expect_value(t, c.bytes, 2 * cover.page_bytes(80))
+	testing.expect_value(t, c.pages[0].texture, render.Texture(1001))
+	e := cover.lookup(c, cover.key_of("9", 80))
+	testing.expect_value(t, cover.src(c, e), render.Rect{80, 80, 80, 80})
+
+	// Full: "1" is drawn again, so "0" and then "2" are the oldest, and the
+	// new covers take their slots instead of a third page.
+	frame := u64(2 * slots + 10)
+	cover.want(c, .Album, "1", 80, 80, frame, 1)
+	frame += render.FRAMES_IN_FLIGHT
+	a := add_ready(c, "new a", 80, frame)
+	b := add_ready(c, "new b", 80, frame)
+	testing.expect_value(t, [2]u8{a.page, a.slot}, [2]u8{0, 0})
+	testing.expect_value(t, [2]u8{b.page, b.slot}, [2]u8{0, 2})
+	testing.expect(t, cover.lookup(c, cover.key_of("0", 80)) == nil)
+	testing.expect(t, cover.lookup(c, cover.key_of("1", 80)) != nil)
+	testing.expect_value(t, c.bytes, 2 * cover.page_bytes(80))
+	testing.expect_value(t, c.ready, 2 * slots)
+}
+
+@(test)
+cover_slots_drawn_lately_are_never_overwritten :: proc(t: ^testing.T) {
+	c := new(cover.Cache, context.temp_allocator)
+	cover.init(c, cover.page_bytes(80))
+	slots := 64
+	for i in 0 ..< slots {
+		add_ready(c, fmt.tprint(i), 80, 10)
+	}
+	// Drawn two frames ago, so a frame in flight may still sample them:
+	// the new cover opens a page over the budget instead.
+	e := add_ready(c, "late", 80, 12)
+	testing.expect_value(t, int(e.page), 1)
+	testing.expect_value(t, c.bytes, 2 * cover.page_bytes(80))
+
+	// trim gives back the page drawn longest ago, never one drawn in the
+	// current frame.
+	out: [4]render.Texture
+	cover.want(c, .Album, "0", 80, 80, 13, 1)
+	cover.want(c, .Album, "late", 80, 80, 13, 1)
+	testing.expect_value(t, cover.trim(c, 13, out[:]), 0)
+	cover.want(c, .Album, "0", 80, 80, 14, 1)
+	testing.expect_value(t, cover.trim(c, 14, out[:]), 1)
+	testing.expect_value(t, out[0], render.Texture(1012)) // the second page
+	testing.expect(t, cover.lookup(c, cover.key_of("late", 80)) == nil)
+	testing.expect_value(t, c.ready, slots)
+	testing.expect_value(t, c.bytes, cover.page_bytes(80))
+}
+
+@(test)
+cover_pages_hold_one_size_each :: proc(t: ^testing.T) {
+	c := new(cover.Cache, context.temp_allocator)
+	cover.init(c, 64 << 20)
+	small := add_ready(c, "a", 80, 1)
+	big := add_ready(c, "a", 184, 1) // the same cover in the header
+	huge := add_ready(c, "b", 1280, 1)
+	testing.expect(t, small.page != big.page && big.page != huge.page)
+	cols, side := cover.page_layout(184)
+	testing.expect_value(t, [2]int{cols, side}, [2]int{3, 552})
+	cols, side = cover.page_layout(1280)
+	testing.expect_value(t, [2]int{cols, side}, [2]int{1, 1280})
+	testing.expect_value(t, c.bytes, cover.page_bytes(80) + cover.page_bytes(184) + cover.page_bytes(1280))
+
+	// Removing a cover frees its slot for the next one of that size.
+	cover.remove(c, small)
+	again := add_ready(c, "c", 80, 2)
+	testing.expect_value(t, [2]u8{again.page, again.slot}, [2]u8{0, 0})
+	testing.expect_value(t, c.ready, 3)
 }
 
 @(test)
@@ -181,12 +236,12 @@ cover_cache_reuses_entries_when_full :: proc(t: ^testing.T) {
 	c := new(cover.Cache, context.temp_allocator)
 	cover.init(c, max(int))
 	for i in 0 ..< cover.MAX_ENTRIES {
-		testing.expect(t, cover.want(c, .Album, fmt.tprint(i), 80, 1, 1) != nil)
+		testing.expect(t, cover.want(c, .Album, fmt.tprint(i), 80, 80, 1, 1) != nil)
 	}
 	// Full of entries nobody has loaded yet: a new one replaces the oldest
 	// of those, but never one asked for in the same frame.
-	testing.expect(t, cover.want(c, .Album, "late", 80, 1, 1) == nil)
-	testing.expect(t, cover.want(c, .Album, "next frame", 80, 2, 1) != nil)
+	testing.expect(t, cover.want(c, .Album, "late", 80, 80, 1, 1) == nil)
+	testing.expect(t, cover.want(c, .Album, "next frame", 80, 80, 2, 1) != nil)
 	testing.expect_value(t, c.used, cover.MAX_ENTRIES)
 }
 
@@ -209,6 +264,30 @@ cover_decode_premultiplies :: proc(t: ^testing.T) {
 	testing.expect_value(t, [4]u8{pixels[0], pixels[1], pixels[2], pixels[3]}, [4]u8{255, 0, 0, 255})
 	// Premultiplied in linear light and encoded back to sRGB: 188, not 128.
 	testing.expect_value(t, [4]u8{pixels[4], pixels[5], pixels[6], pixels[7]}, [4]u8{188, 188, 188, 128})
+}
+
+// A cover is scaled on the worker to the size it's drawn at.
+@(test)
+cover_decode_scales_to_size :: proc(t: ^testing.T) {
+	src: [8 * 8 * 4]u8
+	for &v, i in src {
+		v = 255 if i % 4 == 3 || (i / 4) % 2 == 0 else 0 // alternate white and black columns
+	}
+	png := make([dynamic]u8, context.temp_allocator)
+	write :: proc "c" (ctx: rawptr, data: rawptr, size: i32) {
+		context = runtime.default_context()
+		out := (^[dynamic]u8)(ctx)
+		append(out, ..([^]u8)(data)[:size])
+	}
+	stbi.write_png_to_func(write, &png, 8, 8, 4, &src, 8 * 4)
+	pixels, w, h, ok := cover.decode(png[:], 4)
+	defer cover.free_pixels(pixels)
+	testing.expect(t, ok)
+	testing.expect_value(t, [2]int{w, h}, [2]int{4, 4})
+	testing.expect_value(t, len(pixels), 4 * 4 * 4)
+	// Averaged in linear light: half white is 188 in sRGB, not 128.
+	testing.expect(t, pixels[4 * 5] > 170 && pixels[4 * 5] < 205, fmt.tprint(pixels[4 * 5]))
+	testing.expect_value(t, pixels[4 * 5 + 3], 255)
 }
 
 @(test)

@@ -34,7 +34,8 @@ cover_art :: proc(s: ^State, kind: cover.Kind, id: string, seed: u32, size: f32,
 			if e != nil && e.state == .Ready {
 				ui.parent(b)
 				img := ui.box_make("", {}, ui.fill(), ui.fill())
-				img.texture = e.texture
+				img.texture = cover.texture(&s.data.covers, e)
+				img.texture_src = cover.src(&s.data.covers, e)
 				img.radius = b.radius
 				img.opacity = cover.alpha(e, s.ui.time)
 				if img.opacity < 1 {
@@ -50,8 +51,9 @@ cover_want :: proc(s: ^State, kind: cover.Kind, id: string, points: f32, priorit
 	if s.data.fake || id == "" {
 		return nil
 	}
-	size := cover.pick_size(kind, points, s.renderer.scale)
-	return cover.want(&s.data.covers, kind, id, size, s.frame_count, priority)
+	px := int(points * s.renderer.scale + 0.5)
+	fetch := cover.pick_size(kind, points, s.renderer.scale)
+	return cover.want(&s.data.covers, kind, id, px, fetch, s.frame_count, priority)
 }
 
 // cover_prefetch asks for the covers of rows [first, last) without drawing
@@ -111,7 +113,8 @@ covers_schedule :: proc(s: ^State) {
 			job := Job {
 				kind = .Cover,
 				key  = e.key,
-				size = e.size,
+				size = e.px,
+				fetch = e.fetch,
 				id   = small(cover.entry_id(&e)),
 			}
 			if room > 0 && jobs.push(&d.queue, job, e.priority) {
@@ -128,7 +131,7 @@ covers_schedule :: proc(s: ^State) {
 			}
 		}
 	}
-	n := cover.evict(&d.covers, frame, d.evicted[:])
+	n := cover.trim(&d.covers, frame, d.evicted[:])
 	for t in d.evicted[:n] {
 		render.texture_destroy(&s.renderer, t)
 	}

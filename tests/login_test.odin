@@ -547,9 +547,9 @@ cover_401_keeps_the_login :: proc(t: ^testing.T) {
 	d.account = .Signed_In
 	app.auth_changed(d.session, d)
 
-	e := cover.want(&d.covers, .Album, "cover-id", 80, 1, app.PRIORITY_COVER)
+	e := cover.want(&d.covers, .Album, "cover-id", 80, 80, 1, app.PRIORITY_COVER)
 	key := e.key
-	app.push_job(d, {kind = .Cover, key = key, size = 80, id = app.small("cover-id")}, app.PRIORITY_COVER)
+	app.push_job(d, {kind = .Cover, key = key, size = 80, fetch = 80, id = app.small("cover-id")}, app.PRIORITY_COVER)
 	app.workers_start(d)
 	res, ok := wait_result(d, 5 * time.Second)
 	testing.expect(t, ok)

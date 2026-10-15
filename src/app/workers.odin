@@ -86,7 +86,8 @@ Job :: struct {
 	offset:     i32,
 	limit:      i32,
 	key:        u64, // Cover: the cache key; Stream: the track id; Artwork: the track's serial
-	size:       u16, // Cover: pixels across
+	size:       u16, // Cover: pixels across on screen
+	fetch:      u16, // Cover: the size to download
 	interval:   f32, // Login_Wait: seconds between polls
 	deadline:   time.Tick, // Login_Wait: when the code expires
 	not_before: time.Tick, // Login_Wait: when to poll first, {} for now
@@ -493,7 +494,7 @@ run_playlists :: proc(s: ^tidal.Session, res: ^Result, alloc: mem.Allocator) {
 run_cover :: proc(d: ^Data, job: Job, res: ^Result) {
 	s := d.session
 	id := job.id
-	url := cover.url(s.config.image_url, small_str(&id), int(job.size), context.temp_allocator)
+	url := cover.url(s.config.image_url, small_str(&id), int(job.fetch), context.temp_allocator)
 	heap := runtime.heap_allocator()
 	body, err := tidal.resource_get(s, url, heap)
 	if err != nil {
@@ -505,7 +506,7 @@ run_cover :: proc(d: ^Data, job: Job, res: ^Result) {
 		return
 	}
 	defer delete(body, heap)
-	pixels, w, h, ok := cover.decode(body)
+	pixels, w, h, ok := cover.decode(body, int(job.size))
 	if !ok {
 		res.err = .Bad_Response
 		res.message = small("not an image")
