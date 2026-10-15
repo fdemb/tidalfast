@@ -774,42 +774,48 @@ The frame-time overlay (backtick) shows footprint and gpu under the frame times.
 
 ### Baseline
 
-`docs/measure-baseline.json`, from `./build/measure/measure all` on a MacBook Air (M1, 8 GB, MacBookAir10,1), macOS 27.0.1, 1100x700 window at 2x. MB is 2^20 bytes.
+`docs/measure-baseline.json`, from `./build/measure/measure all -runs=10` on a MacBook Air (M1, 8 GB, MacBookAir10,1), macOS 27.0.1, 1100x700 window at 2x. MB is 2^20 bytes.
 
 Startup, in ms since the process started. Run 1 is on its own. The other 9 runs give the median and range.
 
 | mark | fake run 1 | fake median (min to max) | mock run 1 | mock median (min to max) |
 |---|---|---|---|---|
-| main | 7.2 | 10.4 (7.9 to 11.9) | 11.5 | 10.1 (7.7 to 13.9) |
-| launched | 92.3 | 98.0 (86.6 to 100.5) | 98.7 | 99.3 (91.1 to 102.5) |
-| dylib | 231.2 | 234.1 (227.9 to 247.3) | 338.3 | 261.5 (248.0 to 274.3) |
-| init | 249.5 | 249.9 (244.0 to 270.2) | 354.5 | 285.7 (272.8 to 295.8) |
-| window | 254.8 | 255.4 (249.4 to 275.8) | 359.7 | 291.4 (278.6 to 303.1) |
-| first_frame | 301.6 | 306.2 (300.1 to 334.5) | 408.8 | 345.5 (330.2 to 353.3) |
-| library | 301.6 | 306.3 (300.1 to 334.5) | 464.0 | 351.1 (337.9 to 361.4) |
-| tracks | 308.9 | 312.1 (304.8 to 338.9) | 695.0 | 581.4 (548.6 to 595.5) |
+| main | 9.2 | 9.8 (6.7 to 15.3) | 14.1 | 11.2 (5.0 to 12.2) |
+| launched | 94.3 | 86.7 (82.5 to 92.4) | 94.8 | 93.8 (89.6 to 103.7) |
+| dylib | 365.2 | 117.3 (112.8 to 123.3) | 125.1 | 126.9 (121.1 to 135.4) |
+| init | 396.7 | 129.3 (124.9 to 135.3) | 133.3 | 135.5 (129.6 to 144.0) |
+| window | 406.5 | 134.3 (128.6 to 139.1) | 137.9 | 139.5 (132.9 to 149.0) |
+| first_frame | 461.9 | 179.5 (172.7 to 186.3) | 180.6 | 186.8 (178.3 to 197.0) |
+| library | 461.9 | 179.5 (172.7 to 186.3) | 225.8 | 191.8 (182.6 to 200.8) |
+| tracks | 466.4 | 188.6 (179.5 to 192.6) | 454.8 | 417.3 (407.9 to 428.8) |
 
-At `tracks` the footprint is 80 MB with the fake data and 118 MB with the mock, gpu 31 and 47 MB.
+At `tracks` the footprint is 56 MB with the fake data and 93 MB with the mock, gpu 27 and 41 MB.
 
-The baseline's fake run 1 came after earlier runs of the same build, so it shows no first-run cost. Straight after a build the first launch reaches `main` at about 170 to 300 ms instead of 10, while macOS checks the new binary's signature. The mock's run 1 also logs in.
+The fake run 1 came straight after a build, so it includes macOS checking the new dylib's signature: `dylib` at 365 ms instead of 117. Later launches open the same file and skip that. The mock's run 1 also logs in.
 
-Memory, MB:
+Memory, MB. `-runs` applies to startup; the memory scenario ran once with each setup, and earlier runs of the same build with two or three runs each were within 1 MB of these:
 
 | stage | fake footprint | resident | gpu | mock footprint | resident | gpu | mock covers |
 |---|---|---|---|---|---|---|---|
-| startup_idle | 104.0 | 134.2 | 43.3 | 113.7 | 144.0 | 47.2 | 22 |
-| list_open | 104.0 | 134.2 | 43.3 | 116.3 | 146.2 | 49.2 | 37 |
-| scrolled | 110.0 | 139.9 | 47.3 | 173.6 | 194.6 | 102.8 | 608 (21.5 MB) |
-| playing | 115.8 | 143.7 | 47.3 | 189.5 | 208.2 | 103.3 | 610 |
-| idle_after | 111.6 | 142.5 | 47.3 | 184.4 | 206.1 | 103.3 | 610 |
+| startup_idle | 66.4 | 111.9 | 27.3 | 69.4 | 116.6 | 28.9 | 22 |
+| list_open | 66.5 | 111.9 | 27.3 | 71.6 | 118.2 | 30.2 | 37 |
+| scrolled | 72.6 | 120.7 | 28.4 | 78.0 | 124.6 | 35.8 | 257 (7.4 MB of pages) |
+| playing | 78.3 | 124.2 | 28.4 | 83.0 | 126.5 | 35.5 | 195 |
+| idle_after | 73.9 | 122.7 | 28.4 | 78.7 | 126.0 | 35.5 | 195 |
 
-The peak footprint was 128 MB with the fake data and 198 MB with the mock. Fallback fonts: 601 MB mapped, 29 to 30 MB of it resident.
+The peak footprint was 93 MB with the fake data and 110 MB with the mock, both while scrolling, when the layer has three drawables. Fallback fonts: 601 MB mapped, 23 MB of it resident.
 
-What stands out:
+Before the memory work (the previous baseline, same machine) the footprint was 104 MB at `startup_idle` with the fake data and 114 MB with the mock, 174 MB on the mock after scrolling and 185 MB after playing, with a 198 MB peak, and `tracks` came at 312 and 581 ms. What took it down, in the order it went in, measured each time against the build before:
 
-- Between `launched` and `dylib` the shell spends about 140 ms. It copies the dylib to a temp file and opens the copy, so hot reload can replace the original, and it does that in release builds too. A file macOS hasn't seen gets its signature checked on every `dlopen`: opening a fresh copy of `app.dylib` takes about 100 ms, opening the same file again takes 7 to 9 ms. Opening the dylib in place when hot reload is off would save about 90 ms of the 310.
-- From `main` to `launched` is about 85 ms of AppKit setup before the app's code runs.
-- Covers dominate memory growth on the mock. During the scroll gpu went up 54 MB for 571 more covers, about 96 KB each, while the cover cache grew by 18.6 MB of base levels, about 33 KB each (most are 80x80, 25 KB). Mips add a third, so most of the rest is likely Metal rounding each small texture's allocation up. Footprint rose by the same amount, since GPU memory is part of it.
-- Playback adds about 6 MB of footprint with the fake data and 16 MB on the mock, and 10 s after it stops only 4 to 5 MB of that is gone.
-- The 43 MB of GPU memory before any cover loads isn't broken down here. A coverage atlas page alone is 4 MB.
-- The persistent arena holds 23 MB in every setup and doesn't grow.
+- Covers in shared pages of exact-size covers, without mips, within 8 MB: the mock's scrolled footprint went from 174 to 119 MB, gpu from 103 to 51 MB. See Covers.
+- Opening the dylib in place in release builds: `tracks` 320 to 187 ms with the fake data, 589 to 437 ms on the mock, all of it between `launched` and `dylib`.
+- The persistent arena not zeroing what it hands out: about 16 to 17 MB at every stage.
+- One draw call for a colour and a coverage texture: the mock's library from 37 draw calls a frame to 3. No memory change.
+- The fake rows made only for the fake data: 2.5 MB with an account.
+- Inter's embedded bytes used in place in release builds: 3.3 MB.
+- 3 MB stream windows given back when cleared: nothing on the mock's memory scenario, whose tracks are smaller than either window. After the hi-res album played out, the old build still counted 5.9 MB of window and the new one none.
+- Two drawables while idle: 12 MB at every idle stage.
+- Glyph pages starting at a quarter size: 3.3 to 6.7 MB.
+- Idle workers giving back their temp pages: about 2.3 MB on the mock.
+
+What's left at idle with the fake data: two drawables (24 MB of gpu, as IOSurfaces), about 25 MB of malloc (7 MB of it kb_text_shape's tables for the 16 fallback faces the loader loads at start, the rest mostly AppKit, Core Text and Metal), and a few MB of the persistent arena actually written.
