@@ -183,6 +183,11 @@ arena_free :: proc(d: ^Data, a: ^vmem.Arena) {
 	d.has_retired = true
 }
 
+// list_name names a list for the log: its kind and TIDAL id.
+list_name :: proc(source: Source, id: string) -> string {
+	return fmt.tprintf("%v %s", source, id) if id != "" else fmt.tprint(source)
+}
+
 // view_complete says whether every row of a list is in and none failed.
 view_complete :: proc(v: ^Track_View) -> bool {
 	return v.source != .None && v.done && v.in_flight == 0 && v.error.len == 0 && !v.reading
@@ -270,7 +275,7 @@ list_open :: proc(d: ^Data, source: Source, id, name, image: string, hint: int) 
 			v.gen = gen
 			v.name = small(name)
 			v.image = small(image)
-			log.debugf("lists: %v %s from memory", source, id)
+			log.debugf("lists: %s from memory", list_name(source, id))
 			disk_push(d, {op = .Touch, source = source, id = small(id)})
 			list_check(d)
 			return
@@ -300,7 +305,7 @@ list_check :: proc(d: ^Data) {
 	}
 	id := small_str(&v.id)
 	if list_stale(v.source, v.version, v.fetched, list_version_now(d, v.source, id), unix_now()) {
-		log.debugf("lists: %v %s changed, fetching it again", v.source, id)
+		log.debugf("lists: %s changed, fetching it again", list_name(v.source, id))
 		refresh_start(d)
 	}
 }
@@ -440,7 +445,7 @@ refresh_land :: proc(s: ^State) {
 		arena_free(d, &old.arena)
 	}
 	rows_moved(s, marks)
-	log.debugf("lists: %v %s fetched again, %d rows", d.view.source, small_str(&d.view.id), d.view.count)
+	log.debugf("lists: %s fetched again, %d rows", list_name(d.view.source, small_str(&d.view.id)), d.view.count)
 	list_save(d, &d.view)
 }
 
@@ -890,6 +895,7 @@ disk_result :: proc(s: ^State, res: ^Result) {
 	d := &s.data
 	if res.job.source == .None {
 		if res.hit && !d.sidebar.fresh {
+			log.debugf("lists: sidebar from disk, %d playlists", len(res.playlists))
 			sidebar_adopt(s, res, true)
 		}
 		return
@@ -921,6 +927,6 @@ disk_result :: proc(s: ^State, res: ^Result) {
 	for &r in v.rows {
 		v.longest = max(v.longest, r.seconds)
 	}
-	log.debugf("lists: %v %s from disk, %d rows", v.source, small_str(&v.id), n)
+	log.debugf("lists: %s from disk, %d rows", list_name(v.source, small_str(&v.id)), n)
 	list_check(d)
 }
