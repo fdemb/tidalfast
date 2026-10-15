@@ -19488,7 +19488,7 @@ static kbts__hangul_syllable_info kbts__HangulSyllableInfo(kbts_u32 Codepoint)
   {
     Result.Type = KBTS__HANGUL_SYLLABLE_TYPE_L;
   }
-  else if((Codepoint == 0xAC00) && (Codepoint <= 0xD7A3))
+  else if((Codepoint >= 0xAC00) && (Codepoint <= 0xD7A3))
   {
     Result.Type = KBTS__HANGUL_SYLLABLE_TYPE_LVT;
 
@@ -20316,6 +20316,8 @@ static void kbts__ExecuteOp(kbts_shape_scratchpad *Scratchpad, kbts_glyph_storag
             {
               goto OutOfMemory;
             }
+
+            NewGlyph->UserIdOrCodepointIndex = Glyph->UserIdOrCodepointIndex;
           } break;
           }
         }
@@ -20827,6 +20829,9 @@ static void kbts__ExecuteOp(kbts_shape_scratchpad *Scratchpad, kbts_glyph_storag
               goto OutOfMemory;
             }
 
+            NewGlyph->Config = Glyph->Config;
+            NewGlyph->UserIdOrCodepointIndex = Glyph->UserIdOrCodepointIndex;
+
             kbts_glyph_config *GlyphConfig = Glyph->Config;
             kbts__SetGlyphPreserveLinksAndUserId(Glyph, &Config->SaraAa);
             Glyph->Config = GlyphConfig;
@@ -20869,6 +20874,8 @@ static void kbts__ExecuteOp(kbts_shape_scratchpad *Scratchpad, kbts_glyph_storag
         kbts_un T = 0;
         kbts_un LvtGlyphCount = 0;
         kbts_glyph LvtGlyphs[4];
+        kbts_u32 VComposable = 0;
+        kbts_u32 TComposable = 0;
 
         kbts__hangul_syllable_info LInfo = kbts__HangulSyllableInfo(Glyph->Codepoint);
         if(LInfo.Type >= KBTS__HANGUL_SYLLABLE_TYPE_LV)
@@ -20883,6 +20890,11 @@ static void kbts__ExecuteOp(kbts_shape_scratchpad *Scratchpad, kbts_glyph_storag
           {
             T = 0x11A7 + TIndex;
           }
+
+          // The jamo of a precomposed syllable always recompose.
+          LInfo.Composable = 1;
+          VComposable = 1;
+          TComposable = (T != 0);
         }
         else if(LInfo.Type == KBTS__HANGUL_SYLLABLE_TYPE_L)
         {
@@ -20902,6 +20914,7 @@ static void kbts__ExecuteOp(kbts_shape_scratchpad *Scratchpad, kbts_glyph_storag
             if(VInfo.Type == KBTS__HANGUL_SYLLABLE_TYPE_V)
             {
               V = VCodepoint;
+              VComposable = VInfo.Composable;
 
               Next = Next->Next;
             }
@@ -20920,6 +20933,7 @@ static void kbts__ExecuteOp(kbts_shape_scratchpad *Scratchpad, kbts_glyph_storag
               if(TInfo.Type == KBTS__HANGUL_SYLLABLE_TYPE_T)
               {
                 T = TCodepoint;
+                TComposable = TInfo.Composable;
 
                 Next = Next->Next;
               }
@@ -20941,7 +20955,7 @@ static void kbts__ExecuteOp(kbts_shape_scratchpad *Scratchpad, kbts_glyph_storag
               }
             }
 
-            if(LInfo.Composable & VInfo.Composable & TInfo.Composable)
+            if(LInfo.Composable & VComposable & TComposable)
             {
               // Try LVT.
               kbts_un LvtCodepoint = 0xAC00 + (L - 0x1100) * 588 + (V - 0x1161) * 28 + (T - 0x11A7);
@@ -20956,7 +20970,7 @@ static void kbts__ExecuteOp(kbts_shape_scratchpad *Scratchpad, kbts_glyph_storag
             if(!LvtGlyphCount)
             {
               kbts_glyph LvGlyph = KBTS__ZERO;
-              if(LInfo.Composable & VInfo.Composable)
+              if(LInfo.Composable & VComposable)
               {
                 // Try LV.
                 kbts_un LvCodepoint = 0xAC00 + (L - 0x1100) * 588 + (V - 0x1161) * 28;
@@ -21001,6 +21015,10 @@ static void kbts__ExecuteOp(kbts_shape_scratchpad *Scratchpad, kbts_glyph_storag
 
         { // Insert the LVT glyphs.
           kbts_glyph *LastConsumed = Next->Prev;
+          // Keep the syllable's codepoint index and config, as decomposition does.
+          // Read them now: Glyph goes to the free list and gets reused below.
+          kbts_glyph_config *SyllableConfig = Glyph->Config;
+          int SyllableUserId = Glyph->UserIdOrCodepointIndex;
 
           // Remove the sub-list from the main list.
           Glyph->Prev->Next = LastConsumed->Next;
@@ -21017,6 +21035,8 @@ static void kbts__ExecuteOp(kbts_shape_scratchpad *Scratchpad, kbts_glyph_storag
               ++LvtGlyphIndex)
           {
             kbts_glyph *LvtGlyph = &LvtGlyphs[LvtGlyphIndex];
+            LvtGlyph->Config = SyllableConfig;
+            LvtGlyph->UserIdOrCodepointIndex = SyllableUserId;
             kbts_glyph *NewGlyph = kbts__InsertGlyphBefore(Storage, Next, LvtGlyph);
 
             if(!NewGlyph)
