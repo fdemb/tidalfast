@@ -4,9 +4,9 @@ package mock_tidal
 // continuous sine sweep, so a gap, a repeat or a click where one track
 // meets the next shows up as a break in the sweep, plus four plain tones
 // that every other track id plays. Generated as WAV at startup and encoded
-// to FLAC with macOS's afconvert. afconvert writes no SEEKTABLE, so the
-// files are rebuilt with one (every 2 s) unless -seektable=0, followed by a
-// PADDING block the decoder has to skip.
+// to FLAC with macOS's afconvert (ffmpeg on Linux). The files are rebuilt
+// with a SEEKTABLE (every 2 s), since afconvert writes none, unless
+// -seektable=0, followed by a PADDING block the decoder has to skip.
 //
 // album-source.wav in the audio directory is the whole sweep, for
 // tests/audio_check to compare a capture against.
@@ -101,12 +101,7 @@ encode :: proc(dir, name: string, pcm: []i16, seektable: bool) -> ([]u8, bool) {
 	if !write_wav(wav, pcm) {
 		return nil, false
 	}
-	desc := os.Process_Desc {
-		command = {"afconvert", "-f", "flac", "-d", "flac", wav, flac},
-	}
-	state, _, stderr, err := os.process_exec(desc, context.temp_allocator)
-	if err != nil || !state.success {
-		fmt.eprintfln("mock: afconvert failed for %s: %v %s", name, err, string(stderr))
+	if !flac_encode(name, wav, flac) {
 		return nil, false
 	}
 	os.remove(wav)
@@ -119,6 +114,22 @@ encode :: proc(dir, name: string, pcm: []i16, seektable: bool) -> ([]u8, bool) {
 		_ = os.write_entire_file(flac, data)
 	}
 	return data, true
+}
+
+// flac_encode encodes a WAV file to FLAC with macOS's afconvert, or with
+// ffmpeg on Linux, for tools/linux.
+flac_encode :: proc(name, wav, flac: string) -> bool {
+	when ODIN_OS == .Darwin {
+		command := []string{"afconvert", "-f", "flac", "-d", "flac", wav, flac}
+	} else {
+		command := []string{"ffmpeg", "-y", "-loglevel", "error", "-i", wav, "-c:a", "flac", flac}
+	}
+	state, _, stderr, err := os.process_exec({command = command}, context.temp_allocator)
+	if err != nil || !state.success {
+		fmt.eprintfln("mock: %s failed for %s: %v %s", command[0], name, err, string(stderr))
+		return false
+	}
+	return true
 }
 
 write_wav :: proc(path: string, pcm: []i16) -> bool {

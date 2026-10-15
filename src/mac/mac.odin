@@ -80,8 +80,13 @@ cf_string :: proc(s: string) -> CFStringRef {
 // and with -o:speed Odin links a foreign variable declared in two packages
 // under a mangled name that doesn't exist. So these two are looked up at
 // run time instead.
-@(private)
-RTLD_DEFAULT :: posix.Symbol_Table(~uintptr(1)) // (void *)-2 on macOS
+when ODIN_OS == .Darwin {
+	@(private)
+	RTLD_DEFAULT :: posix.Symbol_Table(~uintptr(1)) // (void *)-2 on macOS
+} else {
+	@(private)
+	RTLD_DEFAULT :: posix.Symbol_Table(uintptr(0)) // the Linux build in tools/linux
+}
 
 @(private)
 cf_dictionary :: proc(keys, values: []CFTypeRef) -> CFDictionaryRef {
