@@ -1154,7 +1154,12 @@ static void update_display_link(void) {
   // a run could lock into waiting most of a refresh in nextDrawable on
   // every frame.
   NSUInteger drawables = paused ? 2 : 3;
-  if (g_layer.maximumDrawableCount != drawables) g_layer.maximumDrawableCount = drawables;
+  if (g_layer.maximumDrawableCount != drawables) {
+    g_layer.maximumDrawableCount = drawables;
+    // The layer lets go of the third drawable in the next nextDrawable, and
+    // an idle window may not draw again for a long time.
+    if (paused) request_redraw();
+  }
 }
 
 // TIDALFAST_SHELL_TEST runs steps against the shell's own entry points,
