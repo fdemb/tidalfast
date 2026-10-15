@@ -578,6 +578,9 @@ sidebar_adopt :: proc(s: ^State, res: ^Result, from_disk: bool) {
 		fetched      = fetched if from_disk else time.tick_now(),
 	}
 	res.arena = nil
+	if lib.status == .Added {
+		lib.status = .None // it names a sidebar entry by its place
+	}
 	if open != "" {
 		lib.playlist = -1
 		for &it, i in d.sidebar.items {

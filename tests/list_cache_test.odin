@@ -563,3 +563,21 @@ sidebar_refreshes_when_the_window_becomes_key :: proc(t: ^testing.T) {
 	testing.expect_value(t, playlists(s), 1)
 	testing.expect(t, d.sidebar.loading)
 }
+
+// "Added ... to <playlist>" names the sidebar entry by its place, which a
+// refreshed sidebar may not have. It used to index past the new sidebar.
+@(test)
+added_status_goes_with_the_old_sidebar :: proc(t: ^testing.T) {
+	s := cache_state()
+	defer cache_state_free(s)
+	sidebar(s, updated = 1, count = 3)
+	serve(s, rows_of(LIKED_IDS))
+	app.set_status(s, .Added, 0, 2)
+	testing.expect_value(t, app.status_text(s), "Added Song 900 夜に駆ける to A playlist")
+	res := app.Result {
+		job       = {kind = .Playlists},
+		playlists = []app.Sidebar_Item{{id = "other", name = "Other", tracks = 2, updated = 1}},
+	}
+	app.handle_result(s, &res, 0)
+	testing.expect_value(t, app.status_text(s), "")
+}
