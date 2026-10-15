@@ -389,3 +389,55 @@ track_menu_closes_with_its_list :: proc(t: ^testing.T) {
 	testing.expect_value(t, fs.search.fake_source, app.Source.Search)
 	testing.expect(t, !ui.menu_is_open("track_menu"))
 }
+
+// Search results stay in memory for a few minutes: searching for the same
+// words again after opening another list shows them without asking TIDAL,
+// tabs included. Older ones are asked for again.
+@(test)
+search_results_come_back_from_memory :: proc(t: ^testing.T) {
+	arena: vmem.Arena
+	_ = vmem.arena_init_growing(&arena)
+	defer vmem.arena_destroy(&arena)
+	context.allocator = vmem.arena_allocator(&arena)
+	s := library_state(false)
+	defer library_state_free(s)
+	s.data.lists.memory = true
+	sr := &s.search
+	f: Frame
+	library_frame(t, s, &f)
+	library_frame(t, s, &f, {kind = .Key_Down, key_code = ui.KEY_F, modifiers = {.Command}})
+	library_frame(t, s, &f, type_text(&f, "abc"))
+	library_frame(t, s, &f, {kind = .Key_Down, key_code = ui.KEY_RETURN})
+	testing.expect_value(t, search_jobs(s), 1)
+	albums := []app.Found{{id = 5, name = "An album", subtitle = "Album · Someone"}}
+	res := app.Result {
+		job   = {kind = .Search, view = sr.gen, id = app.small("abc")},
+		rows  = []app.Row{{title = "Found song", artist = "Someone", id = 1}, {title = "Other song", artist = "Someone", id = 2}},
+		found = {albums = albums},
+	}
+	app.search_result(s, &res)
+	testing.expect(t, s.data.view.done)
+	library_frame(t, s, &f)
+
+	library_frame(t, s, &f, press(s, "Liked Songs"))
+	testing.expect_value(t, s.data.view.source, app.Source.Liked)
+	library_frame(t, s, &f, {kind = .Key_Down, key_code = ui.KEY_F, modifiers = {.Command}})
+	library_frame(t, s, &f, {kind = .Key_Down, key_code = ui.KEY_RETURN})
+	testing.expect_value(t, search_jobs(s), 0)
+	testing.expect(t, app.search_showing(s))
+	testing.expect_value(t, app.view_count(s), 2)
+	testing.expect_value(t, len(sr.found.albums), 1)
+	library_frame(t, s, &f)
+	_, ok := node(s, "Found song")
+	testing.expect(t, ok)
+
+	// Five minutes on, it's asked for again.
+	library_frame(t, s, &f, press(s, "Liked Songs"))
+	i := app.lru_find(&s.data, .Search, "abc")
+	testing.expect(t, i >= 0)
+	s.data.lists.entries[i].view.fetched -= app.SEARCH_MAX_AGE + 1
+	library_frame(t, s, &f, {kind = .Key_Down, key_code = ui.KEY_F, modifiers = {.Command}})
+	library_frame(t, s, &f, {kind = .Key_Down, key_code = ui.KEY_RETURN})
+	testing.expect_value(t, search_jobs(s), 1)
+	testing.expect(t, app.lru_find(&s.data, .Search, "abc") < 0)
+}

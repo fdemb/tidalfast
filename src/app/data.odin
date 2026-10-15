@@ -12,7 +12,6 @@ import "core:encoding/json"
 import "core:fmt"
 import "core:log"
 import "core:math"
-import "core:mem"
 import vmem "core:mem/virtual"
 import "core:os"
 import "core:strings"
@@ -70,16 +69,19 @@ Login :: struct {
 }
 
 Sidebar :: struct {
-	arena:       ^vmem.Arena, // adopted from the Playlists result
-	items:       []Sidebar_Item,
-	liked_count: int,
-	loading:     bool,
-	loaded:      bool,
+	arena:        ^vmem.Arena, // adopted from the Playlists result, or the file's
+	items:        []Sidebar_Item,
+	liked_count:  int,
+	liked_newest: i64, // the newest liked track's id
+	loading:      bool,
+	loaded:       bool,
+	fresh:        bool, // from TIDAL, not from disk
+	fetched:      time.Tick, // when TIDAL's came
 }
 
-// Track_View is the open track list. Its rows live in its arena, which is
-// freed when another list opens. gen tells this list's pages from those of
-// lists opened before it.
+// Track_View is a track list: the open one, one kept in memory after it
+// closed (see lists.odin), or the open one being fetched again. Its rows
+// live in its arena. gen tells its pages from those of other lists.
 Track_View :: struct {
 	gen:         u32,
 	source:      Source,
@@ -99,6 +101,10 @@ Track_View :: struct {
 	error:       Small,
 	gaps:        [dynamic]Gap, // in arena, by offset
 	longest:     int, // seconds, of the longest track loaded
+	version:     List_Version, // what TIDAL said the list was at when it was fetched
+	fetched:     i64, // unix seconds the rows came from TIDAL; 0 until they all have
+	reading:     bool, // waiting for its file
+	found:       Found_Lists, // .Search: the albums, artists and playlists found, in arena
 }
 
 // Gap is where a page came back short before the end of its list: TIDAL
@@ -165,6 +171,10 @@ Data :: struct {
 	settings_written: u64, // the settings_gen on disk; under settings_write
 	sidebar:        Sidebar,
 	view:           Track_View,
+	refresh:        Track_View, // the open list fetched again, see refresh_start
+	next_gen:       u32, // the last Track_View.gen handed out
+	lists:          Lists, // closed lists and the disk cache, see lists.odin
+	window_key:     bool, // the window had the keyboard last frame
 	// Debug builds and tests keep the last closed list's arena, filled with
 	// POISON, until the next list closes, so a string still borrowed from it
 	// reads as garbage instead of whatever the next list put there.
@@ -191,6 +201,8 @@ data_start :: proc(s: ^State, shell: ^platform.Shell) {
 		d.account = .Fake
 		return
 	}
+	d.lists.memory = true
+	d.lists.root = lists_root(api != "")
 	d.bench.running = bench == "covers"
 	d.api = small(api)
 	d.mock = api != ""
@@ -258,6 +270,7 @@ data_shutdown :: proc(s: ^State) {
 	delete(d.settings_path, runtime.heap_allocator())
 	d.settings_path = ""
 	sidebar_free(d)
+	lists_shutdown(d)
 	if d.view.has_arena {
 		vmem.arena_destroy(&d.view.arena)
 	}
@@ -529,6 +542,7 @@ sign_out :: proc(s: ^State, why: string) {
 		sync.guard(&d.keychain_mutex)
 		mac.keychain_delete(keychain_service(d), KEYCHAIN_ACCOUNT)
 	}
+	lists_forget(d)
 	d.login = {
 		note = small(why),
 	}
@@ -542,7 +556,7 @@ sign_out :: proc(s: ^State, why: string) {
 // their results. Playback stops and its queue goes.
 account_end :: proc(s: ^State) {
 	d := &s.data
-	d.auth_gen += 1
+	sync.atomic_add(&d.auth_gen, 1) // the disk thread reads it
 	d.retry = {}
 	d.held = {}
 	jobs.remove_if(&d.queue, drop_account_job, nil)
@@ -551,6 +565,7 @@ account_end :: proc(s: ^State) {
 	d.device_login = false
 	sidebar_free(d)
 	view_close(d)
+	lists_clear(d)
 	playback_stop(s)
 	s.library.playlist = 0
 }
@@ -773,30 +788,35 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 			d.message = res.message
 			return
 		}
-		sidebar_free(d)
-		d.sidebar = {
-			arena       = res.arena,
-			items       = res.playlists,
-			liked_count = res.liked_count,
-			loaded      = true,
-		}
-		res.arena = nil
-		if d.view.source == .None {
-			select_playlist(s, 0)
-		}
+		sidebar_adopt(s, res, false)
+		sidebar_save(d)
+	case .Disk:
+		disk_result(s, res)
 	case .Tracks:
 		v := &d.view
-		if res.job.view != v.gen {
+		r := &d.refresh
+		if res.job.view == r.gen && r.source != .None {
+			v = r
+		} else if res.job.view != v.gen {
 			return
 		}
 		v.in_flight -= 1
 		if failed {
+			if v == r {
+				refresh_drop(d) // the rows on screen stay
+				return
+			}
 			v.error = res.message
 			v.done = true
 			return
 		}
 		view_add_rows(v, int(res.job.offset), int(res.job.limit), res.rows, res.total)
-		view_request_pages(d)
+		view_pages(d, v)
+		if v != r {
+			list_loaded(d)
+		} else if view_complete(r) {
+			refresh_land(s)
+		}
 	case .Stream, .Artwork:
 		playback_result(s, res)
 	case .Search:
@@ -909,9 +929,14 @@ login_error :: proc(err: tidal.Error_Kind, message: Small) -> Small {
 }
 
 // select_playlist opens sidebar entry i: Liked Songs first, then the
-// playlists.
+// playlists. One that's gone opens Liked Songs.
 select_playlist :: proc(s: ^State, i: int) {
 	lib := &s.library
+	d := &s.data
+	i := i
+	if !d.fake && (i < 0 || i > len(d.sidebar.items)) {
+		i = 0
+	}
 	if search_leave(s) || lib.playlist != i {
 		lib.selected = -1
 		lib.playing = -1
@@ -919,16 +944,16 @@ select_playlist :: proc(s: ^State, i: int) {
 	}
 	lib.playlist = i
 	lib.list_gen += 1
-	d := &s.data
 	if d.fake {
 		return
 	}
 	if i == 0 {
-		view_open(d, .Liked, "", "Liked Songs", "", d.sidebar.liked_count)
-	} else if i - 1 < len(d.sidebar.items) {
+		list_open(d, .Liked, "", "Liked Songs", "", d.sidebar.liked_count)
+	} else {
 		pl := d.sidebar.items[i - 1]
-		view_open(d, .Playlist, pl.id, pl.name, pl.image, pl.tracks)
+		list_open(d, .Playlist, pl.id, pl.name, pl.image, pl.tracks)
 	}
+	sidebar_check(d)
 }
 
 @(private = "file")
@@ -938,42 +963,51 @@ drop_track_jobs :: proc(job: ^Job, _: rawptr) -> bool {
 
 POISON :: 0xdb
 
-view_close :: proc(d: ^Data) {
-	jobs.remove_if(&d.queue, drop_track_jobs, nil)
-	v := &d.view
-	if v.has_arena {
-		if d.poison {
-			for b := v.arena.curr_block; b != nil; b = b.prev {
-				mem.set(b.base, POISON, int(b.used))
-			}
-			if d.has_retired {
-				vmem.arena_destroy(&d.retired)
-			}
-			d.retired = v.arena
-			d.has_retired = true
-		} else {
-			vmem.arena_destroy(&v.arena)
-		}
-	}
-	v^ = {gen = v.gen + 1}
+view_gen :: proc(d: ^Data) -> u32 {
+	d.next_gen += 1
+	return d.next_gen
 }
 
+// view_close closes the open list. A list that loaded whole is kept in
+// memory (list_keep); the rest is freed. A refresh of it stops.
+view_close :: proc(d: ^Data) {
+	jobs.remove_if(&d.queue, drop_track_jobs, nil)
+	refresh_drop(d)
+	v := &d.view
+	if v.has_arena {
+		if d.lists.memory && view_complete(v) && v.fetched != 0 {
+			list_keep(d, v^)
+		} else {
+			arena_free(d, &v.arena)
+		}
+	}
+	v^ = {gen = view_gen(d)}
+}
+
+// view_open opens a list from TIDAL, whatever is kept of it. list_open
+// looks in the cache first.
 view_open :: proc(d: ^Data, source: Source, id, name, image: string, hint: int) {
 	view_close(d)
+	view_fetch(d, source, id, name, image, hint)
+}
+
+// view_fetch has TIDAL fill the open list, just closed or read from a file
+// that wasn't there.
+view_fetch :: proc(d: ^Data, source: Source, id, name, image: string, hint: int) {
 	v := &d.view
+	sid, sname, simage := small(id), small(name), small(image)
+	v^ = {gen = v.gen}
 	v.source = source
-	v.id = small(id)
-	v.name = small(name)
-	v.image = small(image)
+	v.id, v.name, v.image = sid, sname, simage
 	v.hint = hint
 	v.count = hint
+	v.version = list_version_now(d, source, id)
 	v.has_arena = vmem.arena_init_growing(&v.arena) == nil
 	view_reserve(v, max(hint, PAGE_FIRST))
 	view_request_pages(d)
 }
 
 // view_reserve makes room for n rows.
-@(private = "file")
 view_reserve :: proc(v: ^Track_View, n: int) {
 	if n <= len(v.rows) || !v.has_arena {
 		return
@@ -1023,19 +1057,7 @@ view_add_rows :: proc(v: ^Track_View, offset, limit: int, rows: []Row, total := 
 	}
 	a := vmem.arena_allocator(&v.arena)
 	for r, i in rows {
-		v.rows[start + i] = {
-			title    = strings.clone(r.title, a),
-			artist   = strings.clone(r.artist, a),
-			album    = strings.clone(r.album, a),
-			added    = strings.clone(r.added, a),
-			duration = strings.clone(r.duration, a),
-			cover    = strings.clone(r.cover, a),
-			seconds  = r.seconds,
-			id       = r.id,
-			album_id = r.album_id,
-			artist_id = r.artist_id,
-			track    = r.track,
-		}
+		v.rows[start + i] = row_clone(r, a)
 		v.loaded_rows += int(!v.loaded[start + i])
 		v.loaded[start + i] = true
 		v.longest = max(v.longest, r.seconds)
@@ -1090,11 +1112,16 @@ view_close_gap :: proc(v: ^Track_View, offset, row, limit, got: int) {
 	inject_at(&v.gaps, i, Gap{offset, missing})
 }
 
-// view_request_pages keeps PAGES_IN_FLIGHT pages loading until a short page
-// says the list has ended. The first page is small so it shows sooner.
+// view_request_pages keeps PAGES_IN_FLIGHT pages loading, for the open list
+// and its refresh, until a short page says the list has ended. The first
+// page is small so it shows sooner.
 view_request_pages :: proc(d: ^Data) {
-	v := &d.view
-	for v.source != .None && !v.done && v.in_flight < PAGES_IN_FLIGHT && (v.next_offset < v.hint || v.in_flight == 0) {
+	view_pages(d, &d.view)
+	view_pages(d, &d.refresh)
+}
+
+view_pages :: proc(d: ^Data, v: ^Track_View) {
+	for v.source != .None && !v.done && !v.reading && v.in_flight < PAGES_IN_FLIGHT && (v.next_offset < v.hint || v.in_flight == 0) {
 		limit := PAGE_FIRST if v.next_offset == 0 else PAGE_SIZE
 		job := Job {
 			kind   = .Tracks,
@@ -1238,5 +1265,6 @@ signed_in :: proc(d: ^Data) {
 	d.relogin = false
 	d.device_login = !tidal.session_is_pkce(d.session)
 	d.notice_hidden = false
+	lists_signed_in(d, tidal.session_auth(d.session, context.temp_allocator).user_id)
 	request_playlists(d)
 }

@@ -73,6 +73,10 @@ Library :: struct {
 	status:        Status,
 	status_track:  int,
 	status_list:   int,
+	top_row:       int, // the first row in view, last frame
+	top_offset:    f32, // how far it was scrolled past
+	anchor_row:    int, // scroll this row to the top, -1 for none; see rows_moved
+	anchor_offset: f32,
 }
 
 Status :: enum u8 {
@@ -149,6 +153,7 @@ library_init :: proc(lib: ^Library) {
 		volume      = 0.7,
 		menu_row    = -1,
 		drop_target = -1,
+		anchor_row  = -1,
 	}
 }
 
@@ -303,7 +308,13 @@ draw_main_view :: proc(s: ^State, main_w: f32) {
 	} else if s.data.bench.running {
 		list.view_off.y = cover_bench_offset(s, list)
 		list.view_off_target.y = list.view_off.y
+	} else if lib.anchor_row >= 0 {
+		list.view_off.y = f32(lib.anchor_row) * TRACK_ROW_H + lib.anchor_offset
+		list.view_off_target.y = list.view_off.y
 	}
+	lib.anchor_row = -1
+	lib.top_row = int(list.view_off.y / TRACK_ROW_H)
+	lib.top_offset = list.view_off.y - f32(lib.top_row) * TRACK_ROW_H
 	table_keys(s, list)
 	{
 		rows := ui.virtual_rows(list, view_count(s), TRACK_ROW_H)

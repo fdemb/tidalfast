@@ -186,7 +186,7 @@ search_send :: proc(s: ^State, q: string) {
 		fake_search(s, q)
 		return
 	}
-	if s.data.account != .Signed_In {
+	if s.data.account != .Signed_In || search_from_memory(s, q) {
 		return
 	}
 	sr.loading = true
@@ -247,9 +247,65 @@ search_result :: proc(s: ^State, res: ^Result) {
 	v.id = sr.query
 	v.name = small(fmt.tprintf("Results for “%s”", q))
 	v.has_arena = vmem.arena_init_growing(&v.arena) == nil
+	if v.has_arena {
+		v.found = found_clone(sr.found, vmem.arena_allocator(&v.arena))
+	}
 	view_add_rows(v, 0, SEARCH_PAGE, res.rows)
 	v.next_offset = SEARCH_PAGE
 	view_request_pages(d)
+	list_loaded(d)
+}
+
+// search_from_memory shows the results kept for q, if they're recent
+// enough (list_stale), without asking TIDAL.
+@(private = "file")
+search_from_memory :: proc(s: ^State, q: string) -> bool {
+	d := &s.data
+	i := lru_find(d, .Search, q)
+	if i < 0 {
+		return false
+	}
+	e := &d.lists.entries[i].view
+	if list_stale(.Search, {}, e.fetched, {}, unix_now()) {
+		lru_drop(d, i)
+		return false
+	}
+	sr := &s.search
+	sr.loading = false
+	sr.error = {}
+	found_free(sr)
+	sr.arena = new(vmem.Arena, runtime.heap_allocator())
+	if vmem.arena_init_growing(sr.arena) != nil {
+		free(sr.arena, runtime.heap_allocator())
+		sr.arena = nil
+		return false
+	}
+	sr.found = found_clone(e.found, vmem.arena_allocator(sr.arena))
+	sr.query = small(q)
+	browse_begin(s)
+	// Out of memory first, so closing the open list can't drop it.
+	kept := lru_remove(d, i)
+	view_close(d)
+	kept.gen = d.view.gen
+	d.view = kept
+	log.infof("search: \"%s\": %d songs from memory", q, d.view.count)
+	return true
+}
+
+// found_clone copies found lists into a.
+found_clone :: proc(f: Found_Lists, a: runtime.Allocator) -> Found_Lists {
+	clone :: proc(list: []Found, a: runtime.Allocator) -> []Found {
+		out := make([]Found, len(list), a)
+		for x, i in list {
+			out[i] = x
+			out[i].uuid = strings.clone(x.uuid, a)
+			out[i].name = strings.clone(x.name, a)
+			out[i].subtitle = strings.clone(x.subtitle, a)
+			out[i].image = strings.clone(x.image, a)
+		}
+		return out
+	}
+	return {clone(f.albums, a), clone(f.artists, a), clone(f.playlists, a)}
 }
 
 // browse_begin resets the table's selection for a list that isn't a
@@ -273,7 +329,7 @@ open_list :: proc(s: ^State, p: ^Pending) {
 		return
 	}
 	browse_begin(s)
-	view_open(&s.data, p.source, small_str(&p.id), small_str(&p.name), small_str(&p.image), p.hint)
+	list_open(&s.data, p.source, small_str(&p.id), small_str(&p.name), small_str(&p.image), p.hint)
 }
 
 // go_to_album opens the album of row i once the frame is done.

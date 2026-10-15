@@ -67,6 +67,7 @@ Job_Kind :: enum u8 {
 	Search, // songs, albums, artists and playlists for a query, see search.odin
 	Login_Pkce, // finish a PKCE login with the pasted address, see login.odin
 	Save_Settings, // write the settings, see settings.odin
+	Disk, // read or write a cache file, on the disk thread, see lists.odin
 }
 
 Source :: enum u8 {
@@ -86,13 +87,15 @@ Job :: struct {
 	view:       u32, // Tracks: the view generation it's for; Stream: the track's serial; Search: the query's generation; Login_Start, Login_Wait, Login_Pkce: the login attempt
 	offset:     i32,
 	limit:      i32,
-	key:        u64, // Cover: the cache key; Stream: the track id; Artwork: the track's serial
+	key:        u64, // Cover: the cache key; Stream: the track id; Artwork: the track's serial; Disk: the user id
 	size:       u16, // Cover: pixels across on screen
 	fetch:      u16, // Cover: the size to download
 	interval:   f32, // Login_Wait: seconds between polls
 	deadline:   time.Tick, // Login_Wait: when the code expires
 	not_before: time.Tick, // Login_Wait: when to poll first, {} for now
 	id:         Small, // playlist id, image id, device code, query, album or artist id
+	op:         Disk_Op,
+	blob:       []u8, // Disk writes: the file, heap, freed by the disk thread
 }
 
 // Priorities: lower runs first.
@@ -101,10 +104,11 @@ PRIORITY_COVER :: 1 // visible
 PRIORITY_COVER_NEAR :: 2 // just outside the view
 
 Sidebar_Item :: struct {
-	id:     string,
-	name:   string,
-	image:  string, // square image id, "" for none
-	tracks: int,
+	id:      string,
+	name:    string,
+	image:   string, // square image id, "" for none
+	tracks:  int,
+	updated: i64, // lastUpdated, unix ms, 0 if TIDAL didn't say
 }
 
 Login_Link :: struct {
@@ -132,6 +136,10 @@ Result :: struct {
 	stream:      tidal.Stream_Info, // strings in arena
 	codec:       Small, // Stream: the manifest's codec, when that's why it failed
 	found:       Found_Lists, // Search: in arena
+	liked_newest: i64, // Playlists: the newest liked track's id
+	hit:         bool, // Disk: the file was there and good
+	version:     List_Version, // Disk: what the list was fetched at
+	fetched:     i64, // Disk: when, unix seconds
 }
 
 workers_start :: proc(d: ^Data) {
@@ -144,6 +152,7 @@ workers_start :: proc(d: ^Data) {
 	for &t in d.threads {
 		posix.pthread_create(&t, nil, worker_main, d)
 	}
+	disk_start(d)
 	d.running = true
 }
 
@@ -159,6 +168,7 @@ workers_stop :: proc(d: ^Data) {
 	for t in d.threads {
 		posix.pthread_join(t)
 	}
+	disk_stop(d)
 	d.running = false
 }
 
@@ -356,7 +366,7 @@ run_job :: proc(d: ^Data, job: Job) -> (res: Result) {
 	alloc := vmem.arena_allocator(res.arena)
 	id := job.id
 	switch job.kind {
-	case .None, .Cover, .Artwork:
+	case .None, .Cover, .Artwork, .Disk:
 	case .Save_Settings:
 		if !settings_flush(d) {
 			res.err = .Io
@@ -523,12 +533,17 @@ fail_login :: proc(res: ^Result, err: tidal.Error) {
 
 @(private = "file")
 run_playlists :: proc(s: ^tidal.Session, res: ^Result, alloc: mem.Allocator) {
-	count, err := tidal.favorites_tracks_count(s)
+	// One liked track gives the count and the newest, which tell whether
+	// Liked Songs changed.
+	newest, count, err := tidal.favorites_tracks(s, 1, 0, .Date, .Descending, context.temp_allocator)
 	if err != nil {
 		fail(res, err)
 		return
 	}
 	res.liked_count = count
+	if len(newest) > 0 {
+		res.liked_newest = newest[0].id
+	}
 	items := make([dynamic]Sidebar_Item, 0, 64, alloc)
 	for offset := 0;; offset += PLAYLIST_PAGE {
 		page, perr := tidal.user_playlist_and_favorite_playlists(s, offset, PLAYLIST_PAGE, alloc)
@@ -537,7 +552,11 @@ run_playlists :: proc(s: ^tidal.Session, res: ^Result, alloc: mem.Allocator) {
 			return
 		}
 		for pl in page {
-			append(&items, Sidebar_Item{id = pl.id, name = pl.name, image = pl.square_picture, tracks = pl.num_tracks})
+			item := Sidebar_Item{id = pl.id, name = pl.name, image = pl.square_picture, tracks = pl.num_tracks}
+			if t, ok := pl.last_updated.?; ok {
+				item.updated = time.to_unix_nanoseconds(t) / 1e6
+			}
+			append(&items, item)
 		}
 		if len(page) < PLAYLIST_PAGE {
 			break
