@@ -454,7 +454,8 @@ hsv :: proc(h, s, v: f32) -> render.Color {
 // bars, newest on the right, with lines at 120 Hz and 60 Hz budgets. Under
 // the bars: the last frame's CPU time in total and building the frame (the
 // UI, before end_frame), then its draw calls (blue), instances (green), and
-// the text cache's runs and atlas pages.
+// the text cache's runs and atlas pages, then the keyed boxes in use, in red
+// when the pool ran out this frame.
 draw_frame_overlay :: proc(s: ^State, view_width: f32) {
 	BAR_W :: 2
 	PX_PER_MS :: 4
@@ -464,7 +465,7 @@ draw_frame_overlay :: proc(s: ^State, view_width: f32) {
 	y0 := f32(12)
 	r := &s.renderer
 
-	render.push_rect(r, {x0, y0, panel_w, PANEL_H + 42}, {0, 0, 0, 0.6}, 6)
+	render.push_rect(r, {x0, y0, panel_w, PANEL_H + 58}, {0, 0, 0, 0.6}, 6)
 	for i in 0 ..< FRAME_HISTORY {
 		// Oldest first, starting just after the newest entry.
 		ms := s.frame_ms[(s.frame_count + u64(i)) % FRAME_HISTORY]
@@ -493,4 +494,11 @@ draw_frame_overlay :: proc(s: ^State, view_width: f32) {
 	text.draw(t, r, .Regular, 11, {x0 + 70, y}, {1, 1, 1, 0.9}, fmt.tprint(s.last_stats.instances))
 	runs := fmt.tprintf("%d runs, %d pages", t.stats.runs, t.stats.pages)
 	text.draw(t, r, .Regular, 11, {x0 + panel_w - 8 - text.measure(t, .Regular, 11, runs).width, y}, {1, 1, 1, 0.6}, runs)
+	y += 16
+	used, capacity, misses := ui.pool_stats(&s.ui)
+	if misses > 0 {
+		text.draw(t, r, .Medium, 11, {x0 + 8, y}, {0.95, 0.30, 0.25, 1}, fmt.tprintf("boxes %d/%d full, %d without state", used, capacity, misses))
+	} else {
+		text.draw(t, r, .Regular, 11, {x0 + 8, y}, {1, 1, 1, 0.6}, fmt.tprintf("boxes %d/%d", used, capacity))
+	}
 }

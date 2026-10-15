@@ -227,6 +227,9 @@ known_or_load :: proc(l: ^Loader, ct: CTFontRef, need: rune, res: ^Load_Result) 
 		posix.munmap(raw_data(data), uint(len(data)))
 		return false
 	}
+	if need >= 0 {
+		warm_face(&face, need)
+	}
 	l.known[l.known_count] = {name, face.kb}
 	l.known_count += 1
 	res.found = name
@@ -295,6 +298,47 @@ search_fallback :: proc(l: ^Loader, font: Font, str: CFStringRef, r: rune, res: 
 		}
 	}
 	return false
+}
+
+// warm_face lays out and draws r once in a newly loaded face, on the
+// loader thread, so the first use of the font costs the main thread less.
+// Measured on an M1: the first line CoreText lays out in Geeza Pro takes
+// 3.8 ms and later ones 30 to 200 us at any size. The first Apple Color
+// Emoji glyph drawn takes 6 ms, and after this about 2.3 ms; the rest is
+// decoding that glyph's bitmap, which every emoji glyph pays.
+@(private)
+warm_face :: proc(face: ^Face, r: rune) {
+	if face.coretext_shaping {
+		r := r
+		str := CFStringCreateWithBytes(nil, ([^]u8)(&r), 4, CF_STRING_ENCODING_UTF32LE, false)
+		defer cf_release(str)
+		keys := [1]rawptr{kCTFontAttributeName}
+		values := [1]rawptr{face.ct}
+		attrs := CFDictionaryCreate(nil, &keys[0], &values[0], 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks)
+		defer cf_release(attrs)
+		attributed := CFAttributedStringCreate(nil, str, attrs)
+		defer cf_release(attributed)
+		cf_release(CTLineCreateWithAttributedString(attributed))
+	}
+	glyph := CGGlyph(kbts.CodepointToGlyphId(&face.kb, r))
+	if glyph == 0 {
+		return
+	}
+	SIZE :: 64
+	ctx: CGContextRef
+	if face.color {
+		space := CGColorSpaceCreateWithName(kCGColorSpaceSRGB)
+		defer CGColorSpaceRelease(space)
+		ctx = CGBitmapContextCreate(nil, SIZE, SIZE, 8, SIZE * 4, space, CG_BITMAP_BGRA_PREMULTIPLIED)
+	} else {
+		ctx = CGBitmapContextCreate(nil, SIZE, SIZE, 8, SIZE, nil, CG_IMAGE_ALPHA_ONLY)
+	}
+	if ctx == nil {
+		return
+	}
+	defer CGContextRelease(ctx)
+	pos := CGPoint{8, 16}
+	CTFontDrawGlyphs(face.ct, &glyph, &pos, 1, ctx)
 }
 
 // load_face loads font file data into kb_text_shape and keeps a copy of ct

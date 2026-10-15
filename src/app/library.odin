@@ -39,7 +39,6 @@ Library :: struct {
 	paused:        bool,
 	volume:        f32,
 	menu_row:      int, // the row the context menu is for
-	dragged:       int, // the row being dragged, -1 for none
 	drop_target:   int, // the playlist under a dragged row this frame, -1 for none
 	status:        Status,
 	status_track:  int,
@@ -123,7 +122,6 @@ library_init :: proc(lib: ^Library) {
 		playing     = -1,
 		volume      = 0.7,
 		menu_row    = -1,
-		dragged     = -1,
 		drop_target = -1,
 	}
 }
@@ -166,9 +164,12 @@ draw_sidebar :: proc(s: ^State) {
 		if lib.playlist == i {
 			item.background = SURFACE_ACTIVE
 		}
-		if lib.dragged >= 0 && ui.mouse_over(item) {
+		if ui.drop_hover(item) {
 			lib.drop_target = i
 			item.border_color = ACCENT
+		}
+		if track, ok := ui.dropped(item); ok {
+			set_status(s, .Added, int(track), i)
 		}
 		sig := ui.signal(item)
 		if sig.clicked {
@@ -209,7 +210,7 @@ draw_sidebar_handle :: proc(s: ^State, window_w: f32) {
 	if sig.pressed {
 		lib.drag_from_w = lib.sidebar_w
 	}
-	if sig.held {
+	if sig.held || sig.released {
 		lib.sidebar_w = clamp(lib.drag_from_w + sig.drag_delta.x, SIDEBAR_MIN, sidebar_limit(window_w))
 	}
 	ui.spacer(ui.px(2))
@@ -339,13 +340,7 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 		ui.open_menu("track_menu", ui.mouse())
 	}
 	if sig.dragging {
-		lib.dragged = i
-	}
-	if sig.released && lib.dragged == i {
-		if lib.drop_target >= 0 {
-			set_status(s, .Added, i, lib.drop_target)
-		}
-		lib.dragged = -1
+		ui.drag_begin(u64(i))
 	}
 
 	current := lib.playing == i
@@ -426,7 +421,8 @@ draw_track_menu :: proc(s: ^State) {
 // draw_drag_ghost follows the mouse with the dragged row's title.
 draw_drag_ghost :: proc(s: ^State) {
 	lib := &s.library
-	if lib.dragged < 0 {
+	track, dragging := ui.drag_payload()
+	if !dragging {
 		return
 	}
 	ui.floating()
@@ -437,7 +433,7 @@ draw_drag_ghost :: proc(s: ^State) {
 	ghost.radius = 6
 	ghost.opacity = 0.95
 	ui.text_style(.Medium, 13, TEXT)
-	b := ui.label(s.rows[lib.dragged].title, ui.fill(), ui.fill())
+	b := ui.label(s.rows[track].title, ui.fill(), ui.fill())
 	b.text_pad = 12
 }
 
@@ -585,13 +581,14 @@ skip_stop :: proc() {
 	ui.spacer(ui.fill())
 }
 
-// draw_volume is a slider: press or drag along it to set the volume.
+// draw_volume is a slider: press or drag along it to set the volume. A
+// press and release in one frame still counts, at the release.
 draw_volume :: proc(s: ^State) {
 	lib := &s.library
 	slider := ui.column("volume", {.Clickable}, ui.px(110), ui.fill())
 	sig := ui.signal(slider)
-	if sig.held && slider.rect.w > 0 {
-		lib.volume = clamp((ui.mouse().x - slider.rect.x) / slider.rect.w, 0, 1)
+	if (sig.held || sig.released) && slider.rect.w > 0 {
+		lib.volume = clamp((sig.mouse.x - slider.rect.x) / slider.rect.w, 0, 1)
 	}
 	ui.spacer(ui.fill())
 	{

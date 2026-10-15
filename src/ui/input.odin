@@ -16,6 +16,8 @@ Input :: struct {
 	// released while buttons doesn't change.
 	pressed:      Mouse_Buttons,
 	released:     Mouse_Buttons,
+	press_pos:    [platform.Mouse_Button][2]f32, // where each button last went down
+	release_pos:  [platform.Mouse_Button][2]f32, // where each button last came up
 	scroll:       [2]f32, // points
 }
 
@@ -59,10 +61,12 @@ input_apply :: proc(input: ^Input, e: platform.Event) {
 		input.mouse = {e.x, e.y}
 		input.buttons += {e.button}
 		input.pressed += {e.button}
+		input.press_pos[e.button] = input.mouse
 	case .Mouse_Up:
 		input.mouse = {e.x, e.y}
 		input.buttons -= {e.button}
 		input.released += {e.button}
+		input.release_pos[e.button] = input.mouse
 	case .Scroll:
 		input.scroll += scroll_delta(e)
 	}

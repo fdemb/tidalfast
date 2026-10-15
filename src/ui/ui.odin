@@ -17,6 +17,7 @@
 // begin_frame, so State survives a hot reload.
 package ui
 
+import "core:fmt"
 import "core:hash"
 import "core:math"
 import "core:strings"
@@ -31,6 +32,7 @@ MAX_KEY_PRESSES :: 32
 STACK_DEPTH :: 64
 TOOLTIP_DELAY :: 0.5 // seconds of hovering before a tooltip shows
 DRAG_THRESHOLD :: 4 // points the mouse moves before a press becomes a drag
+MAX_SETTLE_FRAMES :: 3 // extra frames in a row that a layout mismatch may ask for
 
 Key :: distinct u64
 
@@ -91,6 +93,7 @@ Box :: struct {
 	view_bounds:     [2]f32, // size of the children from the last layout
 	view_off:        [2]f32, // scroll offset drawn
 	view_off_target: [2]f32, // where view_off is easing to
+	built_size:      [2]f32, // the rect size a scroll view's children were built for
 	hot_t:           f32,
 	active_t:        f32,
 	focus_t:         f32,
@@ -137,7 +140,8 @@ Signal :: struct {
 	double_clicked: bool,
 	right_clicked:  bool, // right or control-click went down on the box
 	dragging:       bool, // pressed on the box and moved past DRAG_THRESHOLD
-	drag_delta:     [2]f32, // mouse movement since the press
+	drag_delta:     [2]f32, // mouse movement since the press, up to the release if released
+	mouse:          [2]f32, // while held the mouse, when released where the button came up
 	scroll:         [2]f32, // points scrolled over the box this frame
 }
 
@@ -150,6 +154,7 @@ Hit :: struct {
 	focus_parent: Key, // nearest focusable ancestor
 	click_parent: Key, // nearest clickable ancestor
 	floating:     bool,
+	in_menu:      bool, // the open menu or inside it
 }
 
 Key_Press :: struct {
@@ -202,6 +207,7 @@ State :: struct {
 	scroll_precise: [2]f32, // the part of scroll from trackpads, applied without easing
 	focus:          Key,
 	focus_visible:  bool, // the focus came from the keyboard, so draw a ring
+	focus_reveal:   bool, // the keyboard moved the focus: scroll it into view
 	key_click:      Key, // Enter or Space this frame
 	keys:           [MAX_KEY_PRESSES]Key_Press, // presses the UI didn't use
 	key_count:      int,
@@ -210,7 +216,22 @@ State :: struct {
 	menu_open:      bool,
 	menu_pos:       [2]f32,
 	menu_built:     bool,
+	menu_focus_new: bool, // the first menu item built takes the focus
+	menu_saved:     Key, // the focus before the menu opened, restored when it closes
+	menu_saved_vis: bool,
 	tooltip_owner:  Key,
+
+	drag_active:    bool,
+	drag_payload:   u64,
+	drag_cancelled: bool, // Escape ended the drag; no new one until the next press
+	drop:           bool, // a drag ended this frame, at drop_pos
+	drop_payload:   u64,
+	drop_pos:       [2]f32,
+
+	settle_frames:  int, // frames in a row asked for by a layout mismatch
+	pool_misses:    int, // keyed boxes this frame that got no state, the pool being full
+	pool_miss_last: u64, // the last frame with pool misses
+	pool_logged_at: f64,
 
 	debug:          bool, // outline every box, show the key under the mouse
 	animating:      bool, // something is still moving, draw another frame
@@ -312,6 +333,7 @@ begin_frame :: proc(u: ^State, events: []platform.Event, r: ^render.Renderer, t:
 	u.texts = t
 	u.animating = false
 	u.menu_built = false
+	u.pool_misses = 0
 	prune(u)
 	process_events(u, events)
 
@@ -353,6 +375,9 @@ prune :: proc(u: ^State) {
 	if box_lookup(u, u.focus) == nil {
 		u.focus = 0
 	}
+	if box_lookup(u, u.menu_saved) == nil {
+		u.menu_saved = 0
+	}
 }
 
 @(private)
@@ -367,6 +392,7 @@ process_events :: proc(u: ^State, events: []platform.Event) {
 	u.scroll = {}
 	u.scroll_precise = {}
 	u.scroll_key = 0
+	u.drop = false
 
 	for event in events {
 		e := event
@@ -394,6 +420,13 @@ process_events :: proc(u: ^State, events: []platform.Event) {
 				}
 			}
 			u.active[e.button] = 0
+			// A drag ends on any left release, wherever the source is.
+			if e.button == .Left && u.drag_active {
+				u.drag_active = false
+				u.drop = true
+				u.drop_payload = u.drag_payload
+				u.drop_pos = u.input.mouse
+			}
 		case .Mouse_Move:
 			if u.active[.Left] != 0 && !u.drag_moved {
 				d := u.input.mouse - u.drag_start
@@ -414,6 +447,10 @@ process_events :: proc(u: ^State, events: []platform.Event) {
 		case .Key_Down:
 			key_down(u, e)
 		}
+	}
+	// The release may have gone missing, as when another app took the mouse.
+	if u.drag_active && .Left not_in u.input.buttons {
+		u.drag_active = false
 	}
 
 	hot := hit_at(u, u.input.mouse) if u.input.mouse_inside else 0
@@ -453,6 +490,7 @@ mouse_pressed :: proc(u: ^State, e: platform.Event) {
 	if e.button == .Left {
 		u.drag_start = pos
 		u.drag_moved = false
+		u.drag_cancelled = false
 		if e.click_count >= 2 {
 			u.double_clicked = hover
 		}
@@ -481,6 +519,11 @@ key_down :: proc(u: ^State, e: platform.Event) {
 		focus_step(u, -1 if .Shift in mods else 1)
 		return
 	case code == KEY_ESCAPE && mods == {}:
+		if u.drag_active {
+			u.drag_active = false
+			u.drag_cancelled = true
+			return
+		}
 		if u.menu != 0 && u.menu_open {
 			close_menu()
 			return
@@ -490,7 +533,10 @@ key_down :: proc(u: ^State, e: platform.Event) {
 			return
 		}
 	case (code == KEY_RETURN || code == KEY_SPACE) && mods == {} && u.focus != 0:
-		u.key_click = u.focus
+		// With a menu open, only its items take keys.
+		if !menu_blocks(u, u.focus) {
+			u.key_click = u.focus
+		}
 		return
 	case (code == KEY_UP || code == KEY_DOWN) && mods == {}:
 		if focus_arrow(u, -1 if code == KEY_UP else 1) {
@@ -518,16 +564,31 @@ focus_step :: proc(u: ^State, dir: int) {
 			break
 		}
 	}
-	start := at if at >= 0 else (n if dir > 0 else -1)
+	start := at if at >= 0 else (-1 if dir > 0 else n)
 	for step in 1 ..= n {
 		i := ((start + dir * step) % n + n) % n
 		h := u.hits[i]
-		if .Focusable in h.flags && (u.menu == 0 || !u.menu_open || h.floating) {
+		if .Focusable in h.flags && (!u.menu_open || h.in_menu) {
 			u.focus = h.key
 			u.focus_visible = true
+			u.focus_reveal = true
 			return
 		}
 	}
+}
+
+// menu_blocks reports whether an open menu keeps the keyboard from key.
+@(private)
+menu_blocks :: proc(u: ^State, key: Key) -> bool {
+	if u.menu == 0 || !u.menu_open {
+		return false
+	}
+	for h in u.hits[:u.hit_count] {
+		if h.key == key {
+			return !h.in_menu
+		}
+	}
+	return true
 }
 
 // focus_arrow moves the focus to the previous or next focusable box with
@@ -557,6 +618,7 @@ focus_arrow :: proc(u: ^State, dir: int) -> bool {
 		if .Focusable in h.flags && h.group == group {
 			u.focus = h.key
 			u.focus_visible = true
+			u.focus_reveal = true
 			return true
 		}
 	}
@@ -602,16 +664,38 @@ end_frame :: proc() -> bool {
 	layout(u.root)
 	layout(u.floating_root)
 	u.hit_count = 0
-	finish(u, u.root, {0, 0, u.width, u.height}, 0, 0, false)
-	finish(u, u.floating_root, {0, 0, u.width, u.height}, 0, 0, true)
+	mismatch := false
+	finish(u, u.root, {0, 0, u.width, u.height}, 0, 0, false, false, &mismatch)
+	finish(u, u.floating_root, {0, 0, u.width, u.height}, 0, 0, true, false, &mismatch)
+	if u.focus_reveal {
+		u.focus_reveal = false
+		reveal_focus(u)
+	}
+	// The build used sizes or offsets the layout didn't keep, so what's on
+	// screen may be missing rows. One more frame builds it right. The limit
+	// stops a layout that never settles from drawing forever.
+	if mismatch && u.settle_frames < MAX_SETTLE_FRAMES {
+		u.settle_frames += 1
+		u.animating = true
+	} else if !mismatch {
+		u.settle_frames = 0
+	}
+	if u.pool_misses > 0 {
+		// Log when a run of full frames starts, at most once a second.
+		if u.pool_miss_last + 1 != u.frame && u.time - u.pool_logged_at >= 1 {
+			fmt.eprintfln("ui: box pool full (%d boxes), %d keyed boxes built without state", MAX_BOXES, u.pool_misses)
+			u.pool_logged_at = u.time
+		}
+		u.pool_miss_last = u.frame
+	}
 	draw_box(u, u.root, 1)
 	draw_box(u, u.floating_root, 1)
 	if u.debug {
 		draw_debug(u)
 	}
 	if u.menu != 0 && !u.menu_built {
+		close_menu()
 		u.menu = 0
-		u.menu_open = false
 	}
 	// Rows moved under a still mouse, or a box appeared that has no rect to
 	// test against yet: one more frame settles hot.
@@ -636,10 +720,26 @@ measure :: proc(u: ^State, b: ^Box) {
 }
 
 // finish records each box's clipped rect and the interactive boxes in
-// drawing order for the next frame's input.
+// drawing order for the next frame's input. It clamps scroll offsets to the
+// content just laid out, and sets mismatch when a scroll view's children
+// were built for an offset or size that the layout didn't keep.
 @(private)
-finish :: proc(u: ^State, b: ^Box, clip: render.Rect, focus_parent, click_parent: Key, floating: bool) {
+finish :: proc(u: ^State, b: ^Box, clip: render.Rect, focus_parent, click_parent: Key, floating, menu_ancestor: bool, mismatch: ^bool) {
 	b.clip = rect_intersect(b.rect, clip)
+	in_menu := menu_ancestor || (b.key != 0 && b.key == u.menu)
+	if .View_Scroll in b.flags && b.key != 0 {
+		limit := [2]f32{max(b.view_bounds.x - b.rect.w, 0), max(b.view_bounds.y - b.rect.h, 0)}
+		for axis in 0 ..< 2 {
+			if b.view_off[axis] > limit[axis] {
+				b.view_off[axis] = limit[axis]
+				mismatch^ = true
+			}
+			b.view_off_target[axis] = min(b.view_off_target[axis], limit[axis])
+		}
+		if b.built_size != {b.rect.w, b.rect.h} {
+			mismatch^ = true
+		}
+	}
 	if b.key != 0 && b.flags & {.Clickable, .Focusable, .View_Scroll} != {} && .Disabled not_in b.flags && u.hit_count < len(u.hits) {
 		u.hits[u.hit_count] = {
 			key          = b.key,
@@ -649,6 +749,7 @@ finish :: proc(u: ^State, b: ^Box, clip: render.Rect, focus_parent, click_parent
 			focus_parent = focus_parent,
 			click_parent = click_parent,
 			floating     = floating,
+			in_menu      = in_menu,
 		}
 		u.hit_count += 1
 	}
@@ -656,7 +757,43 @@ finish :: proc(u: ^State, b: ^Box, clip: render.Rect, focus_parent, click_parent
 	fp := b.key if .Focusable in b.flags && b.key != 0 else focus_parent
 	cp := b.key if .Clickable in b.flags && b.key != 0 else click_parent
 	for c := b.first; c != nil; c = c.next {
-		finish(u, c, inner, fp, cp, floating)
+		finish(u, c, inner, fp, cp, floating, in_menu, mismatch)
+	}
+}
+
+// reveal_focus scrolls the nearest scroll view around the focused box the
+// least it takes to show the box. The box must have been built this frame.
+@(private)
+reveal_focus :: proc(u: ^State) {
+	b := box_lookup(u, u.focus)
+	if b == nil || b.last_frame != u.frame {
+		return
+	}
+	for v := b.parent; v != nil; v = v.parent {
+		if .View_Scroll not_in v.flags || v.key == 0 {
+			continue
+		}
+		pos := [2]f32{b.rect.x - v.rect.x, b.rect.y - v.rect.y} + v.view_off
+		size := [2]f32{b.rect.w, b.rect.h}
+		view := [2]f32{v.rect.w, v.rect.h}
+		for axis in 0 ..< 2 {
+			overflow := Box_Flag.Allow_Overflow_X if axis == 0 else .Allow_Overflow_Y
+			if overflow not_in v.flags {
+				continue
+			}
+			t := v.view_off_target[axis]
+			if pos[axis] < t {
+				t = pos[axis]
+			} else if pos[axis] + size[axis] > t + view[axis] {
+				t = pos[axis] + size[axis] - view[axis]
+			}
+			t = clamp(t, 0, max(v.view_bounds[axis] - view[axis], 0))
+			if t != v.view_off_target[axis] {
+				v.view_off_target[axis] = t
+				u.animating = true
+			}
+		}
+		return
 	}
 }
 
@@ -676,6 +813,9 @@ box_make :: proc(id: string, flags: Box_Flags = {}, width: Size = {}, height: Si
 	}
 	if key != 0 && b == nil {
 		b = box_alloc(u, key)
+		if b == nil {
+			u.pool_misses += 1
+		}
 	}
 	if b == nil {
 		b = new(Box, context.temp_allocator)
@@ -706,6 +846,7 @@ box_make :: proc(id: string, flags: Box_Flags = {}, width: Size = {}, height: Si
 	}
 	if .View_Scroll in flags && b.key != 0 {
 		scroll_box(u, b)
+		b.built_size = {b.rect.w, b.rect.h}
 	}
 	return b
 }
@@ -781,9 +922,13 @@ signal :: proc(b: ^Box) -> (s: Signal) {
 	s.keyboard = u.key_click == k
 	s.double_clicked = u.double_clicked == k
 	s.right_clicked = u.pressed[.Right] == k
-	if u.active[.Left] == k {
-		s.drag_delta = u.input.mouse - u.drag_start
+	if s.held {
+		s.mouse = u.input.mouse
+		s.drag_delta = s.mouse - u.drag_start
 		s.dragging = u.drag_moved
+	} else if s.released {
+		s.mouse = u.input.release_pos[.Left]
+		s.drag_delta = s.mouse - u.drag_start
 	}
 	if u.scroll_key == k {
 		s.scroll = u.scroll
@@ -905,6 +1050,45 @@ mouse :: proc() -> [2]f32 {
 mouse_over :: proc(b: ^Box) -> bool {
 	u := ctx
 	return u.input.mouse_inside && rect_contains(b.clip, u.input.mouse)
+}
+
+// Drag and drop. A source calls drag_begin with a payload once its signal
+// says dragging. The drag then belongs to the UI: any left release ends it,
+// over a target or not, and Escape cancels it, whether or not the source is
+// still built. A target asks drop_hover while the drag goes on and dropped
+// in the frame it ends.
+
+drag_begin :: proc(payload: u64) {
+	u := ctx
+	if u.drag_cancelled || .Left not_in u.input.buttons {
+		return
+	}
+	u.drag_active = true
+	u.drag_payload = payload
+}
+
+drag_payload :: proc() -> (payload: u64, ok: bool) {
+	return ctx.drag_payload, ctx.drag_active
+}
+
+// drop_hover reports a drag going on with the mouse over b.
+drop_hover :: proc(b: ^Box) -> bool {
+	return ctx.drag_active && mouse_over(b)
+}
+
+// dropped returns the payload of a drag that ended over b this frame.
+dropped :: proc(b: ^Box) -> (payload: u64, ok: bool) {
+	u := ctx
+	if !u.drop || !rect_contains(b.clip, u.drop_pos) {
+		return
+	}
+	return u.drop_payload, true
+}
+
+// pool_stats is how many keyed boxes are alive and how many this frame got
+// no state because the pool was full.
+pool_stats :: proc(u: ^State) -> (used, capacity, misses: int) {
+	return u.box_count, MAX_BOXES, u.pool_misses
 }
 
 // request_frame asks for another frame, for app animations.

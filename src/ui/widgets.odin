@@ -59,9 +59,14 @@ virtual_rows_end :: proc(v: Virtual_Rows) {
 // virtual_rows works out which of count rows of height row_h show in the
 // scroll view, which is the current parent, and stands in for the rest with
 // spacers. Build exactly the rows in [first, last) before the scope ends.
+// One row past each edge is built too, so the keyboard can move the focus
+// onto it and scroll it into view.
 @(deferred_out = virtual_rows_end)
 virtual_rows :: proc(view: ^Box, count: int, row_h: f32) -> Virtual_Rows {
 	first, last := virtual_range(view.view_off.y, view.rect.h, row_h, count)
+	if last > first {
+		first, last = max(first - 1, 0), min(last + 1, count)
+	}
 	if first > 0 {
 		spacer(px(f32(first) * row_h))
 	}
@@ -92,17 +97,33 @@ floating :: proc() {
 
 // Menus. One context menu is open at a time. open_menu opens it at pos;
 // menu builds it while it's open or fading out. A click outside it or
-// Escape closes it, and so does clicking an item.
+// Escape closes it, and so does clicking an item. While it's open the focus
+// is inside it, starting on the first item, and the keyboard reaches
+// nothing else. Closing it puts the focus back where it was.
 
 open_menu :: proc(id: string, pos: [2]f32) {
 	u := ctx
+	if !u.menu_open {
+		u.menu_saved = u.focus
+		u.menu_saved_vis = u.focus_visible
+	}
 	u.menu = key_from_string(0, id)
 	u.menu_open = true
 	u.menu_pos = pos
+	u.menu_focus_new = true
 }
 
 close_menu :: proc() {
-	ctx.menu_open = false
+	u := ctx
+	if u.menu_open {
+		u.focus = u.menu_saved
+		u.focus_visible = u.menu_saved_vis && u.focus != 0
+		u.menu_saved = 0
+	}
+	u.menu_open = false
+	u.menu_focus_new = false
+	// It may close after it was built this frame, so the fade starts next.
+	u.animating = true
 }
 
 menu_is_open :: proc(id: string) -> bool {
@@ -128,7 +149,12 @@ menu :: proc(id: string, width: f32 = 220) -> bool {
 		return false
 	}
 	push_parent(u.floating_root)
-	b := box_make(id, {.Clickable, .Draw_Background, .Draw_Border, .Draw_Shadow, .Floating_X, .Floating_Y}, px(width), children_sum())
+	// A menu fading out takes no input.
+	flags := Box_Flags{.Clickable, .Draw_Background, .Draw_Border, .Draw_Shadow, .Floating_X, .Floating_Y}
+	if !u.menu_open {
+		flags += {.Disabled}
+	}
+	b := box_make(id, flags, px(width), children_sum())
 	b.child_axis = .Y
 	b.open_t = approach(u, b.open_t, 1 if u.menu_open else 0, 1 - math.exp(-u.dt * 24), 0.01)
 	u.menu_built = true
@@ -163,6 +189,11 @@ menu_item :: proc(id: string) -> Signal {
 	b := box_make(id, flags, fill(), px(30))
 	b.text_pad = 14
 	b.hover_color = {1, 1, 1, 0.08}
+	if u.menu_focus_new && u.menu_open && b.key != 0 {
+		u.menu_focus_new = false
+		u.focus = b.key
+		u.focus_visible = true
+	}
 	sig := signal(b)
 	if sig.clicked {
 		close_menu()

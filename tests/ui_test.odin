@@ -1,5 +1,6 @@
 package tidal_tests
 
+import "core:fmt"
 import "core:testing"
 
 import app "../src/app"
@@ -345,4 +346,379 @@ test_ui_scroll :: proc(t: ^testing.T) {
 	}
 	testing.expect(t, !animating)
 	testing.expect_value(t, list.view_off.y, list.view_off_target.y)
+}
+
+@(private = "file")
+ui_destroy :: proc(u: ^ui.State) {
+	delete(u.boxes)
+	delete(u.table)
+	delete(u.hits)
+	free_all(context.temp_allocator)
+}
+
+// A scroll view filling a 300 by height window, with count rows of 10 pt
+// built through virtual_rows. Returns the view and the rows built.
+@(private = "file")
+rows_frame :: proc(u: ^ui.State, now: ^f64, height: f32, count: int, events: ..platform.Event) -> (view: ^ui.Box, rows: ui.Virtual_Rows, animating: bool) {
+	now^ += 1.0 / 120
+	ui.begin_frame(u, events, nil, nil, 300, height, now^)
+	{
+		view = ui.scroll_view("view", ui.fill(), ui.fill())
+		rows = ui.virtual_rows(view, count, 10)
+		for i in rows.first ..< rows.last {
+			ui.box_make(fmt.tprintf("##row%d", i), {.Focusable, .Clickable}, ui.fill(), ui.px(10))
+		}
+	}
+	animating = ui.end_frame()
+	return
+}
+
+@(private = "file")
+settle :: proc(u: ^ui.State, now: ^f64, height: f32, count: int) -> (view: ^ui.Box, rows: ui.Virtual_Rows, settled: bool) {
+	animating: bool
+	for _ in 0 ..< 300 {
+		view, rows, animating = rows_frame(u, now, height, count)
+		if !animating {
+			return view, rows, true
+		}
+	}
+	return
+}
+
+@(test)
+test_ui_scroll_clamps_to_new_content :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	now := 0.0
+	settle(&u, &now, 200, 100)
+	view, _, _ := rows_frame(&u, &now, 200, 100, {kind = .Scroll, x = 50, y = 50, dy = -800, precise = true, phase = .Began})
+	testing.expect_value(t, view.view_off.y, f32(800))
+	settle(&u, &now, 200, 100)
+
+	// The content shrinks to 100 pt. This frame was built at offset 800, so
+	// it must clamp and ask for a frame that builds at 0.
+	animating: bool
+	view, _, animating = rows_frame(&u, &now, 200, 10)
+	testing.expect_value(t, view.view_off.y, f32(0))
+	testing.expect(t, animating, "a clamped offset asks for another frame")
+	rows: ui.Virtual_Rows
+	view, rows, animating = rows_frame(&u, &now, 200, 10)
+	testing.expect_value(t, rows.first, 0)
+	testing.expect_value(t, rows.last, 10)
+	// The rows are new boxes, which ask for one frame of their own.
+	_, _, animating = rows_frame(&u, &now, 200, 10)
+	testing.expect(t, !animating, "and then settles")
+}
+
+@(test)
+test_ui_virtual_rows_follow_new_size :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	now := 0.0
+	_, rows, settled := settle(&u, &now, 100, 1000)
+	testing.expect(t, settled)
+	testing.expect_value(t, rows.last, 11) // 10 in view and one more
+
+	// The view grows to 200 pt. This frame's rows were picked for 100, so
+	// it asks for another, which builds the rest, then stops.
+	animating: bool
+	_, rows, animating = rows_frame(&u, &now, 200, 1000)
+	testing.expect_value(t, rows.last, 11)
+	testing.expect(t, animating, "a view whose size changed asks for another frame")
+	_, rows, _ = rows_frame(&u, &now, 200, 1000)
+	testing.expect_value(t, rows.last, 21)
+	_, _, animating = rows_frame(&u, &now, 200, 1000)
+	testing.expect(t, !animating, "then settles")
+}
+
+@(test)
+test_ui_settle_frames_are_limited :: proc(t: ^testing.T) {
+	// A view whose size depends on the frame count never settles; the extra
+	// frames stop after a few.
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	now := 0.0
+	asked := 0
+	for i in 0 ..< 20 {
+		now += 1.0 / 120
+		ui.begin_frame(&u, {}, nil, nil, 300, 200, now)
+		ui.scroll_view("view", ui.px(100 + f32(i)), ui.px(100))
+		if ui.end_frame() {
+			asked += 1
+		}
+	}
+	testing.expectf(t, asked <= 4, "asked for %d frames", asked)
+}
+
+Menu_Frame :: struct {
+	area, a, b: ui.Signal,
+	animating:  bool,
+}
+
+// A focusable area that opens a menu with items A and B on a right click.
+@(private = "file")
+menu_frame :: proc(u: ^ui.State, now: ^f64, events: ..platform.Event) -> (f: Menu_Frame) {
+	now^ += 1.0 / 120
+	ui.begin_frame(u, events, nil, nil, 300, 200, now^)
+	ui.box_make("play", {.Clickable, .Focusable}, ui.px(100), ui.px(40))
+	area := ui.box_make("area", {.Clickable, .Focusable}, ui.px(300), ui.px(100))
+	f.area = ui.signal(area)
+	if f.area.right_clicked {
+		ui.open_menu("menu", ui.mouse())
+	}
+	if ui.menu("menu") {
+		f.a = ui.menu_item("A##a")
+		f.b = ui.menu_item("B##b")
+	}
+	f.animating = ui.end_frame()
+	return
+}
+
+@(test)
+test_ui_menu_keyboard :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	now := 0.0
+	menu_frame(&u, &now)
+	menu_frame(&u, &now)
+	f := menu_frame(&u, &now, {kind = .Key_Down, key_code = ui.KEY_TAB}, {kind = .Key_Down, key_code = ui.KEY_TAB})
+	testing.expect(t, ui.has_focus(f.area.box))
+
+	// Opening the menu moves the focus to its first item.
+	f = menu_frame(&u, &now, {kind = .Mouse_Down, x = 50, y = 60, button = .Right}, {kind = .Mouse_Up, x = 50, y = 60, button = .Right})
+	testing.expect(t, f.a.box != nil && ui.has_focus(f.a.box), "the first item has the focus")
+
+	// Tab and the arrows stay inside the menu.
+	f = menu_frame(&u, &now, {kind = .Key_Down, key_code = ui.KEY_TAB})
+	testing.expect(t, ui.has_focus(f.b.box))
+	f = menu_frame(&u, &now, {kind = .Key_Down, key_code = ui.KEY_TAB})
+	testing.expect(t, ui.has_focus(f.a.box), "Tab wraps within the menu")
+	f = menu_frame(&u, &now, {kind = .Key_Down, key_code = ui.KEY_DOWN})
+	testing.expect(t, ui.has_focus(f.b.box))
+
+	// Enter clicks the item, not the box focused behind the menu, then the
+	// focus goes back to it.
+	f = menu_frame(&u, &now, {kind = .Key_Down, key_code = ui.KEY_RETURN})
+	testing.expect(t, f.b.clicked && f.b.keyboard)
+	testing.expect(t, !f.area.clicked, "the background box isn't clicked")
+	testing.expect(t, ui.has_focus(f.area.box), "the focus is back on the area")
+
+	// Escape closes it the same way, and Enter with the background focus
+	// set from outside the menu does nothing while it's open.
+	f = menu_frame(&u, &now)
+	f = menu_frame(&u, &now, {kind = .Mouse_Down, x = 50, y = 60, button = .Right}, {kind = .Mouse_Up, x = 50, y = 60, button = .Right})
+	ui.set_focus(f.area.box)
+	f = menu_frame(&u, &now, {kind = .Key_Down, key_code = ui.KEY_RETURN})
+	testing.expect(t, !f.area.clicked && !f.a.clicked && !f.b.clicked)
+	f = menu_frame(&u, &now, {kind = .Key_Down, key_code = ui.KEY_ESCAPE})
+	testing.expect(t, ui.has_focus(f.area.box))
+	for _ in 0 ..< 100 {
+		if f = menu_frame(&u, &now); !f.animating {
+			break
+		}
+	}
+	testing.expect(t, !f.animating, "the menu fades out and frames stop")
+	testing.expect(t, f.a.box == nil)
+}
+
+// A target at the top and a virtual list of 100 draggable rows below it.
+// Returns the payload dropped on the target this frame.
+@(private = "file")
+drag_frame :: proc(u: ^ui.State, now: ^f64, events: ..platform.Event) -> (dropped: u64, ok: bool) {
+	now^ += 1.0 / 120
+	ui.begin_frame(u, events, nil, nil, 300, 200, now^)
+	target := ui.box_make("target", {.Clickable}, ui.px(300), ui.px(40))
+	dropped, ok = ui.dropped(target)
+	{
+		view := ui.scroll_view("view", ui.fill(), ui.fill())
+		rows := ui.virtual_rows(view, 100, 20)
+		for i in rows.first ..< rows.last {
+			row := ui.box_make(fmt.tprintf("##row%d", i), {.Clickable}, ui.fill(), ui.px(20))
+			if ui.signal(row).dragging {
+				ui.drag_begin(u64(i) + 100)
+			}
+		}
+	}
+	ui.end_frame()
+	return
+}
+
+@(test)
+test_ui_drag_outlives_source :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	now := 0.0
+	for _ in 0 ..< 3 {
+		drag_frame(&u, &now)
+	}
+
+	// Drag row 0, scroll it out of the built range, release over nothing.
+	drag_frame(&u, &now, {kind = .Mouse_Down, x = 50, y = 50, click_count = 1})
+	drag_frame(&u, &now, {kind = .Mouse_Move, x = 50, y = 120})
+	payload, dragging := ui.drag_payload()
+	testing.expect(t, dragging && payload == 100)
+	drag_frame(&u, &now, {kind = .Scroll, x = 50, y = 120, dy = -1000, precise = true, phase = .Began})
+	drag_frame(&u, &now)
+	drag_frame(&u, &now)
+	_, dragging = ui.drag_payload()
+	testing.expect(t, dragging, "the drag outlives its source")
+	_, ok := drag_frame(&u, &now, {kind = .Mouse_Up, x = 50, y = 120})
+	_, dragging = ui.drag_payload()
+	testing.expect(t, !dragging && !ok, "a release anywhere ends it")
+
+	// The same, released over the target.
+	drag_frame(&u, &now, {kind = .Scroll, x = 50, y = 120, dy = 1000, precise = true, phase = .Began})
+	drag_frame(&u, &now, {kind = .Mouse_Down, x = 50, y = 50, click_count = 1})
+	drag_frame(&u, &now, {kind = .Mouse_Move, x = 50, y = 120})
+	drag_frame(&u, &now, {kind = .Scroll, x = 50, y = 120, dy = -1000, precise = true, phase = .Began})
+	drag_frame(&u, &now, {kind = .Mouse_Move, x = 50, y = 20})
+	payload, ok = drag_frame(&u, &now, {kind = .Mouse_Up, x = 50, y = 20})
+	testing.expect(t, ok && payload == 100, "dropped on the target")
+
+	// Escape cancels, and moving on with the button held doesn't restart it.
+	drag_frame(&u, &now, {kind = .Scroll, x = 50, y = 120, dy = 1000, precise = true, phase = .Began})
+	drag_frame(&u, &now, {kind = .Mouse_Down, x = 50, y = 50, click_count = 1})
+	drag_frame(&u, &now, {kind = .Mouse_Move, x = 50, y = 120})
+	_, dragging = ui.drag_payload()
+	testing.expect(t, dragging)
+	drag_frame(&u, &now, {kind = .Key_Down, key_code = ui.KEY_ESCAPE})
+	drag_frame(&u, &now, {kind = .Mouse_Move, x = 50, y = 30})
+	_, dragging = ui.drag_payload()
+	testing.expect(t, !dragging, "Escape cancels")
+	_, ok = drag_frame(&u, &now, {kind = .Mouse_Up, x = 50, y = 20})
+	testing.expect(t, !ok, "a cancelled drag drops nothing")
+}
+
+// Three focusable boxes in a row.
+@(private = "file")
+three_frame :: proc(u: ^ui.State, now: ^f64, events: ..platform.Event) -> (boxes: [3]^ui.Box) {
+	now^ += 1.0 / 120
+	ui.begin_frame(u, events, nil, nil, 300, 200, now^)
+	ui.row("", {}, ui.fill(), ui.px(40))
+	for &b, i in boxes {
+		b = ui.box_make(fmt.tprintf("##b%d", i), {.Clickable, .Focusable}, ui.px(50), ui.fill())
+	}
+	ui.end_frame()
+	return
+}
+
+@(test)
+test_ui_tab_from_nothing :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	now := 0.0
+	three_frame(&u, &now)
+	boxes := three_frame(&u, &now, {kind = .Key_Down, key_code = ui.KEY_TAB})
+	testing.expect(t, ui.has_focus(boxes[0]), "Tab starts at the first box")
+	boxes = three_frame(&u, &now, {kind = .Key_Down, key_code = ui.KEY_ESCAPE})
+	testing.expect(t, !ui.has_focus(boxes[0]))
+	boxes = three_frame(&u, &now, {kind = .Key_Down, key_code = ui.KEY_TAB, modifiers = {.Shift}})
+	testing.expect(t, ui.has_focus(boxes[2]), "Shift-Tab starts at the last box")
+}
+
+@(test)
+test_ui_click_in_one_frame :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	now := 0.0
+	slider :: proc(u: ^ui.State, now: ^f64, events: ..platform.Event) -> ui.Signal {
+		now^ += 1.0 / 120
+		ui.begin_frame(u, events, nil, nil, 300, 200, now^)
+		b := ui.box_make("slider", {.Clickable}, ui.px(200), ui.px(20))
+		sig := ui.signal(b)
+		ui.end_frame()
+		return sig
+	}
+	slider(&u, &now)
+	slider(&u, &now)
+
+	// Down and up in one frame, then the mouse moves on: the release is
+	// where it was let go.
+	sig := slider(&u, &now, {kind = .Mouse_Down, x = 150, y = 10, click_count = 1}, {kind = .Mouse_Up, x = 150, y = 10, click_count = 1}, {kind = .Mouse_Move, x = 10, y = 10})
+	testing.expect(t, sig.pressed && sig.released && !sig.held)
+	testing.expect_value(t, sig.mouse, [2]f32{150, 10})
+
+	// A whole drag in one frame still reports how far it went.
+	sig = slider(&u, &now, {kind = .Mouse_Down, x = 20, y = 10, click_count = 1}, {kind = .Mouse_Move, x = 80, y = 10}, {kind = .Mouse_Up, x = 80, y = 10, click_count = 1})
+	testing.expect(t, sig.released)
+	testing.expect_value(t, sig.drag_delta, [2]f32{60, 0})
+
+	// While held, mouse follows the mouse.
+	sig = slider(&u, &now, {kind = .Mouse_Down, x = 20, y = 10, click_count = 1}, {kind = .Mouse_Move, x = 90, y = 10})
+	testing.expect(t, sig.held)
+	testing.expect_value(t, sig.mouse, [2]f32{90, 10})
+	slider(&u, &now, {kind = .Mouse_Up, x = 90, y = 10})
+}
+
+@(test)
+test_ui_focus_scrolls_into_view :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	now := 0.0
+
+	// A plain scroll view of ten 40 pt focusable boxes, 100 pt high.
+	list :: proc(u: ^ui.State, now: ^f64, events: ..platform.Event) -> (view: ^ui.Box, animating: bool) {
+		now^ += 1.0 / 120
+		ui.begin_frame(u, events, nil, nil, 300, 100, now^)
+		view = ui.scroll_view("list", ui.fill(), ui.fill())
+		for i in 0 ..< 10 {
+			ui.box_make(fmt.tprintf("##item%d", i), {.Clickable, .Focusable}, ui.fill(), ui.px(40))
+		}
+		animating = ui.end_frame()
+		return
+	}
+	list(&u, &now)
+	list(&u, &now)
+	for _ in 0 ..< 4 {
+		list(&u, &now, {kind = .Key_Down, key_code = ui.KEY_TAB})
+	}
+	// Item 3 is 120 to 160, so the view scrolls to 60.
+	view, _ := list(&u, &now)
+	testing.expect_value(t, view.view_off_target.y, f32(60))
+	list(&u, &now, {kind = .Key_Down, key_code = ui.KEY_TAB, modifiers = {.Shift}})
+	list(&u, &now, {kind = .Key_Down, key_code = ui.KEY_TAB, modifiers = {.Shift}})
+	list(&u, &now, {kind = .Key_Down, key_code = ui.KEY_TAB, modifiers = {.Shift}})
+	view, _ = list(&u, &now)
+	testing.expect_value(t, view.view_off_target.y, f32(0))
+
+	// A virtual list: Down walks past the bottom edge, one row at a time,
+	// and each step scrolls the row into view.
+	v: ui.State
+	ui.init(&v)
+	defer ui_destroy(&v)
+	now = 0
+	settle(&v, &now, 100, 1000)
+	rows_frame(&v, &now, 100, 1000, {kind = .Mouse_Down, x = 50, y = 5, click_count = 1}, {kind = .Mouse_Up, x = 50, y = 5, click_count = 1})
+	for _ in 0 ..< 25 {
+		rows_frame(&v, &now, 100, 1000, {kind = .Key_Down, key_code = ui.KEY_DOWN})
+		settle(&v, &now, 100, 1000)
+	}
+	view, _, _ = settle(&v, &now, 100, 1000)
+	testing.expect_value(t, v.focus, ui.key_from_string(view.key, "##row25"))
+	// Row 25 is 250 to 260, so the view ends at 260.
+	testing.expect_value(t, view.view_off.y, f32(160))
+}
+
+@(test)
+test_ui_pool_full :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	ui.begin_frame(&u, {}, nil, nil, 300, 200, 1)
+	for i in 0 ..< ui.MAX_BOXES + 5 {
+		ui.box_make(fmt.tprintf("##%d", i))
+	}
+	ui.end_frame()
+	used, capacity, misses := ui.pool_stats(&u)
+	testing.expect_value(t, used, ui.MAX_BOXES)
+	testing.expect_value(t, capacity, ui.MAX_BOXES)
+	testing.expect_value(t, misses, 5)
 }
