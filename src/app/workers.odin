@@ -165,6 +165,7 @@ workers_stop :: proc(d: ^Data) {
 worker_main :: proc "c" (arg: rawptr) -> rawptr {
 	context = runtime.default_context()
 	d := (^Data)(arg)
+	temp_given := false
 	for {
 		job, ticket, ok := jobs.pop_wait(&d.queue)
 		if !ok {
@@ -181,6 +182,7 @@ worker_main :: proc "c" (arg: rawptr) -> rawptr {
 			}
 			continue
 		}
+		temp_take_back(&temp_given)
 		res := run_job(d, job)
 		free_all(context.temp_allocator)
 		if retry_later(d, res) {
@@ -208,9 +210,61 @@ worker_main :: proc "c" (arg: rawptr) -> rawptr {
 		}
 		jobs.done(&d.queue)
 		d.wake()
+		if queued, _ := jobs.pending(&d.queue); queued == 0 {
+			temp_give_back(&temp_given)
+		}
 	}
 	runtime.default_temp_allocator_destroy(&runtime.global_default_temp_allocator_data)
 	return nil
+}
+
+// A worker's temp arena is one 4 MB block, and parsing a page of tracks
+// dirties about 750 KB of it. Rolling the arena back keeps those pages, so
+// with nothing left to do a worker gives back all but TEMP_KEEP of the block
+// to the system, and takes it back before its next job.
+@(private = "file")
+TEMP_KEEP :: 64 << 10
+
+@(private = "file")
+MADV_FREE_REUSABLE :: 7
+@(private = "file")
+MADV_FREE_REUSE :: 8
+
+// temp_tail is the whole pages of a block at base, capacity bytes long,
+// past its first keep bytes. Empty if there are none.
+temp_tail :: proc(base: uintptr, capacity, keep: uint) -> (start: rawptr, size: uint) {
+	PAGE :: 16 << 10 // arm64's page; a multiple of 4 KB pages too
+	from := mem.align_forward_uintptr(base + uintptr(keep), PAGE)
+	to := (base + uintptr(capacity)) &~ (PAGE - 1)
+	if to <= from {
+		return nil, 0
+	}
+	return rawptr(from), uint(to - from)
+}
+
+@(private = "file")
+temp_range :: proc() -> (start: rawptr, size: uint) {
+	b := runtime.global_default_temp_allocator_data.arena.curr_block
+	if b == nil {
+		return nil, 0
+	}
+	return temp_tail(uintptr(b.base), b.capacity, TEMP_KEEP)
+}
+
+@(private = "file")
+temp_give_back :: proc(given: ^bool) {
+	if start, size := temp_range(); size > 0 && !given^ {
+		posix.posix_madvise(start, size, transmute(posix.MAdvice)i32(MADV_FREE_REUSABLE))
+		given^ = true
+	}
+}
+
+@(private = "file")
+temp_take_back :: proc(given: ^bool) {
+	if start, size := temp_range(); size > 0 && given^ {
+		posix.posix_madvise(start, size, transmute(posix.MAdvice)i32(MADV_FREE_REUSE))
+	}
+	given^ = false
 }
 
 // retry_later says whether a job should go back in the queue instead of

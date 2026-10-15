@@ -332,7 +332,7 @@ Each job that returns data gets its own virtual-memory arena (`core:mem/virtual`
 - copies a track page's rows into the open list's arena and destroys the page's;
 - uploads a cover's pixels and frees them.
 
-The open list's arena lives in `State` and is destroyed when another list opens. Pages carry the list's generation number, so a page for a list that's been closed is dropped when it arrives.
+The open list's arena lives in `State` and is destroyed when another list opens, which gives its pages back. A worker's temp allocator is one 4 MB block, and parsing a page of tracks dirties about 750 KB of it; rolling it back keeps those pages. So a worker that finds the queue empty after a job gives back all but 64 KB of the block with `MADV_FREE_REUSABLE`, and takes it back with `MADV_FREE_REUSE` before its next job. On the mock that's about 2.3 MB after a list has loaded. Pages carry the list's generation number, so a page for a list that's been closed is dropped when it arrives.
 
 The frame's boxes and its accessibility tree borrow strings from the open list, the search results and the play queue until `end_frame`. So nothing a frame does while it's being built may free them. A click that opens another list, closes the search or plays from the track menu goes in `State.pending`, and `pending_apply` does it once the frame is drawn, then asks for the next one. Results from the workers are handled at the start of a frame, before anything borrows from them. Debug builds keep the last closed list's arena, filled with `0xdb`, until the next list closes, so a string still borrowed from it shows up as garbage instead of passing for the next list's data. The tests turn the same thing on.
 

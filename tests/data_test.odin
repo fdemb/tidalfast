@@ -9,6 +9,7 @@ import "core:time"
 
 import stbi "vendor:stb/image"
 
+import app "../src/app"
 import "../src/cover"
 import "../src/jobs"
 import "../src/render"
@@ -374,4 +375,20 @@ abort_cancels_requests :: proc(t: ^testing.T) {
 	tidal.session_abort(s, false)
 	_, err = tidal.request(s, {method = .GET, path = "echo"}, context.temp_allocator)
 	testing.expect_value(t, err, nil)
+}
+
+// An idle worker gives back the whole pages of its temp block past what it
+// keeps, and nothing when the block is smaller than that.
+@(test)
+temp_tail_is_whole_pages_past_keep :: proc(t: ^testing.T) {
+	PAGE :: 16 << 10
+	base := uintptr(0x1_0000_0000) + 48 // a block's base needn't be page aligned
+	start, size := app.temp_tail(base, 4 << 20, 64 << 10)
+	testing.expect_value(t, uintptr(start), uintptr(0x1_0000_0000) + 5 * PAGE)
+	testing.expect_value(t, size, uint(4 << 20) - 5 * PAGE)
+	testing.expect_value(t, uintptr(start) % PAGE, 0)
+	testing.expect_value(t, (uintptr(start) + uintptr(size)) % PAGE, 0)
+	testing.expect(t, uintptr(start) + uintptr(size) <= base + (4 << 20))
+	_, size = app.temp_tail(base, 64 << 10, 64 << 10)
+	testing.expect_value(t, size, 0)
 }
