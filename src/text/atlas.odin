@@ -8,12 +8,14 @@ import stbrp "vendor:stb/rect_pack"
 import "../render"
 
 // Glyph bitmaps, rasterized by CoreText at physical pixel sizes. Coverage
-// goes into R8 pages, colour glyphs (emoji) into BGRA pages. A page that
-// fills up gets a sibling; when every page is full the whole atlas starts
-// over at the next frame.
+// goes into R8 pages, colour glyphs (emoji) into BGRA pages. A page starts
+// at a quarter of its full side and doubles when it fills, keeping what it
+// holds; a full-size page that fills gets a sibling; when every page is
+// full the whole atlas starts over at the next frame.
 
 PAGE_SIZE :: 2048
 COLOR_PAGE_SIZE :: 1024
+PAGE_START_SHIFT :: 2 // a page starts at its full side >> this
 MAX_PAGES :: 8
 ATLAS_CAPACITY :: 16384 // glyph slots, kept under three quarters full
 SUBPIXEL_STEPS :: 4
@@ -32,21 +34,26 @@ Atlas_Entry :: struct {
 
 Page :: struct {
 	texture: render.Texture,
+	size:    int, // texels across, up to PAGE_SIZE or COLOR_PAGE_SIZE
 	color:   bool,
 	packer:  stbrp.Context,
 	nodes:   []stbrp.Node,
 }
 
 Atlas :: struct {
-	entries:       []Atlas_Entry,
-	entry_count:   int,
-	pages:         [MAX_PAGES]Page,
-	page_count:    int,
-	full:          bool, // reset at the next begin_frame
-	raster_time:   time.Duration, // spent rasterizing this frame
-	srgb:          CGColorSpaceRef,
-	scratch:       CGContextRef, // SCRATCH_SIZE square, alpha only
-	color_scratch: CGContextRef, // SCRATCH_SIZE square, BGRA
+	entries:        []Atlas_Entry,
+	entry_count:    int,
+	pages:          [MAX_PAGES]Page,
+	page_count:     int,
+	full:           bool, // reset at the next begin_frame
+	// Textures of pages that grew this frame. Instances drawn earlier in the
+	// frame still sample them, so they're destroyed at the next begin_frame.
+	outgrown:       [MAX_PAGES]render.Texture,
+	outgrown_count: int,
+	raster_time:    time.Duration, // spent rasterizing this frame
+	srgb:           CGColorSpaceRef,
+	scratch:        CGContextRef, // SCRATCH_SIZE square, alpha only
+	color_scratch:  CGContextRef, // SCRATCH_SIZE square, BGRA
 }
 
 @(private)
@@ -71,6 +78,10 @@ atlas_destroy :: proc(a: ^Atlas, r: ^render.Renderer) {
 @(private)
 atlas_begin_frame :: proc(a: ^Atlas, r: ^render.Renderer) {
 	a.raster_time = 0
+	for t in a.outgrown[:a.outgrown_count] {
+		render.texture_destroy(r, t)
+	}
+	a.outgrown_count = 0
 	if a.full {
 		atlas_clear(a, r)
 	}
@@ -84,6 +95,10 @@ atlas_clear :: proc(a: ^Atlas, r: ^render.Renderer) {
 	for page in a.pages[:a.page_count] {
 		render.texture_destroy(r, page.texture)
 	}
+	for t in a.outgrown[:a.outgrown_count] {
+		render.texture_destroy(r, t)
+	}
+	a.outgrown_count = 0
 	a.page_count = 0
 	mem.zero_slice(a.entries)
 	a.entry_count = 0
@@ -278,30 +293,64 @@ rasterize :: proc(a: ^Atlas, font: CTFontRef, glyph: u16, color: bool, w, h: int
 	return out
 }
 
-// atlas_pack finds room for a w by h bitmap plus a one texel gap, adding a
-// page if the others are full.
+// atlas_pack finds room for a w by h bitmap plus a one texel gap, growing
+// the newest page of its kind or adding a page if the others are full.
 @(private)
 atlas_pack :: proc(a: ^Atlas, r: ^render.Renderer, color: bool, w, h: int) -> (page, x, y: int, ok: bool) {
 	rect := stbrp.Rect{w = stbrp.Coord(w + 1), h = stbrp.Coord(h + 1)}
 	for i := a.page_count - 1; i >= 0; i -= 1 {
-		if a.pages[i].color != color {
+		p := &a.pages[i]
+		if p.color != color {
 			continue
 		}
-		if stbrp.pack_rects(&a.pages[i].packer, &rect, 1) == 1 {
-			return i, int(rect.x), int(rect.y), true
+		for {
+			if stbrp.pack_rects(&p.packer, &rect, 1) == 1 {
+				return i, int(rect.x), int(rect.y), true
+			}
+			if !atlas_grow(a, r, p) {
+				break
+			}
 		}
 	}
 	if a.page_count == MAX_PAGES {
 		return
 	}
 	p := &a.pages[a.page_count]
-	size := COLOR_PAGE_SIZE if color else PAGE_SIZE
-	p.texture = render.texture_create(r, size, size, .BGRA8 if color else .R8)
+	p.size = (COLOR_PAGE_SIZE if color else PAGE_SIZE) >> PAGE_START_SHIFT
+	p.texture = render.texture_create(r, p.size, p.size, .BGRA8 if color else .R8)
 	p.color = color
-	stbrp.init_target(&p.packer, i32(size), i32(size), raw_data(p.nodes), i32(len(p.nodes)))
+	stbrp.init_target(&p.packer, i32(p.size), i32(p.size), raw_data(p.nodes), i32(len(p.nodes)))
 	a.page_count += 1
-	if stbrp.pack_rects(&p.packer, &rect, 1) != 1 {
-		return
+	for stbrp.pack_rects(&p.packer, &rect, 1) != 1 {
+		if !atlas_grow(a, r, p) {
+			return
+		}
 	}
 	return a.page_count - 1, int(rect.x), int(rect.y), true
+}
+
+// atlas_grow doubles a page that isn't at its full size yet. The GPU copies
+// the old texture into the top left of the new one ahead of the next frame,
+// and the packer starts over with that corner taken, so every glyph keeps
+// its place.
+@(private)
+atlas_grow :: proc(a: ^Atlas, r: ^render.Renderer, p: ^Page) -> bool {
+	if p.size >= (COLOR_PAGE_SIZE if p.color else PAGE_SIZE) || a.outgrown_count == MAX_PAGES {
+		return false
+	}
+	size := p.size * 2
+	t := render.texture_create(r, size, size, .BGRA8 if p.color else .R8)
+	if t == 0 {
+		return false
+	}
+	render.texture_copy(r, p.texture, t, p.size, p.size)
+	a.outgrown[a.outgrown_count] = p.texture
+	a.outgrown_count += 1
+	p.texture = t
+	stbrp.init_target(&p.packer, i32(size), i32(size), raw_data(p.nodes), i32(len(p.nodes)))
+	taken := stbrp.Rect{w = stbrp.Coord(p.size), h = stbrp.Coord(p.size)}
+	stbrp.pack_rects(&p.packer, &taken, 1)
+	assert(bool(taken.was_packed) && taken.x == 0 && taken.y == 0)
+	p.size = size
+	return true
 }

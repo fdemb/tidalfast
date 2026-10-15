@@ -488,6 +488,25 @@ texture_destroy :: proc(r: ^Renderer, t: Texture) {
 	slot^ = {generation = slot.generation + 1}
 }
 
+// texture_copy copies the w by h texels at the top left of src to the top
+// left of dst on the GPU, in a command buffer of its own queued ahead of
+// the next frame's. Both must have the same format and no mips.
+texture_copy :: proc(r: ^Renderer, src, dst: Texture, w, h: int) {
+	from, to := texture_slot(r, src), texture_slot(r, dst)
+	if from == nil || to == nil {
+		return
+	}
+	cmd := msg(r.queue, "commandBuffer")
+	blit := msg(cmd, "blitCommandEncoder")
+	msg_proc(proc "c" (id, SEL, id, uint, uint, Origin, Size, id, uint, uint, Origin))(
+		blit,
+		sel_registerName("copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:toTexture:destinationSlice:destinationLevel:destinationOrigin:"),
+		from.texture, 0, 0, {}, {uint(w), uint(h), 1}, to.texture, 0, 0, {},
+	)
+	msg(blit, "endEncoding")
+	msg(cmd, "commit")
+}
+
 texture_size :: proc(r: ^Renderer, t: Texture) -> [2]int {
 	slot := texture_slot(r, t)
 	if slot == nil {
