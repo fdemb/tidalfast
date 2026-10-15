@@ -436,3 +436,161 @@ test_loader_restart :: proc(t: ^testing.T) {
 		testing.expect(t, g.id != 0 && g.face >= u8(len(text.Font)), "Thai from a fallback face")
 	}
 }
+
+// coretext_glyphs shapes str with CoreText in face's font at size and
+// returns each glyph's ID and advance by the UTF-16 index of its character.
+@(private = "file")
+coretext_glyphs :: proc(state: ^text.State, face: u8, size: f32, str: string) -> (ids: map[int]u16, advances: map[int]f32) {
+	ids = make(map[int]u16, context.temp_allocator)
+	advances = make(map[int]f32, context.temp_allocator)
+	font := text.CTFontCreateCopyWithAttributes(state.faces[face].ct, text.CGFloat(size), nil, nil)
+	defer text.cf_release(font)
+	cf := text.CFStringCreateWithBytes(nil, raw_data(str), len(str), text.CF_STRING_ENCODING_UTF8, false)
+	defer text.cf_release(cf)
+	keys := [1]rawptr{text.kCTFontAttributeName}
+	values := [1]rawptr{font}
+	attrs := text.CFDictionaryCreate(nil, &keys[0], &values[0], 1, &text.kCFTypeDictionaryKeyCallBacks, &text.kCFTypeDictionaryValueCallBacks)
+	defer text.cf_release(attrs)
+	attributed := text.CFAttributedStringCreate(nil, cf, attrs)
+	defer text.cf_release(attributed)
+	line := text.CTLineCreateWithAttributedString(attributed)
+	defer text.cf_release(line)
+	runs := text.CTLineGetGlyphRuns(line)
+	for i in 0 ..< text.CFArrayGetCount(runs) {
+		run := text.CFArrayGetValueAtIndex(runs, i)
+		n := text.CTRunGetGlyphCount(run)
+		gs := make([]text.CGGlyph, n, context.temp_allocator)
+		adv := make([]text.CGSize, n, context.temp_allocator)
+		idx := make([]text.CFIndex, n, context.temp_allocator)
+		text.CTRunGetGlyphs(run, {}, raw_data(gs))
+		text.CTRunGetAdvances(run, {}, raw_data(adv))
+		text.CTRunGetStringIndices(run, {}, raw_data(idx))
+		for j in 0 ..< n {
+			ids[idx[j]] = gs[j]
+			advances[idx[j]] = f32(adv[j].width)
+		}
+	}
+	return
+}
+
+// Hangul syllables come out of kb_text_shape as the font's precomposed
+// glyphs, the same ones CoreText picks from the same face, each with its
+// own codepoint index.
+@(test)
+test_hangul_matches_coretext :: proc(t: ^testing.T) {
+	s: Shaper
+	context.allocator = shaper_init(&s)
+	defer shaper_destroy(&s)
+
+	for str in ([]string{"가", "밤편지", "아이유 - 밤편지 (Remix)", "밤밤편지"}) {
+		run := shape_loaded(&s, .Regular, 13, str)
+		testing.expectf(t, !run.pending, "%q still pending", str)
+		runes := make([dynamic]rune, context.temp_allocator)
+		for r in str {
+			append(&runes, r)
+		}
+		syllables := 0
+		for r in runes {
+			if r >= 0xac00 && r <= 0xd7a3 {
+				syllables += 1
+			}
+		}
+		hangul := 0
+		for g in run.glyphs {
+			r := runes[g.cluster]
+			if r < 0xac00 || r > 0xd7a3 {
+				continue
+			}
+			hangul += 1
+			testing.expectf(t, g.face >= u8(len(text.Font)), "%q: %c from a fallback face", str, r)
+			ids, advances := coretext_glyphs(s.state, g.face, 13, str)
+			testing.expectf(t, ids[int(g.cluster)] == g.id, "%q: %c is glyph %d, CoreText %d", str, r, g.id, ids[int(g.cluster)])
+			want := advances[int(g.cluster)]
+			testing.expectf(t, abs(g.advance - want) < 0.01, "%q: %c advance %v, CoreText %v", str, r, g.advance, want)
+		}
+		testing.expectf(t, hangul == syllables, "%q: %d Hangul glyphs for %d syllables", str, hangul, syllables)
+	}
+}
+
+// Every glyph keeps the index of its own character through shaping, so
+// repeated characters each get their own cluster, in kb_text_shape (Hangul,
+// Latin with marks, Devanagari with a reordered vowel sign, Thai with sara
+// am split in two) and CoreText (Arabic).
+@(test)
+test_repeated_clusters :: proc(t: ^testing.T) {
+	s: Shaper
+	context.allocator = shaper_init(&s)
+	defer shaper_destroy(&s)
+
+	Case :: struct {
+		str:      string,
+		clusters: []u32, // the distinct clusters in logical order
+	}
+	cases := []Case{
+		{"밤밤편지", {0, 1, 2, 3}},
+		{"가가가", {0, 1, 2}},
+		{"ééx", {0, 1, 2}},
+		{"ééx", {0, 2, 4}},
+		{"q̣̇q̣̇", {0, 3}},
+		{"किकि", {0, 2}},
+		{"น้ำน้ำ", {0, 3}},
+		{"ببب", {0, 1, 2}},
+		{"عيونك عيونك", {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10}},
+	}
+	for c in cases {
+		run := shape_loaded(&s, .Regular, 13, c.str)
+		testing.expectf(t, !run.pending, "%q still pending", c.str)
+		// In visual order: rising left to right, falling right to left.
+		seen := make([dynamic]u32, context.temp_allocator)
+		for k in 0 ..< len(run.glyphs) {
+			g := run.glyphs[len(run.glyphs) - 1 - k if run.rtl else k]
+			if len(seen) == 0 || seen[len(seen) - 1] != g.cluster {
+				append(&seen, g.cluster)
+			}
+		}
+		testing.expectf(t, slice_equal(seen[:], c.clusters), "%q: clusters %v, want %v", c.str, seen[:], c.clusters)
+	}
+
+	// The case from the review: the two leading syllables are kept or
+	// dropped one at a time.
+	ellipsis := shape_loaded(&s, .Regular, 13, text.ELLIPSIS)
+	run := shape_loaded(&s, .Regular, 13, "밤밤편지")
+	two := run.glyphs[1].pen + run.glyphs[1].advance
+	_, last, _, _, _ := text.truncate(run.glyphs, run.width, two + ellipsis.width + 0.1, ellipsis.width, false)
+	testing.expect_value(t, last, 2)
+}
+
+// A character no font has is asked of the loader once, even after the
+// fallback cache's first table fills up, and the run stops being pending.
+@(test)
+test_fallback_cache_limit :: proc(t: ^testing.T) {
+	s: Shaper
+	context.allocator = shaper_init(&s)
+	defer shaper_destroy(&s)
+	state := s.state
+
+	testing.expect(t, !shape_loaded(&s, .Regular, 13, "가 夜 ب").pending)
+	// Fill the table to the point where it used to drop new keys, with keys
+	// no lookup makes.
+	capacity := len(state.fallback_cache)
+	for i := 0; state.fallback_used < capacity * 3 / 4; i += 1 {
+		if state.fallback_cache[i].key == 0 {
+			state.fallback_cache[i] = {key = 1 << 62 | u64(i), face = text.NO_FACE}
+			state.fallback_used += 1
+		}
+	}
+
+	run := shape_loaded(&s, .Regular, 13, "a͸b")
+	testing.expect(t, !run.pending, "settles")
+	testing.expect(t, len(state.fallback_cache) > capacity, "the table grew")
+	generation := state.generation
+	for _ in 0 ..< 10 {
+		time.sleep(2 * time.Millisecond)
+		text.begin_frame(state, &s.r)
+		run = text.shape(state, .Regular, 13, "a͸b")
+		testing.expect(t, !run.pending)
+		testing.expect_value(t, state.stats.shaped, 0)
+		testing.expect(t, !text.loading(state), "nothing asked again")
+	}
+	testing.expect_value(t, state.generation, generation)
+}

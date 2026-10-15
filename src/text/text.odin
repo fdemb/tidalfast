@@ -26,6 +26,7 @@
 // code, so unload stops it and reload starts it.
 package text
 
+import "core:c/libc"
 import "core:hash"
 import "core:mem"
 import "core:slice"
@@ -52,7 +53,7 @@ FONT_FILES := [Font][]byte {
 
 MAX_FACES :: 32 // also kb_text_shape's font stack limit
 SIZED_FONTS :: 8
-FALLBACK_CAPACITY :: 4096
+FALLBACK_CAPACITY :: 4096 // to start with; it doubles when three quarters full
 RUN_CAPACITY :: 8192 // slots; the cache holds at most half that
 GLYPH_POOL :: 1 << 18
 SHAPER_MEMORY :: 8 << 20
@@ -144,8 +145,13 @@ State :: struct {
 	// Fallback faces found so far for each font, in the order found.
 	fallbacks:       [Font][MAX_FACES]u8,
 	fallback_counts: [Font]int,
+	// Malloc'd, since it grows. Entries are never dropped, so each
+	// character or font is asked of the loader once per session.
 	fallback_cache:  []Fallback,
 	fallback_used:   int,
+	// False for a cache from the persistent arena, which a State made by an
+	// older dylib still has after a hot reload. That one is never freed.
+	fallback_malloc: bool,
 	loader:          Loader,
 	// Goes up whenever loaded fonts arrive, so pending runs reshape.
 	generation:      u64,
@@ -174,9 +180,15 @@ State :: struct {
 
 // init loads the Inter faces, allocates the caches from context.allocator,
 // which must outlive the State (the persistent arena), and starts the font
-// loader. wake is called from the loader thread when fonts arrive.
+// loader. The fallback cache grows, so it's malloc'd instead. wake is
+// called from the loader thread when fonts arrive.
 init :: proc(t: ^State, wake: proc "c" () = nil) -> bool {
-	t.fallback_cache = make([]Fallback, FALLBACK_CAPACITY)
+	cache := ([^]Fallback)(libc.calloc(FALLBACK_CAPACITY, size_of(Fallback)))
+	if cache == nil {
+		return false
+	}
+	t.fallback_cache = cache[:FALLBACK_CAPACITY]
+	t.fallback_malloc = true
 	for &c in t.coverage {
 		c = make([]u8, 0x10000 / 4)
 	}
@@ -244,6 +256,9 @@ destroy :: proc(t: ^State, r: ^render.Renderer) {
 		free_face(&face)
 	}
 	atlas_destroy(&t.atlas, r)
+	if t.fallback_malloc {
+		libc.free(raw_data(t.fallback_cache))
+	}
 	t^ = {}
 }
 
@@ -422,13 +437,10 @@ shape_uncached :: proc(t: ^State, font: Font, size: f32, s: string) -> Run {
 	glyphs.allocator = context.temp_allocator
 	cps: [dynamic]int // each glyph's codepoint index
 	cps.allocator = context.temp_allocator
-	codes: [dynamic]rune // each glyph's codepoint as kb_text_shape reports it
-	codes.allocator = context.temp_allocator
 	for _ in 0 ..< 2 {
 		clear(&pieces)
 		clear(&glyphs)
 		clear(&cps)
-		clear(&codes)
 		// The top of the stack wins: fallbacks first, earliest found
 		// highest, then the primary font.
 		pushed := 1
@@ -442,7 +454,6 @@ shape_uncached :: proc(t: ^State, font: Font, size: f32, s: string) -> Run {
 		kbts.ShapeBegin(ctx, .KBTS_DIRECTION_RTL if paragraph_rtl else .KBTS_DIRECTION_LTR, .DONT_KNOW)
 		kbts.ShapeUtf32(ctx, runes[:])
 		kbts.ShapeEnd(ctx)
-		cursor := 0
 		for {
 			run, ok := kbts.ShapeRun(ctx)
 			if !ok {
@@ -461,14 +472,14 @@ shape_uncached :: proc(t: ^State, font: Font, size: f32, s: string) -> Run {
 					face = u8(face),
 					space = g.Codepoint == ' ' || g.Codepoint == 0xa0 || g.Codepoint == 0x3000,
 				})
-				append(&cps, int(g.UserIdOrCodepointIndex))
-				append(&codes, g.Codepoint)
+				// With the context API this is always the codepoint index.
+				append(&cps, clamp(int(g.UserIdOrCodepointIndex), 0, len(runes) - 1))
 				x += f32(g.AdvanceX) * scale
 			}
 			piece.count = len(glyphs) - piece.first
 			piece.width = x
 			if piece.count > 0 {
-				piece.start = claim_codepoints(cps[piece.first:], codes[piece.first:], piece.rtl, runes[:], &cursor)
+				piece.start = slice.min(cps[piece.first:])
 				append(&pieces, piece)
 			}
 		}
@@ -591,43 +602,6 @@ bidi_class :: proc(r: rune) -> kbts.Bidi_Class {
 		return .L
 	}
 	return class
-}
-
-// claim_codepoints sets the codepoint index of each glyph of one
-// kb_text_shape run, given in visual order. kb_text_shape's indices aren't
-// always right: Apple SD Gothic Neo's Hangul comes back all 0. So, going in
-// logical order from cursor (the first codepoint no earlier glyph took), an
-// index is kept if it moves forward or names a codepoint equal to the
-// glyph's, as with a reordered Indic vowel sign. Otherwise the glyph takes
-// the next codepoint equal to its own, or failing that (a ligature part or
-// a decomposed mark) the previous glyph's. Returns the lowest index.
-@(private)
-claim_codepoints :: proc(cps: []int, codes: []rune, rtl: bool, runes: []rune, cursor: ^int) -> int {
-	LOOKAHEAD :: 8
-	start := len(runes)
-	last := -1
-	n := len(cps)
-	for k in 0 ..< n {
-		i := n - 1 - k if rtl else k
-		idx := cps[i]
-		if idx < 0 || idx >= len(runes) || (idx < cursor^ && runes[idx] != codes[i]) {
-			idx = -1
-			for j in cursor^ ..< min(cursor^ + LOOKAHEAD, len(runes)) {
-				if runes[j] == codes[i] {
-					idx = j
-					break
-				}
-			}
-			if idx < 0 {
-				idx = last if last >= 0 else min(cursor^, len(runes) - 1)
-			}
-		}
-		cps[i] = idx
-		cursor^ = max(cursor^, idx + 1)
-		last = idx
-		start = min(start, idx)
-	}
-	return start
 }
 
 // grapheme_starts returns, for each codepoint, the index of the first
@@ -1125,6 +1099,11 @@ fallback_face :: proc(t: ^State, font: Font, r: rune) -> int {
 	if face, ok := cached_face(t, key); ok {
 		return face
 	}
+	// Without an entry to record the answer in, the loader's result would
+	// be lost and the character asked for again on every reshape.
+	if !fallback_room(t) {
+		return NO_FACE
+	}
 	if load_request(&t.loader, {font = font, codepoint = r}) {
 		cache_face(t, key, PENDING)
 	}
@@ -1141,6 +1120,9 @@ run_font_face :: proc(t: ^State, ct: CTFontRef, name: u64) -> int {
 	key := font_key(name)
 	if face, ok := cached_face(t, key); ok {
 		return face
+	}
+	if !fallback_room(t) {
+		return NO_FACE
 	}
 	CFRetain(ct)
 	if !load_request(&t.loader, {ct = ct, name = name}) {
@@ -1209,18 +1191,46 @@ cached_face :: proc(t: ^State, key: u64) -> (int, bool) {
 	return int(t.fallback_cache[slot].face), found
 }
 
-// cache_face records face for key. A new key is dropped once the cache is
-// three quarters full.
+// cache_face records face for key. A new key goes in only if fallback_room
+// finds room, which fails only when malloc does.
 @(private)
 cache_face :: proc(t: ^State, key: u64, face: int) {
 	slot, found := fallback_slot(t, key)
 	if !found {
-		if t.fallback_used >= len(t.fallback_cache) * 3 / 4 {
+		if !fallback_room(t) {
 			return
 		}
+		slot, _ = fallback_slot(t, key)
 		t.fallback_used += 1
 	}
 	t.fallback_cache[slot] = {key, i8(face)}
+}
+
+// fallback_room makes sure the fallback cache can take one more key,
+// doubling it once it's three quarters full. False if it can't grow.
+@(private)
+fallback_room :: proc(t: ^State) -> bool {
+	if t.fallback_used < len(t.fallback_cache) * 3 / 4 {
+		return true
+	}
+	n := 2 * len(t.fallback_cache)
+	table := ([^]Fallback)(libc.calloc(uint(n), size_of(Fallback)))
+	if table == nil {
+		return false
+	}
+	old := t.fallback_cache
+	t.fallback_cache = table[:n]
+	for entry in old {
+		if entry.key != 0 {
+			slot, _ := fallback_slot(t, entry.key)
+			t.fallback_cache[slot] = entry
+		}
+	}
+	if t.fallback_malloc {
+		libc.free(raw_data(old))
+	}
+	t.fallback_malloc = true
+	return true
 }
 
 @(private)
