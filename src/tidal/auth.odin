@@ -41,9 +41,11 @@ token_refresh :: proc(s: ^Session, refresh_token: string) -> (ok: bool, err: Err
 }
 
 // refresh_tokens is token_refresh for the login of auth epoch epoch. If the
-// login was cleared since, the new tokens are dropped. A rate limit or a
-// server error comes back as that, not as .Authentication: only TIDAL
-// refusing the refresh token means the login is gone.
+// login was cleared since, the new tokens are dropped. Only TIDAL refusing
+// the refresh token means the login is gone (.Authentication, see
+// is_refresh_refused). A rate limit, a held back or cancelled request comes
+// back as that, and any other failure, unreachable network included, as
+// .Refresh_Failed, which keeps the tokens.
 @(private)
 refresh_tokens :: proc(s: ^Session, refresh_token: string, epoch: u64) -> (ok: bool, err: Error) {
 	client_id, client_secret: string
@@ -59,13 +61,22 @@ refresh_tokens :: proc(s: ^Session, refresh_token: string, epoch: u64) -> (ok: b
 		{"client_id", client_id},
 		{"client_secret", client_secret},
 	}
-	resp, obj := post_form(s, s.config.api_oauth2_token, form, epoch, context.temp_allocator) or_return
-	if is_rate_limit(resp) || resp.status >= 500 {
+	resp, obj, perr := post_form(s, s.config.api_oauth2_token, form, epoch, context.temp_allocator)
+	if e, failed := perr.?; failed {
+		if e.kind == .Network {
+			e.kind = .Refresh_Failed
+		}
+		return false, e
+	}
+	if is_rate_limit(resp) {
 		return false, http_error(resp)
 	}
 	if resp.status != 200 {
 		detail := fmt.tprintf("%s: %s", jstr(obj, "error"), jstr(obj, "error_description"))
-		return false, make_error(.Authentication, "Authentication failed", resp.status, detail = detail)
+		if is_refresh_refused(resp.status, jstr(obj, "error")) {
+			return false, make_error(.Authentication, "Authentication failed", resp.status, detail = detail)
+		}
+		return false, make_error(.Refresh_Failed, "Token refresh failed", resp.status, detail = detail)
 	}
 	if obj == nil {
 		return false, make_error(.Bad_Response, "Token response is not valid JSON", resp.status)
@@ -86,6 +97,17 @@ refresh_tokens :: proc(s: ^Session, refresh_token: string, epoch: u64) -> (ok: b
 	}
 	notify_auth_change(s)
 	return true, nil
+}
+
+// is_refresh_refused says whether a token endpoint error means the refresh
+// token will never work again: 400 or 401 with invalid_grant, which RFC
+// 6749 section 5.2 sends for a refresh token that's expired, revoked or
+// rotated away. The reference clients know no TIDAL-specific rejection
+// beyond it. Anything else, such as a 408 or a 400 with another code, may
+// be temporary, so the caller keeps the tokens and tries again.
+@(private = "file")
+is_refresh_refused :: proc(status: int, oauth_error: string) -> bool {
+	return (status == 400 || status == 401) && oauth_error == "invalid_grant"
 }
 
 // Reads sessionId, countryCode and the user after the tokens are set.

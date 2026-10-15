@@ -229,12 +229,14 @@ basic_request :: proc(s: ^Session, r: Request, allocator := context.allocator) -
 		append(&headers, fmt.tprintf("User-Agent: %s", s.user_agent))
 	}
 
+	early_refresh: Error
 	if access_token_expired(auth) {
 		log.debug("The access token is about to expire, trying to refresh it.")
 		if _, rerr := refresh_access_token(s, auth.access_token); rerr != nil {
 			// Don't fail the request: the token may still be accepted, and if it
 			// isn't, the expired-token handling below reports the failure.
 			log.warnf("Proactive access token refresh failed: %s", error_string(rerr, tmp))
+			early_refresh = rerr
 		}
 	}
 
@@ -269,6 +271,11 @@ basic_request :: proc(s: ^Session, r: Request, allocator := context.allocator) -
 				// (e.g. clock skew), return that response instead of looping.
 				resp, _ = send(s, r.method, url, headers[:], body, auth.epoch, allocator) or_return
 			}
+		} else if resp.status == 401 && is_error(early_refresh, .Refresh_Failed) {
+			// TIDAL refused the token that couldn't be refreshed, without
+			// saying it expired. The refresh failure is what to report: it
+			// keeps the login, a plain 401 would end it.
+			return resp, early_refresh
 		} else {
 			log.debugf("HTTP error on %d", resp.status)
 			log.debugf("Response text\n%s", body_prefix(resp, 2000))

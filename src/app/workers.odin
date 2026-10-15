@@ -172,12 +172,25 @@ worker_main :: proc "c" (arg: rawptr) -> rawptr {
 		free_all(context.temp_allocator)
 		if retry_later(d, res) {
 			result_free(&res)
+			jobs.requeue(&d.queue, requeued(job, res), ticket)
+			continue
+		}
+		if e, failed := res.err.?; failed && e == .Refresh_Failed {
+			// The tokens are kept, so the job goes back after a wait that
+			// doubles with each failed refresh until one works.
+			result_free(&res)
+			n := sync.atomic_add(&d.refresh_errors, 1) + 1
+			wait := min(1 << uint(min(n, 5)), LOGIN_RETRY_MAX)
+			stopping := jobs.sleep(&d.queue, time.Duration(wait) * time.Second)
 			jobs.requeue(&d.queue, job, ticket)
+			if stopping {
+				break
+			}
 			continue
 		}
 		if !jobs.push_wait(&d.results, res) {
 			result_free(&res)
-			jobs.requeue(&d.queue, job, ticket)
+			jobs.requeue(&d.queue, requeued(job, res), ticket)
 			continue
 		}
 		jobs.done(&d.queue)
@@ -203,6 +216,19 @@ retry_later :: proc(d: ^Data, res: Result) -> bool {
 	return false
 }
 
+// requeued is job as it goes back in the queue. A Login_Wait that polled
+// keeps the interval TIDAL asked for, slow_down included, and polls again
+// no sooner than that interval from now.
+@(private = "file")
+requeued :: proc(job: Job, res: Result) -> Job {
+	job := job
+	if job.kind == .Login_Wait && res.link.interval > 0 {
+		job.interval = res.link.interval
+		job.not_before = time.tick_add(time.tick_now(), time.Duration(f64(job.interval) * f64(time.Second)))
+	}
+	return job
+}
+
 result_free :: proc(res: ^Result) {
 	if res.arena != nil {
 		vmem.arena_destroy(res.arena)
@@ -213,12 +239,13 @@ result_free :: proc(res: ^Result) {
 	res.pixels = nil
 }
 
+// fail records err for a job that sent the login's tokens. An expired
+// session that couldn't be refreshed comes back as a plain 401 from some
+// endpoints, so that ends the login too.
 @(private = "file")
 fail :: proc(res: ^Result, err: tidal.Error) {
 	e, _ := err.?
-	// An expired session that couldn't be refreshed comes back as a plain
-	// 401 from some endpoints.
-	res.err = .Authentication if e.status == 401 else e.kind
+	res.err = .Authentication if e.kind == .Http && e.status == 401 else e.kind
 	res.message = small(tidal.error_string(err, context.temp_allocator))
 }
 
@@ -292,6 +319,23 @@ run_login_wait :: proc(d: ^Data, job: Job, res: ^Result) {
 			return
 		}
 	}
+	// An earlier poll got the tokens, then failed to load the session
+	// (rate limited, the network dropped, or a reload cut it short). The
+	// device code is spent, so finish with the tokens, however long ago the
+	// code expired.
+	a := tidal.session_auth(s, context.temp_allocator)
+	if a.user_id != 0 {
+		return
+	}
+	if a.access_token != "" {
+		err := tidal.load_oauth_session(s, a.token_type, a.access_token, a.refresh_token, a.expiry_time)
+		if err != nil {
+			fail(res, err)
+			return
+		}
+		auth_changed(s, d)
+		return
+	}
 	left := time.duration_seconds(time.tick_diff(time.tick_now(), job.deadline))
 	if left <= 0 {
 		res.err = .Timeout
@@ -304,18 +348,7 @@ run_login_wait :: proc(d: ^Data, job: Job, res: ^Result) {
 		interval    = f64(job.interval),
 		expires_in  = left,
 	}
-	err: tidal.Error
-	// An earlier poll got the tokens, then failed to load the session
-	// (rate limited, or the network dropped). The device code is spent, so
-	// finish with the tokens.
-	if a := tidal.session_auth(s, context.temp_allocator); a.access_token != "" && a.user_id == 0 {
-		err = tidal.load_oauth_session(s, a.token_type, a.access_token, a.refresh_token, a.expiry_time)
-		if err == nil {
-			auth_changed(s, d)
-		}
-	} else {
-		err = tidal.login_device_wait(s, &link, until_expiry = !job.once)
-	}
+	err := tidal.login_device_wait(s, &link, until_expiry = !job.once)
 	res.link.interval = f32(link.interval)
 	if err != nil {
 		fail(res, err)
@@ -355,7 +388,11 @@ run_cover :: proc(d: ^Data, job: Job, res: ^Result) {
 	heap := runtime.heap_allocator()
 	body, err := tidal.resource_get(s, url, heap)
 	if err != nil {
-		fail(res, err)
+		// Not fail: covers carry no token, so a 401 here says nothing about
+		// the login. The cover is marked failed and tried again later.
+		e, _ := err.?
+		res.err = e.kind
+		res.message = small(tidal.error_string(err, context.temp_allocator))
 		return
 	}
 	defer delete(body, heap)

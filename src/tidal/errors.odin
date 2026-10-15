@@ -27,6 +27,7 @@ Error_Kind :: enum {
 	Timeout,
 	Cancelled,
 	Io,
+	Refresh_Failed,          // the token refresh failed, but TIDAL didn't refuse the refresh token
 }
 
 // Longest server detail kept in an Api_Error, in bytes.

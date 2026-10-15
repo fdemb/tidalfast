@@ -43,11 +43,14 @@ Mock :: struct {
 	// one second).
 	token_status:  int,
 	device_status: int,
+	token_error:   string, // the OAuth error with token_status
 	token_delay:   time.Duration, // before /token answers
-	// /device_token answers poll i with polls[i]: "pending", "slow_down",
-	// "denied", "429" or "ok"; past the end, "pending".
+	// /device_token, and /oauth2/token for an app session, answers poll i
+	// with polls[i]: "pending", "slow_down", "denied", "429" or "ok"; past
+	// the end, "pending". poll_times has when each poll arrived.
 	polls:      []string,
 	poll_count: int,
+	poll_times: [dynamic]time.Tick,
 
 	allocator:  runtime.Allocator,
 }
@@ -56,6 +59,7 @@ mock_start :: proc(m: ^Mock, items: []Mock_Item = nil) {
 	m.allocator = runtime.heap_allocator()
 	m.items = make([dynamic]Mock_Item, m.allocator)
 	m.requests = make([dynamic]string, m.allocator)
+	m.poll_times = make([dynamic]time.Tick, m.allocator)
 	append(&m.items, ..items)
 
 	sock, err := net.listen_tcp({address = net.IP4_Loopback, port = 0})
@@ -80,6 +84,7 @@ mock_stop :: proc(m: ^Mock) {
 	}
 	delete(m.requests)
 	delete(m.items)
+	delete(m.poll_times)
 	clear_query(&m.last_query, m.allocator)
 	delete(m.last_query)
 	delete(m.base_url, m.allocator)
@@ -243,6 +248,8 @@ mock_route :: proc(m: ^Mock, req: Mock_Request, target: string) -> (status: int,
 		return 200, `{}`, etag
 	case req.path == "/echo":
 		return 200, `{}`, etag
+	case req.path == "/refused":
+		return 401, `{"status":401,"subStatus":11002,"userMessage":"Session is not valid"}`, etag
 	case req.path == "/limited":
 		return 429, `{"userMessage":"Too many requests"}`, etag
 	case req.path == "/slow":
@@ -255,9 +262,13 @@ mock_route :: proc(m: ^Mock, req: Mock_Request, target: string) -> (status: int,
 			return m.device_status, `{"userMessage":"no"}`, etag
 		}
 		return 200, `{"deviceCode":"dc","userCode":"UC","verificationUri":"link","verificationUriComplete":"link/UC","expiresIn":300,"interval":1}`, etag
-	case req.path == "/device_token":
+	case strings.has_prefix(req.path, "/images/"):
+		// Covers carry no token. A 401 here mustn't end the login.
+		return 401, `{"status":401,"subStatus":11003,"userMessage":"unauthorized"}`, etag
+	case req.path == "/device_token" || req.path == "/oauth2/token":
 		poll := m.polls[m.poll_count] if m.poll_count < len(m.polls) else "pending"
 		m.poll_count += 1
+		append(&m.poll_times, time.tick_now())
 		switch poll {
 		case "slow_down":
 			return 400, `{"status":400,"error":"slow_down"}`, etag
@@ -276,7 +287,7 @@ mock_route :: proc(m: ^Mock, req: Mock_Request, target: string) -> (status: int,
 			sync.mutex_lock(&m.mutex)
 		}
 		if m.token_status != 0 {
-			return m.token_status, `{"status":0,"error":"no"}`, etag
+			return m.token_status, fmt.tprintf(`{{"status":%d,"error":"%s"}}`, m.token_status, m.token_error), etag
 		}
 		// A refresh that rotates the refresh token, as TIDAL may.
 		m.refreshes += 1

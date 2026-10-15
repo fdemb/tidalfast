@@ -10,6 +10,7 @@ package app
 import "base:runtime"
 import "core:encoding/json"
 import "core:fmt"
+import "core:math"
 import vmem "core:mem/virtual"
 import "core:os"
 import "core:strings"
@@ -92,6 +93,7 @@ Data :: struct {
 	// and results from an older one are dropped.
 	auth_gen:       u32,
 	retry:          bit_set[Job_Kind; u8], // pushes the queue refused, tried again next frame
+	refresh_errors: int, // token refreshes in a row that failed without ending the login (atomic)
 	keychain_mutex: sync.Mutex, // orders a sign-out's delete against the workers' saves
 	session:        ^tidal.Session, // made by this dylib, so closed on unload
 	wake:           proc "c" (), // the shell's request_redraw
@@ -156,7 +158,9 @@ data_reload :: proc(s: ^State, shell: ^platform.Shell) {
 	}
 	session_open(d)
 	if d.saved_auth != nil {
-		auth_restore(d.session, d.saved_auth)
+		// partial: a login approved before the unload may not have loaded
+		// its session yet. Its Login_Wait finishes it with these tokens.
+		auth_restore(d.session, d.saved_auth, partial = true)
 		delete(d.saved_auth, runtime.heap_allocator())
 		d.saved_auth = nil
 	}
@@ -301,13 +305,18 @@ auth_marshal :: proc(a: tidal.Auth, allocator: runtime.Allocator) -> []u8 {
 }
 
 // auth_restore puts stored login state into the session. False if it holds
-// no usable login.
-auth_restore :: proc(s: ^tidal.Session, data: []u8) -> bool {
+// no usable login. With partial, tokens without a user are restored too
+// (and true returned): a device login that got its tokens but hasn't loaded
+// the session yet.
+auth_restore :: proc(s: ^tidal.Session, data: []u8, partial := false) -> bool {
 	st: Stored_Auth
 	if json.unmarshal(data, &st, allocator = context.temp_allocator) != nil {
 		return false
 	}
-	if st.user_id == 0 || (st.access_token == "" && st.refresh_token == "") {
+	if st.access_token == "" && st.refresh_token == "" {
+		return false
+	}
+	if st.user_id == 0 && (!partial || st.access_token == "") {
 		return false
 	}
 	a := tidal.Auth {
@@ -351,6 +360,7 @@ auth_load :: proc(d: ^Data, res: ^Result) -> bool {
 // they were read in must still be the session's.
 auth_changed :: proc(s: ^tidal.Session, data: rawptr) {
 	d := (^Data)(data)
+	sync.atomic_store(&d.refresh_errors, 0)
 	a := tidal.session_auth(s, context.temp_allocator)
 	if a.user_id == 0 || (a.access_token == "" && a.refresh_token == "") {
 		return
@@ -412,7 +422,20 @@ request_login_code :: proc(d: ^Data) {
 	if d.login.requested || d.login.waiting {
 		return
 	}
+	// Tokens of a device login that never loaded its session would make
+	// the new code's Login_Wait try them again instead of polling.
+	if login_has_tokens(d) {
+		tidal.session_clear_auth(d.session)
+	}
 	d.login.requested = push_job(d, {kind = .Login_Start})
+}
+
+// login_has_tokens says whether the device login got its tokens but hasn't
+// loaded the session yet. The code is spent then, and its expiry no longer
+// matters: Login_Wait finishes with the tokens.
+login_has_tokens :: proc(d: ^Data) -> bool {
+	a := tidal.session_auth(d.session, context.temp_allocator)
+	return a.access_token != "" && a.user_id == 0
 }
 
 // request_login_poll queues the poll for the code on screen.
@@ -500,7 +523,9 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 		return
 	}
 	err, failed := res.err.?
-	if failed && err == .Authentication && res.job.kind != .Login_Wait && res.job.kind != .Login_Start {
+	// Only jobs that sent the login's tokens can end it. A cover carries no
+	// token, and a login job's .Authentication means the user denied it.
+	if failed && err == .Authentication && res.job.kind != .Cover && res.job.kind != .Login_Start && res.job.kind != .Login_Wait {
 		sign_out(s, "Your TIDAL session ended. Log in again.")
 		return
 	}
@@ -598,13 +623,14 @@ login_wait_done :: proc(d: ^Data, res: ^Result, err: tidal.Error_Kind, failed: b
 		request_playlists(d)
 		return
 	}
-	expired := time.tick_diff(time.tick_now(), l.deadline) <= 0
+	expired := time.tick_diff(time.tick_now(), l.deadline) <= 0 && !login_has_tokens(d)
 	#partial switch err {
 	case .Timeout:
 		if res.job.once && !expired {
+			// TIDAL answered the check, which counts as a poll.
 			l.note = {}
 			l.retries = 0
-			l.poll_at = {}
+			l.poll_at = time.tick_add(time.tick_now(), time.Duration(f64(l.link.interval) * f64(time.Second)))
 			l.poll_once = false
 			request_login_poll(d)
 			return
@@ -622,7 +648,9 @@ login_wait_done :: proc(d: ^Data, res: ^Result, err: tidal.Error_Kind, failed: b
 			return
 		}
 		l.retries += 1
-		wait := min(1 << uint(min(l.retries, 5)), LOGIN_RETRY_MAX)
+		// The poll may have reached TIDAL, so the next one waits at least
+		// the interval.
+		wait := max(min(1 << uint(min(l.retries, 5)), LOGIN_RETRY_MAX), int(math.ceil(l.link.interval)))
 		l.poll_at = time.tick_add(time.tick_now(), time.Duration(wait) * time.Second)
 		l.poll_once = true
 		l.note = small(fmt.tprintf("Can't reach TIDAL. Trying again in %d s.", wait))

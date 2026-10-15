@@ -8,6 +8,7 @@ import "core:thread"
 import "core:time"
 
 import app "../src/app"
+import "../src/cover"
 import "../src/jobs"
 import "../src/mac"
 import "../src/platform"
@@ -53,7 +54,7 @@ refresh_rate_limit_is_not_an_auth_failure :: proc(t: ^testing.T) {
 
 	m.token_status = 503
 	_, err := tidal.token_refresh(s, "refresh-0")
-	testing.expect(t, tidal.is_error(err, .Http), fmt.tprint(err))
+	testing.expect(t, tidal.is_error(err, .Refresh_Failed), fmt.tprint(err))
 
 	m.token_status = 429
 	_, err = tidal.token_refresh(s, "refresh-0")
@@ -66,9 +67,81 @@ refresh_rate_limit_is_not_an_auth_failure :: proc(t: ^testing.T) {
 	// Only TIDAL turning the refresh token down ends the login.
 	time.sleep(1100 * time.Millisecond)
 	m.token_status = 400
+	m.token_error = "invalid_grant"
 	_, err = tidal.token_refresh(s, "refresh-0")
 	testing.expect(t, tidal.is_error(err, .Authentication), fmt.tprint(err))
 	testing.expect_value(t, tidal.session_auth(s, context.temp_allocator).refresh_token, "refresh-0")
+}
+
+// Only 400 or 401 with an OAuth error that refuses the refresh token ends
+// the login. Anything else keeps the tokens.
+@(test)
+refresh_keeps_tokens_unless_refused :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := oauth_session(&m)
+	defer tidal.session_destroy(s)
+	tidal.session_restore(s, {token_type = "Bearer", access_token = "old", refresh_token = "refresh-0", user_id = 123, user_kind = .Logged_In_User})
+
+	Case :: struct {
+		status:  int,
+		error:   string,
+		refused: bool,
+	}
+	cases := []Case {
+		{408, "", false},
+		{400, "", false},
+		{400, "invalid_request", false},
+		{401, "", false},
+		{403, "invalid_grant", false},
+		{400, "invalid_grant", true},
+		{401, "invalid_grant", true},
+		{401, "invalid_client", false},
+	}
+	for c in cases {
+		m.token_status = c.status
+		m.token_error = c.error
+		_, err := tidal.token_refresh(s, "refresh-0")
+		testing.expect(t, err != nil, fmt.tprint(c))
+		testing.expect_value(t, tidal.is_error(err, .Authentication), c.refused)
+		testing.expect_value(t, tidal.is_error(err, .Refresh_Failed), !c.refused)
+		a := tidal.session_auth(s, context.temp_allocator)
+		testing.expect_value(t, a.refresh_token, "refresh-0")
+		testing.expect_value(t, a.access_token, "old")
+	}
+
+	// No answer at all is temporary too.
+	s.config.api_oauth2_token = "http://127.0.0.1:1/token"
+	_, err := tidal.token_refresh(s, "refresh-0")
+	testing.expect(t, tidal.is_error(err, .Refresh_Failed), fmt.tprint(err))
+}
+
+// The token expired and the refresh timed out, then TIDAL answers the
+// request with a plain 401. The refresh failure comes back, not the 401,
+// so the login stays.
+@(test)
+expired_token_with_failed_refresh_keeps_the_login :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := oauth_session(&m)
+	defer tidal.session_destroy(s)
+	expired := time.time_add(time.now(), -time.Minute)
+	tidal.session_restore(s, {token_type = "Bearer", access_token = "old", refresh_token = "refresh-0", expiry_time = expired, user_id = 123, user_kind = .Logged_In_User})
+
+	m.token_status = 408
+	_, err := tidal.request(s, {method = .GET, path = "refused"}, context.temp_allocator)
+	testing.expect(t, tidal.is_error(err, .Refresh_Failed), fmt.tprint(err))
+	testing.expect_value(t, mock_count(&m, "POST /token"), 1)
+
+	// Refused for good, the 401 stands.
+	m.token_status = 400
+	m.token_error = "invalid_grant"
+	_, err = tidal.request(s, {method = .GET, path = "refused"}, context.temp_allocator)
+	testing.expect(t, !tidal.is_error(err, .Refresh_Failed), fmt.tprint(err))
+	e, _ := err.?
+	testing.expect_value(t, e.status, 401)
 }
 
 @(test)
@@ -428,5 +501,155 @@ api_override_debug_only :: proc(t: ^testing.T) {
 		testing.expect_value(t, app.api_override(), "")
 	} else {
 		testing.expect_value(t, app.api_override(), "")
+	}
+}
+
+// A State whose session talks to the mock, with a Keychain service of its
+// own. Workers aren't started.
+@(private = "file")
+mock_data_state :: proc(m: ^Mock) -> ^app.State {
+	s := new(app.State)
+	d := &s.data
+	d.keychain = app.small(test_keychain_service())
+	d.api = app.small(m.base_url)
+	d.wake = proc "c" () {}
+	cover.init(&d.covers, app.COVER_BUDGET)
+	app.session_open(d)
+	return s
+}
+
+// wait_result waits up to timeout for the workers' next result.
+@(private = "file")
+wait_result :: proc(d: ^app.Data, timeout: time.Duration) -> (res: app.Result, ok: bool) {
+	start := time.tick_now()
+	for time.tick_since(start) < timeout {
+		if res, ok = jobs.try_pop(&d.results); ok {
+			return
+		}
+		time.sleep(10 * time.Millisecond)
+	}
+	return
+}
+
+// A cover that answers 401 after a new login leaves the login alone: covers
+// carry no token.
+@(test)
+cover_401_keeps_the_login :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := mock_data_state(&m)
+	defer data_state_free(s)
+	d := &s.data
+	service := app.keychain_service(d)
+	tidal.session_restore(d.session, {token_type = "Bearer", access_token = "new", refresh_token = "new-r", user_id = 123, user_kind = .Logged_In_User})
+	d.account = .Signed_In
+	app.auth_changed(d.session, d)
+
+	e := cover.want(&d.covers, .Album, "cover-id", 80, 1, app.PRIORITY_COVER)
+	key := e.key
+	app.push_job(d, {kind = .Cover, key = key, size = 80, id = app.small("cover-id")}, app.PRIORITY_COVER)
+	app.workers_start(d)
+	res, ok := wait_result(d, 5 * time.Second)
+	testing.expect(t, ok)
+	app.handle_result(s, &res, 0)
+	app.result_free(&res)
+
+	testing.expect_value(t, mock_count(&m, "GET /images/"), 1)
+	testing.expect_value(t, cover.lookup(&d.covers, key).state, cover.State.Failed)
+	testing.expect_value(t, d.account, app.Account.Signed_In)
+	testing.expect_value(t, d.auth_gen, 0)
+	testing.expect_value(t, tidal.session_auth(d.session, context.temp_allocator).access_token, "new")
+	_, status := mac.keychain_get(service, app.KEYCHAIN_ACCOUNT, context.temp_allocator)
+	testing.expect_value(t, status, mac.ERR_SEC_SUCCESS)
+}
+
+// The approval got the tokens, then loading the session was held back
+// until after the code expired. The tokens still finish the login.
+@(test)
+login_resumes_with_tokens_after_the_code_expired :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := mock_data_state(&m)
+	defer data_state_free(s)
+	d := &s.data
+	tidal.session_restore(d.session, {token_type = "Bearer", access_token = "device-access", refresh_token = "device-refresh"})
+	d.account = .Signed_Out
+	d.login.link.device_code = app.small("dc")
+	d.login.link.interval = 1
+	d.login.deadline = time.tick_add(time.tick_now(), -time.Second)
+	app.request_login_poll(d)
+	app.workers_start(d)
+	res, ok := wait_result(d, 5 * time.Second)
+	testing.expect(t, ok)
+	app.handle_result(s, &res, 0)
+	app.result_free(&res)
+
+	testing.expect_value(t, m.poll_count, 0)
+	testing.expect_value(t, d.account, app.Account.Signed_In)
+	testing.expect_value(t, tidal.session_auth(d.session, context.temp_allocator).user_id, 123)
+}
+
+// A reload after the approval, before the session loaded, keeps the tokens,
+// and the Login_Wait finishes with them instead of polling the spent code.
+@(test)
+reload_keeps_an_approved_login :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := mock_data_state(&m)
+	defer data_state_free(s)
+	d := &s.data
+	tidal.session_restore(d.session, {token_type = "Bearer", access_token = "device-access", refresh_token = "device-refresh"})
+	d.account = .Signed_Out
+	d.login.link.device_code = app.small("dc")
+	d.login.link.interval = 1
+	d.login.deadline = time.tick_add(time.tick_now(), 300 * time.Second)
+	app.request_login_poll(d)
+
+	shell := platform.Shell {
+		request_redraw = proc "c" () {},
+	}
+	app.data_unload(s)
+	app.data_reload(s, &shell)
+	testing.expect_value(t, tidal.session_auth(d.session, context.temp_allocator).refresh_token, "device-refresh")
+	res, ok := wait_result(d, 5 * time.Second)
+	testing.expect(t, ok)
+	app.handle_result(s, &res, 0)
+	app.result_free(&res)
+
+	testing.expect_value(t, m.poll_count, 0)
+	testing.expect_value(t, d.account, app.Account.Signed_In)
+}
+
+// slow_down, then a 429: the poll after the backoff still waits the slower
+// interval.
+@(test)
+login_requeue_keeps_the_interval :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := mock_data_state(&m)
+	defer data_state_free(s)
+	d := &s.data
+	m.polls = {"slow_down", "429", "ok"}
+	d.account = .Signed_Out
+	d.login.link.device_code = app.small("dc")
+	d.login.link.interval = 0.2
+	d.login.deadline = time.tick_add(time.tick_now(), 300 * time.Second)
+	app.request_login_poll(d)
+	app.workers_start(d)
+	res, ok := wait_result(d, 20 * time.Second)
+	testing.expect(t, ok)
+	app.handle_result(s, &res, 0)
+	app.result_free(&res)
+
+	testing.expect_value(t, d.account, app.Account.Signed_In)
+	testing.expect_value(t, len(m.poll_times), 3)
+	interval := 0.2 + f64(tidal.SLOW_DOWN_STEP)
+	for i in 1 ..< len(m.poll_times) {
+		gap := time.duration_seconds(time.tick_diff(m.poll_times[i - 1], m.poll_times[i]))
+		testing.expectf(t, gap >= interval - 0.05, "poll %d came %.3f s after the one before, interval %.1f s", i, gap, interval)
 	}
 }

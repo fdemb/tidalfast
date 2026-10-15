@@ -18,6 +18,9 @@
 //     -device-429=N      answer the first N device code requests with 429 and Retry-After: 3
 //     -slow-down=N       answer the first N polls of each code with slow_down
 //     -revoke-after=N    after N API requests (not logins or covers), refuse the login with 401 until a new device login, once
+//     -cover-401=N       answer the first N covers after each device login with 401
+//     -cover-401-delay=MS  wait this long before each of those 401s (default 0)
+//     -poll-429=N        answer poll N of each code with 429 and Retry-After: 1
 //
 // It never prints tokens or Authorization headers.
 package mock_tidal
@@ -40,16 +43,19 @@ USER_ID :: 123
 LIKED :: 240
 
 Config :: struct {
-	port:          int,
-	tracks:        int,
-	approve_after: f64,
-	expires_in:    int,
-	page_delay:    int,
-	cover_delay:   int,
-	rate_limit_at: int,
-	device_429:    int,
-	slow_down:     int,
-	revoke_after:  int,
+	port:            int,
+	tracks:          int,
+	approve_after:   f64,
+	expires_in:      int,
+	page_delay:      int,
+	cover_delay:     int,
+	rate_limit_at:   int,
+	device_429:      int,
+	slow_down:       int,
+	revoke_after:    int,
+	cover_401:       int,
+	cover_401_delay: int,
+	poll_429:        int,
 }
 
 Server :: struct {
@@ -64,6 +70,8 @@ Server :: struct {
 	api_requests:  int, // since the last device login
 	revoked:       bool,
 	was_revoked:   bool,
+	last_poll:     time.Tick,
+	covers_401:    int, // covers answered 401 since the last device login
 }
 
 server: Server
@@ -123,6 +131,12 @@ main :: proc() {
 			c.slow_down = n
 		case "revoke-after":
 			c.revoke_after = n
+		case "cover-401":
+			c.cover_401 = n
+		case "cover-401-delay":
+			c.cover_401_delay = n
+		case "poll-429":
+			c.poll_429 = n
 		case:
 			fmt.eprintln("mock: unknown flag", arg)
 			os.exit(2)
@@ -281,6 +295,18 @@ route :: proc(req: ^Request) -> Response {
 	case path == "/oauth2/token":
 		return token_response(req)
 	case strings.has_prefix(path, "/images/"):
+		sync.mutex_lock(&server.mutex)
+		refuse := server.covers_401 < server.config.cover_401
+		if refuse {
+			server.covers_401 += 1
+		}
+		k, codes := server.covers_401, server.codes
+		sync.mutex_unlock(&server.mutex)
+		if refuse {
+			time.sleep(time.Duration(server.config.cover_401_delay) * time.Millisecond)
+			fmt.printfln("mock: cover %d asked for under device code %d, 401", k, codes)
+			return json_response(401, `{"status":401,"subStatus":11002,"userMessage":"Unauthorized"}`)
+		}
 		return cover_response(path)
 	}
 
@@ -369,17 +395,26 @@ token_response :: proc(req: ^Request) -> Response {
 			server.first_poll = time.tick_now()
 		}
 		server.polls += 1
+		gap := time.duration_seconds(time.tick_since(server.last_poll)) if server.polls > 1 else 0
+		server.last_poll = time.tick_now()
 		if server.polls <= server.config.slow_down {
-			fmt.printfln("mock: poll %d, slow_down", server.polls)
+			fmt.printfln("mock: poll %d, %.3f s after the last, slow_down", server.polls, gap)
 			return json_response(400, `{"status":400,"error":"slow_down","error_description":"Polling too fast"}`)
 		}
-		fmt.printfln("mock: poll %d", server.polls)
+		if server.polls == server.config.poll_429 {
+			fmt.printfln("mock: poll %d, %.3f s after the last, 429", server.polls, gap)
+			r := json_response(429, `{"status":429,"subStatus":0,"userMessage":"Too many requests"}`)
+			r.retry_after = 1
+			return r
+		}
+		fmt.printfln("mock: poll %d, %.3f s after the last", server.polls, gap)
 		if time.duration_seconds(time.tick_since(server.first_poll)) < server.config.approve_after {
 			return json_response(400, `{"status":400,"error":"authorization_pending","sub_status":1002,"error_description":"Device Authorization code is not authorized yet"}`)
 		}
 		server.token += 1
 		server.revoked = false
 		server.api_requests = 0
+		server.covers_401 = 0
 		fmt.printfln("mock: device login approved, tokens %d", server.token)
 	case "refresh_token":
 		if server.revoked {

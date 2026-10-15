@@ -33,6 +33,7 @@ What a UI needs to know:
 - **Stopping.** `session_abort(s, true)` makes requests in flight and new ones fail with `.Cancelled`, and stops `login_device_wait`.
 - **Signing out.** `session_clear_auth` forgets the tokens, session id and user. Requests, refreshes and device logins that started before it fail with `.Cancelled`, in flight or not, and a refresh that finishes anyway doesn't store its tokens. `Auth.epoch` and `session_epoch` say which login a copy of the state came from.
 - **Rate limits.** After a 429 or an anti-abuse 403 the session refuses every request with `.Backing_Off` until `Retry-After` has passed (60 s or 30 minutes without one). That covers the OAuth endpoints too: device login, polling and token refresh. A rate-limited refresh fails with `.Too_Many_Requests`, not `.Authentication`, so only TIDAL turning down the refresh token looks like a lost login. `backoff_state` and `backoff_restore` carry a running backoff over to a new session.
+- **Refresh failures.** A refresh fails with `.Authentication` only when TIDAL answers 400 or 401 with the OAuth error `invalid_grant`. Every other failure, unreachable network included, is `.Refresh_Failed` and keeps the tokens, so the caller can try again later. Say a request's token had expired and its refresh failed that way. If TIDAL then answers the request with a 401 that doesn't mention the expiry, the request returns the `.Refresh_Failed` error, not the 401.
 - **Polymorphic results** are unions: `Media` (track or video), `Item` (anything a page row or search top hit can hold), `Page_Category`, `Creator`.
 
 ## API overview
@@ -61,7 +62,7 @@ What a UI needs to know:
 - Session files are JSON, written to a new 0600 file and renamed into place, so an existing file's permissions never apply. A session logged in by session id alone restores through `load_session`.
 - Requests time out after `config.timeout_seconds` (30 by default).
 - `login_device_wait` takes the link by pointer. It waits `link.interval` seconds between polls and adds 5 to it when TIDAL answers `slow_down`, so a caller that polls again after a network error keeps the slower pace. It returns `.Timeout` when the code expired, `.Authentication` when the user denied it, and a rate limit or a transport error as soon as one happens.
-- `resource_get` downloads a file outside the API, such as a cover from `resources.tidal.com`, under the same backoff as API requests.
+- `resource_get` downloads a file outside the API, such as a cover from `resources.tidal.com`, under the same backoff as API requests. It sends no token and never refreshes or clears one, so its errors, a 401 included, say nothing about the login.
 - Every endpoint, the device authorization one included (`config.api_device_auth`), comes from `Config`, so tests and the app's mock mode can point a session elsewhere.
 - A query string in a request path is merged with the default parameters; the path's values win over defaults, and `Request.params` win over both.
 - `Dash_Info` keeps the initialization segment (`init_url`) apart from the media `segments`, each with its own duration. `urls` lists both in download order. `manifest_hls` puts the initialization segment in `EXT-X-MAP`.
