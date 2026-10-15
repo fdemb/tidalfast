@@ -63,12 +63,16 @@ Job_Kind :: enum u8 {
 	Cover, // download and decode one cover
 	Stream, // resolve a track's stream URL, see player.odin
 	Artwork, // a cover for Now Playing: download and decode, keep the pixels
+	Search, // songs, albums, artists and playlists for a query, see search.odin
 }
 
 Source :: enum u8 {
 	None,
 	Liked,
 	Playlist,
+	Search,
+	Album,
+	Artist,
 }
 
 Job :: struct {
@@ -76,7 +80,7 @@ Job :: struct {
 	source:     Source,
 	once:       bool, // Login_Wait: poll once, to see if TIDAL answers again
 	auth:       u32, // the auth generation it was queued in, see sign_out
-	view:       u32, // Tracks: the view generation it's for; Stream: the track's serial
+	view:       u32, // Tracks: the view generation it's for; Stream: the track's serial; Search: the query's generation
 	offset:     i32,
 	limit:      i32,
 	key:        u64, // Cover: the cache key; Stream: the track id; Artwork: the track's serial
@@ -84,7 +88,7 @@ Job :: struct {
 	interval:   f32, // Login_Wait: seconds between polls
 	deadline:   time.Tick, // Login_Wait: when the code expires
 	not_before: time.Tick, // Login_Wait: when to poll first, {} for now
-	id:         Small, // playlist id, image id or device code
+	id:         Small, // playlist id, image id, device code, query, album or artist id
 }
 
 // Priorities: lower runs first.
@@ -121,6 +125,7 @@ Result :: struct {
 	pixels:      []u8, // from cover.decode
 	w, h:        int,
 	stream:      tidal.Stream_Info, // strings in arena
+	found:       Found_Lists, // Search: in arena
 }
 
 workers_start :: proc(d: ^Data) {
@@ -302,10 +307,13 @@ run_job :: proc(d: ^Data, job: Job) -> (res: Result) {
 	case .Tracks:
 		tracks: []tidal.Track
 		err: tidal.Error
-		if job.source == .Liked {
+		#partial switch job.source {
+		case .Liked:
 			tracks, err = tidal.favorites_tracks(s, int(job.limit), int(job.offset), .Date, .Descending, alloc)
-		} else {
+		case .Playlist:
 			tracks, err = tidal.playlist_tracks(s, small_str(&id), int(job.limit), int(job.offset), allocator = alloc)
+		case:
+			tracks, err = more_tracks(s, job, alloc)
 		}
 		if err != nil {
 			fail(&res, err)
@@ -315,6 +323,17 @@ run_job :: proc(d: ^Data, job: Job) -> (res: Result) {
 		for t, i in tracks {
 			res.rows[i] = row_from_track(t, alloc)
 		}
+	case .Search:
+		found, err := tidal.search(s, small_str(&id), {.Track, .Album, .Artist, .Playlist}, SEARCH_PAGE, 0, alloc)
+		if err != nil {
+			fail(&res, err)
+			return
+		}
+		res.rows = make([]Row, len(found.tracks), alloc)
+		for t, i in found.tracks {
+			res.rows[i] = row_from_track(t, alloc)
+		}
+		res.found = found_lists(found, alloc)
 	}
 	return
 }
@@ -442,6 +461,11 @@ row_from_track :: proc(t: tidal.Track, alloc: mem.Allocator) -> (row: Row) {
 		row.artist = strings.to_string(b)
 	} else if t.artist != nil {
 		row.artist = t.artist.name
+	}
+	if len(t.artists) > 0 {
+		row.artist_id = t.artists[0].id
+	} else if t.artist != nil {
+		row.artist_id = t.artist.id
 	}
 	if t.album != nil {
 		row.album = t.album.name

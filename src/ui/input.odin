@@ -36,7 +36,18 @@ Input :: struct {
 SCROLL_LINE :: 16
 
 // macOS virtual key codes (kVK_*) the UI and the app use.
+KEY_A :: 0
 KEY_D :: 2
+KEY_F :: 3
+KEY_Z :: 6
+KEY_X :: 7
+KEY_C :: 8
+KEY_V :: 9
+KEY_E :: 14
+KEY_L :: 37
+KEY_BACKSPACE :: 51
+KEY_KEYPAD_ENTER :: 76
+KEY_FORWARD_DELETE :: 117
 KEY_1 :: 18
 KEY_2 :: 19
 KEY_3 :: 20

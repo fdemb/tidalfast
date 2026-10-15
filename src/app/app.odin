@@ -29,7 +29,7 @@ import "../ui"
 
 CLEAR_COLOR :: render.Color{0.10, 0.11, 0.13, 1}
 
-STATE_VERSION :: 10
+STATE_VERSION :: 11
 
 FRAME_HISTORY :: 120
 
@@ -71,6 +71,8 @@ State :: struct {
 	library:      Library,
 	data:         Data,
 	playback:     Playback,
+	search:       Search,
+	access_sent:  u64, // hash of the accessibility tree the shell has
 	scroll:       [2]f32, // the test screens' scroll offset
 	bench:        Bench,
 	slide_start:  f64,
@@ -158,6 +160,7 @@ app_shutdown :: proc "c" (m: ^platform.Memory) {
 	}
 	playback_shutdown(s)
 	data_shutdown(s)
+	search_shutdown(s)
 	text.destroy(&s.text, &s.renderer)
 	render.destroy(&s.renderer)
 }
@@ -172,7 +175,7 @@ app_frame :: proc "c" (m: ^platform.Memory, shell: ^platform.Shell, input: ^plat
 	result: platform.Frame_Result
 	{
 		prof_scope(s, "frame")
-		result = update_and_draw(s, input)
+		result = update_and_draw(s, input, shell)
 	}
 	frame_ms := f32(time.duration_milliseconds(time.tick_since(begin)))
 	s.frame_ms[s.frame_count % FRAME_HISTORY] = frame_ms
@@ -254,6 +257,7 @@ start :: proc(s: ^State, shell: ^platform.Shell) {
 	library_init(&s.library)
 	data_start(s, shell)
 	playback_start(s, shell)
+	search_init(s)
 	// TIDALFAST_BENCH=1 scrolls the library's track table, =text the text
 	// test screen's list.
 	switch bench {
@@ -294,7 +298,7 @@ Screen :: enum u8 {
 
 SLIDE_SECONDS :: 0.6
 
-update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input) -> platform.Frame_Result {
+update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input, shell: ^platform.Shell) -> platform.Frame_Result {
 	events := input.events[:input.event_count]
 	if s.log_events {
 		for e in events {
@@ -306,7 +310,9 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input) -> platform.Fra
 	render.begin_frame(r, w, h, input.scale, CLEAR_COLOR)
 	ui_begin := time.tick_now()
 	text.begin_frame(&s.text, r)
-	ui.begin_frame(&s.ui, events, r, &s.text, w, h, input.time, ui.hardware_buttons())
+	ui.begin_frame(&s.ui, events, r, &s.text, w, h, input.time, ui.hardware_buttons(), input.text[:input.text_length])
+	ui.set_window_key(&s.ui, bool(input.key_window))
+	ui.set_clipboard(&s.ui, shell.get_clipboard, shell.set_clipboard)
 	data_update(s, input.time)
 	playback_update(s, events)
 
@@ -340,6 +346,7 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input) -> platform.Fra
 		draw_test_screen(s, w, h)
 	}
 	animating := ui.end_frame()
+	shell_update(s, shell)
 	covers_schedule(s)
 
 	if s.sliding {
@@ -373,7 +380,7 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input) -> platform.Fra
 		fmt.eprintfln("render: %d draw calls, %d instances", r.stats.draw_calls, r.stats.instances)
 		s.last_stats = r.stats
 	}
-	return {animating = b32(animating || s.sliding || s.text.needs_redraw)}
+	return {animating = b32(animating || s.sliding || s.text.needs_redraw), wake_after = ui.wake_after(&s.ui)}
 }
 
 // draw_test_screen exercises the renderer: a grid of shadowed gradient cards

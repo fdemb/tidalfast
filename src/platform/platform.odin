@@ -2,7 +2,7 @@
 // this file field for field. Change both together and bump ABI_VERSION.
 package platform
 
-ABI_VERSION :: 2
+ABI_VERSION :: 3
 
 Event_Kind :: enum u32 {
 	None,
@@ -16,6 +16,17 @@ Event_Kind :: enum u32 {
 	Modifiers_Changed,
 	Resize,
 	Media, // key_code is a Media_Command, dx the position for .Seek
+	// Text from the keyboard or an input method, for the focused text field.
+	// It replaces the marked text if there is any, else the selection, or
+	// the replace range when replace is set.
+	Text,
+	// The input method's composition: replaces the marked text if there is
+	// any, else the selection, or the replace range, and becomes the new
+	// marked text. Empty text ends the composition and removes it.
+	Marked_Text,
+	Unmark_Text, // the marked text stays as it is and is no longer marked
+	Access_Press, // an assistive app pressed the node target
+	Access_Focus, // an assistive app moved the focus to the node target
 }
 
 // Media keys, Control Center and headphones, from MPRemoteCommandCenter.
@@ -72,9 +83,17 @@ Event :: struct {
 	momentum_phase: Scroll_Phase,
 	precise:        b8,
 	repeat:         b8,
-	_:              [2]u8,
+	replace:        b8, // Text, Marked_Text: replace_start and replace_end are set
+	_:              u8,
+	text_offset:    u32, // Text, Marked_Text: the text is Frame_Input.text[text_offset:][:text_length], UTF-8
+	text_length:    u32,
+	replace_start:  i32, // bytes of the field's text
+	replace_end:    i32,
+	select_start:   i32, // Marked_Text: the input method's selection inside the marked text, bytes
+	select_end:     i32,
+	target:         u64, // Access_Press, Access_Focus: the node's id
 }
-#assert(size_of(Event) == 56)
+#assert(size_of(Event) == 88)
 
 // Memory the shell allocates once and passes to every app call. It outlives
 // any one dylib, so it is where all app state goes. Both blocks start zeroed.
@@ -108,6 +127,56 @@ Now_Playing :: struct {
 }
 #assert(size_of(Now_Playing) == 72)
 
+// The focused text field, for the input method. The shell answers
+// NSTextInputClient's questions from it, and puts the candidate window
+// under caret.
+Text_Input :: struct {
+	text:            [^]u8, // UTF-8; nil when no text field has the focus
+	length:          u32,
+	selection_start: u32, // bytes, start <= end
+	selection_end:   u32,
+	marked_start:    i32, // bytes; -1 without marked text
+	marked_end:      i32,
+	_:               u32,
+	caret:           [4]f32, // x, y, w, h in view points: the marked text, or the caret
+}
+#assert(size_of(Text_Input) == 48)
+
+Access_Role :: enum u32 {
+	None,
+	Group,
+	Button,
+	Text_Field,
+	Static_Text,
+	List,
+	Table,
+	Row,
+	Menu,
+	Menu_Item,
+	Slider,
+}
+
+Access_Flag :: enum u32 {
+	Focused,
+	Selected,
+	Disabled,
+}
+Access_Flags :: bit_set[Access_Flag; u32]
+
+// One element of the accessibility tree. Nodes come parents first; parent
+// is the index of the parent node, or -1 for the window's content.
+Access_Node :: struct {
+	id:     u64, // stable across frames
+	parent: i32,
+	role:   Access_Role,
+	flags:  Access_Flags,
+	_:      u32,
+	frame:  [4]f32, // x, y, w, h in view points
+	label:  cstring, // UTF-8 or nil
+	value:  cstring,
+}
+#assert(size_of(Access_Node) == 56)
+
 // What the shell gives the app. The Metal objects and the procedures belong
 // to the shell, so they stay valid across reloads and the app may keep them.
 Shell :: struct {
@@ -115,10 +184,19 @@ Shell :: struct {
 	metal_layer:     rawptr, // CAMetalLayer*
 	// Safe from any thread. Wakes the main run loop and draws one frame.
 	request_redraw:  proc "c" (),
-	// Main thread only.
-	set_now_playing: proc "c" (info: ^Now_Playing),
+	// The rest are main thread only.
+	set_now_playing:   proc "c" (info: ^Now_Playing),
+	// nil or a Text_Input with a nil text when no text field has the focus.
+	// The shell copies it.
+	set_text_input:    proc "c" (input: ^Text_Input),
+	set_clipboard:     proc "c" (text: [^]u8, length: uint),
+	// Copies up to capacity bytes of the clipboard's text and returns its
+	// whole length. buffer may be nil to ask for the length.
+	get_clipboard:     proc "c" (buffer: [^]u8, capacity: uint) -> uint,
+	// The shell copies the nodes and their strings.
+	set_accessibility: proc "c" (nodes: [^]Access_Node, count: u32),
 }
-#assert(size_of(Shell) == 32)
+#assert(size_of(Shell) == 64)
 
 Frame_Input :: struct {
 	events:        [^]Event,
@@ -126,11 +204,17 @@ Frame_Input :: struct {
 	width, height: f32, // view size in points
 	scale:         f32, // backing scale factor
 	time:          f64, // seconds since the shell started
+	text:          [^]u8, // what Text and Marked_Text events point into
+	text_length:   u32,
+	key_window:    b32, // the window gets key events
 }
 
 Frame_Result :: struct {
 	// Keep the display link running and call frame again next vsync.
-	animating: b32,
+	animating:  b32,
+	// Seconds until the app wants a frame without input, as for a caret's
+	// next blink; 0 for none. A timer wakes the shell, not the display link.
+	wake_after: f32,
 }
 
 // Returned by app_get_api. The shell calls init on the first load, unload on
@@ -145,7 +229,8 @@ App_API :: struct {
 	shutdown:    proc "c" (mem: ^Memory),
 	frame:       proc "c" (mem: ^Memory, shell: ^Shell, input: ^Frame_Input) -> Frame_Result,
 }
-#assert(size_of(Frame_Input) == 32)
+#assert(size_of(Frame_Input) == 48)
+#assert(size_of(Frame_Result) == 8)
 #assert(size_of(App_API) == 48)
 
 GET_API_SYMBOL :: "app_get_api"

@@ -30,6 +30,7 @@ button :: proc(id: string, width: Size = {}, height: Size = {}) -> Signal {
 	b.text_pad = 10
 	b.text_align = .Center
 	b.radius = 6
+	accessible(b, .Button, b.label)
 	return signal(b)
 }
 
@@ -156,6 +157,7 @@ menu :: proc(id: string, width: f32 = 220) -> bool {
 	}
 	b := box_make(id, flags, px(width), children_sum())
 	b.child_axis = .Y
+	accessible(b, .Menu, "")
 	b.open_t = approach(u, b.open_t, 1 if u.menu_open else 0, 1 - math.exp(-u.dt * 24), 0.01)
 	u.menu_built = true
 	if !u.menu_open && b.open_t == 0 {
@@ -189,6 +191,7 @@ menu_item :: proc(id: string) -> Signal {
 	b := box_make(id, flags, fill(), px(30))
 	b.text_pad = 14
 	b.hover_color = {1, 1, 1, 0.08}
+	accessible(b, .Menu_Item, b.label)
 	if u.menu_focus_new && u.menu_open && b.key != 0 {
 		u.menu_focus_new = false
 		u.focus = b.key

@@ -3,12 +3,13 @@
 A native macOS TIDAL client in Odin. A small Obj-C shell owns the window and talks to macOS. Everything else is an Odin dylib that the shell reloads while it runs. `docs/plan.md` has the plan and the phases.
 
 ```
-shell/          Obj-C executable: window, CAMetalLayer, event queue, dylib loader, media keys and Now Playing
+shell/          Obj-C executable: window, CAMetalLayer, event queue, dylib loader, media keys and Now Playing,
+                input methods, clipboard and accessibility
 src/platform/   the ABI between shell and app (shell/platform.h mirrors it)
 src/app/        the hot-reloaded app dylib
 src/render/     Metal renderer
 src/text/       fonts, shaping (kb_text_shape), rasterizing (CoreText), glyph atlas
-src/ui/         box tree, layout, input, animation, menus and tooltips
+src/ui/         box tree, layout, input, animation, menus, tooltips and the text field
 src/kbts/       kb_text_shape 2.21: C source and Odin bindings
 assets/fonts/   Inter 4.1, static Regular/Medium/SemiBold/Bold, with its OFL licence
 src/tidal/      TIDAL API library, see src/tidal/README.md
@@ -54,12 +55,13 @@ Environment variables:
 - `TIDALFAST_REMOTE_TEST="8:play,12:seek=10,20:pause,24:next"` makes the shell send those remote commands that many seconds after launch, through the same path as the media keys. The commands are `play`, `pause`, `toggle`, `next`, `previous` and `seek=seconds`.
 - `TIDALFAST_SPALL=path` writes a [spall](https://gravitymoth.com/spall/) trace of every frame to `path`.
 - `TIDALFAST_LOG_EVENTS=1` prints every input event.
+- `TIDALFAST_SHELL_TEST="2:key=cmd+f;3:mark=にほんご;4:commit=日本語;6:ax-dump"` runs steps against the shell's own entry points that many seconds after launch, for checking text input and accessibility without a person at the keyboard. Steps are separated by semicolons. `key=cmd+shift+z` sends a key down and up. `mark=text`, `commit=text` and `unmark` call the view's `setMarkedText`, `insertText` and `unmarkText` the way an input method does, and `ime` prints what the view answers to NSTextInputClient's questions. `ax-dump` prints the window's accessibility tree as AppKit hands it to an assistive app, and `ax-press=label` sends AXPress to the first element whose label or value starts with `label`. `capture=path` copies the last `TIDALFAST_CAPTURE` frame to `path`, and `quit` quits. The comment above `setup_shell_test` in `shell.m` lists them.
 - `TIDALFAST_CAPTURE=path` writes each presented frame to `path` as a TGA. It's for checking output when you can't take screenshots. Each frame goes to a temp file that's renamed over `path`, so copying `path` while the app runs gives a whole frame.
 - `TIDALFAST_BENCH=1` scrolls the library's track table by itself and logs the CPU time per frame in three phases (see UI below). `TIDALFAST_BENCH=text` does the same for the text test list (see Text). `TIDALFAST_BENCH=covers` does it on live data while covers stream in (see TIDAL data). All of them keep asking for frames even when the window is covered.
 
 The backtick key toggles the frame-time overlay. It's off unless `TIDALFAST_OVERLAY` or `TIDALFAST_BENCH` is set; the benches draw it so their numbers include it. It plots the CPU time of the last 120 frames against 120 Hz and 60 Hz lines. Under the plot are the last frame's total CPU time and the time spent building it (ui: everything before `end_frame`), its draw calls (blue dot) and instances (green dot), and the text cache's run count and atlas pages. The app also logs draw calls and instances to stderr whenever they change.
 
-The app opens on the library screen, or the login screen when there's no saved login. Cmd-1 goes back to it, Cmd-2 shows the text test screen (specimen lines and a 10,000-row list) and Cmd-3 the phase 1 renderer test screen. F1 or Cmd-Shift-D outlines every UI box and shows the key, ID and size of the box under the mouse.
+The app opens on the library screen, or the login screen when there's no saved login. Cmd-F or Cmd-L focuses the search field (see Search). Cmd-1 goes back to the library, Cmd-2 shows the text test screen (specimen lines and a 10,000-row list) and Cmd-3 the phase 1 renderer test screen. F1 or Cmd-Shift-D outlines every UI box and shows the key, ID and size of the box under the mouse.
 
 To run with Metal's validation layer, set `MTL_DEBUG_LAYER=1 METAL_DEVICE_WRAPPER_TYPE=1`.
 
@@ -230,7 +232,7 @@ Box flags pick what's drawn, in this order: shadow, background (optionally a ver
 
 ### The library screen
 
-`src/app/library.odin` follows spotifast's layout and dark palette: a sidebar of 32 fake playlists, 250 pt wide by default, resized with a 5 pt handle between 210 and 600 pt (it stops growing once the main view would go below 360 pt). Next to it is the main view with the playlist header and the 10,000-row track table, and the 88 pt player bar runs along the bottom. Rows are 56 pt. The columns follow spotifast's `columns`, measured on the main view's width: #, cover and title always. Album shows above 560 pt (28% of the width, 140 to 360 pt), date added above 760 and added by above 920. Duration and the "more" button always show. Hovering lights a row; a click selects it; a double-click plays it (see Playback), and the row playing is lit. A right click or the "more" button opens a context menu. Dragging a row onto a playlist shows a ghost and a drop highlight. The drag goes through `ui.drag_begin` with the row index, so releasing after the row has scrolled out of view still ends it. With the table focused, the arrow keys, Page Up/Down and Home/End move the selection and scroll it into view, and Enter plays it. The player bar has previous, play/pause and next, a progress bar that seeks on click or drag and shows the drag position while held, elapsed and remaining time, and the volume slider. Rows whose page hasn't arrived yet show their number and grey bars. With `TIDALFAST_FAKE=1` the 32 playlists and 10,000 rows are the fake data again and covers are gradients.
+`src/app/library.odin` follows spotifast's layout and dark palette: a sidebar of 32 fake playlists, 250 pt wide by default, resized with a 5 pt handle between 210 and 600 pt (it stops growing once the main view would go below 360 pt). Next to it is the main view with the playlist header and the 10,000-row track table, and the 88 pt player bar runs along the bottom. Rows are 56 pt. The columns follow spotifast's `columns`, measured on the main view's width: #, cover and title always. Album shows above 560 pt (28% of the width, 140 to 360 pt), date added above 760 and added by above 920. Duration and the "more" button always show. Hovering lights a row; a click selects it; a double-click plays it (see Playback), and the row playing is lit. A right click or the "more" button opens a context menu with Play, Go to album, Go to artist and Copy song link (see Search). Dragging a row onto a playlist shows a ghost and a drop highlight. The drag goes through `ui.drag_begin` with the row index, so releasing after the row has scrolled out of view still ends it. With the table focused, the arrow keys, Page Up/Down and Home/End move the selection and scroll it into view, and Enter plays it. The player bar has previous, play/pause and next, a progress bar that seeks on click or drag and shows the drag position while held, elapsed and remaining time, and the volume slider. Rows whose page hasn't arrived yet show their number and grey bars. With `TIDALFAST_FAKE=1` the 32 playlists and 10,000 rows are the fake data again and covers are gradients.
 
 ### Performance
 
@@ -284,7 +286,7 @@ The plan said v2 (`openapi.tidal.com`). The reference clients show v1 still work
 
 Four worker threads (`WORKERS`) share two queues in `State`, both from `src/jobs`. The jobs queue goes from the UI thread to the workers. The results queue goes back. Each is a fixed array of 256 plain-data items behind a mutex and condition variable. Jobs come out by priority, then oldest first: data (sign-in, playlists, track pages) before visible covers, visible covers before the ones just outside the view. A job a worker has taken keeps its slot until it's done or put back, so a job cut short always has room to go back, however full the UI made the queue meanwhile. Covers leave 16 slots free for data jobs. If the queue refuses a data job anyway, its kind goes in `Data.retry` and the next frame pushes it again; a worker finishing a job frees a slot and asks for that frame. A refused cover stays wanted and is pushed again the same way. A job holds only fixed-size text (a playlist id, an image id, a device code) and numbers, so it never points into memory a view switch or a reload could free. A worker runs a job, pushes the result and calls the shell's `request_redraw`. The next frame takes results right after `ui.begin_frame`.
 
-Kinds of job: `Restore` (read the Keychain), `Login_Start`, `Login_Wait`, `Playlists`, `Tracks` (one page), `Cover`, `Stream` (resolve a track's stream, see Playback) and `Artwork` (a cover for Now Playing, kept as pixels).
+Kinds of job: `Restore` (read the Keychain), `Login_Start`, `Login_Wait`, `Playlists`, `Tracks` (one page), `Cover`, `Stream` (resolve a track's stream, see Playback), `Artwork` (a cover for Now Playing, kept as pixels) and `Search` (see Search). `Tracks` also pages through search results, an album's tracks and an artist's top tracks.
 
 Hot reload: `unload` sets the session's abort flag, which makes curl stop any transfer in flight (an `XFERINFOFUNCTION` that checks it) and `login_device_wait` return. Then it stops both queues and joins the workers. A worker whose job was cut short puts it back in the queue where it was. `unload` then copies the session's login state to a heap buffer, keeps the backoff's end and reason in `State`, and destroys the session, since a `tidal.Session` holds allocators and a curl handle pool made by this dylib. `reload` makes a new session, restores the login and the backoff, and starts new workers, which pick up the jobs that were put back. So a reload during a 30 minute anti-abuse hold doesn't end it. A device login that got its tokens but hadn't loaded the session when the reload came keeps them too: `reload` restores tokens without a user only then, and the `Login_Wait` that was put back finishes the login with them. Results that were waiting stay in their queue. A `Login_Wait` job holds the code's expiry as a time, not a duration, so a reload doesn't stretch it.
 
@@ -321,6 +323,8 @@ Texture uploads don't wait on the GPU. A new texture has no earlier mip generati
 ### The mock server
 
 `tests/mock_tidal` serves the device login (approved a few seconds after the first poll), token refresh that rotates the refresh token, the session and user, 240 liked tracks, 12 playlists (one with 3,000 tracks), their tracks, and covers drawn on request as JPEGs at any size. Flags set the long playlist's length, the login delay, the access token's lifetime, delays for pages and covers, a request to answer with 429, 429s for the first device code requests, `slow_down` answers to the first polls, a 429 to one poll of each code, a point after which it refuses the login with 401 until the next device login, and 401s to the first covers after each device login, held back for as long as you ask. It prints the time between polls. The comment at the top of `main.odin` lists them. It never prints tokens or Authorization headers, and neither does the app.
+
+It answers `/search` too. Tracks of the long playlist match by title or artist, ignoring ASCII case, up to TIDAL's 300, with their albums and artists and the playlists whose names match. A query that matches nothing, such as 日本語, gets 120 made-up tracks named after it, so every query has results. `/albums/<id>/tracks` and `/artists/<id>/toptracks` return 12 and 20 made-up tracks. It logs each search with its query.
 
 It also serves playback (see Playback below). Flags add a delay before every audio response (`-audio-delay=ms`), cap each audio connection's bandwidth (`-audio-rate=KB/s`), leave the SEEKTABLE out of the files (`-seektable=0`) and pick where the generated audio goes (`-audio-dir`).
 
@@ -393,7 +397,7 @@ The slowest in both is a seek to 18.7 s in a 20 s track, which needed a second p
 
 `MPRemoteCommandCenter` and `MPNowPlayingInfoCenter` are Obj-C classes, and Odin dev-2026-10 crashes compiling Obj-C method calls, so both live in `shell/shell.m`. The shell enables play, pause, toggle, next, previous and `changePlaybackPosition`, and turns each command into an `EVENT_MEDIA` event: `key_code` is the `Media_Command`, `dx` the position for a seek. The app handles them in `playback_update`, the same way as the player bar's buttons.
 
-The app calls `Shell.set_now_playing` with the title, artist, album, duration, elapsed time, state and the cover as RGBA pixels, which an `Artwork` job fetches at 640x640. It calls it only when one of those changes, since macOS moves the elapsed time along by itself from the playback rate. The shell copies everything before it returns and rebuilds the artwork only when `artwork_key` changes. This is platform ABI version 2. `Shell` and `Now_Playing` have size checks on both sides.
+The app calls `Shell.set_now_playing` with the title, artist, album, duration, elapsed time, state and the cover as RGBA pixels, which an `Artwork` job fetches at 640x640. It calls it only when one of those changes, since macOS moves the elapsed time along by itself from the playback rate. The shell copies everything before it returns and rebuilds the artwork only when `artwork_key` changes. Now Playing came with platform ABI version 2; text input and accessibility made it version 3 (see Text input). Every struct the two sides share has a size check on both sides.
 
 ### Hot reload
 
@@ -422,6 +426,91 @@ odin run tests/audio_check -o:speed -- /tmp/cap.wav /tmp/tidalfast-mock-audio/al
 Apple M1, the mock album playing to the null device: 1.5% with an optimized dylib and about 4% with a debug one, mostly the four UI frames a second for the progress bar. Paused, the device is stopped and the decode thread sleeps on its semaphore: 0.0%.
 
 Measured again after the callback stopped waking the decode thread, with CPU time from `ps`: the fake tones with an optimized dylib use 0.20 s in 15 s of playing (1.3%), and nothing in 7 s idle before playing or 20 s paused. The mock album with a debug dylib uses 2.3 to 3.6%, and nothing in 20 s paused once the next track's download has filled its window.
+
+## Text input
+
+### The text field
+
+`ui.text_field(id, &field, placeholder, width, height)` is a single-line text field. Its state is a `ui.Text_Field` the app keeps: up to 256 bytes of UTF-8 in a fixed buffer, the cursor and the selection's anchor, the input method's marked text and the undo stacks. It's plain data, so it survives a hot reload, and `edit.odin` holds the editing on its own, which the tests drive without a window.
+
+Every offset is a byte offset on a grapheme cluster boundary. The boundaries come from `text.grapheme_starts`, the same segmentation the renderer uses, so Backspace removes a whole 가, a whole jamo syllable, a ZWJ family or a flag with its two regional indicators, and an Arabic letter with its marks. A range from the input method that starts or ends inside a cluster widens to the whole cluster. kb_text_shape broke before the last pictograph of a ZWJ sequence (👨‍👩‍ and 👧), so `grapheme_starts` now joins them as rule GB11 says, which fixes truncation of such titles too.
+
+With the focus, the field takes:
+
+- Left and Right by cluster, Option by word, Command to either end, and Up, Down, Home and End to either end. Shift extends the selection. Word movement skips separators, then goes over letters and digits.
+- Backspace and Delete by cluster, Option by word, Command to the end of the line.
+- Cmd-A, Cmd-C, Cmd-X, Cmd-V, Cmd-Z and Shift-Cmd-Z, Control-A and Control-E.
+- Clicks: one places the cursor (Shift extends), two select a word, three select everything, and dragging selects by cluster, or by word after a double-click.
+- Return reports `submitted`. Escape clears the text, and a second Escape gives up the focus.
+
+Undo keeps whole snapshots, 32 deep. Typing right after typing joins one step, and so do Backspaces in a row and Deletes in a row. Moving the cursor or clicking ends the step, and cut, paste and word or line deletes are steps of their own. A composition belongs to the step of the typing before it.
+
+Pasted text becomes one line: line breaks and tabs become a space and other control characters go. Text that doesn't fit is cut at a cluster boundary.
+
+The field draws its insides as floating boxes: the selection, the text moved left by `scroll` to keep the caret in view, the marked text's underline (thin under the composition, thick under the clause the input method has selected) and the caret. Positions come from the shaped run. Each cluster's left and right edge is the extent of its glyphs. A cluster without a glyph of its own, as inside a ligature, shares the one before it. A cluster reads right to left when the next cluster sits to its left. The caret goes on a cluster's leading edge, so mixed Arabic and Latin text draws with bidi while the cursor moves in logical order.
+
+The caret blinks every 0.53 s through `ui.wake_at`, only while the window has the keyboard (`Frame_Input.key_window`). Without the keyboard it's hidden and asks for no frames.
+
+### Keys, text and the input method
+
+While a text field has the focus, the UI keeps Return, Space, the arrows and Escape for it instead of clicking or moving the focus. Tab still moves the focus.
+
+The shell's view is an `NSTextInputClient`. After each frame the app tells the shell about the focused field through `Shell.set_text_input`: its text, selection and marked range in bytes, and a rect for the marked text or the caret, or nil when no field has the focus. Only changes are sent. While a field has the focus, `keyDown` goes through the view's input context:
+
+- Text it inserts (`insertText`) reaches the app as a `Text` event, and the key doesn't.
+- Marked text (`setMarkedText`, `unmarkText`) reaches it as `Marked_Text` and `Unmark_Text` events, and the key doesn't. While there is marked text every key belongs to the input method.
+- Keys it turns into commands (arrows, Delete, Return, Escape, Tab) reach the app as key events, which the field handles. So do Command shortcuts, which skip the input context.
+
+Event text lives in a byte buffer that comes with the frame's events (`Frame_Input.text`). A text event carries an offset and length into it, and an optional replacement range in bytes, as when the accent menu replaces the letter typed before it.
+
+Input methods ask questions synchronously, often right after `setMarkedText` and before the app has had a frame. So the shell keeps a mirror of the field, applies every edit it sends on to the mirror too, and answers `selectedRange`, `markedRange`, `hasMarkedText` and `attributedSubstringForProposedRange` from it. It converts between the app's UTF-8 bytes and AppKit's UTF-16 units and never lands between a surrogate pair's halves. The app's next state replaces the mirror. `firstRectForCharacterRange` returns the marked text's rect in screen coordinates, so the candidate window opens under the composition. When the app ends a composition itself, as when the field loses the focus, the shell calls `discardMarkedText` so the input method forgets it.
+
+The clipboard goes through `Shell.set_clipboard` and `Shell.get_clipboard`, which use `NSPasteboard`. `ui.copy_to_clipboard` puts a string on it from anywhere in the UI.
+
+### Platform ABI version 3
+
+- `Event` grew to 88 bytes: text offset and length, a replacement range, the input method's selection inside marked text, and a `target` node id. New kinds: `Text`, `Marked_Text`, `Unmark_Text`, `Access_Press` and `Access_Focus`.
+- `Frame_Input` (48 bytes) carries the text buffer and whether the window is key.
+- `Frame_Result` (8 bytes) has `wake_after`.
+- `Shell` (64 bytes) adds `set_text_input`, `set_clipboard`, `get_clipboard` and `set_accessibility`.
+- New structs: `Text_Input` (48 bytes) and `Access_Node` (56 bytes).
+
+## Search
+
+The search field sits at the top of the sidebar. Cmd-F or Cmd-L focuses it with its text selected.
+
+Every edit raises the query generation and throws out queued Search jobs. Once typing has stopped for 250 ms (`SEARCH_DEBOUNCE`, a `ui.wake_at`, not a running timer), a `Search` job asks TIDAL's `search` for songs, albums, artists and playlists in one request, 50 of each. Nothing goes while the input method still has marked text, so composing にほんご doesn't search for each kana. Return searches at once. A result whose generation isn't the latest is dropped, and the auth generation drops results from a login that has ended, as for every job. The app logs each query it sends and what came back.
+
+The songs become the open track list, a `Track_View` with source `.Search`. So covers, double-click to play, the queue, the playing row and Enter work as in a playlist, and more songs load as `Tracks` jobs that page through `search` with only tracks, up to TIDAL's 300. The old results stay on screen until the new ones arrive. Tabs above the table switch to the albums, artists and playlists found, shown as rows. A click opens an album's tracks (`albums/{id}/tracks`), an artist's top tracks (`artists/{id}/toptracks`) or a playlist, each as a track list of its own. Picking a sidebar entry goes back to it. Clearing the field, by deleting the text or with Escape, closes the search and opens the sidebar's playlist again if the results were showing.
+
+The track menu's Go to album and Go to artist open the same lists, from the row's album and first artist ids. The menu offers them only when the row has those ids. Copy song link puts `https://tidal.com/browse/track/<id>` on the clipboard. Add to queue is gone from the menu until the player has a queue API to call.
+
+With `TIDALFAST_FAKE=1` the search runs over the 10,000 fake rows on the UI thread. It matches title, artist or album, ignoring case, and its albums and artists are the distinct ones among the matches. Going to an album or artist lists the fake rows with that name.
+
+## Accessibility
+
+Boxes say what assistive apps should see with `ui.accessible(box, role, label, value)`. `ui.button`, menus and menu items do it themselves. `end_frame` walks the tree after layout and flattens every box with a role into a list of `Access_Node`s, parents first, with their clipped rects, focus and selection. A box clipped away, and everything inside a clipping box clipped away, stays out, so the virtualized track table only ever gives the rows in view. Keyed boxes use their key as the node id. The rest get one from their parent's id and their place among its nodes, which stays put while the tree does. The app hashes the list and calls `Shell.set_accessibility` only when the hash changes.
+
+What's exposed: the search field (`AXTextField` with the text as its value), the sidebar (`AXList` of `AXRow`s), the track table (`AXTable` whose `AXRow`s are labelled "title, artist, album" and hold one `AXStaticText` each), the search tabs and the found lists, the headings and status line, the player bar's buttons and its two sliders with their values, the login screen's buttons, and context menus.
+
+The shell copies the nodes. It makes `NSAccessibilityElement`s from them only once an assistive app has asked the view for its children or hit-tested it, and after every change from then on. So without VoiceOver running a changed tree costs one copy. Elements are kept by node id, so VoiceOver stays on an element while it moves or changes, and frames are turned into screen coordinates when asked for. After a change the shell posts a layout change, a focus change when the focused node is a new one, and a value change for a focused text field. AXPress on a button, row or menu item comes to the app as an `Access_Press` event, which the UI treats as a keyboard click: buttons click, sidebar rows open their playlist and track rows play. Setting the focus comes as `Access_Focus`.
+
+### Checking it
+
+There is no human or VoiceOver in the loop here, so the checks run the shell's own entry points:
+
+```
+./build/mock_tidal -port=8787
+TIDALFAST_API=http://127.0.0.1:8787 TIDALFAST_KEYCHAIN=tidalfast-p7-test TIDALFAST_AUDIO_NULL=1 \
+    TIDALFAST_CAPTURE=/tmp/cap.tga \
+    TIDALFAST_SHELL_TEST="10:key=cmd+f;10.5:mark=にほんご;11.2:ime;11.3:capture=/tmp/marked.tga;12:commit=日本語;14:capture=/tmp/results.tga;14.5:ax-dump;15:ax-press=日本語 1,;16.5:quit" \
+    ./build/tidalfast
+security delete-generic-password -s tidalfast-p7-test
+```
+
+The mock approves the login after about 3 s. `ime` printed `text "にほんご", marked {0, 4}, selected {4, 0}` and a rect under the field. After the commit the app logged `search: "日本語"`, the mock answered 50 of 120 tracks, and the second page came as a tracks-only search at offset 50. `ax-dump` listed the `AXTextField` with the value 日本語, the playlists list, the search tabs as buttons, the table with seven rows of title, artist and album, and the player's Previous, Play and Next buttons. `ax-press` on the first row played it.
+
+An `AXUIElementCreateApplication` walk from another process needs the Accessibility permission, which the environment this was built in doesn't grant (`AXIsProcessTrusted` returns false). `ax-dump` reads the tree in process instead, from the window down through AppKit's NSAccessibility calls, the same path an assistive app's requests take.
 
 ## Hot reload
 
@@ -454,6 +543,8 @@ That only works because the shell never closes an old dylib, so the old `release
 ## Redraw policy
 
 The shell draws only when something asks for a frame: input, a resize, a reload, or `request_redraw` from any thread. `request_redraw` sets a flag and calls `CFRunLoopWakeUp`. A run loop observer draws just before the main thread sleeps, so a burst of events becomes one frame.
+
+A frame can also ask for a frame later without animating: `Frame_Result.wake_after` is how many seconds from now, and the shell arms a one-shot run loop timer that calls `request_redraw`. The caret's blink and the search's debounce use it, through `ui.wake_at`, so a focused text field draws twice a second instead of every vsync.
 
 If the app returns `animating = true`, the view's `CADisplayLink` adds a frame every vsync until the app returns false. The shell pauses the link while the window is minimized or fully covered, so a hidden animation costs no CPU. An idle window uses no CPU.
 

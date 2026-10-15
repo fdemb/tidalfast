@@ -29,6 +29,7 @@ import "../text"
 MAX_BOXES :: 8192
 BOX_TABLE :: 4096 // buckets, a power of two
 MAX_KEY_PRESSES :: 32
+MAX_EDIT_EVENTS :: 64
 STACK_DEPTH :: 64
 TOOLTIP_DELAY :: 0.5 // seconds of hovering before a tooltip shows
 DRAG_THRESHOLD :: 4 // points the mouse moves before a press becomes a drag
@@ -79,6 +80,7 @@ Box_Flag :: enum u32 {
 	Draw_Shadow,
 	Draw_Hot_Effects, // hover_color fades in while hot
 	Draw_Active_Effects, // active_color fades in while pressed
+	Text_Input, // a text field: with the focus it takes Return, Space, the arrows and Escape
 }
 Box_Flags :: bit_set[Box_Flag; u32]
 
@@ -128,6 +130,12 @@ Build :: struct {
 	opacity:                   f32, // multiplies the box and everything inside it
 	run:                       ^text.Run,
 	text_size:                 [2]f32, // the label's size with padding, measured in end_frame
+	// What assistive apps see: a role puts the box in the accessibility
+	// tree. The strings must live until end_frame.
+	access_role:               platform.Access_Role,
+	access_label:              string,
+	access_value:              string,
+	access_selected:           bool,
 }
 
 Signal :: struct {
@@ -161,6 +169,17 @@ Hit :: struct {
 Key_Press :: struct {
 	code:      u32,
 	modifiers: platform.Modifiers,
+}
+
+// Edit_Event is a key press the UI didn't use, or text from the shell, in
+// the order they came, for the focused text field.
+Edit_Event :: struct {
+	kind:                   platform.Event_Kind, // Key_Down, Text, Marked_Text or Unmark_Text
+	key:                    Key_Press,
+	text:                   string, // this frame's
+	replace:                bool,
+	replace_lo, replace_hi: int,
+	select_lo, select_hi:   int,
 }
 
 Stack :: struct($T: typeid) {
@@ -213,6 +232,20 @@ State :: struct {
 	key_click:      Key, // Enter or Space this frame
 	keys:           [MAX_KEY_PRESSES]Key_Press, // presses the UI didn't use
 	key_count:      int,
+	edits:          [MAX_EDIT_EVENTS]Edit_Event,
+	edit_count:     int,
+	click_count:    u32, // of the last left press: 2 for a double-click, 3 for a triple
+	window_inactive: bool, // another window has the keyboard
+	wake:           f64, // the earliest time something asked for a frame at, 0 for none
+	// The focused text field, for the shell and the input method.
+	text_input:     platform.Text_Input,
+	text_claimed:   bool, // a focused field set text_input this frame
+	text_sent:      u64, // hash of what the shell has
+	// The shell's clipboard, set with set_clipboard every frame.
+	clipboard_get:  proc "c" (buffer: [^]u8, capacity: uint) -> uint,
+	clipboard_set:  proc "c" (text: [^]u8, length: uint),
+	access_nodes:   []platform.Access_Node, // this frame's tree, from end_frame
+	access_hash:    u64,
 
 	menu:           Key, // the open or closing context menu, 0 if none
 	menu_open:      bool,
@@ -327,7 +360,8 @@ box_lookup :: proc(u: ^State, key: Key) -> ^Box {
 // events and sets up the roots. Strings given to boxes must live until
 // end_frame. hardware is the buttons down right now, from hardware_buttons;
 // without it the UI goes by the events alone.
-begin_frame :: proc(u: ^State, events: []platform.Event, r: ^render.Renderer, t: ^text.State, width, height: f32, time: f64, hardware: Maybe(Mouse_Buttons) = nil) {
+// text is the bytes Text and Marked_Text events point into.
+begin_frame :: proc(u: ^State, events: []platform.Event, r: ^render.Renderer, t: ^text.State, width, height: f32, time: f64, hardware: Maybe(Mouse_Buttons) = nil, text_bytes: []u8 = nil) {
 	ctx = u
 	u.frame += 1
 	if width != u.width || height != u.height || len(events) > 0 {
@@ -342,11 +376,14 @@ begin_frame :: proc(u: ^State, events: []platform.Event, r: ^render.Renderer, t:
 	u.animating = false
 	u.menu_built = false
 	u.pool_misses = 0
+	u.wake = 0
+	u.text_claimed = false
+	u.access_nodes = nil
 	prune(u)
 	if held, ok := hardware.?; ok {
 		release_stale(u, events, held)
 	}
-	process_events(u, events)
+	process_events(u, events, text_bytes)
 
 	u.parents.count = 0
 	u.root = new(Box, context.temp_allocator)
@@ -440,7 +477,7 @@ cancel_buttons :: proc(u: ^State, buttons: Mouse_Buttons) {
 }
 
 @(private)
-process_events :: proc(u: ^State, events: []platform.Event) {
+process_events :: proc(u: ^State, events: []platform.Event, text_bytes: []u8) {
 	input_begin_frame(&u.input)
 	u.pressed = {}
 	u.released = {}
@@ -448,6 +485,7 @@ process_events :: proc(u: ^State, events: []platform.Event) {
 	u.double_clicked = 0
 	u.key_click = 0
 	u.key_count = 0
+	u.edit_count = 0
 	u.scroll = {}
 	u.scroll_precise = {}
 	u.scroll_key = 0
@@ -510,6 +548,21 @@ process_events :: proc(u: ^State, events: []platform.Event) {
 			}
 		case .Key_Down:
 			key_down(u, e)
+		case .Text, .Marked_Text, .Unmark_Text:
+			text_event(u, e, text_bytes)
+		case .Access_Press:
+			// As if the keyboard clicked it: Signal.clicked and keyboard.
+			if !menu_blocks(u, Key(e.target)) {
+				u.key_click = Key(e.target)
+			}
+		case .Access_Focus:
+			for h in u.hits[:u.hit_count] {
+				if h.key == Key(e.target) && .Focusable in h.flags {
+					u.focus = h.key
+					u.focus_visible = true
+					u.focus_reveal = true
+				}
+			}
 		}
 	}
 
@@ -554,6 +607,7 @@ mouse_pressed :: proc(u: ^State, e: platform.Event) {
 		if e.click_count >= 2 {
 			u.double_clicked = hover
 		}
+		u.click_count = e.click_count
 	}
 	// The press moves the focus to what was clicked, or its nearest
 	// focusable ancestor, or nowhere.
@@ -578,6 +632,8 @@ key_down :: proc(u: ^State, e: platform.Event) {
 	case code == KEY_TAB && mods - {.Shift} == {}:
 		focus_step(u, -1 if .Shift in mods else 1)
 		return
+	case focus_takes_text(u) && (code == KEY_ESCAPE || code == KEY_RETURN || code == KEY_SPACE || code == KEY_UP || code == KEY_DOWN):
+		// The text field has these.
 	case code == KEY_ESCAPE && mods == {}:
 		if u.drag_active {
 			u.drag_active = false
@@ -607,6 +663,49 @@ key_down :: proc(u: ^State, e: platform.Event) {
 		u.keys[u.key_count] = {code, mods}
 		u.key_count += 1
 	}
+	if u.edit_count < MAX_EDIT_EVENTS {
+		u.edits[u.edit_count] = {
+			kind = .Key_Down,
+			key  = {code, mods},
+		}
+		u.edit_count += 1
+	}
+}
+
+// focus_takes_text says whether the focused box is a text field.
+@(private)
+focus_takes_text :: proc(u: ^State) -> bool {
+	if u.focus == 0 {
+		return false
+	}
+	for h in u.hits[:u.hit_count] {
+		if h.key == u.focus {
+			return .Text_Input in h.flags
+		}
+	}
+	return false
+}
+
+// text_event queues text from the shell for the focused text field.
+@(private)
+text_event :: proc(u: ^State, e: platform.Event, text_bytes: []u8) {
+	if u.edit_count >= MAX_EDIT_EVENTS {
+		return
+	}
+	s := ""
+	if int(e.text_offset) + int(e.text_length) <= len(text_bytes) {
+		s = string(text_bytes[e.text_offset:][:e.text_length])
+	}
+	u.edits[u.edit_count] = {
+		kind       = e.kind,
+		text       = s,
+		replace    = bool(e.replace),
+		replace_lo = int(e.replace_start),
+		replace_hi = int(e.replace_end),
+		select_lo  = int(e.select_start),
+		select_hi  = int(e.select_end),
+	}
+	u.edit_count += 1
 }
 
 // focus_step moves the focus to the next or previous focusable box in
@@ -749,6 +848,7 @@ end_frame :: proc() -> bool {
 		}
 		u.pool_miss_last = u.frame
 	}
+	access_build(u)
 	draw_box(u, u.root, 1)
 	draw_box(u, u.floating_root, 1)
 	if u.debug {
@@ -1173,6 +1273,76 @@ pool_stats :: proc(u: ^State) -> (used, capacity, misses: int) {
 // request_frame asks for another frame, for app animations.
 request_frame :: proc() {
 	ctx.animating = true
+}
+
+// wake_at asks for a frame at time t without keeping frames coming until
+// then, as a caret's blink or a debounce does.
+wake_at :: proc(t: f64) {
+	u := ctx
+	if u.wake == 0 || t < u.wake {
+		u.wake = t
+	}
+}
+
+// wake_after is how long from now the frame wake_at asked for is, for
+// Frame_Result.wake_after, or 0 for none.
+wake_after :: proc(u: ^State) -> f32 {
+	if u.wake == 0 {
+		return 0
+	}
+	return max(f32(u.wake - u.time), 0.001)
+}
+
+// set_window_key tells the UI whether the window has the keyboard. Carets
+// only blink in the key window.
+set_window_key :: proc(u: ^State, key: bool) {
+	u.window_inactive = !key
+}
+
+// set_clipboard gives the UI the shell's clipboard for this frame.
+set_clipboard :: proc(u: ^State, get: proc "c" (buffer: [^]u8, capacity: uint) -> uint, set: proc "c" (text: [^]u8, length: uint)) {
+	u.clipboard_get = get
+	u.clipboard_set = set
+}
+
+// copy_to_clipboard puts s on the shell's clipboard.
+copy_to_clipboard :: proc(s: string) {
+	u := ctx
+	if u.clipboard_set != nil {
+		u.clipboard_set(raw_data(s), uint(len(s)))
+	}
+}
+
+// text_input returns the focused text field's state, and whether it
+// differs from what was last returned, so the app tells the shell only
+// about changes. text is nil when no field has the focus.
+text_input :: proc(u: ^State) -> (input: platform.Text_Input, changed: bool) {
+	if u.text_claimed {
+		input = u.text_input
+	}
+	h := hash.fnv64a(transmute([]byte)string(input.text[:input.length])) if input.text != nil else 0
+	fields := [7]u64{u64(input.selection_start), u64(input.selection_end), u64(u32(input.marked_start)), u64(u32(input.marked_end)), u64(input.text != nil), u64(transmute(u32)input.caret[0]) << 32 | u64(transmute(u32)input.caret[1]), u64(transmute(u32)input.caret[2]) << 32 | u64(transmute(u32)input.caret[3])}
+	for f in fields {
+		h = (h ~ f) * 1099511628211
+	}
+	changed = h != u.text_sent
+	u.text_sent = h
+	return
+}
+
+// access_tree is this frame's accessibility tree and a hash of it, valid
+// after end_frame until the next begin_frame.
+access_tree :: proc(u: ^State) -> (nodes: []platform.Access_Node, h: u64) {
+	return u.access_nodes, u.access_hash
+}
+
+// accessible puts b in the accessibility tree as role, read as label. The
+// strings must live until end_frame.
+accessible :: proc(b: ^Box, role: platform.Access_Role, label: string, value := "", selected := false) {
+	b.access_role = role
+	b.access_label = label
+	b.access_value = value
+	b.access_selected = selected
 }
 
 // data_changed asks for another frame after data the tree is built from

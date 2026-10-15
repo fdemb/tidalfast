@@ -637,6 +637,8 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 		view_request_pages(d)
 	case .Stream, .Artwork:
 		playback_result(s, res)
+	case .Search:
+		search_result(s, res)
 	case .Cover:
 		key := res.job.key
 		if failed || res.pixels == nil {
@@ -731,7 +733,7 @@ login_error :: proc(err: tidal.Error_Kind, message: Small) -> Small {
 // playlists.
 select_playlist :: proc(s: ^State, i: int) {
 	lib := &s.library
-	if lib.playlist != i {
+	if search_leave(s) || lib.playlist != i {
 		lib.selected = -1
 		lib.playing = -1
 		lib.status = .None
@@ -824,6 +826,7 @@ view_add_rows :: proc(v: ^Track_View, offset: int, rows: []Row, last: bool) {
 			seconds  = r.seconds,
 			id       = r.id,
 			album_id = r.album_id,
+			artist_id = r.artist_id,
 			track    = r.track,
 		}
 		v.loaded_rows += int(!v.loaded[offset + i])
@@ -889,6 +892,9 @@ sidebar_entry :: proc(s: ^State, i: int) -> Sidebar_Entry {
 
 view_title :: proc(s: ^State) -> string {
 	d := &s.data
+	if title, _, ok := browse_header(s); ok {
+		return title
+	}
 	if d.fake {
 		return PLAYLISTS[s.library.playlist]
 	}
@@ -900,6 +906,9 @@ view_title :: proc(s: ^State) -> string {
 
 view_subtitle :: proc(s: ^State, main_w: f32) -> string {
 	d := &s.data
+	if _, subtitle, ok := browse_header(s); ok {
+		return subtitle
+	}
 	if d.fake {
 		lib := &s.library
 		count := ROW_COUNT if lib.playlist == 0 else 20 + lib.playlist * 37 % 300
@@ -930,11 +939,17 @@ data_status :: proc(s: ^State) -> string {
 	if d.view.error.len > 0 {
 		return small_str(&d.view.error)
 	}
+	if status := search_status(s); status != "" {
+		return status
+	}
 	return small_str(&d.message)
 }
 
 view_count :: proc(s: ^State) -> int {
 	if s.data.fake {
+		if n, listed := fake_count(s); listed {
+			return n
+		}
 		return ROW_COUNT
 	}
 	return s.data.view.count
@@ -943,6 +958,9 @@ view_count :: proc(s: ^State) -> int {
 // view_row returns row i of the open list, or nil while it's loading.
 view_row :: proc(s: ^State, i: int) -> ^Row {
 	if s.data.fake {
+		if row, listed := fake_row(s, i); listed {
+			return row
+		}
 		return &s.rows[i] if i >= 0 && i < len(s.rows) else nil
 	}
 	v := &s.data.view

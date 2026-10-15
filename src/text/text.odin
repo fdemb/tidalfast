@@ -634,12 +634,30 @@ grapheme_starts :: proc(runes: []rune) -> []int {
 			boundary[b.Position] = true
 		}
 	}
+	// kb_text_shape breaks before the last pictograph of a ZWJ sequence, so
+	// 👨‍👩‍👧 came out as 👨‍👩‍ and 👧. Rule GB11 joins them.
+	for i in 1 ..< len(runes) {
+		if runes[i - 1] == 0x200d && pictographic(runes[i]) {
+			boundary[i] = false
+		}
+	}
 	for i in 1 ..< len(runes) {
 		if !boundary[i] {
 			starts[i] = starts[i - 1]
 		}
 	}
 	return starts
+}
+
+// pictographic approximates Extended_Pictographic: the emoji blocks and the
+// older symbol blocks emoji sequences use.
+@(private)
+pictographic :: proc(r: rune) -> bool {
+	switch r {
+	case 0x1f000 ..= 0x1faff, 0x2600 ..= 0x27bf, 0x2b00 ..= 0x2bff, 0x2190 ..= 0x21ff, 0x2300 ..= 0x23ff, 0x00a9, 0x00ae, 0x203c, 0x2049, 0x2122, 0x2139, 0x3030, 0x303d, 0x3297, 0x3299:
+		return true
+	}
+	return false
 }
 
 // peel splits spaces and brackets at either logical end of a run into
