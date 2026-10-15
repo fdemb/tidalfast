@@ -4,6 +4,10 @@
 //
 // Everything in Queue is plain data in a fixed array, with no allocator or
 // procedure pointer, so a queue survives a hot reload with its items in it.
+//
+// An item popped with pop_wait keeps its slot until done or requeue, so N
+// counts queued and busy items together. That way requeue always has room:
+// work cut short can't be lost because something else filled the queue.
 package jobs
 
 import "core:sync"
@@ -24,14 +28,15 @@ Queue :: struct($T: typeid, $N: int) {
 	tickets:  [N]Ticket,
 	count:    int,
 	next_seq: u64,
-	busy:     int, // popped and not yet marked done
+	busy:     int, // popped with pop_wait and not yet done or requeued
 	stopped:  bool,
 }
 
-// push adds item unless the queue is full or stopped.
+// push adds item unless the queue is full or stopped. Full counts busy
+// items.
 push :: proc(q: ^Queue($T, $N), item: T, priority: u8 = 0) -> bool {
 	sync.guard(&q.mutex)
-	if q.count == N || q.stopped {
+	if q.count + q.busy >= N || q.stopped {
 		return false
 	}
 	add(q, item, {priority, q.next_seq})
@@ -42,7 +47,7 @@ push :: proc(q: ^Queue($T, $N), item: T, priority: u8 = 0) -> bool {
 // push_wait adds item, waiting for room. False if the queue stopped first.
 push_wait :: proc(q: ^Queue($T, $N), item: T, priority: u8 = 0) -> bool {
 	sync.guard(&q.mutex)
-	for q.count == N && !q.stopped {
+	for q.count + q.busy >= N && !q.stopped {
 		sync.cond_wait(&q.cond, &q.mutex)
 	}
 	if q.stopped {
@@ -53,18 +58,14 @@ push_wait :: proc(q: ^Queue($T, $N), item: T, priority: u8 = 0) -> bool {
 	return true
 }
 
-// requeue puts back an item popped with ticket and marks it done. It goes
-// in even when the queue is stopped, so work interrupted by a stop is still
-// there when the queue starts again. False only if the queue is full.
-requeue :: proc(q: ^Queue($T, $N), item: T, ticket: Ticket) -> bool {
+// requeue puts back an item popped with ticket, in the slot it kept. It
+// goes in even when the queue is stopped, so work interrupted by a stop is
+// still there when the queue starts again.
+requeue :: proc(q: ^Queue($T, $N), item: T, ticket: Ticket) {
 	sync.guard(&q.mutex)
+	assert(q.busy > 0 && q.count < N, "jobs: requeue without a pop_wait")
 	q.busy -= 1
-	if q.count == N {
-		sync.cond_broadcast(&q.cond)
-		return false
-	}
 	add(q, item, ticket)
-	return true
 }
 
 @(private)
@@ -173,6 +174,12 @@ sleep :: proc(q: ^Queue($T, $N), d: time.Duration) -> bool {
 		sync.cond_wait_with_timeout(&q.cond, &q.mutex, left)
 	}
 	return q.stopped
+}
+
+// room returns how many more items push would take.
+room :: proc(q: ^Queue($T, $N)) -> int {
+	sync.guard(&q.mutex)
+	return N - q.count - q.busy
 }
 
 // pending returns how many items are queued and how many are being worked on.

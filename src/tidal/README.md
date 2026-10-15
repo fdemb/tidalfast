@@ -15,7 +15,7 @@ defer tidal.session_destroy(s)
 if err := tidal.session_load_file(s, "session.json"); err != nil {
 	link, _ := tidal.login_device_start(s)
 	show_code(link.verification_uri_complete) // your UI
-	tidal.login_device_wait(s, link, cancel = &cancel_flag) or_return
+	tidal.login_device_wait(s, &link, cancel = &cancel_flag) or_return
 	tidal.session_save_file(s, "session.json")
 }
 
@@ -31,13 +31,15 @@ What a UI needs to know:
 - **Threads.** Calls block on the network, so run them off the UI thread. A `Session` can be shared between threads: token refresh happens once even when several requests hit an expired token, and the rate-limit backoff state is shared. Each thread needs its own result allocator, or a thread-safe one.
 - **Saved logins.** `session_auth` copies the login state out; `session_restore` puts it back without a request, so an app can keep it somewhere safe (TIDALfast uses the Keychain). Set `Session.on_auth_change` to hear about new tokens after a login or refresh. TIDAL may rotate the refresh token on refresh, so save every time it's called. It runs on the thread that refreshed, one call at a time.
 - **Stopping.** `session_abort(s, true)` makes requests in flight and new ones fail with `.Cancelled`, and stops `login_device_wait`.
+- **Signing out.** `session_clear_auth` forgets the tokens, session id and user. Requests, refreshes and device logins that started before it fail with `.Cancelled`, in flight or not, and a refresh that finishes anyway doesn't store its tokens. `Auth.epoch` and `session_epoch` say which login a copy of the state came from.
+- **Rate limits.** After a 429 or an anti-abuse 403 the session refuses every request with `.Backing_Off` until `Retry-After` has passed (60 s or 30 minutes without one). That covers the OAuth endpoints too: device login, polling and token refresh. A rate-limited refresh fails with `.Too_Many_Requests`, not `.Authentication`, so only TIDAL turning down the refresh token looks like a lost login. `backoff_state` and `backoff_restore` carry a running backoff over to a new session.
 - **Polymorphic results** are unions: `Media` (track or video), `Item` (anything a page row or search top hit can hold), `Page_Category`, `Creator`.
 
 ## API overview
 
 | Area | Procs |
 | --- | --- |
-| Session | `session_create`, `session_destroy`, `session_auth`, `session_restore`, `session_abort`, `session_user`, `session_set_quality`, `session_client_enable_hires`, `check_login` |
+| Session | `session_create`, `session_destroy`, `session_auth`, `session_restore`, `session_clear_auth`, `session_abort`, `backoff_remaining`, `backoff_state`, `backoff_restore`, `session_user`, `session_set_quality`, `session_client_enable_hires`, `check_login` |
 | Login | `login_device_start`, `login_device_wait`, `login_oauth_simple`, `pkce_login_url`, `login_pkce_complete`, `login_pkce`, `load_oauth_session`, `load_session`, `token_refresh` |
 | Session file | `login_session_file`, `session_save_file`, `session_load_file` |
 | Tracks and videos | `track_get`, `track_stream`, `track_url`, `track_lyrics`, `track_radio`, `track_radio_mix`, `video_get`, `video_url` |
@@ -58,6 +60,7 @@ What a UI needs to know:
 - `*_paginated` procs fetch 50 items per request on two threads. If any request fails, the whole call fails.
 - Session files are JSON, written to a new 0600 file and renamed into place, so an existing file's permissions never apply. A session logged in by session id alone restores through `load_session`.
 - Requests time out after `config.timeout_seconds` (30 by default).
+- `login_device_wait` takes the link by pointer. It waits `link.interval` seconds between polls and adds 5 to it when TIDAL answers `slow_down`, so a caller that polls again after a network error keeps the slower pace. It returns `.Timeout` when the code expired, `.Authentication` when the user denied it, and a rate limit or a transport error as soon as one happens.
 - `resource_get` downloads a file outside the API, such as a cover from `resources.tidal.com`, under the same backoff as API requests.
 - Every endpoint, the device authorization one included (`config.api_device_auth`), comes from `Config`, so tests and the app's mock mode can point a session elsewhere.
 - A query string in a request path is merged with the default parameters; the path's values win over defaults, and `Request.params` win over both.

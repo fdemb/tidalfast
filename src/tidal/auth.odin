@@ -37,6 +37,15 @@ default_read_line :: proc(prompt: string, allocator := context.allocator) -> str
 // token_refresh gets a new access token with refresh_token and stores it.
 // TIDAL may rotate the refresh token; the new one is kept.
 token_refresh :: proc(s: ^Session, refresh_token: string) -> (ok: bool, err: Error) {
+	return refresh_tokens(s, refresh_token, session_epoch(s))
+}
+
+// refresh_tokens is token_refresh for the login of auth epoch epoch. If the
+// login was cleared since, the new tokens are dropped. A rate limit or a
+// server error comes back as that, not as .Authentication: only TIDAL
+// refusing the refresh token means the login is gone.
+@(private)
+refresh_tokens :: proc(s: ^Session, refresh_token: string, epoch: u64) -> (ok: bool, err: Error) {
 	client_id, client_secret: string
 	{
 		// session_client_enable_hires swaps these under the lock.
@@ -50,7 +59,10 @@ token_refresh :: proc(s: ^Session, refresh_token: string) -> (ok: bool, err: Err
 		{"client_id", client_id},
 		{"client_secret", client_secret},
 	}
-	resp, obj := post_form(s, s.config.api_oauth2_token, form, context.temp_allocator) or_return
+	resp, obj := post_form(s, s.config.api_oauth2_token, form, epoch, context.temp_allocator) or_return
+	if is_rate_limit(resp) || resp.status >= 500 {
+		return false, http_error(resp)
+	}
 	if resp.status != 200 {
 		detail := fmt.tprintf("%s: %s", jstr(obj, "error"), jstr(obj, "error_description"))
 		return false, make_error(.Authentication, "Authentication failed", resp.status, detail = detail)
@@ -61,6 +73,9 @@ token_refresh :: proc(s: ^Session, refresh_token: string) -> (ok: bool, err: Err
 
 	{
 		sync.guard(&s.mutex)
+		if s.auth_epoch != epoch {
+			return false, make_error(.Cancelled, "The login was cleared during the refresh")
+		}
 		set_owned(s, &s.access_token, jstr(obj, "access_token"))
 		s.expiry_time = time.time_add(time.now(), time.Duration(ji64(obj, "expires_in")) * time.Second)
 		set_owned(s, &s.token_type, jstr(obj, "token_type"))
@@ -92,10 +107,14 @@ finish_login :: proc(s: ^Session) -> (err: Error) {
 }
 
 // Stores the tokens of an OAuth token response, then loads the session.
+// Nothing is stored if the login was cleared after epoch.
 @(private = "file")
-process_auth_token :: proc(s: ^Session, obj: json.Object, is_pkce: bool) -> Error {
+process_auth_token :: proc(s: ^Session, obj: json.Object, is_pkce: bool, epoch: u64) -> Error {
 	{
 		sync.guard(&s.mutex)
+		if s.auth_epoch != epoch {
+			return make_error(.Cancelled, "The login was cleared during the login")
+		}
 		set_owned(s, &s.access_token, jstr(obj, "access_token"))
 		s.expiry_time = time.time_add(time.now(), time.Duration(ji64(obj, "expires_in")) * time.Second)
 		set_owned(s, &s.refresh_token, jstr(obj, "refresh_token"))
@@ -195,9 +214,11 @@ login_device_start :: proc(s: ^Session, allocator := context.allocator) -> (link
 	scratch_begin(allocator)
 	client_id, _ := device_client_credentials(s)
 	form := []Param{{"client_id", client_id}, {"scope", "r_usr w_usr w_sub"}}
-	resp, obj := post_form(s, s.config.api_device_auth, form, context.temp_allocator) or_return
+	resp, obj := post_form(s, s.config.api_device_auth, form, session_epoch(s), context.temp_allocator) or_return
 	if !http_ok(resp) {
-		log.errorf("Login failed: %s", body_prefix(resp, 500))
+		if !is_rate_limit(resp) {
+			log.errorf("Login failed: %s", body_prefix(resp, 500))
+		}
 		return {}, http_error(resp)
 	}
 	if obj == nil {
@@ -217,11 +238,23 @@ login_device_start :: proc(s: ^Session, allocator := context.allocator) -> (link
 		nil
 }
 
+// Added to the polling interval each time TIDAL answers slow_down, in
+// seconds, as RFC 8628 says.
+SLOW_DOWN_STEP :: 5
+
 // login_device_wait polls TIDAL until the user approves the device code,
 // then logs in. With until_expiry = false it checks once. Blocks; run it on
 // a worker thread in a UI. Setting cancel^ to true (atomically) stops it.
-login_device_wait :: proc(s: ^Session, link: Link_Login, until_expiry := true, cancel: ^bool = nil) -> (err: Error) {
+//
+// It waits link.interval seconds between polls and adds SLOW_DOWN_STEP to
+// link.interval when TIDAL asks it to slow down, so a caller that polls
+// again after an error keeps the slower pace. It returns .Timeout when the
+// code expired, .Authentication if the user denied it, a rate limit as
+// .Too_Many_Requests or .Abuse_Detected (with the backoff started), and
+// transport errors as they come.
+login_device_wait :: proc(s: ^Session, link: ^Link_Login, until_expiry := true, cancel: ^bool = nil) -> (err: Error) {
 	scratch_begin(context.allocator)
+	epoch := session_epoch(s)
 	expiry := link.expires_in if until_expiry else 1
 	client_id, client_secret := device_client_credentials(s)
 	form := []Param {
@@ -231,29 +264,41 @@ login_device_wait :: proc(s: ^Session, link: Link_Login, until_expiry := true, c
 		{"grant_type", "urn:ietf:params:oauth:grant-type:device_code"},
 		{"scope", "r_usr w_usr w_sub"},
 	}
-	interval := link.interval if link.interval > 0 else 2
+	if link.interval <= 0 {
+		link.interval = 2
+	}
 
 	for expiry > 0 {
-		resp, obj := post_form(s, s.config.api_oauth2_token, form, context.temp_allocator) or_return
+		resp, obj := post_form(s, s.config.api_oauth2_token, form, epoch, context.temp_allocator) or_return
 		if http_ok(resp) && obj != nil {
-			return process_auth_token(s, obj, false)
+			return process_auth_token(s, obj, false, epoch)
 		}
-		// Requests take time, so the expiry countdown drifts. Stop when TIDAL
-		// says the code expired.
-		if jstr(obj, "error") == "expired_token" {
-			break
+		if is_rate_limit(resp) {
+			return http_error(resp)
+		}
+		// authorization_pending and anything unknown: keep polling, as
+		// other TIDAL clients do.
+		switch jstr(obj, "error") {
+		case "slow_down":
+			link.interval += SLOW_DOWN_STEP
+		case "access_denied":
+			return make_error(.Authentication, "The login was denied", resp.status)
+		case "expired_token":
+			// Requests take time, so the expiry countdown drifts. Stop when
+			// TIDAL says the code expired.
+			return make_error(.Timeout, "You took too long to log in")
 		}
 		if !until_expiry {
 			break
 		}
-		deadline := time.tick_add(time.tick_now(), time.Duration(interval * f64(time.Second)))
+		deadline := time.tick_add(time.tick_now(), time.Duration(link.interval * f64(time.Second)))
 		for time.tick_diff(time.tick_now(), deadline) > 0 {
-			if (cancel != nil && sync.atomic_load(cancel)) || sync.atomic_load(&s.abort) {
+			if (cancel != nil && sync.atomic_load(cancel)) || sync.atomic_load(&s.abort) || session_epoch(s) != epoch {
 				return make_error(.Cancelled, "Login cancelled")
 			}
 			time.sleep(100 * time.Millisecond)
 		}
-		expiry -= interval
+		expiry -= link.interval
 	}
 	return make_error(.Timeout, "You took too long to log in")
 }
@@ -263,7 +308,7 @@ login_oauth_simple :: proc(s: ^Session, print_fn: Print_Proc = default_print) ->
 	scratch_begin(context.allocator)
 	link := login_device_start(s, context.temp_allocator) or_return
 	print_fn(fmt.tprintf("Visit https://%s to log in, the code will expire in %v seconds", link.verification_uri_complete, int(link.expires_in)))
-	return login_device_wait(s, link)
+	return login_device_wait(s, &link)
 }
 
 // ---- PKCE login ----
@@ -305,7 +350,8 @@ login_pkce_complete :: proc(s: ^Session, url_redirect: string) -> (err: Error) {
 		{"code_verifier", s.config.code_verifier},
 		{"client_unique_key", s.config.client_unique_key},
 	}
-	resp, obj := post_form(s, s.config.api_oauth2_token, form, context.temp_allocator) or_return
+	epoch := session_epoch(s)
+	resp, obj := post_form(s, s.config.api_oauth2_token, form, epoch, context.temp_allocator) or_return
 	if !http_ok(resp) {
 		log.errorf("Login failed: %s", body_prefix(resp, 500))
 		return http_error(resp)
@@ -313,7 +359,7 @@ login_pkce_complete :: proc(s: ^Session, url_redirect: string) -> (err: Error) {
 	if obj == nil {
 		return make_error(.Authentication, "Wrong one-time authorization code", resp.status)
 	}
-	return process_auth_token(s, obj, true)
+	return process_auth_token(s, obj, true, epoch)
 }
 
 @(private = "file")

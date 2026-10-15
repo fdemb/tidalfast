@@ -12,6 +12,7 @@ import "../render"
 import "../ui"
 
 COVER_PREFETCH_ROWS :: 4 // rows above and below the view whose covers load too
+DATA_SLOTS :: 16 // job queue slots covers leave free for data jobs
 
 // cover_art draws a cover size points square, centred in a cell of width
 // cell_w. Without an image id it draws the fake data's gradient for seed.
@@ -95,6 +96,9 @@ covers_schedule :: proc(s: ^State) {
 	frame := s.frame_count
 	st := Stale_Covers{&d.covers, frame}
 	jobs.remove_if(&d.queue, drop_stale_cover, &st)
+	// A cover the queue has no room for stays Wanted and is pushed again
+	// next frame.
+	room := jobs.room(&d.queue) - DATA_SLOTS
 	for &e in d.covers.entries {
 		switch e.state {
 		case .Free, .Queued, .Ready:
@@ -109,8 +113,9 @@ covers_schedule :: proc(s: ^State) {
 				size = e.size,
 				id   = small(cover.entry_id(&e)),
 			}
-			if jobs.push(&d.queue, job, e.priority) {
+			if room > 0 && jobs.push(&d.queue, job, e.priority) {
 				e.state = .Queued
+				room -= 1
 			}
 		case .Failed:
 			// Forgotten once off screen, so it's tried again when it comes

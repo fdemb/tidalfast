@@ -40,6 +40,28 @@ backoff_remaining :: proc(s: ^Session) -> f64 {
 	return max(0, -time.duration_seconds(time.tick_since(s.backoff_until)))
 }
 
+// backoff_state returns when the current backoff ends and why, {} and ""
+// for none, so it can be carried over to another session with
+// backoff_restore.
+backoff_state :: proc(s: ^Session, allocator := context.allocator) -> (until: time.Tick, reason: string) {
+	sync.guard(&s.backoff_mutex)
+	return s.backoff_until, strings.clone(s.backoff_reason, allocator)
+}
+
+// backoff_restore starts a backoff that ends at until, unless the session
+// already has one that ends later.
+backoff_restore :: proc(s: ^Session, until: time.Tick, reason: string) {
+	if until == {} {
+		return
+	}
+	sync.guard(&s.backoff_mutex)
+	if s.backoff_until == {} || time.tick_diff(s.backoff_until, until) > 0 {
+		s.backoff_until = until
+		delete(s.backoff_reason, s.allocator)
+		s.backoff_reason = strings.clone(reason, s.allocator)
+	}
+}
+
 @(private = "file")
 check_backoff :: proc(s: ^Session) -> Error {
 	sync.guard(&s.backoff_mutex)
@@ -117,10 +139,12 @@ body_prefix :: proc(resp: Http_Response, n: int) -> string {
 refresh_access_token :: proc(s: ^Session, stale: string) -> (refreshed: bool, err: Error) {
 	sync.guard(&s.refresh_mutex)
 	current, refresh: string
+	epoch: u64
 	{
 		sync.guard(&s.mutex)
 		current = strings.clone(s.access_token, context.temp_allocator)
 		refresh = strings.clone(s.refresh_token, context.temp_allocator)
+		epoch = s.auth_epoch
 	}
 	if current != stale {
 		return true, nil
@@ -128,7 +152,7 @@ refresh_access_token :: proc(s: ^Session, stale: string) -> (refreshed: bool, er
 	if refresh == "" {
 		return false, nil
 	}
-	return token_refresh(s, refresh)
+	return refresh_tokens(s, refresh, epoch)
 }
 
 // Whether the access token is expired, or about to be. TIDAL's expired-token
@@ -142,9 +166,10 @@ access_token_expired :: proc(a: Auth) -> bool {
 	return time.diff(time.now(), expiry) <= TOKEN_EXPIRY_MARGIN
 }
 
-// Sends with the session's current access token.
+// Sends with the session's current access token. epoch is the auth epoch
+// the request started in; if the login was cleared since, it's cancelled.
 @(private = "file")
-send :: proc(s: ^Session, method: Method, url: string, headers: []string, body: string, allocator: mem.Allocator) -> (resp: Http_Response, sent_token: string, err: Error) {
+send :: proc(s: ^Session, method: Method, url: string, headers: []string, body: string, epoch: u64, allocator: mem.Allocator) -> (resp: Http_Response, sent_token: string, err: Error) {
 	check_backoff(s) or_return
 	auth := session_auth(s, context.temp_allocator)
 	all := make([dynamic]string, 0, len(headers) + 1, context.temp_allocator)
@@ -152,7 +177,7 @@ send :: proc(s: ^Session, method: Method, url: string, headers: []string, body: 
 	if auth.token_type != "" && auth.access_token != "" {
 		append(&all, fmt.tprintf("authorization: %s %s", auth.token_type, auth.access_token))
 	}
-	resp = http_send(s, method, url, all[:], body, allocator) or_return
+	resp = http_send(s, method, url, all[:], body, allocator, epoch) or_return
 	start_backoff_if_needed(s, resp)
 	return resp, auth.access_token, nil
 }
@@ -219,7 +244,7 @@ basic_request :: proc(s: ^Session, r: Request, allocator := context.allocator) -
 	body := encode_params(r.data, tmp)
 
 	sent_token: string
-	resp, sent_token = send(s, r.method, url, headers[:], body, allocator) or_return
+	resp, sent_token = send(s, r.method, url, headers[:], body, auth.epoch, allocator) or_return
 
 	refresh_token: string
 	{
@@ -242,7 +267,7 @@ basic_request :: proc(s: ^Session, r: Request, allocator := context.allocator) -
 			if refreshed {
 				// Retry exactly once. If TIDAL still reports an expired token
 				// (e.g. clock skew), return that response instead of looping.
-				resp, _ = send(s, r.method, url, headers[:], body, allocator) or_return
+				resp, _ = send(s, r.method, url, headers[:], body, auth.epoch, allocator) or_return
 			}
 		} else {
 			log.debugf("HTTP error on %d", resp.status)
@@ -339,15 +364,27 @@ http_error :: proc(resp: Http_Response) -> Error {
 	return make_error(.Http, "HTTP error", resp.status, detail = detail)
 }
 
-// POSTs a form without TIDAL's default params, as the OAuth endpoints expect.
+// POSTs a form without TIDAL's default params, as the OAuth endpoints
+// expect. It goes through the same backoff as API requests: refused while
+// one runs, and a 429 or anti-abuse 403 starts one. It's cancelled if the
+// login is cleared after epoch.
 @(private)
-post_form :: proc(s: ^Session, url: string, form: []Param, allocator: mem.Allocator) -> (resp: Http_Response, obj: json.Object, err: Error) {
+post_form :: proc(s: ^Session, url: string, form: []Param, epoch: u64, allocator: mem.Allocator) -> (resp: Http_Response, obj: json.Object, err: Error) {
+	check_backoff(s) or_return
 	headers := []string{fmt.tprintf("User-Agent: %s", s.user_agent)}
-	resp = http_send(s, .POST, url, headers, encode_params(form, context.temp_allocator), allocator) or_return
+	resp = http_send(s, .POST, url, headers, encode_params(form, context.temp_allocator), allocator, epoch) or_return
+	start_backoff_if_needed(s, resp)
 	if v, jerr := json.parse(resp.body, .JSON, true, allocator); jerr == nil {
 		obj, _ = v.(json.Object)
 	}
 	return resp, obj, nil
+}
+
+// is_rate_limit says whether resp is a 429 or an anti-abuse 403, which
+// start a backoff and must reach the caller as such, not as a failed login.
+@(private)
+is_rate_limit :: proc(resp: Http_Response) -> bool {
+	return resp.status == 429 || is_abuse_response(resp)
 }
 
 @(private = "file")

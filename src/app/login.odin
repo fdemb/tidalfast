@@ -4,9 +4,12 @@ package app
 // short code, the user enters it at link.tidal.com (or opens the link with
 // the code in it), and a worker polls until they approve.
 
+import "core:fmt"
+
 import "../mac"
 import "../render"
 import "../text"
+import "../tidal"
 import "../ui"
 
 LOGIN_W :: 420
@@ -51,6 +54,18 @@ login_card :: proc(s: ^State) {
 
 	code := small_str(&l.link.user_code)
 	switch {
+	case l.error.len > 0:
+		line(small_str(&l.error), .Regular, 14, 20, SECONDARY)
+		ui.spacer(ui.px(16))
+		{
+			ui.row("", {}, ui.fill(), ui.px(40))
+			ui.spacer(ui.fill())
+			if pill_button("retry", "Try again", 160, SURFACE_ACTIVE, TEXT) {
+				l.error = {}
+				request_login_code(&s.data)
+			}
+			ui.spacer(ui.fill())
+		}
 	case code != "":
 		line("On your phone or computer, go to", .Regular, 14, 20, SECONDARY)
 		line(small_str(&l.link.uri), .Semibold, 15, 22, ACCENT)
@@ -67,24 +82,19 @@ login_card :: proc(s: ^State) {
 			ui.spacer(ui.fill())
 		}
 		ui.spacer(ui.px(18))
-		line("Waiting for you to approve this device…", .Regular, 12, 18, DIM)
-	case l.error.len > 0:
-		line(small_str(&l.error), .Regular, 14, 20, SECONDARY)
-		ui.spacer(ui.px(16))
-		{
-			ui.row("", {}, ui.fill(), ui.px(40))
-			ui.spacer(ui.fill())
-			if pill_button("retry", "Try again", 160, SURFACE_ACTIVE, TEXT) {
-				l.error = {}
-				request_login_code(&s.data)
-			}
-			ui.spacer(ui.fill())
+		if l.note.len > 0 {
+			line(small_str(&l.note), .Regular, 12, 18, DIM)
+		} else {
+			line("Waiting for you to approve this device…", .Regular, 12, 18, DIM)
 		}
 	case:
 		line("Getting a code from TIDAL…", .Regular, 14, 20, SECONDARY)
+		if l.note.len > 0 {
+			line(small_str(&l.note), .Regular, 12, 18, DIM)
+		}
 	}
-	if code != "" && l.error.len > 0 {
-		line(small_str(&l.error), .Regular, 12, 18, DIM)
+	if wait := tidal.backoff_remaining(s.data.session); wait > 0 {
+		line(fmt.tprintf("TIDAL asked us to slow down. Trying again in %d s.", int(wait + 0.5)), .Regular, 12, 18, DIM)
 	}
 }
 

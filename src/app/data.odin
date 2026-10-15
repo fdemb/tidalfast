@@ -13,6 +13,7 @@ import "core:fmt"
 import vmem "core:mem/virtual"
 import "core:os"
 import "core:strings"
+import "core:sync"
 import "core:sys/posix"
 import "core:time"
 
@@ -25,11 +26,12 @@ import "../tidal"
 import "../ui"
 
 KEYCHAIN_SERVICE :: "tidalfast"
-KEYCHAIN_MOCK_SERVICE :: "tidalfast-mock" // when TIDALFAST_API points somewhere else
+KEYCHAIN_MOCK_SERVICE :: "tidalfast-mock" // with TIDALFAST_API
 KEYCHAIN_ACCOUNT :: "auth"
 COVER_BUDGET :: 48 << 20 // texture bytes
 UPLOAD_BUDGET :: 2 * time.Millisecond // cover uploads per frame
 PAGES_IN_FLIGHT :: 2
+LOGIN_RETRY_MAX :: 30 // seconds between polls while TIDAL can't be reached
 
 Account :: enum u8 {
 	Fake,
@@ -42,7 +44,12 @@ Login :: struct {
 	link:      Login_Link,
 	requested: bool, // a Login_Start job is out
 	waiting:   bool, // a Login_Wait job is out
-	error:     Small,
+	error:     Small, // the login stopped; the screen offers "Try again"
+	note:      Small, // shown under the code while the login goes on
+	deadline:  time.Tick, // when the code expires
+	poll_at:   time.Tick, // the next Login_Wait polls no sooner
+	poll_once: bool, // it checks once whether TIDAL can be reached again
+	retries:   int, // polls in a row that couldn't reach TIDAL
 }
 
 Sidebar :: struct {
@@ -76,23 +83,33 @@ Track_View :: struct {
 }
 
 Data :: struct {
-	fake:       bool,
-	mock:       bool, // TIDALFAST_API is set
-	account:    Account,
-	session:    ^tidal.Session, // made by this dylib, so closed on unload
-	wake:       proc "c" (), // the shell's request_redraw
-	queue:      jobs.Queue(Job, JOB_QUEUE),
-	results:    jobs.Queue(Result, RESULT_QUEUE),
-	threads:    [WORKERS]posix.pthread_t,
-	running:    bool,
-	saved_auth: []u8, // heap; the login state from unload to reload
-	login:      Login,
-	sidebar:    Sidebar,
-	view:       Track_View,
-	covers:     cover.Cache,
-	message:    Small, // the last error worth showing
-	evicted:    [64]render.Texture,
-	bench:      Cover_Bench,
+	fake:           bool,
+	mock:           bool, // api is set
+	api:            Small, // TIDALFAST_API once checked, "" for TIDAL
+	keychain:       Small, // the Keychain service the login goes in
+	account:        Account,
+	// Goes up with every sign_out. Jobs carry the one they were queued in,
+	// and results from an older one are dropped.
+	auth_gen:       u32,
+	retry:          bit_set[Job_Kind; u8], // pushes the queue refused, tried again next frame
+	keychain_mutex: sync.Mutex, // orders a sign-out's delete against the workers' saves
+	session:        ^tidal.Session, // made by this dylib, so closed on unload
+	wake:           proc "c" (), // the shell's request_redraw
+	queue:          jobs.Queue(Job, JOB_QUEUE),
+	results:        jobs.Queue(Result, RESULT_QUEUE),
+	threads:        [WORKERS]posix.pthread_t,
+	running:        bool,
+	// From unload to reload: the login state (heap) and the backoff.
+	saved_auth:     []u8,
+	saved_backoff:  time.Tick,
+	saved_reason:   Small,
+	login:          Login,
+	sidebar:        Sidebar,
+	view:           Track_View,
+	covers:         cover.Cache,
+	message:        Small, // the last error worth showing
+	evicted:        [64]render.Texture,
+	bench:          Cover_Bench,
 }
 
 data_start :: proc(s: ^State, shell: ^platform.Shell) {
@@ -101,11 +118,17 @@ data_start :: proc(s: ^State, shell: ^platform.Shell) {
 	cover.init(&d.covers, COVER_BUDGET)
 	bench := os.get_env("TIDALFAST_BENCH", context.temp_allocator)
 	d.fake = os.get_env("TIDALFAST_FAKE", context.temp_allocator) != "" || (bench != "" && bench != "covers")
+	// Checked even with fake data, so a refused TIDALFAST_API is always
+	// logged.
+	api := api_override()
 	if d.fake {
 		d.account = .Fake
 		return
 	}
 	d.bench.running = bench == "covers"
+	d.api = small(api)
+	d.mock = api != ""
+	d.keychain = small(KEYCHAIN_MOCK_SERVICE if d.mock else KEYCHAIN_SERVICE)
 	session_open(d)
 	d.account = .Restoring
 	push_job(d, {kind = .Restore})
@@ -116,7 +139,10 @@ data_unload :: proc(s: ^State) {
 	d := &s.data
 	workers_stop(d)
 	if d.session != nil {
-		d.saved_auth = auth_marshal(d.session, runtime.heap_allocator())
+		d.saved_auth = auth_marshal(tidal.session_auth(d.session, context.temp_allocator), runtime.heap_allocator())
+		until, reason := tidal.backoff_state(d.session, context.temp_allocator)
+		d.saved_backoff = until
+		d.saved_reason = small(reason)
 		tidal.session_destroy(d.session)
 		d.session = nil
 	}
@@ -134,6 +160,8 @@ data_reload :: proc(s: ^State, shell: ^platform.Shell) {
 		delete(d.saved_auth, runtime.heap_allocator())
 		d.saved_auth = nil
 	}
+	tidal.backoff_restore(d.session, d.saved_backoff, small_str(&d.saved_reason))
+	d.saved_backoff = {}
 	workers_start(d)
 }
 
@@ -160,13 +188,70 @@ data_shutdown :: proc(s: ^State) {
 	}
 }
 
-// session_open makes the session for this dylib. TIDALFAST_API=url sends
-// every request, login and cover to url instead of TIDAL, for running
-// against tests/mock_tidal.
-@(private = "file")
+// api_override returns TIDALFAST_API if the app may use it, else "". It
+// sends every request, login and cover to that URL instead of TIDAL, for
+// running against tests/mock_tidal. The login goes to that server too, so
+// it's only honoured in debug builds and only for this machine: anywhere
+// else could collect the tokens of whoever logs in.
+api_override :: proc() -> string {
+	api := os.get_env("TIDALFAST_API", context.temp_allocator)
+	if api == "" {
+		return ""
+	}
+	when !ODIN_DEBUG {
+		fmt.eprintln("app: TIDALFAST_API is ignored in release builds")
+		return ""
+	} else {
+		if !is_loopback_url(api) || len(api) > len(Small{}.buf) {
+			fmt.eprintln("app: TIDALFAST_API must be an http(s) URL on 127.0.0.1, ::1 or localhost, ignoring it")
+			return ""
+		}
+		return api
+	}
+}
+
+// is_loopback_url says whether url is http or https on 127.0.0.1, [::1]
+// or localhost, with an optional port and path.
+is_loopback_url :: proc(url: string) -> bool {
+	rest: string
+	switch {
+	case strings.has_prefix(url, "http://"):
+		rest = url[len("http://"):]
+	case strings.has_prefix(url, "https://"):
+		rest = url[len("https://"):]
+	case:
+		return false
+	}
+	if end := strings.index_any(rest, "/?#"); end >= 0 {
+		rest = rest[:end]
+	}
+	host, port := rest, ""
+	if strings.has_prefix(rest, "[") {
+		close := strings.index_byte(rest, ']')
+		if close < 0 {
+			return false
+		}
+		host, port = rest[1:close], rest[close + 1:]
+	} else if colon := strings.index_byte(rest, ':'); colon >= 0 {
+		host, port = rest[:colon], rest[colon:]
+	}
+	if port != "" {
+		if len(port) < 2 || port[0] != ':' {
+			return false
+		}
+		for c in port[1:] {
+			if c < '0' || c > '9' {
+				return false
+			}
+		}
+	}
+	return host == "127.0.0.1" || host == "::1" || strings.equal_fold(host, "localhost")
+}
+
+// session_open makes the session for this dylib, pointed at d.api if set.
 session_open :: proc(d: ^Data) {
 	s := tidal.session_create(allocator = runtime.heap_allocator())
-	if api := os.get_env("TIDALFAST_API", context.temp_allocator); api != "" {
+	if api := small_str(&d.api); api != "" {
 		a := vmem.arena_allocator(&s.arena)
 		base := strings.concatenate({strings.trim_right(api, "/"), "/"}, a)
 		s.config.api_v1_location = base
@@ -174,7 +259,6 @@ session_open :: proc(d: ^Data) {
 		s.config.api_oauth2_token = strings.concatenate({base, "oauth2/token"}, a)
 		s.config.api_device_auth = strings.concatenate({base, "oauth2/device_authorization"}, a)
 		s.config.image_url = strings.concatenate({base, "images/%s/%dx%d.jpg"}, a)
-		d.mock = true
 	}
 	s.on_auth_change = auth_changed
 	s.on_auth_change_data = d
@@ -182,7 +266,7 @@ session_open :: proc(d: ^Data) {
 }
 
 keychain_service :: proc(d: ^Data) -> string {
-	return KEYCHAIN_MOCK_SERVICE if d.mock else KEYCHAIN_SERVICE
+	return small_str(&d.keychain)
 }
 
 // Stored_Auth is what goes in the Keychain item, as JSON.
@@ -198,8 +282,7 @@ Stored_Auth :: struct {
 	is_pkce:       bool,
 }
 
-auth_marshal :: proc(s: ^tidal.Session, allocator: runtime.Allocator) -> []u8 {
-	a := tidal.session_auth(s, context.temp_allocator)
+auth_marshal :: proc(a: tidal.Auth, allocator: runtime.Allocator) -> []u8 {
 	st := Stored_Auth {
 		token_type    = a.token_type,
 		access_token  = a.access_token,
@@ -263,29 +346,62 @@ auth_load :: proc(d: ^Data, res: ^Result) -> bool {
 // auth_changed is the session's on_auth_change: after a login or a token
 // refresh, on whichever worker did it, the new tokens go to the Keychain.
 // TIDAL may rotate the refresh token on refresh, and the old one stops
-// working, so this happens every time.
+// working, so this happens every time. Tokens from a login that sign_out
+// has cleared since are never saved: with keychain_mutex held, the epoch
+// they were read in must still be the session's.
 auth_changed :: proc(s: ^tidal.Session, data: rawptr) {
 	d := (^Data)(data)
-	bytes := auth_marshal(s, context.temp_allocator)
+	a := tidal.session_auth(s, context.temp_allocator)
+	if a.user_id == 0 || (a.access_token == "" && a.refresh_token == "") {
+		return
+	}
+	sync.guard(&d.keychain_mutex)
+	if a.epoch != tidal.session_epoch(s) {
+		return
+	}
+	bytes := auth_marshal(a, context.temp_allocator)
 	if status := mac.keychain_set(keychain_service(d), KEYCHAIN_ACCOUNT, bytes); status != mac.ERR_SEC_SUCCESS {
 		fmt.eprintfln("app: couldn't save the login to the Keychain (error %d)", status)
 	}
 }
 
+// push_job queues job for the current login. If the queue is full the
+// kind goes in d.retry, and data_update tries again next frame. A worker
+// finishing a job frees a slot and asks for that frame.
 push_job :: proc(d: ^Data, job: Job, priority: u8 = PRIORITY_DATA) -> bool {
+	job := job
+	job.auth = d.auth_gen
 	if !jobs.push(&d.queue, job, priority) {
-		fmt.eprintfln("app: job queue full, dropped a %v job", job.kind)
+		d.retry += {job.kind}
 		return false
 	}
 	return true
 }
 
+@(private = "file")
+drop_account_job :: proc(job: ^Job, _: rawptr) -> bool {
+	return job.kind != .Cover
+}
+
+// sign_out ends a login TIDAL no longer accepts. Results of jobs queued
+// before it are dropped when they arrive, so however many requests fail,
+// the login ends once and one new login starts. Queued jobs for the old
+// login go, the ones in flight are cancelled (session_clear_auth), and the
+// Keychain item is deleted.
 sign_out :: proc(s: ^State, why: string) {
 	d := &s.data
+	d.auth_gen += 1
+	d.retry = {}
+	jobs.remove_if(&d.queue, drop_account_job, nil)
+	tidal.session_clear_auth(d.session)
+	{
+		sync.guard(&d.keychain_mutex)
+		mac.keychain_delete(keychain_service(d), KEYCHAIN_ACCOUNT)
+	}
 	d.account = .Signed_Out
-	d.login = {}
-	d.login.error = small(why)
-	mac.keychain_delete(keychain_service(d), KEYCHAIN_ACCOUNT)
+	d.login = {
+		note = small(why),
+	}
 	sidebar_free(d)
 	view_close(d)
 	s.library.playlist = 0
@@ -299,11 +415,49 @@ request_login_code :: proc(d: ^Data) {
 	d.login.requested = push_job(d, {kind = .Login_Start})
 }
 
+// request_login_poll queues the poll for the code on screen.
+request_login_poll :: proc(d: ^Data) {
+	l := &d.login
+	if l.waiting {
+		return
+	}
+	l.waiting = push_job(d, {kind = .Login_Wait, id = l.link.device_code, interval = l.link.interval, deadline = l.deadline, not_before = l.poll_at, once = l.poll_once})
+}
+
 request_playlists :: proc(d: ^Data) {
 	if d.sidebar.loading {
 		return
 	}
 	d.sidebar.loading = push_job(d, {kind = .Playlists})
+}
+
+// data_retry pushes again what the queue refused last frame, if it's still
+// wanted.
+data_retry :: proc(d: ^Data) {
+	kinds := d.retry
+	d.retry = {}
+	for kind in kinds {
+		#partial switch kind {
+		case .Restore:
+			if d.account == .Restoring {
+				push_job(d, {kind = .Restore})
+			}
+		case .Login_Start:
+			if d.account == .Signed_Out && d.login.error.len == 0 {
+				request_login_code(d)
+			}
+		case .Login_Wait:
+			if d.account == .Signed_Out && d.login.link.device_code.len > 0 {
+				request_login_poll(d)
+			}
+		case .Playlists:
+			if d.account == .Signed_In {
+				request_playlists(d)
+			}
+		case .Tracks:
+			view_request_pages(d)
+		}
+	}
 }
 
 sidebar_free :: proc(d: ^Data) {
@@ -335,12 +489,16 @@ data_update :: proc(s: ^State, now: f64) {
 	if queued, _ := jobs.pending(&d.results); queued > 0 {
 		ui.request_frame()
 	}
+	data_retry(d)
 	d.bench.upload_ms = f32(time.duration_milliseconds(time.tick_since(begin)))
 }
 
-@(private = "file")
 handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 	d := &s.data
+	// From a login sign_out has ended. Covers don't depend on the login.
+	if res.job.kind != .Cover && res.job.auth != d.auth_gen {
+		return
+	}
 	err, failed := res.err.?
 	if failed && err == .Authentication && res.job.kind != .Login_Wait && res.job.kind != .Login_Start {
 		sign_out(s, "Your TIDAL session ended. Log in again.")
@@ -360,29 +518,22 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 			request_login_code(d)
 		}
 	case .Login_Start:
-		d.login.requested = false
+		l := &d.login
+		l.requested = false
 		if failed {
-			d.login.error = res.message
-			return
-		}
-		d.login.link = res.link
-		d.login.error = {}
-		link := res.link
-		d.login.waiting = push_job(d, {kind = .Login_Wait, id = link.device_code, interval = link.interval, expires = link.expires})
-	case .Login_Wait:
-		d.login.waiting = false
-		if failed {
-			if err == .Timeout {
-				d.login = {error = small("The code expired. Here's a new one.")}
-				request_login_code(d)
-			} else {
-				d.login.error = res.message
+			l^ = {
+				error = login_error(err, res.message),
 			}
 			return
 		}
-		d.login = {}
-		d.account = .Signed_In
-		request_playlists(d)
+		l^ = {
+			link     = res.link,
+			note     = l.note,
+			deadline = time.tick_add(time.tick_now(), time.Duration(f64(res.link.expires) * f64(time.Second))),
+		}
+		request_login_poll(d)
+	case .Login_Wait:
+		login_wait_done(d, res, err, failed)
 	case .Playlists:
 		d.sidebar.loading = false
 		if failed {
@@ -428,6 +579,70 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 		d.bench.uploads += 1
 		d.bench.frame_uploads += 1
 	}
+}
+
+// login_wait_done handles the end of a Login_Wait. A code that expired is
+// replaced. While TIDAL can't be reached and the code is still good, the
+// app checks again after 2, 4, 8 up to LOGIN_RETRY_MAX seconds, once per
+// try, and goes back to polling as soon as TIDAL answers.
+@(private = "file")
+login_wait_done :: proc(d: ^Data, res: ^Result, err: tidal.Error_Kind, failed: bool) {
+	l := &d.login
+	l.waiting = false
+	if res.link.interval > 0 {
+		l.link.interval = res.link.interval
+	}
+	if !failed {
+		d.login = {}
+		d.account = .Signed_In
+		request_playlists(d)
+		return
+	}
+	expired := time.tick_diff(time.tick_now(), l.deadline) <= 0
+	#partial switch err {
+	case .Timeout:
+		if res.job.once && !expired {
+			l.note = {}
+			l.retries = 0
+			l.poll_at = {}
+			l.poll_once = false
+			request_login_poll(d)
+			return
+		}
+		d.login = {
+			note = small("The code expired. Here's a new one."),
+		}
+		request_login_code(d)
+	case .Network:
+		if expired {
+			d.login = {
+				note = small("The code expired. Here's a new one."),
+			}
+			request_login_code(d)
+			return
+		}
+		l.retries += 1
+		wait := min(1 << uint(min(l.retries, 5)), LOGIN_RETRY_MAX)
+		l.poll_at = time.tick_add(time.tick_now(), time.Duration(wait) * time.Second)
+		l.poll_once = true
+		l.note = small(fmt.tprintf("Can't reach TIDAL. Trying again in %d s.", wait))
+		request_login_poll(d)
+	case:
+		d.login = {
+			error = login_error(err, res.message),
+		}
+	}
+}
+
+@(private = "file")
+login_error :: proc(err: tidal.Error_Kind, message: Small) -> Small {
+	#partial switch err {
+	case .Network:
+		return small("Can't reach TIDAL. Check your connection.")
+	case .Authentication:
+		return small("The login was denied.")
+	}
+	return message
 }
 
 // select_playlist opens sidebar entry i: Liked Songs first, then the
@@ -494,11 +709,24 @@ view_reserve :: proc(v: ^Track_View, n: int) {
 	v.rows, v.loaded = rows, loaded
 }
 
-// view_add_rows copies a page into the view. A short page is the last one.
-@(private = "file")
+// view_add_rows copies a page into the view. A short page ends the list,
+// and the earliest end found stands: pages arrive out of order, and an
+// empty page asked for past the end mustn't bring back rows a short page
+// before it cut. Rows past the end are dropped. Until the end is known, a
+// full page past the count TIDAL gave grows the list.
 view_add_rows :: proc(v: ^Track_View, offset: int, rows: []Row, last: bool) {
+	rows := rows
 	end := offset + len(rows)
-	view_reserve(v, end)
+	if last && (!v.done || end < v.count) {
+		v.done = true
+		v.count = end
+	}
+	if v.done {
+		rows = rows[:clamp(v.count - offset, 0, len(rows))]
+	} else {
+		v.count = max(v.count, end)
+	}
+	view_reserve(v, offset + len(rows))
 	if !v.has_arena {
 		return
 	}
@@ -515,12 +743,6 @@ view_add_rows :: proc(v: ^Track_View, offset: int, rows: []Row, last: bool) {
 		}
 		v.loaded_rows += int(!v.loaded[offset + i])
 		v.loaded[offset + i] = true
-	}
-	if last {
-		v.done = true
-		v.count = end
-	} else {
-		v.count = max(v.count, end)
 	}
 }
 
@@ -539,7 +761,7 @@ view_request_pages :: proc(d: ^Data) {
 			id     = v.id,
 		}
 		if !push_job(d, job) {
-			return
+			return // d.retry has it
 		}
 		v.next_offset += limit
 		v.in_flight += 1

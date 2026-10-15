@@ -29,7 +29,7 @@ import "../ui"
 
 CLEAR_COLOR :: render.Color{0.10, 0.11, 0.13, 1}
 
-STATE_VERSION :: 7
+STATE_VERSION :: 8
 
 FRAME_HISTORY :: 120
 
@@ -214,7 +214,9 @@ app_context :: proc(s: ^State) -> runtime.Context {
 }
 
 start :: proc(s: ^State, shell: ^platform.Shell) {
-	s.show_overlay = true
+	// Off unless asked for. The benches draw it, so their numbers include it.
+	bench := os.get_env("TIDALFAST_BENCH", context.temp_allocator)
+	s.show_overlay = os.get_env("TIDALFAST_OVERLAY", context.temp_allocator) != "" || bench != ""
 	s.log_events = os.get_env("TIDALFAST_LOG_EVENTS", context.temp_allocator) != ""
 
 	// TIDALFAST_SPALL=path writes a spall trace of every frame to path. Only
@@ -249,7 +251,7 @@ start :: proc(s: ^State, shell: ^platform.Shell) {
 	data_start(s, shell)
 	// TIDALFAST_BENCH=1 scrolls the library's track table, =text the text
 	// test screen's list.
-	switch os.get_env("TIDALFAST_BENCH", context.temp_allocator) {
+	switch bench {
 	case "", "covers":
 	case "text":
 		s.bench.running = true

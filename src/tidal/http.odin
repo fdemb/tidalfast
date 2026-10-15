@@ -32,6 +32,8 @@ curl_once: sync.Once
 // http_send performs one HTTP exchange. body is sent form-encoded for
 // POST/PUT/DELETE. Response body and etag are allocated with allocator.
 // Only transport failures are errors; any HTTP status is returned as-is.
+// With an epoch, the request fails with .Cancelled once the session's
+// auth_epoch is different, before it's sent or while it's in flight.
 @(private)
 http_send :: proc(
 	s: ^Session,
@@ -40,12 +42,18 @@ http_send :: proc(
 	headers: []string,
 	body: string,
 	allocator: mem.Allocator,
+	epoch: Maybe(u64) = nil,
 ) -> (
 	resp: Http_Response,
 	err: Error,
 ) {
 	sync.once_do(&curl_once, proc() {curl.global_init(curl.GLOBAL_DEFAULT)})
-	if sync.atomic_load(&s.abort) {
+	watch := Abort_Watch {
+		abort = &s.abort,
+		epoch = &s.auth_epoch,
+	}
+	watch.start, watch.watch_epoch = epoch.?
+	if aborted(&watch) {
 		return {}, make_error(.Cancelled, "Request cancelled")
 	}
 
@@ -102,7 +110,7 @@ http_send :: proc(
 	curl.easy_setopt(h, .HEADERDATA, &capture)
 	curl.easy_setopt(h, .NOPROGRESS, c.long(0))
 	curl.easy_setopt(h, .XFERINFOFUNCTION, abort_callback)
-	curl.easy_setopt(h, .XFERINFODATA, &s.abort)
+	curl.easy_setopt(h, .XFERINFODATA, &watch)
 
 	code := curl.easy_perform(h)
 	if code == .E_ABORTED_BY_CALLBACK {
@@ -135,11 +143,24 @@ write_callback :: proc "c" (buffer: [^]byte, size: c.size_t, nitems: c.size_t, u
 	return c.size_t(n)
 }
 
+@(private = "file")
+Abort_Watch :: struct {
+	abort:       ^bool,
+	epoch:       ^u64,
+	start:       u64,
+	watch_epoch: bool,
+}
+
+@(private = "file")
+aborted :: proc "contextless" (w: ^Abort_Watch) -> bool {
+	return sync.atomic_load(w.abort) || (w.watch_epoch && sync.atomic_load(w.epoch) != w.start)
+}
+
 // Called by curl about once a second and whenever data moves. A non-zero
 // return aborts the transfer.
 @(private = "file")
-abort_callback :: proc "c" (abort: rawptr, dltotal, dlnow, ultotal, ulnow: curl.off_t) -> c.int {
-	return 1 if sync.atomic_load((^bool)(abort)) else 0
+abort_callback :: proc "c" (watch: rawptr, dltotal, dlnow, ultotal, ulnow: curl.off_t) -> c.int {
+	return 1 if aborted((^Abort_Watch)(watch)) else 0
 }
 
 @(private = "file")

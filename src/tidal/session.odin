@@ -51,6 +51,11 @@ Session :: struct {
 	// login_device_wait fail with .Cancelled.
 	abort:                bool,
 
+	// Goes up by one each time session_clear_auth forgets the login.
+	// Requests remember the epoch they started in and fail with .Cancelled
+	// once it moves on. Written under `mutex`, read atomically.
+	auth_epoch:           u64,
+
 	// Called after a login or token refresh changed the tokens, on the
 	// thread that changed them. Refreshes run one at a time, so calls never
 	// overlap. Set it before the session is shared between threads.
@@ -107,6 +112,7 @@ Auth :: struct {
 	is_pkce:       bool,
 	user_id:       i64, // 0 when no user is loaded
 	user_kind:     User_Kind,
+	epoch:         u64, // the session's auth_epoch; session_restore ignores it
 }
 
 // session_auth copies the login state, e.g. to persist it.
@@ -121,6 +127,7 @@ session_auth :: proc(s: ^Session, allocator := context.allocator) -> Auth {
 		country_code  = strings.clone(s.country_code, allocator),
 		locale        = strings.clone(s.locale, allocator),
 		is_pkce       = s.is_pkce,
+		epoch         = s.auth_epoch,
 	}
 	if u, ok := s.user.?; ok {
 		a.user_id = u.id
@@ -146,6 +153,27 @@ session_restore :: proc(s: ^Session, a: Auth) {
 	if a.user_id != 0 {
 		set_user(s, User{kind = a.user_kind, id = a.user_id})
 	}
+}
+
+// session_clear_auth forgets the login: tokens, session id and user.
+// Requests, refreshes and device logins started before it fail with
+// .Cancelled, in flight or not, and a refresh that finishes anyway doesn't
+// store its tokens. Safe from any thread.
+session_clear_auth :: proc(s: ^Session) {
+	sync.guard(&s.mutex)
+	for f in ([]^string{&s.token_type, &s.access_token, &s.refresh_token, &s.session_id, &s.country_code, &s.locale}) {
+		delete(f^, s.allocator)
+		f^ = ""
+	}
+	s.expiry_time = nil
+	s.is_pkce = false
+	s.user = nil
+	sync.atomic_store(&s.auth_epoch, s.auth_epoch + 1)
+}
+
+// session_epoch returns the session's auth epoch, see session_clear_auth.
+session_epoch :: proc(s: ^Session) -> u64 {
+	return sync.atomic_load(&s.auth_epoch)
 }
 
 // session_abort makes requests in flight, and any made while it's on, fail

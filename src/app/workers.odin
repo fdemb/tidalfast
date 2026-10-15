@@ -70,16 +70,19 @@ Source :: enum u8 {
 }
 
 Job :: struct {
-	kind:     Job_Kind,
-	source:   Source,
-	view:     u32, // Tracks: the view generation it's for
-	offset:   i32,
-	limit:    i32,
-	key:      u64, // Cover: the cache key
-	size:     u16, // Cover: pixels across
-	interval: f32, // Login_Wait: seconds between polls
-	expires:  f32, // Login_Wait: seconds the code lives
-	id:       Small, // playlist id, image id or device code
+	kind:       Job_Kind,
+	source:     Source,
+	once:       bool, // Login_Wait: poll once, to see if TIDAL answers again
+	auth:       u32, // the auth generation it was queued in, see sign_out
+	view:       u32, // Tracks: the view generation it's for
+	offset:     i32,
+	limit:      i32,
+	key:        u64, // Cover: the cache key
+	size:       u16, // Cover: pixels across
+	interval:   f32, // Login_Wait: seconds between polls
+	deadline:   time.Tick, // Login_Wait: when the code expires
+	not_before: time.Tick, // Login_Wait: when to poll first, {} for now
+	id:         Small, // playlist id, image id or device code
 }
 
 // Priorities: lower runs first.
@@ -186,7 +189,8 @@ worker_main :: proc "c" (arg: rawptr) -> rawptr {
 
 // retry_later says whether a job should go back in the queue instead of
 // failing: it was cut short by unload, held back by the backoff gate, or
-// was the request that started a backoff.
+// was the request that started a backoff. A job cancelled because its
+// login was cleared isn't retried; sign_out drops its result.
 @(private = "file")
 retry_later :: proc(d: ^Data, res: Result) -> bool {
 	e := res.err.? or_return
@@ -255,14 +259,7 @@ run_job :: proc(d: ^Data, job: Job) -> (res: Result) {
 			expires     = f32(link.expires_in),
 		}
 	case .Login_Wait:
-		link := tidal.Link_Login {
-			device_code = small_str(&id),
-			interval    = f64(job.interval),
-			expires_in  = f64(job.expires),
-		}
-		if err := tidal.login_device_wait(s, link); err != nil {
-			fail(&res, err)
-		}
+		run_login_wait(d, job, &res)
 	case .Playlists:
 		run_playlists(s, &res, alloc)
 	case .Tracks:
@@ -283,6 +280,46 @@ run_job :: proc(d: ^Data, job: Job) -> (res: Result) {
 		}
 	}
 	return
+}
+
+@(private = "file")
+run_login_wait :: proc(d: ^Data, job: Job, res: ^Result) {
+	s := d.session
+	if job.not_before != {} {
+		if wait := time.tick_diff(time.tick_now(), job.not_before); wait > 0 && jobs.sleep(&d.queue, wait) {
+			// Stopping for a reload: retry_later puts the job back.
+			res.err = .Cancelled
+			return
+		}
+	}
+	left := time.duration_seconds(time.tick_diff(time.tick_now(), job.deadline))
+	if left <= 0 {
+		res.err = .Timeout
+		res.message = small("The code expired")
+		return
+	}
+	id := job.id
+	link := tidal.Link_Login {
+		device_code = small_str(&id),
+		interval    = f64(job.interval),
+		expires_in  = left,
+	}
+	err: tidal.Error
+	// An earlier poll got the tokens, then failed to load the session
+	// (rate limited, or the network dropped). The device code is spent, so
+	// finish with the tokens.
+	if a := tidal.session_auth(s, context.temp_allocator); a.access_token != "" && a.user_id == 0 {
+		err = tidal.load_oauth_session(s, a.token_type, a.access_token, a.refresh_token, a.expiry_time)
+		if err == nil {
+			auth_changed(s, d)
+		}
+	} else {
+		err = tidal.login_device_wait(s, &link, until_expiry = !job.once)
+	}
+	res.link.interval = f32(link.interval)
+	if err != nil {
+		fail(res, err)
+	}
 }
 
 @(private = "file")

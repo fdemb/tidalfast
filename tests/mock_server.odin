@@ -7,10 +7,12 @@ import "core:strconv"
 import "core:strings"
 import "core:sync"
 import "core:thread"
+import "core:time"
 
 // A one-connection-at-a-time HTTP server on 127.0.0.1 standing in for TIDAL.
 // It models one playlist's items, the session endpoints, an echo endpoint,
-// a rate-limited endpoint and token refresh, and records every request line.
+// a rate-limited endpoint, a slow one, token refresh and the device login,
+// and records every request line.
 
 Mock_Item :: struct {
 	kind: string, // "track" or "video"
@@ -37,6 +39,15 @@ Mock :: struct {
 	requests:   [dynamic]string, // "METHOD /path?query"
 	refreshes:  int, // POSTs to /token
 	last_query: map[string]string,
+	// Non-zero: /token and /device answer with this status (429 asks for
+	// one second).
+	token_status:  int,
+	device_status: int,
+	token_delay:   time.Duration, // before /token answers
+	// /device_token answers poll i with polls[i]: "pending", "slow_down",
+	// "denied", "429" or "ok"; past the end, "pending".
+	polls:      []string,
+	poll_count: int,
 
 	allocator:  runtime.Allocator,
 }
@@ -234,7 +245,39 @@ mock_route :: proc(m: ^Mock, req: Mock_Request, target: string) -> (status: int,
 		return 200, `{}`, etag
 	case req.path == "/limited":
 		return 429, `{"userMessage":"Too many requests"}`, etag
+	case req.path == "/slow":
+		sync.mutex_unlock(&m.mutex)
+		time.sleep(2 * time.Second)
+		sync.mutex_lock(&m.mutex)
+		return 200, `{}`, etag
+	case req.path == "/device":
+		if m.device_status != 0 {
+			return m.device_status, `{"userMessage":"no"}`, etag
+		}
+		return 200, `{"deviceCode":"dc","userCode":"UC","verificationUri":"link","verificationUriComplete":"link/UC","expiresIn":300,"interval":1}`, etag
+	case req.path == "/device_token":
+		poll := m.polls[m.poll_count] if m.poll_count < len(m.polls) else "pending"
+		m.poll_count += 1
+		switch poll {
+		case "slow_down":
+			return 400, `{"status":400,"error":"slow_down"}`, etag
+		case "denied":
+			return 400, `{"status":400,"error":"access_denied"}`, etag
+		case "429":
+			return 429, `{"userMessage":"Too many requests"}`, etag
+		case "ok":
+			return 200, `{"access_token":"device-access","refresh_token":"device-refresh","token_type":"Bearer","expires_in":3600}`, etag
+		}
+		return 400, `{"status":400,"error":"authorization_pending"}`, etag
 	case req.path == "/token":
+		if m.token_delay > 0 {
+			sync.mutex_unlock(&m.mutex)
+			time.sleep(m.token_delay)
+			sync.mutex_lock(&m.mutex)
+		}
+		if m.token_status != 0 {
+			return m.token_status, `{"status":0,"error":"no"}`, etag
+		}
 		// A refresh that rotates the refresh token, as TIDAL may.
 		m.refreshes += 1
 		return 200, fmt.tprintf(`{{"access_token":"access-%d","refresh_token":"refresh-%d","token_type":"Bearer","expires_in":3600}}`, m.refreshes, m.refreshes), etag

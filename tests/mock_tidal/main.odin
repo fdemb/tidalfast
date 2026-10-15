@@ -15,6 +15,11 @@
 //     -page-delay=MS     added to every track page (default 0)
 //     -cover-delay=MS    added to every cover (default 40)
 //     -rate-limit-at=N   answer the Nth request with 429 and Retry-After: 3
+//     -device-429=N      answer the first N device code requests with 429 and Retry-After: 3
+//     -slow-down=N       answer the first N polls of each code with slow_down
+//     -revoke-after=N    after N API requests (not logins or covers), refuse the login with 401 until a new device login, once
+//
+// It never prints tokens or Authorization headers.
 package mock_tidal
 
 import "base:runtime"
@@ -42,6 +47,9 @@ Config :: struct {
 	page_delay:    int,
 	cover_delay:   int,
 	rate_limit_at: int,
+	device_429:    int,
+	slow_down:     int,
+	revoke_after:  int,
 }
 
 Server :: struct {
@@ -51,6 +59,11 @@ Server :: struct {
 	token:         int, // the current access and refresh token number
 	first_poll:    time.Tick,
 	polled:        bool,
+	polls:         int, // of the current code
+	codes:         int, // device codes handed out
+	api_requests:  int, // since the last device login
+	revoked:       bool,
+	was_revoked:   bool,
 }
 
 server: Server
@@ -104,6 +117,12 @@ main :: proc() {
 			c.cover_delay = n
 		case "rate-limit-at":
 			c.rate_limit_at = n
+		case "device-429":
+			c.device_429 = n
+		case "slow-down":
+			c.slow_down = n
+		case "revoke-after":
+			c.revoke_after = n
 		case:
 			fmt.eprintln("mock: unknown flag", arg)
 			os.exit(2)
@@ -247,6 +266,17 @@ route :: proc(req: ^Request) -> Response {
 	path := req.path
 	switch {
 	case path == "/oauth2/device_authorization":
+		sync.guard(&server.mutex)
+		server.codes += 1
+		if server.codes <= server.config.device_429 {
+			fmt.printfln("mock: device code request %d, 429", server.codes)
+			r := json_response(429, `{"status":429,"subStatus":0,"userMessage":"Too many requests"}`)
+			r.retry_after = 3
+			return r
+		}
+		server.polled = false
+		server.polls = 0
+		fmt.printfln("mock: device code %d issued", server.codes)
 		return json_response(200, `{"deviceCode":"mock-device-code","userCode":"MOCK1","verificationUri":"link.tidal.com","verificationUriComplete":"link.tidal.com/MOCK1","expiresIn":300,"interval":1}`)
 	case path == "/oauth2/token":
 		return token_response(req)
@@ -254,8 +284,20 @@ route :: proc(req: ^Request) -> Response {
 		return cover_response(path)
 	}
 
+	sync.mutex_lock(&server.mutex)
+	server.api_requests += 1
+	if server.config.revoke_after > 0 && server.api_requests > server.config.revoke_after && !server.was_revoked {
+		server.revoked = true
+		server.was_revoked = true
+	}
+	revoked := server.revoked
+	sync.mutex_unlock(&server.mutex)
+	if revoked {
+		fmt.printfln("mock: request %d, %s %s after the login was revoked, 401", n, req.method, path)
+		return json_response(401, `{"status":401,"subStatus":11002,"userMessage":"Session is not valid"}`)
+	}
 	if req.auth != fmt.tprintf("Bearer mock-access-%d", token) {
-		fmt.printfln("mock: %s %s with a stale token (%q), 401", req.method, path, req.auth)
+		fmt.printfln("mock: request %d, %s %s with a stale or missing token, 401", n, req.method, path)
 		return json_response(401, `{"status":401,"subStatus":11003,"userMessage":"The token has expired. (Expired on time)"}`)
 	}
 	offset, _ := strconv.parse_int(req.query["offset"] or_else "0")
@@ -326,13 +368,26 @@ token_response :: proc(req: ^Request) -> Response {
 			server.polled = true
 			server.first_poll = time.tick_now()
 		}
+		server.polls += 1
+		if server.polls <= server.config.slow_down {
+			fmt.printfln("mock: poll %d, slow_down", server.polls)
+			return json_response(400, `{"status":400,"error":"slow_down","error_description":"Polling too fast"}`)
+		}
+		fmt.printfln("mock: poll %d", server.polls)
 		if time.duration_seconds(time.tick_since(server.first_poll)) < server.config.approve_after {
 			return json_response(400, `{"status":400,"error":"authorization_pending","sub_status":1002,"error_description":"Device Authorization code is not authorized yet"}`)
 		}
+		server.token += 1
+		server.revoked = false
+		server.api_requests = 0
 		fmt.printfln("mock: device login approved, tokens %d", server.token)
 	case "refresh_token":
+		if server.revoked {
+			fmt.println("mock: refresh after the login was revoked, 400")
+			return json_response(400, `{"status":400,"error":"invalid_grant","sub_status":11101,"error_description":"Token could not be verified"}`)
+		}
 		if req.form["refresh_token"] != fmt.tprintf("mock-refresh-%d", server.token) {
-			fmt.printfln("mock: refresh with an old refresh token %q", req.form["refresh_token"])
+			fmt.println("mock: refresh with an old refresh token, 400")
 			return json_response(400, `{"status":400,"error":"invalid_grant","sub_status":11101,"error_description":"Token could not be verified"}`)
 		}
 		server.token += 1
