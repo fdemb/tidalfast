@@ -751,6 +751,7 @@ select_playlist :: proc(s: ^State, i: int) {
 		lib.status = .None
 	}
 	lib.playlist = i
+	lib.list_gen += 1
 	d := &s.data
 	if d.fake {
 		return

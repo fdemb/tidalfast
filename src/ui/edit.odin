@@ -5,8 +5,13 @@
 //
 // Every offset is in bytes and sits on a grapheme cluster boundary, from
 // src/text's segmentation, so nothing here splits a cluster or a codepoint.
-// Edits that arrive with a range inside a cluster (an input method's
-// replacement range) are widened to whole clusters.
+// The one exception is the input method's: the shell's mirror of the field
+// applies its edits before the app does and can't segment text as the app
+// does, so both take them by rules that need no segmentation. A
+// replacement range is clamped to the text and its ends moved back to the
+// start of a codepoint, and an edit that doesn't fit the limit is refused
+// whole. An input method that replaces part of a cluster leaves the cursor
+// inside one.
 package ui
 
 import "core:unicode"
@@ -156,17 +161,6 @@ snap_down :: proc(bounds: []int, p: int) -> int {
 	return best
 }
 
-// snap_up moves p forward to the end of the cluster it's in.
-@(private)
-snap_up :: proc(bounds: []int, p: int) -> int {
-	for b in bounds {
-		if b >= p {
-			return b
-		}
-	}
-	return bounds[len(bounds) - 1]
-}
-
 // is_word_rune says whether r belongs to a word for word movement: letters
 // and digits. A cluster counts by its first codepoint, so marks go with
 // their base. Everything else separates words.
@@ -289,9 +283,10 @@ field_select_word :: proc(f: ^Text_Field, p: int) {
 
 // Editing
 
-// field_insert types s: it replaces the marked text, or else the
-// selection. Line breaks become spaces and other control characters go.
-// What doesn't fit the limit is dropped a whole cluster at a time.
+// field_insert types s, as from the input method: it replaces the marked
+// text, or else the selection. Line breaks become spaces and other control
+// characters go. If the text doesn't fit the limit nothing goes in, and a
+// composition ends as it was.
 field_insert :: proc(f: ^Text_Field, s: string) {
 	lo, hi := field_selection(f)
 	if f.marked {
@@ -300,14 +295,15 @@ field_insert :: proc(f: ^Text_Field, s: string) {
 	field_insert_at(f, lo, hi, s)
 }
 
-// field_insert_at types s in place of bytes [lo, hi), widened to whole
-// clusters, as for an input method's replacement range. It ends any marked
-// text.
+// field_insert_at types s in place of bytes [from, to), an input method's
+// replacement range, as field_insert does. It ends any marked text.
 field_insert_at :: proc(f: ^Text_Field, from, to: int, s: string) {
-	bounds := cluster_bounds(field_text(f))
-	lo := snap_down(bounds, clamp(from, 0, f.len))
-	hi := snap_up(bounds, clamp(to, lo, f.len))
+	lo, hi := ime_range(f, from, to)
 	clean := sanitize(s)
+	if len(clean) > field_limit(f) - (f.len - (hi - lo)) {
+		field_unmark(f)
+		return
+	}
 	was_marked := f.marked
 	f.marked = false
 	// Committing a composition finishes the typing step it started.
@@ -320,26 +316,26 @@ field_insert_at :: proc(f: ^Text_Field, from, to: int, s: string) {
 
 // field_set_marked sets the input method's composition. It replaces the
 // marked text, or else the selection, or [replace_lo, replace_hi) when
-// given. select_lo and select_hi are the input method's selection inside s.
-// Empty s removes the marked text and ends the composition.
+// given. select_lo and select_hi are the input method's selection inside s,
+// in bytes of s as given. Empty s removes the marked text and ends the
+// composition. If the text doesn't fit the limit nothing changes.
 field_set_marked :: proc(f: ^Text_Field, s: string, select_lo, select_hi: int, replace_lo := -1, replace_hi := -1) {
 	lo, hi := field_selection(f)
 	if f.marked {
 		lo, hi = f.marked_start, f.marked_end
 	}
 	if replace_lo >= 0 {
-		bounds := cluster_bounds(field_text(f))
-		lo = snap_down(bounds, clamp(replace_lo, 0, f.len))
-		hi = snap_up(bounds, clamp(replace_hi, lo, f.len))
+		lo, hi = ime_range(f, replace_lo, replace_hi)
 	}
 	clean := sanitize(s)
+	if len(clean) > field_limit(f) - (f.len - (hi - lo)) {
+		return
+	}
 	// A composition starts an undo step and stays in it until committed.
 	if !f.marked && f.last_edit != .Typing {
 		push_undo(f)
 		f.redo_count = 0
 	}
-	room := field_limit(f) - (f.len - (hi - lo))
-	clean = fit(clean, room)
 	splice(f, lo, hi, clean)
 	f.last_edit = .Typing
 	if len(clean) == 0 {
@@ -349,9 +345,33 @@ field_set_marked :: proc(f: ^Text_Field, s: string, select_lo, select_hi: int, r
 	}
 	f.marked = true
 	f.marked_start, f.marked_end = lo, lo + len(clean)
-	sel_lo := lo + clamp(select_lo, 0, len(clean))
-	sel_hi := lo + clamp(select_hi, select_lo, len(clean))
-	f.anchor, f.cursor = sel_lo, sel_hi
+	// The selection was found in s before cleaning, so it may fall inside a
+	// codepoint of what's left.
+	sel_lo := clamp(select_lo, 0, len(clean))
+	sel_hi := clamp(max(select_hi, select_lo), 0, len(clean))
+	f.anchor = lo + rune_start(clean, sel_lo)
+	f.cursor = lo + rune_start(clean, sel_hi)
+}
+
+// ime_range is an input method's replacement range [from, to) clamped to
+// the text, with each end moved back to the start of its codepoint. The
+// shell's mirror does the same.
+@(private)
+ime_range :: proc(f: ^Text_Field, from, to: int) -> (lo, hi: int) {
+	s := field_text(f)
+	lo = rune_start(s, clamp(from, 0, f.len))
+	hi = rune_start(s, clamp(to, 0, f.len))
+	return lo, max(lo, hi)
+}
+
+// rune_start moves p back to the start of the UTF-8 sequence it's in.
+@(private)
+rune_start :: proc(s: string, p: int) -> int {
+	p := p
+	for p > 0 && p < len(s) && s[p] & 0xc0 == 0x80 {
+		p -= 1
+	}
+	return p
 }
 
 // field_unmark keeps the marked text as typed and ends the composition,
@@ -497,13 +517,19 @@ fit :: proc(s: string, room: int) -> string {
 	return s[:snap_down(cluster_bounds(s), room)]
 }
 
-// sanitize turns line breaks and tabs into spaces and drops other control
-// characters and invalid UTF-8.
+// sanitize makes s one line: a run of line breaks and tabs (LF, CR, tab,
+// NEL, U+2028, U+2029) becomes one space, or none at the start, and the
+// other C0 and C1 controls, DEL, U+FFFD and invalid UTF-8 go, an invalid
+// byte at a time as utf8.decode_rune reads them. shell.m's field_sanitize
+// does the same byte for byte.
 @(private)
 sanitize :: proc(s: string) -> string {
+	drop :: proc(r: rune) -> bool {
+		return r < 0x20 || (r >= 0x7f && r <= 0x9f) || r == utf8.RUNE_ERROR || r == 0x2028 || r == 0x2029
+	}
 	clean := true
 	for r in s {
-		if r < 0x20 || r == 0x7f || r == utf8.RUNE_ERROR || r == 0x2028 || r == 0x2029 {
+		if drop(r) {
 			clean = false
 			break
 		}
@@ -514,11 +540,11 @@ sanitize :: proc(s: string) -> string {
 	out := make([dynamic]u8, 0, len(s), context.temp_allocator)
 	for r in s {
 		switch {
-		case r == '\n' || r == '\r' || r == '\t' || r == 0x2028 || r == 0x2029:
+		case r == '\n' || r == '\r' || r == '\t' || r == 0x85 || r == 0x2028 || r == 0x2029:
 			if len(out) > 0 && out[len(out) - 1] != ' ' {
 				append(&out, ' ')
 			}
-		case r < 0x20 || r == 0x7f || r == utf8.RUNE_ERROR:
+		case drop(r):
 		case:
 			bytes, n := utf8.encode_rune(r)
 			append(&out, ..bytes[:n])

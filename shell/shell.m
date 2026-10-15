@@ -413,10 +413,11 @@ static void setup_remote_commands(void) {
 // shell keeps a mirror of the field and applies each edit it sends on to
 // the app to the mirror as well. The app's next state replaces the mirror.
 // The app counts in UTF-8 bytes and AppKit in UTF-16 units; the mirror
-// converts, rounding down to a whole codepoint. The field cleans what it
-// takes and drops what doesn't fit its limit, and the mirror does the same
-// (field_clean), but the app always sends its state after taking text, so
-// any difference lasts until its next frame.
+// converts, rounding down to a whole codepoint. Both sides take the input
+// method's edits by rules that need no segmentation, so they agree: the
+// text is cleaned the same way byte for byte (field_sanitize and the app's
+// sanitize), a replacement range is clamped to the text and rounded down to
+// codepoints, and an edit that doesn't fit the limit is refused whole.
 
 static struct {
   bool active;
@@ -489,42 +490,67 @@ static NSString *plain_string(id string) {
   return [string isKindOfClass:NSAttributedString.class] ? [(NSAttributedString *)string string] : (NSString *)string;
 }
 
-// field_clean does to n bytes of text what the app's field does before it
-// puts them in place of bytes [lo, hi): line breaks and tabs become one
-// space, other control characters and U+FFFD go, and the rest is cut to the
-// room the limit leaves, at a composed character boundary. It writes to out,
+// utf8_decode reads one codepoint as Odin's utf8.decode_rune does: an
+// invalid or cut short sequence is U+FFFD one byte long.
+static uint32_t utf8_decode(const uint8_t *s, uint32_t n, uint32_t *cp) {
+  uint8_t c = s[0];
+  uint32_t w = 0, min = 0x80, max = 0xbf;
+  if (c < 0x80) {
+    *cp = c;
+    return 1;
+  } else if (c >= 0xc2 && c <= 0xdf) {
+    w = 2;
+  } else if (c >= 0xe0 && c <= 0xef) {
+    w = 3;
+    if (c == 0xe0) min = 0xa0;
+    if (c == 0xed) max = 0x9f;
+  } else if (c >= 0xf0 && c <= 0xf4) {
+    w = 4;
+    if (c == 0xf0) min = 0x90;
+    if (c == 0xf4) max = 0x8f;
+  }
+  *cp = 0xfffd;
+  if (w == 0 || n < w || s[1] < min || s[1] > max) return 1;
+  for (uint32_t i = 2; i < w; i++)
+    if (s[i] < 0x80 || s[i] > 0xbf) return 1;
+  uint32_t r = c & (0xff >> (w + 1));
+  for (uint32_t i = 1; i < w; i++) r = r << 6 | (s[i] & 0x3f);
+  *cp = r;
+  return w;
+}
+
+// field_sanitize cleans n bytes of text as the app's field does (sanitize
+// in src/ui/edit.odin): a run of line breaks and tabs (LF, CR, tab, NEL,
+// U+2028, U+2029) becomes one space, or none at the start, and the other
+// C0 and C1 controls, DEL, U+FFFD and invalid bytes go. It writes to out,
 // which has room for n bytes, and returns the length.
-static uint32_t field_clean(const char *text, uint32_t n, uint32_t lo, uint32_t hi, char *out) {
+static uint32_t field_sanitize(const char *text, uint32_t n, char *out) {
   const uint8_t *s = (const uint8_t *)text;
   uint32_t o = 0;
   for (uint32_t i = 0; i < n;) {
-    uint32_t w = utf8_width(s[i]);
-    if (i + w > n) break;
-    bool line = s[i] == '\n' || s[i] == '\r' || s[i] == '\t' ||
-                (w == 3 && s[i] == 0xe2 && s[i + 1] == 0x80 && (s[i + 2] == 0xa8 || s[i + 2] == 0xa9));
-    bool control = s[i] < 0x20 || s[i] == 0x7f || (w == 3 && s[i] == 0xef && s[i + 1] == 0xbf && s[i + 2] == 0xbd);
-    if (line) {
+    uint32_t cp, w = utf8_decode(s + i, n - i, &cp);
+    if (cp == '\n' || cp == '\r' || cp == '\t' || cp == 0x85 || cp == 0x2028 || cp == 0x2029) {
       if (o > 0 && out[o - 1] != ' ') out[o++] = ' ';
-    } else if (!control) {
+    } else if (!(cp < 0x20 || (cp >= 0x7f && cp <= 0x9f) || cp == 0xfffd)) {
       memcpy(out + o, s + i, w);
       o += w;
     }
     i += w;
   }
-  if (!g_ti.limit) return o;
-  uint32_t rest = g_ti.length - (hi - lo);
-  uint32_t room = g_ti.limit > rest ? g_ti.limit - rest : 0;
-  if (o <= room) return o;
-  NSString *str = [[NSString alloc] initWithBytes:out length:o encoding:NSUTF8StringEncoding];
-  uint32_t fits = 0;
-  for (NSUInteger at = 0; at < str.length;) {
-    NSRange r = [str rangeOfComposedCharacterSequenceAtIndex:at];
-    uint32_t bytes = (uint32_t)[[str substringWithRange:r] lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
-    if (fits + bytes > room) break;
-    fits += bytes;
-    at = NSMaxRange(r);
-  }
-  return fits;
+  return o;
+}
+
+// field_fits says whether n bytes in place of [lo, hi) keep the field
+// within its limit. An input method's edit that doesn't fit is refused
+// whole, by the app too, so the two never cut text in different places.
+static bool field_fits(uint32_t n, uint32_t lo, uint32_t hi) {
+  return !g_ti.limit || (uint64_t)g_ti.length - (hi - lo) + n <= g_ti.limit;
+}
+
+// utf8_start moves p back to the start of the UTF-8 sequence it's in.
+static uint32_t utf8_start(const uint8_t *s, uint32_t n, uint32_t p) {
+  while (p > 0 && p < n && (s[p] & 0xc0) == 0x80) p--;
+  return p;
 }
 
 static void text_insert(id string, NSRange replacement) {
@@ -535,9 +561,12 @@ static void text_insert(id string, NSRange replacement) {
   uint32_t lo, hi;
   edit_range(replacement, &e, &lo, &hi);
   char *clean = malloc(n + 1);
-  uint32_t cn = field_clean(utf8, n, lo, hi, clean);
-  // The field leaves itself alone when nothing goes in and nothing goes.
-  if (cn > 0 || lo != hi) {
+  uint32_t cn = field_sanitize(utf8, n, clean);
+  if (!field_fits(cn, lo, hi)) {
+    // Refused: a composition ends as it was, as unmarkText does.
+    if (g_ti.marked_start >= 0) g_ti.sel_start = g_ti.sel_end = (uint32_t)g_ti.marked_end;
+  } else if (cn > 0 || lo != hi) {
+    // The field leaves itself alone when nothing goes in and nothing goes.
     mirror_replace(lo, hi, clean, cn);
     g_ti.sel_start = g_ti.sel_end = lo + cn;
   }
@@ -560,21 +589,24 @@ static void text_set_marked(id string, NSRange selected, NSRange replacement) {
   uint32_t lo, hi;
   edit_range(replacement, &e, &lo, &hi);
   char *clean = malloc(n + 1);
-  uint32_t cn = field_clean(utf8, n, lo, hi, clean);
-  mirror_replace(lo, hi, clean, cn);
-  free(clean);
-  if (cn > 0) {
-    // The selection was found in the text as given; the field clamps it to
-    // what it kept.
+  uint32_t cn = field_sanitize(utf8, n, clean);
+  if (!field_fits(cn, lo, hi)) {
+    // Refused: the mirror stays as it was.
+  } else if (cn > 0) {
+    mirror_replace(lo, hi, clean, cn);
+    // The selection was found in the text as given. The field clamps it to
+    // what it kept and rounds it down to a codepoint.
     uint32_t end = (uint32_t)e.select_end;
     g_ti.marked_start = (int32_t)lo;
     g_ti.marked_end = (int32_t)(lo + cn);
-    g_ti.sel_start = lo + (sel_lo < cn ? sel_lo : cn);
-    g_ti.sel_end = lo + (end < cn ? end : cn);
+    g_ti.sel_start = lo + utf8_start((const uint8_t *)clean, cn, sel_lo < cn ? sel_lo : cn);
+    g_ti.sel_end = lo + utf8_start((const uint8_t *)clean, cn, end < cn ? end : cn);
   } else {
+    mirror_replace(lo, hi, clean, cn);
     g_ti.marked_start = g_ti.marked_end = -1;
     g_ti.sel_start = g_ti.sel_end = lo;
   }
+  free(clean);
   g_ime_handled = true;
   push_event(e);
   request_redraw();
@@ -1083,11 +1115,16 @@ static void update_display_link(void) {
 // for checking text input and accessibility without a person at the
 // keyboard: "2:key=cmd+f;3:mark=にほんご;4:commit=日本語;6:ax-dump;7:ax-press=Next".
 // Steps are seconds after launch and a command, separated by semicolons.
+// Commands joined with | run together, with no frame between them.
 //
 //   key=cmd+shift+z     a key down and up, as from the keyboard (letters, escape, return, tab, left...)
 //   mark=text           setMarkedText, with the caret at the end of text
 //   commit=text         insertText
+//   mark-range=l,n,text setMarkedText replacing UTF-16 units [l, l+n)
+//   commit-range=l,n,text insertText replacing UTF-16 units [l, l+n)
+//   commit-marked=text  insertText replacing what markedRange says, as an input method does
 //   unmark              unmarkText
+//   clean=hex           print what field_sanitize makes of the bytes, in hex
 //   ime                 print what NSTextInputClient answers
 //   ax-dump             print the window's accessibility tree, as an assistive app reads it
 //   ax-press=label      AXPress on the first element whose label or value starts with label
@@ -1185,13 +1222,47 @@ static void ax_walk(id el, int depth, NSString *press, bool *pressed) {
   for (id child in [el accessibilityChildren]) ax_walk(child, depth + 1, press, pressed);
 }
 
+static void test_clean(NSString *hex) {
+  uint32_t n = (uint32_t)hex.length / 2;
+  char *in = malloc(n + 1), *out = malloc(n + 1);
+  for (uint32_t i = 0; i < n; i++) in[i] = (char)strtoul([hex substringWithRange:NSMakeRange(i * 2, 2)].UTF8String, NULL, 16);
+  uint32_t o = field_sanitize(in, n, out);
+  fprintf(stderr, "shell: clean %s -> ", hex.UTF8String);
+  for (uint32_t i = 0; i < o; i++) fprintf(stderr, "%02x", (uint8_t)out[i]);
+  fprintf(stderr, "\n");
+  free(in);
+  free(out);
+}
+
+// test_range splits "location,length,text" for mark-range and commit-range.
+static NSRange test_range(NSString *arg, NSString **text) {
+  NSArray *parts = [arg componentsSeparatedByString:@","];
+  if (parts.count < 3) {
+    *text = @"";
+    return NSMakeRange(NSNotFound, 0);
+  }
+  *text = [[parts subarrayWithRange:NSMakeRange(2, parts.count - 2)] componentsJoinedByString:@","];
+  return NSMakeRange((NSUInteger)[parts[0] integerValue], (NSUInteger)[parts[1] integerValue]);
+}
+
 static void test_step(NSString *command, NSString *arg) {
+  NSString *text;
   if ([command isEqualToString:@"key"]) {
     test_key(arg);
   } else if ([command isEqualToString:@"mark"]) {
     [(Metal_View *)g_view setMarkedText:arg selectedRange:NSMakeRange(arg.length, 0) replacementRange:NSMakeRange(NSNotFound, 0)];
   } else if ([command isEqualToString:@"commit"]) {
     [(Metal_View *)g_view insertText:arg replacementRange:NSMakeRange(NSNotFound, 0)];
+  } else if ([command isEqualToString:@"mark-range"]) {
+    NSRange r = test_range(arg, &text);
+    [(Metal_View *)g_view setMarkedText:text selectedRange:NSMakeRange(text.length, 0) replacementRange:r];
+  } else if ([command isEqualToString:@"commit-range"]) {
+    NSRange r = test_range(arg, &text);
+    [(Metal_View *)g_view insertText:text replacementRange:r];
+  } else if ([command isEqualToString:@"commit-marked"]) {
+    [(Metal_View *)g_view insertText:arg replacementRange:((Metal_View *)g_view).markedRange];
+  } else if ([command isEqualToString:@"clean"]) {
+    test_clean(arg);
   } else if ([command isEqualToString:@"unmark"]) {
     [(Metal_View *)g_view unmarkText];
   } else if ([command isEqualToString:@"ime"]) {
@@ -1220,13 +1291,15 @@ static void setup_shell_test(void) {
     NSRange colon = [step rangeOfString:@":"];
     if (colon.location == NSNotFound) continue;
     double at = [[step substringToIndex:colon.location] doubleValue];
-    NSString *rest = [step substringFromIndex:colon.location + 1];
-    NSRange eq = [rest rangeOfString:@"="];
-    NSString *command = eq.location == NSNotFound ? rest : [rest substringToIndex:eq.location];
-    NSString *arg = eq.location == NSNotFound ? @"" : [rest substringFromIndex:eq.location + 1];
+    NSArray *commands = [[step substringFromIndex:colon.location + 1] componentsSeparatedByString:@"|"];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(at * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
       fprintf(stderr, "shell: test step %s\n", step.UTF8String);
-      test_step(command, arg);
+      for (NSString *rest in commands) {
+        NSRange eq = [rest rangeOfString:@"="];
+        NSString *command = eq.location == NSNotFound ? rest : [rest substringToIndex:eq.location];
+        NSString *arg = eq.location == NSNotFound ? @"" : [rest substringFromIndex:eq.location + 1];
+        test_step(command, arg);
+      }
     });
   }
 }

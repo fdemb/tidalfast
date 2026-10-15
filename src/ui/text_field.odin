@@ -2,6 +2,7 @@ package ui
 
 import "core:unicode/utf8"
 
+import "../platform"
 import "../render"
 import "../text"
 
@@ -10,11 +11,12 @@ FIELD_PAD :: 8
 CLIPBOARD_MAX :: 64 << 10
 
 Field_Signal :: struct {
-	box:       ^Box,
-	focused:   bool,
-	changed:   bool, // the text changed this frame
-	submitted: bool, // Return
-	cancelled: bool, // Escape in an empty field, which gave up the focus
+	box:            ^Box,
+	focused:        bool,
+	changed:        bool, // the text changed this frame
+	submitted:      bool, // Return
+	submitted_text: string, // the text when Return was pressed, this frame's
+	cancelled:      bool, // Escape in an empty field, which gave up the focus
 }
 
 // Field_Layout is where each grapheme cluster of a field's text is drawn.
@@ -48,9 +50,6 @@ text_field :: proc(id: string, f: ^Text_Field, placeholder: string, width, heigh
 		if u.focus_visible {
 			field_select_all(f)
 		}
-	}
-	if !focused && f.had_focus {
-		field_unmark(f)
 	}
 	f.had_focus = focused
 
@@ -91,35 +90,61 @@ text_field :: proc(id: string, f: ^Text_Field, placeholder: string, width, heigh
 		f.blink_start = u.time
 	}
 
-	if focused {
-		for e in u.edits[:u.edit_count] {
-			#partial switch e.kind {
-			case .Key_Down:
-				if field_key(u, f, e.key, &sig) {
-					take_key(u, e.key)
-				}
-			case .Text:
-				u.text_resend = true
-				if e.replace {
-					field_insert_at(f, e.replace_lo, e.replace_hi, e.text)
-				} else {
-					field_insert(f, e.text)
-				}
-			case .Marked_Text:
-				u.text_resend = true
-				if e.replace {
-					field_set_marked(f, e.text, e.select_lo, e.select_hi, e.replace_lo, e.replace_hi)
-				} else {
-					field_set_marked(f, e.text, e.select_lo, e.select_hi)
-				}
-			case .Unmark_Text:
-				u.text_resend = true
-				field_unmark(f)
-			}
-			f.blink_start = u.time
+	// The frame's edits for this field, in order. They were queued while it
+	// had the focus, so text typed before a Tab still goes in. After Escape
+	// gives up the focus, the rest wait for the field to get it back.
+	live := true
+	for e in u.edits[:u.edit_count] {
+		if e.target != b.key || b.key == 0 {
+			continue
 		}
-		u.edit_count = 0
+		if !live && e.op != .Focus {
+			continue
+		}
+		switch e.op {
+		case .Focus:
+			if !live && u.focus == 0 {
+				u.focus = b.key
+			}
+			live = true
+			if e.select_all {
+				field_select_all(f)
+			}
+		case .Blur:
+			field_unmark(f)
+		case .Key:
+			used, gave_up := field_key(u, f, b.key, e.key, &sig)
+			if used {
+				take_key(u, e.key)
+			}
+			live = !gave_up
+		case .Text:
+			u.text_resend = true
+			if e.replace {
+				field_insert_at(f, e.replace_lo, e.replace_hi, e.text)
+			} else {
+				field_insert(f, e.text)
+			}
+		case .Marked_Text:
+			u.text_resend = true
+			if e.replace {
+				field_set_marked(f, e.text, e.select_lo, e.select_hi, e.replace_lo, e.replace_hi)
+			} else {
+				field_set_marked(f, e.text, e.select_lo, e.select_hi)
+			}
+		case .Unmark_Text:
+			u.text_resend = true
+			field_unmark(f)
+		}
+		f.blink_start = u.time
 	}
+	// Escape may have given up the focus.
+	focused = b.key != 0 && u.focus == b.key
+	sig.focused = focused
+	if !focused {
+		field_unmark(f)
+	}
+	f.had_focus = focused
 	t := field_text(f)
 	sig.changed = t != old
 
@@ -171,8 +196,20 @@ text_field :: proc(id: string, f: ^Text_Field, placeholder: string, width, heigh
 	return
 }
 
+// focus_shortcut makes the key code with modifiers give the text field b
+// the focus with its text selected, as Cmd-F does. It takes effect at its
+// place among the next frame's events, so keys and text after it go to the
+// field. Call it every frame, after text_field.
+focus_shortcut :: proc(b: ^Box, code: u32, modifiers: platform.Modifiers) {
+	u := ctx
+	if b.key != 0 && u.shortcut_count < MAX_SHORTCUTS {
+		u.shortcuts[u.shortcut_count] = {{code, modifiers}, b.key}
+		u.shortcut_count += 1
+	}
+}
+
 // focus_text_field gives b, a text field built for f, the focus with all
-// of its text selected, as for Cmd-F.
+// of its text selected, right away.
 focus_text_field :: proc(b: ^Box, f: ^Text_Field) {
 	u := ctx
 	if b.key == 0 {
@@ -186,9 +223,10 @@ focus_text_field :: proc(b: ^Box, f: ^Text_Field) {
 	u.animating = true
 }
 
-// field_key applies one key press, reporting whether the field used it.
+// field_key applies one key press, reporting whether the field used it and
+// whether it gave up the focus.
 @(private)
-field_key :: proc(u: ^State, f: ^Text_Field, k: Key_Press, sig: ^Field_Signal) -> bool {
+field_key :: proc(u: ^State, f: ^Text_Field, key: Key, k: Key_Press, sig: ^Field_Signal) -> (used, gave_up: bool) {
 	shift := .Shift in k.modifiers
 	base := k.modifiers - {.Shift}
 	switch k.code {
@@ -202,11 +240,11 @@ field_key :: proc(u: ^State, f: ^Text_Field, k: Key_Press, sig: ^Field_Signal) -
 		case {.Command}:
 			field_move(f, dir, .Line, shift)
 		case:
-			return false
+			return
 		}
 	case KEY_UP, KEY_HOME, KEY_DOWN, KEY_END:
 		if base != {} && base != {.Command} {
-			return false
+			return
 		}
 		field_move(f, -1 if k.code == KEY_UP || k.code == KEY_HOME else 1, .Line, shift)
 	case KEY_BACKSPACE, KEY_FORWARD_DELETE:
@@ -219,7 +257,7 @@ field_key :: proc(u: ^State, f: ^Text_Field, k: Key_Press, sig: ^Field_Signal) -
 		case {.Command}:
 			field_delete(f, dir, .Line)
 		case:
-			return false
+			return
 		}
 	case KEY_A:
 		switch k.modifiers {
@@ -228,16 +266,16 @@ field_key :: proc(u: ^State, f: ^Text_Field, k: Key_Press, sig: ^Field_Signal) -
 		case {.Control}, {.Control, .Shift}:
 			field_move(f, -1, .Line, shift)
 		case:
-			return false
+			return
 		}
 	case KEY_E:
 		if base != {.Control} {
-			return false
+			return
 		}
 		field_move(f, 1, .Line, shift)
 	case KEY_C, KEY_X:
 		if k.modifiers != {.Command} {
-			return false
+			return
 		}
 		sel := field_selected(f) if k.code == KEY_C else field_cut(f)
 		if sel != "" && u.clipboard_set != nil && !f.marked {
@@ -245,7 +283,7 @@ field_key :: proc(u: ^State, f: ^Text_Field, k: Key_Press, sig: ^Field_Signal) -
 		}
 	case KEY_V:
 		if k.modifiers != {.Command} {
-			return false
+			return
 		}
 		if u.clipboard_get != nil {
 			n := min(int(u.clipboard_get(nil, 0)), CLIPBOARD_MAX)
@@ -262,27 +300,32 @@ field_key :: proc(u: ^State, f: ^Text_Field, k: Key_Press, sig: ^Field_Signal) -
 		case {.Command, .Shift}:
 			field_redo(f)
 		case:
-			return false
+			return
 		}
 	case KEY_RETURN, KEY_KEYPAD_ENTER:
 		if k.modifiers != {} {
-			return false
+			return
 		}
 		sig.submitted = true
+		sig.submitted_text = clone_temp(field_text(f))
 	case KEY_ESCAPE:
 		if k.modifiers != {} {
-			return false
+			return
 		}
 		if f.len > 0 || f.marked {
 			field_clear(f)
 		} else {
-			u.focus = 0
+			if u.focus == key {
+				u.focus = 0
+			}
 			sig.cancelled = true
+			gave_up = true
 		}
 	case:
-		return false
+		return
 	}
-	return true
+	used = true
+	return
 }
 
 // take_key removes the first press of k from the keys the app can ask for.

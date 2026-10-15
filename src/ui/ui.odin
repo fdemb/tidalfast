@@ -30,6 +30,7 @@ MAX_BOXES :: 8192
 BOX_TABLE :: 4096 // buckets, a power of two
 MAX_KEY_PRESSES :: 32
 MAX_EDIT_EVENTS :: 64
+MAX_SHORTCUTS :: 8
 STACK_DEPTH :: 64
 TOOLTIP_DELAY :: 0.5 // seconds of hovering before a tooltip shows
 DRAG_THRESHOLD :: 4 // points the mouse moves before a press becomes a drag
@@ -171,15 +172,33 @@ Key_Press :: struct {
 	modifiers: platform.Modifiers,
 }
 
-// Edit_Event is a key press the UI didn't use, or text from the shell, in
-// the order they came, for the focused text field.
+// Edit_Event is a key press the UI didn't use, text from the shell, or a
+// text field getting or losing the focus, in the order they came. target is
+// the box that had the focus when it came, or the one that got or lost it.
 Edit_Event :: struct {
-	kind:                   platform.Event_Kind, // Key_Down, Text, Marked_Text or Unmark_Text
+	op:                     Edit_Op,
+	target:                 Key,
+	select_all:             bool, // .Focus: select the field's text, as for Cmd-F
 	key:                    Key_Press,
 	text:                   string, // this frame's
 	replace:                bool,
 	replace_lo, replace_hi: int,
 	select_lo, select_hi:   int,
+}
+
+Edit_Op :: enum u8 {
+	Key,
+	Text,
+	Marked_Text,
+	Unmark_Text,
+	Focus,
+	Blur,
+}
+
+// Shortcut is a key that gives a text field the focus, from focus_shortcut.
+Shortcut :: struct {
+	key:    Key_Press,
+	target: Key,
 }
 
 Stack :: struct($T: typeid) {
@@ -234,6 +253,9 @@ State :: struct {
 	key_count:      int,
 	edits:          [MAX_EDIT_EVENTS]Edit_Event,
 	edit_count:     int,
+	// Last frame's focus_shortcut calls, which this frame's keys go by.
+	shortcuts:      [MAX_SHORTCUTS]Shortcut,
+	shortcut_count: int,
 	click_count:    u32, // of the last left press: 2 for a double-click, 3 for a triple
 	window_inactive: bool, // another window has the keyboard
 	wake:           f64, // the earliest time something asked for a frame at, 0 for none
@@ -387,6 +409,7 @@ begin_frame :: proc(u: ^State, events: []platform.Event, r: ^render.Renderer, t:
 		release_stale(u, events, held)
 	}
 	process_events(u, events, text_bytes)
+	u.shortcut_count = 0
 
 	u.parents.count = 0
 	u.root = new(Box, context.temp_allocator)
@@ -561,8 +584,7 @@ process_events :: proc(u: ^State, events: []platform.Event, text_bytes: []u8) {
 		case .Access_Focus:
 			for h in u.hits[:u.hit_count] {
 				if h.key == Key(e.target) && .Focusable in h.flags {
-					u.focus = h.key
-					u.focus_visible = true
+					move_focus(u, h.key, true)
 					u.focus_reveal = true
 				}
 			}
@@ -614,13 +636,38 @@ mouse_pressed :: proc(u: ^State, e: platform.Event) {
 	}
 	// The press moves the focus to what was clicked, or its nearest
 	// focusable ancestor, or nowhere.
-	u.focus = 0
-	u.focus_visible = false
+	focus := Key(0)
 	for h in u.hits[:u.hit_count] {
 		if h.key == hover {
-			u.focus = h.key if .Focusable in h.flags else h.focus_parent
+			focus = h.key if .Focusable in h.flags else h.focus_parent
 			break
 		}
+	}
+	move_focus(u, focus, false)
+}
+
+// move_focus gives key the focus. A text field that gets or loses it hears
+// so through the edit events, in order with the keys and text around it.
+// A field selects its text when it comes from the keyboard, as tabbing
+// into a Mac text field does, or when select_all says so.
+@(private)
+move_focus :: proc(u: ^State, key: Key, visible: bool, select_all: Maybe(bool) = nil) {
+	if key != u.focus && takes_text(u, u.focus) {
+		queue_edit(u, {op = .Blur, target = u.focus})
+	}
+	all := select_all.? or_else visible
+	if takes_text(u, key) && (key != u.focus || all) {
+		queue_edit(u, {op = .Focus, target = key, select_all = all})
+	}
+	u.focus = key
+	u.focus_visible = visible
+}
+
+@(private)
+queue_edit :: proc(u: ^State, e: Edit_Event) {
+	if u.edit_count < MAX_EDIT_EVENTS {
+		u.edits[u.edit_count] = e
+		u.edit_count += 1
 	}
 }
 
@@ -631,6 +678,14 @@ key_down :: proc(u: ^State, e: platform.Event) {
 	switch {
 	case !e.repeat && (code == KEY_F1 || (code == KEY_D && mods == {.Command, .Shift})):
 		u.debug = !u.debug
+		return
+	case shortcut_for(u, {code, mods}) != 0:
+		target := shortcut_for(u, {code, mods})
+		if u.menu != 0 && u.menu_open {
+			close_menu()
+		}
+		move_focus(u, target, false, select_all = true)
+		u.animating = true
 		return
 	case code == KEY_TAB && mods - {.Shift} == {}:
 		focus_step(u, -1 if .Shift in mods else 1)
@@ -648,7 +703,7 @@ key_down :: proc(u: ^State, e: platform.Event) {
 			return
 		}
 		if u.focus != 0 {
-			u.focus = 0
+			move_focus(u, 0, false)
 			return
 		}
 	case (code == KEY_RETURN || code == KEY_SPACE) && mods == {} && u.focus != 0:
@@ -666,23 +721,32 @@ key_down :: proc(u: ^State, e: platform.Event) {
 		u.keys[u.key_count] = {code, mods}
 		u.key_count += 1
 	}
-	if u.edit_count < MAX_EDIT_EVENTS {
-		u.edits[u.edit_count] = {
-			kind = .Key_Down,
-			key  = {code, mods},
+	queue_edit(u, {op = .Key, target = u.focus, key = {code, mods}})
+}
+
+@(private)
+shortcut_for :: proc(u: ^State, k: Key_Press) -> Key {
+	for sc in u.shortcuts[:u.shortcut_count] {
+		if sc.key == k {
+			return sc.target
 		}
-		u.edit_count += 1
 	}
+	return 0
 }
 
 // focus_takes_text says whether the focused box is a text field.
 @(private)
 focus_takes_text :: proc(u: ^State) -> bool {
-	if u.focus == 0 {
+	return takes_text(u, u.focus)
+}
+
+@(private)
+takes_text :: proc(u: ^State, key: Key) -> bool {
+	if key == 0 {
 		return false
 	}
 	for h in u.hits[:u.hit_count] {
-		if h.key == u.focus {
+		if h.key == key {
 			return .Text_Input in h.flags
 		}
 	}
@@ -692,23 +756,27 @@ focus_takes_text :: proc(u: ^State) -> bool {
 // text_event queues text from the shell for the focused text field.
 @(private)
 text_event :: proc(u: ^State, e: platform.Event, text_bytes: []u8) {
-	if u.edit_count >= MAX_EDIT_EVENTS {
-		return
-	}
 	s := ""
 	if int(e.text_offset) + int(e.text_length) <= len(text_bytes) {
 		s = string(text_bytes[e.text_offset:][:e.text_length])
 	}
-	u.edits[u.edit_count] = {
-		kind       = e.kind,
+	op := Edit_Op.Text
+	#partial switch e.kind {
+	case .Marked_Text:
+		op = .Marked_Text
+	case .Unmark_Text:
+		op = .Unmark_Text
+	}
+	queue_edit(u, {
+		op         = op,
+		target     = u.focus,
 		text       = s,
 		replace    = bool(e.replace),
 		replace_lo = int(e.replace_start),
 		replace_hi = int(e.replace_end),
 		select_lo  = int(e.select_start),
 		select_hi  = int(e.select_end),
-	}
-	u.edit_count += 1
+	})
 }
 
 // focus_step moves the focus to the next or previous focusable box in
@@ -731,8 +799,7 @@ focus_step :: proc(u: ^State, dir: int) {
 		i := ((start + dir * step) % n + n) % n
 		h := u.hits[i]
 		if .Focusable in h.flags && (!u.menu_open || h.in_menu) {
-			u.focus = h.key
-			u.focus_visible = true
+			move_focus(u, h.key, true)
 			u.focus_reveal = true
 			return
 		}
@@ -778,8 +845,7 @@ focus_arrow :: proc(u: ^State, dir: int) -> bool {
 	for i := at + dir; i >= 0 && i < u.hit_count; i += dir {
 		h := u.hits[i]
 		if .Focusable in h.flags && h.group == group {
-			u.focus = h.key
-			u.focus_visible = true
+			move_focus(u, h.key, true)
 			u.focus_reveal = true
 			return true
 		}

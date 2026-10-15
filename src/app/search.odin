@@ -113,21 +113,30 @@ draw_search_field :: proc(s: ^State) {
 		sig := ui.text_field("search", &sr.field, "Search", ui.fill(), ui.px(32))
 		sig.box.background = SURFACE
 		sig.box.border_color = ACCENT if sig.focused else OUTLINE
+		ui.focus_shortcut(sig.box, ui.KEY_F, {.Command})
+		ui.focus_shortcut(sig.box, ui.KEY_L, {.Command})
 		ui.spacer(ui.px(12))
-		if ui.key_pressed(ui.KEY_F, {.Command}) || ui.key_pressed(ui.KEY_L, {.Command}) {
-			ui.focus_text_field(sig.box, &sr.field)
-		}
-		if sig.changed {
+		// Return searches for the text it was pressed on. Edits after it in
+		// the same frame start the debounce over, as they would in the next.
+		submitted := strings.trim_space(sig.submitted_text)
+		switch {
+		case sig.submitted && submitted != "" && sig.submitted_text != ui.field_text(&sr.field):
+			search_stop(s)
+			search_send(s, submitted)
 			search_edited(s)
-		}
-		if sig.submitted && search_query(s) != "" {
+		case sig.submitted && submitted != "":
+			if sig.changed {
+				search_edited(s)
+			}
 			sr.due = s.ui.time
+		case sig.changed:
+			search_edited(s)
 		}
 	}
 	// Nothing goes while the input method is still composing.
 	if sr.due > 0 && !sr.field.marked {
 		if s.ui.time >= sr.due {
-			search_send(s)
+			search_send(s, search_query(s))
 		} else {
 			ui.wake_at(sr.due)
 		}
@@ -168,10 +177,9 @@ search_stop :: proc(s: ^State) {
 }
 
 @(private = "file")
-search_send :: proc(s: ^State) {
+search_send :: proc(s: ^State, q: string) {
 	sr := &s.search
 	sr.due = 0
-	q := search_query(s)
 	fmt.eprintfln("search: \"%s\" (query %d)", q, sr.gen)
 	if s.data.fake {
 		fake_search(s, q)
@@ -251,6 +259,7 @@ browse_begin :: proc(s: ^State) {
 	lib.selected = -1
 	lib.playing = -1
 	lib.status = .None
+	lib.list_gen += 1
 	s.search.browsing = true
 }
 

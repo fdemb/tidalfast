@@ -234,3 +234,158 @@ fake_search_lists_albums_and_artists :: proc(t: ^testing.T) {
 		testing.expect_value(t, app.view_row(s, i).album, album)
 	}
 }
+
+@(private = "file")
+key :: proc(code: u32, modifiers: platform.Modifiers = {}) -> platform.Event {
+	return {kind = .Key_Down, key_code = code, modifiers = modifiers}
+}
+
+// text_at is a Text event for s, copied into the frame's bytes at offset.
+@(private = "file")
+text_at :: proc(f: ^Frame, at: int, s: string) -> platform.Event {
+	copy(f.bytes[at:], s)
+	return {kind = .Text, text_offset = u32(at), text_length = u32(len(s))}
+}
+
+// The fake library with "Jóga" searched for and the field focused.
+@(private = "file")
+searched_state :: proc(t: ^testing.T, f: ^Frame) -> ^app.State {
+	s := library_state(true)
+	library_frame(t, s, f)
+	library_frame(t, s, f, key(ui.KEY_F, {.Command}))
+	library_frame(t, s, f, type_text(f, "Jóga"))
+	library_frame(t, s, f, dt = 1)
+	assert(app.small_str(&s.search.query) == "Jóga")
+	return s
+}
+
+// Shortcuts the app and the UI handle outside the field take effect at
+// their place among the frame's events, with everything in one frame.
+@(test)
+field_shortcuts_keep_their_order :: proc(t: ^testing.T) {
+	arena: vmem.Arena
+	_ = vmem.arena_init_growing(&arena)
+	defer vmem.arena_destroy(&arena)
+	context.allocator = vmem.arena_allocator(&arena)
+	f: Frame
+	s := searched_state(t, &f)
+	defer library_state_free(s)
+	sr := &s.search
+	field := &sr.field
+
+	// Cmd-F selects what's there, so typing after it replaces it.
+	library_frame(t, s, &f, key(ui.KEY_F, {.Command}), text_at(&f, 0, "Kino"))
+	testing.expect_value(t, ui.field_text(field), "Kino")
+	testing.expect_value(t, field.anchor, field.cursor)
+	// And Cmd-L from another focus, here the next box after a Tab.
+	library_frame(t, s, &f, key(ui.KEY_TAB))
+	testing.expect(t, !ui.has_focus(node_box(s, "Search")))
+	library_frame(t, s, &f, key(ui.KEY_L, {.Command}), text_at(&f, 0, "Jóga"))
+	testing.expect_value(t, ui.field_text(field), "Jóga")
+	testing.expect(t, ui.has_focus(node_box(s, "Search")))
+	library_frame(t, s, &f, dt = 1)
+
+	// Return searches for the text it was pressed on. The X after it
+	// starts the debounce over.
+	library_frame(t, s, &f, key(ui.KEY_RETURN), text_at(&f, 0, "X"))
+	testing.expect_value(t, ui.field_text(field), "JógaX")
+	testing.expect_value(t, app.small_str(&sr.query), "Jóga")
+	testing.expect(t, sr.due > 0)
+	library_frame(t, s, &f, dt = 1)
+	testing.expect_value(t, app.small_str(&sr.query), "JógaX")
+
+	// Typing, then Return, searches at once for all of it.
+	library_frame(t, s, &f, text_at(&f, 0, "Y"), key(ui.KEY_RETURN))
+	testing.expect_value(t, app.small_str(&sr.query), "JógaXY")
+	testing.expect_value(t, sr.due, 0.0)
+
+	// Escape clears the field before the text after it.
+	library_frame(t, s, &f, key(ui.KEY_ESCAPE), text_at(&f, 0, "Kino"))
+	testing.expect_value(t, ui.field_text(field), "Kino")
+	testing.expect(t, sr.due > 0)
+	// Cmd-A, then typing.
+	library_frame(t, s, &f, key(ui.KEY_A, {.Command}), text_at(&f, 0, "Jóga"))
+	testing.expect_value(t, ui.field_text(field), "Jóga")
+
+	// Text typed before a Tab goes in, though the field lost the focus.
+	library_frame(t, s, &f, text_at(&f, 0, "!"), key(ui.KEY_TAB))
+	testing.expect_value(t, ui.field_text(field), "Jóga!")
+	testing.expect(t, !ui.has_focus(node_box(s, "Search")))
+
+	// Once Escape in an empty field gives up the focus, text after it goes
+	// nowhere, until Cmd-F gives the focus back.
+	library_frame(t, s, &f, key(ui.KEY_F, {.Command}))
+	library_frame(t, s, &f, key(ui.KEY_ESCAPE), key(ui.KEY_ESCAPE), text_at(&f, 0, "a"))
+	testing.expect_value(t, ui.field_text(field), "")
+	testing.expect(t, !ui.has_focus(node_box(s, "Search")))
+	library_frame(t, s, &f, key(ui.KEY_F, {.Command}))
+	library_frame(t, s, &f, text_at(&f, 0, "b"), key(ui.KEY_ESCAPE), key(ui.KEY_ESCAPE), key(ui.KEY_F, {.Command}), text_at(&f, 1, "c"))
+	testing.expect_value(t, ui.field_text(field), "c")
+	testing.expect(t, ui.has_focus(node_box(s, "Search")))
+}
+
+// node_box is the box behind the first node whose label starts with label.
+@(private = "file")
+node_box :: proc(s: ^app.State, label: string) -> ^ui.Box {
+	n, ok := node(s, label)
+	assert(ok, label)
+	return ui.box_lookup(&s.ui, ui.Key(n.id))
+}
+
+// The track menu belongs to the list and the track it opened on. When a
+// search result replaces the list, the menu closes, and a click on it in
+// the same frame does nothing, rather than act on the row with the same
+// index in the new list.
+@(test)
+track_menu_closes_with_its_list :: proc(t: ^testing.T) {
+	arena: vmem.Arena
+	_ = vmem.arena_init_growing(&arena)
+	defer vmem.arena_destroy(&arena)
+	context.allocator = vmem.arena_allocator(&arena)
+	s := library_state(false)
+	defer library_state_free(s)
+	open_test_list(s)
+	f: Frame
+	library_frame(t, s, &f)
+	library_frame(t, s, &f)
+	down, up := right_click(s, "Second song")
+	library_frame(t, s, &f, down, up)
+	library_frame(t, s, &f)
+	testing.expect(t, ui.menu_is_open("track_menu"))
+
+	// The same ids, other albums: only the list tells them apart.
+	rows := make([]app.Row, 3, context.temp_allocator)
+	for &r, i in rows {
+		r = {title = "Found song", artist = "Other Artist", album = "Other Album", id = i64(100 + i), album_id = 22, artist_id = 33}
+	}
+	res := app.Result {
+		job  = {kind = .Search, view = s.search.gen, id = app.small("found")},
+		rows = rows,
+	}
+	app.search_result(s, &res)
+	library_frame(t, s, &f, press(s, "Go to album"))
+	testing.expect(t, !ui.menu_is_open("track_menu"))
+	testing.expect_value(t, s.data.view.source, app.Source.Search)
+	library_frame(t, s, &f)
+	testing.expect_value(t, s.data.view.source, app.Source.Search)
+
+	// The fake data's lists, which aren't Track_Views.
+	fs := library_state(true)
+	defer library_state_free(fs)
+	library_frame(t, fs, &f)
+	library_frame(t, fs, &f, key(ui.KEY_F, {.Command}))
+	library_frame(t, fs, &f, type_text(&f, "Jóga"))
+	library_frame(t, fs, &f, dt = 1)
+	// A new search waits for its debounce while the menu opens on the old
+	// results. It ends in the frame of the click, and the search replaces
+	// the list before the menu is built.
+	library_frame(t, fs, &f, key(ui.KEY_A, {.Command}), text_at(&f, 0, "Kino"))
+	down, up = right_click(fs, "Jóga")
+	library_frame(t, fs, &f, down, up)
+	library_frame(t, fs, &f)
+	testing.expect(t, ui.menu_is_open("track_menu"))
+	library_frame(t, fs, &f, press(fs, "Go to album"), dt = 1)
+	testing.expect_value(t, app.small_str(&fs.search.query), "Kino")
+	testing.expect_value(t, fs.search.fake_source, app.Source.Search)
+	testing.expect(t, !ui.menu_is_open("track_menu"))
+}

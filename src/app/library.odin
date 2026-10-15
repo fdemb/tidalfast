@@ -40,6 +40,9 @@ Library :: struct {
 	playing:       int, // the row playing in this list, -1 for none
 	volume:        f32,
 	menu_row:      int, // the row the context menu is for
+	menu_track:    i64, // row_key of menu_row when the menu opened
+	menu_list:     u64, // list_gen when the menu opened
+	list_gen:      u32, // goes up when a sidebar entry or another list opens
 	drop_target:   int, // the playlist under a dragged row this frame, -1 for none
 	status:        Status,
 	status_track:  int,
@@ -346,8 +349,7 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 		play(s, i)
 	}
 	if sig.right_clicked {
-		lib.menu_row = i
-		ui.open_menu("track_menu", ui.mouse())
+		open_track_menu(s, i, ui.mouse())
 	}
 	if sig.dragging {
 		ui.drag_begin(u64(i))
@@ -394,8 +396,7 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 	more_sig := ui.signal(more)
 	if more_sig.clicked {
 		lib.selected = i
-		lib.menu_row = i
-		ui.open_menu("track_menu", {more.rect.x, more.rect.y + more.rect.h})
+		open_track_menu(s, i, {more.rect.x, more.rect.y + more.rect.h})
 	}
 	ui.tooltip(more_sig, more_label)
 	ui.spacer(ui.px(8))
@@ -432,16 +433,55 @@ cell :: proc(s: string, width: f32, align: ui.Align) -> ^ui.Box {
 	return b
 }
 
+// list_gen tells the open list from the lists before it.
+list_gen :: proc(s: ^State) -> u64 {
+	return u64(s.data.view.gen) << 32 | u64(s.library.list_gen)
+}
+
+// row_key tells row i of the open list from the other rows: its TIDAL id,
+// or with the fake data its index in State.rows. -1 while it's loading.
+row_key :: proc(s: ^State, i: int) -> i64 {
+	row := view_row(s, i)
+	if row == nil {
+		return -1
+	}
+	return i64(fake_row_index(s, i)) if s.data.fake else row.id
+}
+
+// open_track_menu opens the track menu for row i, bound to the list and
+// the track it was opened on.
+open_track_menu :: proc(s: ^State, i: int, pos: [2]f32) {
+	lib := &s.library
+	lib.menu_row = i
+	lib.menu_track = row_key(s, i)
+	lib.menu_list = list_gen(s)
+	ui.open_menu("track_menu", pos)
+}
+
+// track_menu_row is the row the track menu is for, or -1 when another list
+// has replaced the one it opened on, or the row holds another track.
+track_menu_row :: proc(s: ^State) -> int {
+	lib := &s.library
+	if lib.menu_list != list_gen(s) || row_key(s, lib.menu_row) != lib.menu_track {
+		return -1
+	}
+	return lib.menu_row
+}
+
 // draw_track_menu offers what the row's data allows: the album and artist
 // need their ids (the fake data goes by name), the link a TIDAL track id.
 // Its actions wait for the end of the frame (see Pending): the player bar
-// built above it shows the queue that Play replaces.
+// built above it shows the queue that Play replaces. It closes once its
+// row is gone, and does nothing while it fades out.
 draw_track_menu :: proc(s: ^State) {
-	i := s.library.menu_row
+	i := track_menu_row(s)
+	if i < 0 && ui.menu_is_open("track_menu") {
+		ui.close_menu()
+	}
 	row := view_row(s, i)
 	if ui.menu("track_menu") {
 		ui.text_style(.Regular, 13, TEXT)
-		if ui.menu_item("Play").clicked {
+		if ui.menu_item("Play").clicked && i >= 0 {
 			pending_set(s, {kind = .Play, index = i})
 		}
 		fake := s.data.fake

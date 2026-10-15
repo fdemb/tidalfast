@@ -76,11 +76,6 @@ test_edit_clusters :: proc(t: ^testing.T) {
 	ui.field_move(f, -1, .Cluster, false)
 	ui.field_delete(f, 1, .Cluster)
 	testing.expect_value(t, ui.field_text(f), "ab")
-
-	// A replacement range inside a cluster widens to the whole cluster.
-	f = field_with("x👍🏽y")
-	ui.field_insert_at(f, 2, 3, "!")
-	testing.expect_value(t, ui.field_text(f), "x!y")
 }
 
 @(test)
@@ -226,12 +221,124 @@ test_edit_limit_and_sanitize :: proc(t: ^testing.T) {
 	f := new(ui.Text_Field)
 	defer free(f)
 	f.limit = 6
-	ui.field_insert(f, "ab👍🏽cd")
-	// The thumb and its tone are 8 bytes, which don't fit after "ab", so the
-	// cluster goes whole and the rest after it too.
+	ui.field_insert(f, "ab")
+	// Typing that doesn't fit goes nowhere.
+	ui.field_insert(f, "👍🏽cd")
+	testing.expect_value(t, ui.field_text(f), "ab")
+	// A paste is cut at a cluster boundary: the thumb and its tone are 8
+	// bytes, which don't fit after "ab", so the cluster goes whole and the
+	// rest after it too.
+	ui.field_paste(f, "👍🏽cd")
 	testing.expect_value(t, ui.field_text(f), "ab")
 	ui.field_paste(f, "x\ny\tz\x01")
 	testing.expect_value(t, ui.field_text(f), "abx y ")
+}
+
+// The field and the shell's mirror clean text the same way byte for byte.
+// The outputs are what shell.m's field_sanitize printed for the same inputs
+// (TIDALFAST_SHELL_TEST clean=...).
+@(test)
+test_edit_sanitize_table :: proc(t: ^testing.T) {
+	Case :: struct {
+		name:    string,
+		input, out: string,
+	}
+	cases := []Case {
+		{"CRLF", "a\r\nb", "a b"},
+		{"lone CR", "a\rb", "a b"},
+		{"tabs, leading dropped", "\ta\t\tb", "a b"},
+		{"line break after a space", "a \nb", "a b"},
+		{"U+2028 and U+2029", "a\u2028\u2029b", "a b"},
+		{"NEL", "a\u0085b", "a b"},
+		{"C1 controls", "a\u0080\u009fb", "ab"},
+		{"C0 controls and DEL", "a\x01\x1b\x7fb", "ab"},
+		{"U+FFFD", "a\ufffdb", "ab"},
+		{"lone continuation byte", "a\x80b", "ab"},
+		{"overlong NUL", "a\xc0\x80b", "ab"},
+		{"encoded surrogate", "a\xed\xa0\x80b", "ab"},
+		{"past U+10FFFF", "a\xf4\x90\x80\x80b", "ab"},
+		{"F5", "a\xf5b", "ab"},
+		{"lead byte then ASCII", "a\xe3ab", "aab"},
+		{"cut short at the end", "a\xe3\x81", "a"},
+		{"U+10FFFF", "a\U0010ffff", "a\U0010ffff"},
+		{"ZWJ family", "👨‍👩‍👧", "👨‍👩‍👧"},
+		{"combining acute", "Jo\u0301ga", "Jo\u0301ga"},
+		{"a, ZWJ, woman", "a\u200d👩", "a\u200d👩"},
+		{"bidi control stays", "\u202eabc", "\u202eabc"},
+	}
+	for c in cases {
+		f := new(ui.Text_Field, context.temp_allocator)
+		ui.field_paste(f, c.input)
+		testing.expectf(t, ui.field_text(f) == c.out, "%s: %x became %x, want %x", c.name, transmute([]u8)c.input, transmute([]u8)ui.field_text(f), transmute([]u8)c.out)
+	}
+}
+
+// The input method's edits go by rules the shell's mirror shares without
+// segmenting text: a range by codepoint, and all or nothing at the limit.
+@(test)
+test_edit_ime_rules :: proc(t: ^testing.T) {
+	// A range inside one codepoint is empty, and one end inside a cluster
+	// stays there.
+	f := field_with("x👍🏽y")
+	ui.field_insert_at(f, 2, 3, "!")
+	testing.expect_value(t, ui.field_text(f), "x!👍🏽y")
+	f = field_with("x👍🏽y")
+	ui.field_insert_at(f, len("x👍"), len("x👍🏽"), "!")
+	testing.expect_value(t, ui.field_text(f), "x👍!y")
+	testing.expect_value(t, f.cursor, len("x👍!"))
+	// A range past the text is cut to it.
+	f = field_with("ab")
+	ui.field_insert_at(f, 1, 50, "c")
+	testing.expect_value(t, ui.field_text(f), "ac")
+	ui.field_set_marked(f, "d", 1, 1, 70, 90)
+	testing.expect_value(t, ui.field_text(f), "acd")
+	testing.expect_value(t, f.marked_start, 2)
+
+	// The reviewer's case: 114 bytes and Z, the caret before Z, a limit of
+	// 119. "a", ZWJ and 👩 are 8 bytes, which don't fit the 4 left, so none
+	// of them goes in, and the next commit goes before Z.
+	f = new(ui.Text_Field, context.temp_allocator)
+	f.limit = 119
+	head: [114]u8
+	for &c in head {
+		c = 'x'
+	}
+	ui.field_insert(f, string(head[:]))
+	ui.field_insert(f, "Z")
+	ui.field_move(f, -1, .Cluster, false)
+	ui.field_set_marked(f, "a\u200d👩", 8, 8)
+	testing.expect(t, !f.marked)
+	testing.expect_value(t, f.len, 115)
+	testing.expect_value(t, f.cursor, 114)
+	// "ab👍" is 6 bytes: none of it, though "ab" would fit.
+	ui.field_set_marked(f, "ab👍", 6, 6)
+	testing.expect(t, !f.marked)
+	testing.expect_value(t, f.len, 115)
+	ui.field_insert(f, "Q")
+	testing.expect_value(t, ui.field_text(f)[113:], "xQZ")
+	// With 3 bytes left 👍 doesn't fit, 日 fits exactly, and then nothing.
+	ui.field_insert(f, "👍")
+	testing.expect_value(t, f.len, 116)
+	ui.field_insert(f, "日")
+	testing.expect_value(t, f.len, 119)
+	ui.field_insert(f, "!")
+	testing.expect_value(t, ui.field_text(f)[113:], "xQ日Z")
+
+	// A commit that doesn't fit ends the composition as it was.
+	f = new(ui.Text_Field, context.temp_allocator)
+	f.limit = 4
+	ui.field_set_marked(f, "あ", 3, 3)
+	ui.field_insert(f, "日本")
+	testing.expect_value(t, ui.field_text(f), "あ")
+	testing.expect(t, !f.marked)
+	testing.expect_value(t, f.cursor, 3)
+
+	// The input method's selection is found in the text before cleaning,
+	// so it's moved back to a codepoint of what's left.
+	f = new(ui.Text_Field, context.temp_allocator)
+	ui.field_set_marked(f, "\x01あい", 2, 2)
+	testing.expect_value(t, ui.field_text(f), "あい")
+	testing.expect_value(t, f.cursor, 0)
 }
 
 // The widget: text and marked text events from the shell reach the focused
