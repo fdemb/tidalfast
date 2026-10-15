@@ -1,8 +1,10 @@
 // The instanced rect renderer. Every shape is one instance of a quad: a
 // rounded box drawn with a signed distance function, with an optional border,
 // soft edge, per-corner colours, texture and clip rect. Solid rects, borders,
-// shadows, gradients, images and (next phase) glyphs all go through the same
-// pipeline, so a frame is one draw call per texture switch.
+// shadows, gradients, images and glyphs all go through the same pipeline. A
+// draw call binds one colour texture and one coverage (R8) texture, so
+// covers and the text next to them share a draw call; a frame takes one
+// more only when it needs another texture of a kind already bound.
 //
 // Units: the app passes points. Push procs multiply by the backing scale and
 // write physical pixels into the instance, rounding rect edges, clip rects
@@ -77,6 +79,7 @@ Texture_Format :: enum u8 {
 Instance_Flag :: enum u32 {
 	Textured,
 	Nearest,
+	Coverage, // sample the R8 texture, bound in its own slot
 }
 Instance_Flags :: bit_set[Instance_Flag; u32]
 
@@ -95,13 +98,14 @@ Instance :: struct {
 }
 #assert(size_of(Instance) == 144)
 
-// A run of instances drawn with one texture bound. Solid instances don't
-// sample, so they join whatever batch is open; only a change from one real
-// texture to another starts a new batch.
+// A run of instances drawn with one colour and one coverage texture bound.
+// Solid instances don't sample, so they join whatever batch is open; only
+// an instance needing a texture other than the one its kind's slot holds
+// starts a new batch.
 Batch :: struct {
-	texture: Texture, // zero until the first textured instance
-	first:   u32,
-	count:   u32,
+	textures: [2]Texture, // colour, coverage; zero until an instance needs one
+	first:    u32,
+	count:    u32,
 }
 
 Texture_Slot :: struct {
@@ -179,6 +183,7 @@ struct Instance {
 
 constant uint TEXTURED = 1;
 constant uint NEAREST = 2;
+constant uint COVERAGE = 4;
 
 struct Fragment_In {
 	float4 position [[position]];
@@ -226,7 +231,8 @@ vertex Fragment_In rect_vertex(uint vid [[vertex_id]],
 
 fragment float4 rect_fragment(Fragment_In in [[stage_in]],
                               device const Instance *instances [[buffer(0)]],
-                              texture2d<float> tex [[texture(0)]]) {
+                              texture2d<float> colour_tex [[texture(0)]],
+                              texture2d<float> coverage_tex [[texture(1)]]) {
 	constexpr sampler linear_sampler(filter::linear, mip_filter::linear, address::clamp_to_edge);
 	constexpr sampler nearest_sampler(filter::nearest, address::clamp_to_edge);
 
@@ -256,7 +262,11 @@ fragment float4 rect_fragment(Fragment_In in [[stage_in]],
 
 	if (r.flags & TEXTURED) {
 		float2 uv = mix(r.src.xy, r.src.zw, t);
-		color *= (r.flags & NEAREST) ? tex.sample(nearest_sampler, uv) : tex.sample(linear_sampler, uv);
+		if (r.flags & COVERAGE) {
+			color *= (r.flags & NEAREST) ? coverage_tex.sample(nearest_sampler, uv) : coverage_tex.sample(linear_sampler, uv);
+		} else {
+			color *= (r.flags & NEAREST) ? colour_tex.sample(nearest_sampler, uv) : colour_tex.sample(linear_sampler, uv);
+		}
 	}
 	return color * coverage;
 }
@@ -585,6 +595,7 @@ push :: proc(r: ^Renderer, rect: Rect, style: Style) {
 	}
 
 	texture := style.texture
+	kind := 0 // the batch's texture slot: colour, or coverage for R8
 	if texture != 0 {
 		slot := texture_slot(r, texture)
 		if slot == nil {
@@ -593,6 +604,10 @@ push :: proc(r: ^Renderer, rect: Rect, style: Style) {
 			inst.flags += {.Textured}
 			if style.nearest {
 				inst.flags += {.Nearest}
+			}
+			if slot.format == .R8 {
+				inst.flags += {.Coverage}
+				kind = 1
 			}
 			src := style.src
 			if src.w == 0 || src.h == 0 {
@@ -614,9 +629,9 @@ push :: proc(r: ^Renderer, rect: Rect, style: Style) {
 	inst.clip = r.clips[min(r.clip_depth, MAX_CLIP_DEPTH) - 1]
 
 	// Open a new batch only when this instance needs a texture other than
-	// the one the current batch already binds.
+	// the one the current batch binds for its kind.
 	b := &r.batches[max(r.batch_count - 1, 0)]
-	if r.batch_count == 0 || (texture != 0 && b.texture != 0 && b.texture != texture) {
+	if r.batch_count == 0 || (texture != 0 && b.textures[kind] != 0 && b.textures[kind] != texture) {
 		if r.batch_count == MAX_BATCHES {
 			return
 		}
@@ -625,7 +640,7 @@ push :: proc(r: ^Renderer, rect: Rect, style: Style) {
 		r.batch_count += 1
 	}
 	if texture != 0 {
-		b.texture = texture
+		b.textures[kind] = texture
 	}
 
 	if r.instance_count == r.capacity[r.slot] {
@@ -730,9 +745,11 @@ end_frame :: proc(r: ^Renderer) {
 			if b.count == 0 {
 				continue
 			}
-			slot := texture_slot(r, b.texture)
-			tex := slot.texture if slot != nil else r.textures[0].texture
-			msg_proc(proc "c" (id, SEL, id, uint))(enc, sel_registerName("setFragmentTexture:atIndex:"), tex, 0)
+			for t, index in b.textures {
+				slot := texture_slot(r, t)
+				tex := slot.texture if slot != nil else r.textures[0].texture
+				msg_proc(proc "c" (id, SEL, id, uint))(enc, sel_registerName("setFragmentTexture:atIndex:"), tex, uint(index))
+			}
 			msg_proc(proc "c" (id, SEL, uint, uint, uint, uint, uint))(enc, sel_registerName("drawPrimitives:vertexStart:vertexCount:instanceCount:baseInstance:"), uint(MTL.PrimitiveType.TriangleStrip), 0, 4, uint(b.count), uint(b.first))
 			draw_calls += 1
 		}
