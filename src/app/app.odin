@@ -273,10 +273,12 @@ start :: proc(s: ^State, shell: ^platform.Shell) {
 	if !text.init(&s.text, shell.request_redraw) {
 		fmt.eprintln("app: text init failed")
 	}
-	s.rows = make_rows()
 	ui.init(&s.ui)
 	library_init(&s.library)
 	data_start(s, shell)
+	if s.data.fake {
+		s.rows = make_rows()
+	}
 	playback_start(s, shell)
 	search_init(s)
 	// TIDALFAST_BENCH=1 scrolls the library's track table, =text the text
