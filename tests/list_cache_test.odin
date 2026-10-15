@@ -4,7 +4,6 @@ import "base:runtime"
 import "core:fmt"
 import "core:math/rand"
 import "core:mem"
-import vmem "core:mem/virtual"
 import "core:os"
 import "core:slice"
 import "core:strings"
@@ -543,6 +542,24 @@ sign_out_deletes_the_cache :: proc(t: ^testing.T) {
 	testing.expect(t, !os.exists(user_dir))
 }
 
-// vmem is imported for the arenas the app's lists use.
-@(private = "file")
-_ :: vmem.Arena
+// The sidebar is fetched again when the window becomes key once it's old,
+// and not while the window just stays key.
+@(test)
+sidebar_refreshes_when_the_window_becomes_key :: proc(t: ^testing.T) {
+	s := cache_state()
+	defer cache_state_free(s)
+	d := &s.data
+	sidebar(s, updated = 1, count = 3)
+	playlists :: proc(s: ^app.State) -> int {
+		return jobs.remove_if(&s.data.queue, proc(job: ^app.Job, _: rawptr) -> bool {return job.kind == .Playlists}, nil)
+	}
+	app.lists_window_key(s, true)
+	testing.expect_value(t, playlists(s), 0) // just fetched
+	d.sidebar.fetched = time.tick_add(time.tick_now(), -app.SIDEBAR_MAX_AGE - time.Second)
+	app.lists_window_key(s, true)
+	testing.expect_value(t, playlists(s), 0) // still key
+	app.lists_window_key(s, false)
+	app.lists_window_key(s, true)
+	testing.expect_value(t, playlists(s), 1)
+	testing.expect(t, d.sidebar.loading)
+}
