@@ -18,6 +18,7 @@ package audio
 import "base:runtime"
 import "core:c"
 import "core:fmt"
+import vmem "core:mem/virtual"
 import "core:strconv"
 import "core:strings"
 import "core:sync"
@@ -25,15 +26,23 @@ import "core:sys/posix"
 import "core:time"
 import curl "vendor:curl"
 
-STREAM_WINDOW :: 8 << 20 // bytes kept per track, about 45 s of 16/44.1 FLAC
+STREAM_WINDOW :: 3 << 20 // bytes kept per track, about 17 s of 16/44.1 FLAC, 5 s of 24/192
 KEEP_BEHIND :: 256 << 10 // bytes kept before the read position, for short seeks back
 FETCH_RETRIES :: 5
+
+// Darwin's madvise advice for memory a process gives back and takes again:
+// pages marked reusable leave the process's footprint at once.
+@(private = "file")
+MADV_FREE_REUSABLE :: 7
+@(private = "file")
+MADV_FREE_REUSE :: 8
 
 Stream :: struct {
 	mutex:       sync.Mutex,
 	cond:        sync.Cond, // room in the window, a new request, or stop
 	url:         cstring, // heap, owned
-	buf:         []u8, // the window; file offset o lives at buf[o % len]
+	buf:         []u8, // the window, page aligned; file offset o lives at buf[o % len]
+	released:    bool, // buf's pages went back to the system; written again after MADV_FREE_REUSE
 	win_start:   i64, // oldest byte still held
 	win_end:     i64, // one past the newest byte
 	read_pos:    i64, // the decoder's position; bytes before it minus KEEP_BEHIND may go
@@ -58,7 +67,11 @@ Stream :: struct {
 }
 
 stream_init :: proc(st: ^Stream, wake: ^sync.Atomic_Sema, window := STREAM_WINDOW) {
-	st.buf = make([]u8, window, runtime.heap_allocator())
+	// Its own mapping, so stream_clear can give the pages back.
+	buf, err := vmem.reserve_and_commit(uint(window))
+	assert(err == nil, "audio: no memory for the stream window")
+	st.buf = buf
+	st.released = true
 	st.wake = wake
 	st.length = -1
 	posix.pthread_create(&st.thread, nil, fetch_main, st)
@@ -72,7 +85,7 @@ stream_destroy :: proc(st: ^Stream) {
 	sync.unlock(&st.mutex)
 	posix.pthread_join(st.thread)
 	stream_clear(st)
-	delete(st.buf, runtime.heap_allocator())
+	vmem.release(raw_data(st.buf), uint(len(st.buf)))
 }
 
 // stream_open points the stream at a new URL, from offset 0.
@@ -138,6 +151,12 @@ stream_clear :: proc(st: ^Stream) {
 
 @(private = "file")
 stream_clear_locked :: proc(st: ^Stream) {
+	// Nothing in the window is wanted any more: a stop, another track or
+	// none. Its pages stop counting against the app until bytes arrive.
+	if !st.released {
+		posix.posix_madvise(raw_data(st.buf), len(st.buf), transmute(posix.MAdvice)i32(MADV_FREE_REUSABLE))
+		st.released = true
+	}
 	heap := runtime.heap_allocator()
 	delete(st.url, heap)
 	delete(st.head, heap)
@@ -478,6 +497,10 @@ write_callback :: proc "c" (buffer: [^]byte, size: c.size_t, nitems: c.size_t, u
 	}
 	sync.lock(&st.mutex)
 	defer sync.unlock(&st.mutex)
+	if st.released {
+		posix.posix_madvise(raw_data(st.buf), len(st.buf), transmute(posix.MAdvice)i32(MADV_FREE_REUSE))
+		st.released = false
+	}
 	cap := i64(len(st.buf))
 	for len(data) > 0 {
 		if st.gen != t.gen || st.stop {
