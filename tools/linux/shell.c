@@ -14,6 +14,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <malloc.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdatomic.h>
@@ -132,6 +133,11 @@ static void *reserve(size_t size) {
 }
 
 int main(int argc, char **argv) {
+  // macOS's malloc hands blocks over 128 KB straight to the VM system and
+  // gives them back when freed. glibc's default raises that threshold as
+  // big blocks are freed and keeps them in its heap, which made the same
+  // app look 10 to 25 MB bigger here than its frees warrant.
+  mallopt(M_MMAP_THRESHOLD, 128 << 10);
   measure_init();
   measure_mark("main");
   double start = now_seconds();
