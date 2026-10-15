@@ -127,6 +127,8 @@ app_reload :: proc "c" (m: ^platform.Memory, shell: ^platform.Shell) {
 		fmt.eprintln("app: shader rebuild failed, drawing with the previous shaders")
 	}
 	text.reload(&s.text, shell.request_redraw)
+	// The old dylib may have missed a release.
+	ui.cancel_pointer(&s.ui)
 	fmt.eprintfln("app: reloaded at frame %d, clear colour %v", s.frame_count, CLEAR_COLOR)
 }
 
@@ -286,7 +288,7 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input) -> platform.Fra
 	render.begin_frame(r, w, h, input.scale, CLEAR_COLOR)
 	ui_begin := time.tick_now()
 	text.begin_frame(&s.text, r)
-	ui.begin_frame(&s.ui, events, r, &s.text, w, h, input.time)
+	ui.begin_frame(&s.ui, events, r, &s.text, w, h, input.time, ui.hardware_buttons())
 
 	// Backtick toggles the frame-time overlay. Cmd-1, 2 and 3 switch between
 	// the library and the phase 2 and phase 1 test screens.

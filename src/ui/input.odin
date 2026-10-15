@@ -2,6 +2,17 @@ package ui
 
 import "../platform"
 
+foreign import CoreGraphics "system:CoreGraphics.framework"
+
+@(default_calling_convention = "c")
+foreign CoreGraphics {
+	CGEventSourceButtonState :: proc(state_id: i32, button: u32) -> bool ---
+}
+
+// kCGEventSourceStateCombinedSessionState: every event source in the login
+// session, so it sees releases that went to other apps.
+CG_EVENT_SOURCE_STATE_COMBINED :: 0
+
 Mouse_Buttons :: bit_set[platform.Mouse_Button; u32]
 
 // Input is the mouse and keyboard state the shell's events add up to. The
@@ -82,6 +93,18 @@ scroll_delta :: proc(e: platform.Event) -> [2]f32 {
 		delta *= SCROLL_LINE
 	}
 	return delta
+}
+
+// hardware_buttons asks CoreGraphics which mouse buttons are down right now,
+// whichever app got the events. Pass it to begin_frame.
+hardware_buttons :: proc() -> (held: Mouse_Buttons) {
+	for b in platform.Mouse_Button {
+		// Mouse_Button's values are CGMouseButton's: left, right, center.
+		if CGEventSourceButtonState(CG_EVENT_SOURCE_STATE_COMBINED, u32(b)) {
+			held += {b}
+		}
+	}
+	return
 }
 
 mouse_down :: proc(input: Input) -> bool {

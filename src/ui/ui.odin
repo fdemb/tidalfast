@@ -139,7 +139,7 @@ Signal :: struct {
 	keyboard:       bool, // clicked came from a key
 	double_clicked: bool,
 	right_clicked:  bool, // right or control-click went down on the box
-	dragging:       bool, // pressed on the box and moved past DRAG_THRESHOLD
+	dragging:       bool, // pressed on the box and moved past DRAG_THRESHOLD, until the release
 	drag_delta:     [2]f32, // mouse movement since the press, up to the release if released
 	mouse:          [2]f32, // while held the mouse, when released where the button came up
 	scroll:         [2]f32, // points scrolled over the box this frame
@@ -201,6 +201,7 @@ State :: struct {
 	drag_start:     [2]f32,
 	drag_moved:     bool, // past DRAG_THRESHOLD since the press
 	control_click:  bool, // the left button is down as a control-click
+	buttons_stale:  Mouse_Buttons, // held here but up in hardware last frame
 	scroll_latch:   Key, // the scroll view a trackpad gesture started over
 	scroll_key:     Key, // this frame's scroll goes to this box
 	scroll:         [2]f32, // points, this frame
@@ -224,7 +225,9 @@ State :: struct {
 	drag_active:    bool,
 	drag_payload:   u64,
 	drag_cancelled: bool, // Escape ended the drag; no new one until the next press
+	drag_unclaimed: bool, // a press past DRAG_THRESHOLD came up this frame before drag_begin
 	drop:           bool, // a drag ended this frame, at drop_pos
+	drop_next:      bool, // drop in the next frame
 	drop_payload:   u64,
 	drop_pos:       [2]f32,
 
@@ -321,10 +324,14 @@ box_lookup :: proc(u: ^State, key: Key) -> ^Box {
 
 // begin_frame prunes boxes that weren't built last frame, takes this frame's
 // events and sets up the roots. Strings given to boxes must live until
-// end_frame.
-begin_frame :: proc(u: ^State, events: []platform.Event, r: ^render.Renderer, t: ^text.State, width, height: f32, time: f64) {
+// end_frame. hardware is the buttons down right now, from hardware_buttons;
+// without it the UI goes by the events alone.
+begin_frame :: proc(u: ^State, events: []platform.Event, r: ^render.Renderer, t: ^text.State, width, height: f32, time: f64, hardware: Maybe(Mouse_Buttons) = nil) {
 	ctx = u
 	u.frame += 1
+	if width != u.width || height != u.height || len(events) > 0 {
+		u.settle_frames = 0
+	}
 	u.dt = f32(clamp(time - u.time, 0, 1.0 / 30))
 	u.time = time
 	u.width = width
@@ -335,6 +342,9 @@ begin_frame :: proc(u: ^State, events: []platform.Event, r: ^render.Renderer, t:
 	u.menu_built = false
 	u.pool_misses = 0
 	prune(u)
+	if held, ok := hardware.?; ok {
+		release_stale(u, events, held)
+	}
 	process_events(u, events)
 
 	u.parents.count = 0
@@ -380,6 +390,54 @@ prune :: proc(u: ^State) {
 	}
 }
 
+// release_stale cancels buttons held since an earlier frame that the
+// hardware says are up, as when the release went to another app. A button
+// must look like that for two frames in a row, since its release may be on
+// its way. Cancelled buttons don't release or click anything, and a drag
+// they held ends without a drop.
+@(private)
+release_stale :: proc(u: ^State, events: []platform.Event, hardware: Mouse_Buttons) {
+	held := hardware
+	// A control-click goes down as the left button and counts as the right.
+	if u.control_click && .Left in held {
+		held += {.Right}
+	}
+	stale := u.input.buttons - held
+	for e in events {
+		if e.kind == .Mouse_Down || e.kind == .Mouse_Up {
+			stale -= {e.button, .Right} if e.button == .Left else {e.button}
+		}
+	}
+	gone := stale & u.buttons_stale
+	u.buttons_stale = stale - gone
+	if u.buttons_stale != {} {
+		u.animating = true
+	}
+	cancel_buttons(u, gone)
+}
+
+// cancel_pointer lets go of every button without a release, for a hot
+// reload, which may have missed one.
+cancel_pointer :: proc(u: ^State) {
+	cancel_buttons(u, u.input.buttons)
+	u.buttons_stale = {}
+}
+
+@(private)
+cancel_buttons :: proc(u: ^State, buttons: Mouse_Buttons) {
+	u.input.buttons -= buttons
+	for b in buttons {
+		u.active[b] = 0
+	}
+	if .Right in buttons {
+		u.control_click = false
+	}
+	if .Left in buttons {
+		u.drag_active = false
+		u.drag_moved = false
+	}
+}
+
 @(private)
 process_events :: proc(u: ^State, events: []platform.Event) {
 	input_begin_frame(&u.input)
@@ -392,7 +450,9 @@ process_events :: proc(u: ^State, events: []platform.Event) {
 	u.scroll = {}
 	u.scroll_precise = {}
 	u.scroll_key = 0
-	u.drop = false
+	u.drop = u.drop_next
+	u.drop_next = false
+	u.drag_unclaimed = false
 
 	for event in events {
 		e := event
@@ -417,6 +477,9 @@ process_events :: proc(u: ^State, events: []platform.Event) {
 				u.released[e.button] = k
 				if hover == k {
 					u.clicked[e.button] = k
+				}
+				if e.button == .Left && u.drag_moved && !u.drag_active && !u.drag_cancelled {
+					u.drag_unclaimed = true
 				}
 			}
 			u.active[e.button] = 0
@@ -447,10 +510,6 @@ process_events :: proc(u: ^State, events: []platform.Event) {
 		case .Key_Down:
 			key_down(u, e)
 		}
-	}
-	// The release may have gone missing, as when another app took the mouse.
-	if u.drag_active && .Left not_in u.input.buttons {
-		u.drag_active = false
 	}
 
 	hot := hit_at(u, u.input.mouse) if u.input.mouse_inside else 0
@@ -673,7 +732,8 @@ end_frame :: proc() -> bool {
 	}
 	// The build used sizes or offsets the layout didn't keep, so what's on
 	// screen may be missing rows. One more frame builds it right. The limit
-	// stops a layout that never settles from drawing forever.
+	// stops a layout that never settles from drawing forever once nothing
+	// new comes in; begin_frame lifts it on events or a new window size.
 	if mismatch && u.settle_frames < MAX_SETTLE_FRAMES {
 		u.settle_frames += 1
 		u.animating = true
@@ -740,7 +800,10 @@ finish :: proc(u: ^State, b: ^Box, clip: render.Rect, focus_parent, click_parent
 			mismatch^ = true
 		}
 	}
-	if b.key != 0 && b.flags & {.Clickable, .Focusable, .View_Scroll} != {} && .Disabled not_in b.flags && u.hit_count < len(u.hits) {
+	// A menu closed while it was built takes no input, though its boxes
+	// were built to.
+	closed := in_menu && !u.menu_open
+	if b.key != 0 && b.flags & {.Clickable, .Focusable, .View_Scroll} != {} && .Disabled not_in b.flags && !closed && u.hit_count < len(u.hits) {
 		u.hits[u.hit_count] = {
 			key          = b.key,
 			rect         = b.clip,
@@ -929,6 +992,7 @@ signal :: proc(b: ^Box) -> (s: Signal) {
 	} else if s.released {
 		s.mouse = u.input.release_pos[.Left]
 		s.drag_delta = s.mouse - u.drag_start
+		s.dragging = u.drag_moved
 	}
 	if u.scroll_key == k {
 		s.scroll = u.scroll
@@ -1060,7 +1124,21 @@ mouse_over :: proc(b: ^Box) -> bool {
 
 drag_begin :: proc(payload: u64) {
 	u := ctx
-	if u.drag_cancelled || .Left not_in u.input.buttons {
+	if u.drag_cancelled {
+		return
+	}
+	if u.drag_unclaimed {
+		// The drag went past the threshold and ended within this frame, and
+		// targets built before the source have already asked. Drop it in the
+		// next frame, against the rects it was released over.
+		u.drag_unclaimed = false
+		u.drop_next = true
+		u.drop_payload = payload
+		u.drop_pos = u.input.release_pos[.Left]
+		u.animating = true
+		return
+	}
+	if .Left not_in u.input.buttons {
 		return
 	}
 	u.drag_active = true
@@ -1093,6 +1171,14 @@ pool_stats :: proc(u: ^State) -> (used, capacity, misses: int) {
 
 // request_frame asks for another frame, for app animations.
 request_frame :: proc() {
+	ctx.animating = true
+}
+
+// data_changed asks for another frame after data the tree is built from
+// changed outside the frame's events, such as a worker's result. A layout
+// that hadn't settled gets its MAX_SETTLE_FRAMES again.
+data_changed :: proc() {
+	ctx.settle_frames = 0
 	ctx.animating = true
 }
 

@@ -529,8 +529,14 @@ test_ui_menu_keyboard :: proc(t: ^testing.T) {
 // Returns the payload dropped on the target this frame.
 @(private = "file")
 drag_frame :: proc(u: ^ui.State, now: ^f64, events: ..platform.Event) -> (dropped: u64, ok: bool) {
+	return drag_frame_held(u, now, nil, ..events)
+}
+
+// drag_frame with the buttons the hardware reports, if given.
+@(private = "file")
+drag_frame_held :: proc(u: ^ui.State, now: ^f64, hardware: Maybe(ui.Mouse_Buttons), events: ..platform.Event) -> (dropped: u64, ok: bool) {
 	now^ += 1.0 / 120
-	ui.begin_frame(u, events, nil, nil, 300, 200, now^)
+	ui.begin_frame(u, events, nil, nil, 300, 200, now^, hardware)
 	target := ui.box_make("target", {.Clickable}, ui.px(300), ui.px(40))
 	dropped, ok = ui.dropped(target)
 	{
@@ -721,4 +727,151 @@ test_ui_pool_full :: proc(t: ^testing.T) {
 	testing.expect_value(t, used, ui.MAX_BOXES)
 	testing.expect_value(t, capacity, ui.MAX_BOXES)
 	testing.expect_value(t, misses, 5)
+}
+
+@(test)
+test_ui_missed_release_cancels :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	now := 0.0
+	down := ui.Mouse_Buttons{.Left}
+	up := ui.Mouse_Buttons{}
+	for _ in 0 ..< 3 {
+		drag_frame_held(&u, &now, up)
+	}
+
+	// Drag row 0, then the window loses the mouse and the release goes to
+	// another app. The first frame that sees the button up in hardware
+	// waits for a release that may be on its way, and asks for a frame.
+	drag_frame_held(&u, &now, down, {kind = .Mouse_Down, x = 50, y = 50, click_count = 1})
+	drag_frame_held(&u, &now, down, {kind = .Mouse_Move, x = 50, y = 120})
+	_, dragging := ui.drag_payload()
+	testing.expect(t, dragging)
+	drag_frame_held(&u, &now, up, {kind = .Mouse_Leave})
+	_, dragging = ui.drag_payload()
+	testing.expect(t, dragging, "one frame up in hardware isn't enough")
+	testing.expect(t, u.animating, "and it asks for the frame that decides")
+	drag_frame_held(&u, &now, up)
+	_, dragging = ui.drag_payload()
+	testing.expect(t, !dragging, "a missed release cancels the drag")
+	testing.expect_value(t, u.input.buttons, ui.Mouse_Buttons{})
+	testing.expect_value(t, u.active[.Left], ui.Key(0))
+
+	// Back in the window, a click on the target drops nothing.
+	drag_frame_held(&u, &now, up, {kind = .Mouse_Move, x = 50, y = 20})
+	_, ok := drag_frame_held(&u, &now, up, {kind = .Mouse_Down, x = 50, y = 20, click_count = 1}, {kind = .Mouse_Up, x = 50, y = 20, click_count = 1})
+	testing.expect(t, !ok, "the cancelled drag doesn't drop")
+	_, ok = drag_frame_held(&u, &now, up)
+	testing.expect(t, !ok)
+
+	// A release that arrives a frame after the hardware went up still
+	// counts: a quick tap.
+	v: ui.State
+	ui.init(&v)
+	defer ui_destroy(&v)
+	now = 0
+	tap :: proc(u: ^ui.State, now: ^f64, events: ..platform.Event) -> ui.Signal {
+		now^ += 1.0 / 120
+		ui.begin_frame(u, events, nil, nil, 300, 200, now^, ui.Mouse_Buttons{})
+		sig := ui.signal(ui.box_make("button", {.Clickable}, ui.px(100), ui.px(40)))
+		ui.end_frame()
+		return sig
+	}
+	tap(&v, &now)
+	tap(&v, &now)
+	sig := tap(&v, &now, {kind = .Mouse_Down, x = 20, y = 20, click_count = 1})
+	testing.expect(t, sig.held)
+	sig = tap(&v, &now)
+	testing.expect(t, sig.held, "held for one frame up in hardware")
+	sig = tap(&v, &now, {kind = .Mouse_Up, x = 20, y = 20, click_count = 1})
+	testing.expect(t, sig.clicked, "the late release clicks")
+
+	// A hot reload lets go of everything.
+	drag_frame_held(&u, &now, down, {kind = .Mouse_Down, x = 50, y = 50, click_count = 1})
+	drag_frame_held(&u, &now, down, {kind = .Mouse_Move, x = 50, y = 120})
+	_, dragging = ui.drag_payload()
+	testing.expect(t, dragging)
+	ui.cancel_pointer(&u)
+	_, dragging = ui.drag_payload()
+	testing.expect(t, !dragging && u.input.buttons == {})
+}
+
+@(test)
+test_ui_settle_frames_reset_on_resize :: proc(t: ^testing.T) {
+	// Each resize is new input, so the limit on extra frames starts over.
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	now := 0.0
+	settle(&u, &now, 200, 1000)
+	for h in ([]f32{190, 180, 170, 300}) {
+		rows_frame(&u, &now, h, 1000)
+	}
+	testing.expect(t, u.animating, "the last resize gets its extra frame")
+	_, rows, settled := settle(&u, &now, 300, 1000)
+	testing.expect(t, settled)
+	testing.expect_value(t, rows.last, 31) // 30 in view and one more
+}
+
+@(test)
+test_ui_drag_in_one_frame :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	now := 0.0
+	for _ in 0 ..< 3 {
+		drag_frame(&u, &now)
+	}
+
+	// Down on row 0, past the threshold onto the target and up, all in one
+	// frame. The target was built before the row, so the drop comes in the
+	// next frame, which the release asks for.
+	payload, ok := drag_frame(&u, &now, {kind = .Mouse_Down, x = 50, y = 50, click_count = 1}, {kind = .Mouse_Move, x = 50, y = 20}, {kind = .Mouse_Up, x = 50, y = 20, click_count = 1})
+	testing.expect(t, !ok)
+	testing.expect(t, u.animating, "the release asks for the frame that drops")
+	payload, ok = drag_frame(&u, &now)
+	testing.expect(t, ok && payload == 100, "dropped on the target a frame later")
+	_, ok = drag_frame(&u, &now)
+	testing.expect(t, !ok, "once")
+
+	// A drag that began in an earlier frame drops in its release frame,
+	// and only then.
+	drag_frame(&u, &now, {kind = .Mouse_Down, x = 50, y = 50, click_count = 1})
+	drag_frame(&u, &now, {kind = .Mouse_Move, x = 50, y = 20})
+	payload, ok = drag_frame(&u, &now, {kind = .Mouse_Up, x = 50, y = 20, click_count = 1})
+	testing.expect(t, ok && payload == 100)
+	_, ok = drag_frame(&u, &now)
+	testing.expect(t, !ok, "the release frame's dragging signal doesn't start another")
+
+	// A click without moving isn't a drag.
+	drag_frame(&u, &now, {kind = .Mouse_Down, x = 50, y = 50, click_count = 1}, {kind = .Mouse_Up, x = 50, y = 50, click_count = 1})
+	_, ok = drag_frame(&u, &now)
+	testing.expect(t, !ok)
+}
+
+@(test)
+test_ui_closed_menu_takes_no_click :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	now := 0.0
+	menu_frame(&u, &now)
+	menu_frame(&u, &now)
+	f := menu_frame(&u, &now, {kind = .Mouse_Down, x = 50, y = 60, button = .Right}, {kind = .Mouse_Up, x = 50, y = 60, button = .Right})
+	for _ in 0 ..< 100 {
+		if f = menu_frame(&u, &now); !f.animating {
+			break
+		}
+	}
+	r := f.a.box.rect
+	at := [2]f32{r.x + 10, r.y + r.h / 2}
+	testing.expect(t, at.y > 40 && at.y < 140, "item A is over the area")
+
+	// Clicking A closes the menu while it's being built. A click on the same
+	// spot in the next frame goes to the area under it.
+	f = menu_frame(&u, &now, {kind = .Mouse_Down, x = at.x, y = at.y, click_count = 1}, {kind = .Mouse_Up, x = at.x, y = at.y, click_count = 1})
+	testing.expect(t, f.a.clicked)
+	f = menu_frame(&u, &now, {kind = .Mouse_Down, x = at.x, y = at.y, click_count = 1}, {kind = .Mouse_Up, x = at.x, y = at.y, click_count = 1})
+	testing.expect(t, f.area.clicked, "the closed menu doesn't swallow the click")
 }
