@@ -935,6 +935,8 @@ static uint32_t scroll_phase(NSEventPhase phase) {
   g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm_sRGB;
   g_layer.colorspace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
   g_layer.framebufferOnly = YES;
+  // Two drawables while idle, see update_display_link.
+  g_layer.maximumDrawableCount = 2;
   return g_layer;
 }
 
@@ -1146,6 +1148,13 @@ static void update_display_link(void) {
   // away and fall back to drawing directly if its first tick never comes.
   if (g_display_link.paused && !paused) g_last_tick = CACurrentMediaTime();
   g_display_link.paused = paused;
+  // Each drawable is the window's size in pixels, about 12 MB at 1100x700
+  // points on a 2x display. Frames drawn on demand need only two, one on
+  // screen and one being drawn. Frames on every tick need three: with two,
+  // a run could lock into waiting most of a refresh in nextDrawable on
+  // every frame.
+  NSUInteger drawables = paused ? 2 : 3;
+  if (g_layer.maximumDrawableCount != drawables) g_layer.maximumDrawableCount = drawables;
 }
 
 // TIDALFAST_SHELL_TEST runs steps against the shell's own entry points,
