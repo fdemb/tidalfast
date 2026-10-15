@@ -549,6 +549,44 @@ test_ui_scrollbar_docked_and_never :: proc(t: ^testing.T) {
 	testing.expect_value(t, view.bar_t, f32(0))
 }
 
+// A header above a docked list leaves the list's gutter, so the right
+// column of the header and of the rows line up.
+@(test)
+test_ui_scrollbar_header_gutter :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	u.scrollbars = .Docked
+	now := 0.0
+	head, cell: ^ui.Box
+	for _ in 0 ..< 10 {
+		now += 1.0 / 120
+		ui.begin_frame(&u, {}, nil, nil, 300, 200, now)
+		ui.column("main", {}, ui.fill(), ui.fill())
+		{
+			ui.row("", {}, ui.fill(), ui.px(20))
+			ui.spacer(ui.fill())
+			head = ui.box_make("", {}, ui.px(40), ui.fill())
+			ui.spacer(ui.px(ui.scroll_gutter("view")))
+		}
+		{
+			view := ui.scroll_view("view", ui.fill(), ui.fill())
+			rows := ui.virtual_rows(view, 100, 10)
+			for i in rows.first ..< rows.last {
+				ui.row(fmt.tprintf("##row%d", i), {}, ui.fill(), ui.px(10))
+				ui.spacer(ui.fill())
+				c := ui.box_make("", {}, ui.px(40), ui.fill())
+				if i == rows.first {
+					cell = c
+				}
+			}
+		}
+		ui.end_frame()
+	}
+	testing.expect_value(t, cell.rect.x, f32(300 - ui.SCROLLBAR_TRACK - 40))
+	testing.expect_value(t, head.rect.x, cell.rect.x)
+}
+
 @(test)
 test_ui_scrollbar_drag :: proc(t: ^testing.T) {
 	u: ui.State

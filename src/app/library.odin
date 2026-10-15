@@ -285,7 +285,7 @@ draw_main_view :: proc(s: ^State, main_w: f32) {
 		header_cell("Added by", cols.added_by, .Left)
 		header_cell("Date added", cols.added, .Left)
 		header_cell("Time", cols.duration, .Right)
-		ui.spacer(ui.px(cols.more + 8))
+		ui.spacer(ui.px(cols.more + 8 + ui.scroll_gutter("tracks")))
 	}
 	{
 		ui.row("", {}, ui.fill(), ui.px(1))

@@ -77,12 +77,25 @@ scroll_view :: proc(id: string, width, height: Size, flags: Box_Flags = {}) -> ^
 	b.child_axis = .Y
 	if b.key != 0 {
 		scrollbar_drag(b)
-		if ctx.scrollbars == .Docked && b.view_bounds.y > b.rect.h {
-			b.gutter = SCROLLBAR_TRACK
-		}
+		b.gutter = gutter_of(b)
 	}
 	push_parent(b)
 	return b
+}
+
+// scroll_gutter is the room the scroll view id, built next under the
+// current parent, takes from its rows' right this frame for a docked
+// scrollbar. A header above the list leaves the same, so its columns line
+// up with the rows'.
+scroll_gutter :: proc(id: string) -> f32 {
+	b := box_lookup(ctx, key_from_string(seed_key(top_parent()), id))
+	return gutter_of(b) if b != nil else 0
+}
+
+// gutter_of goes by the last layout, like the rest of the scrollbar.
+@(private)
+gutter_of :: proc(view: ^Box) -> f32 {
+	return SCROLLBAR_TRACK if ctx.scrollbars == .Docked && view.view_bounds.y > view.rect.h else 0
 }
 
 @(private)

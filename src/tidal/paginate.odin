@@ -81,7 +81,7 @@ fetch_pages :: proc(s: ^Session, r: Request, total: int, chunk_size := PAGE_CHUN
 
 	threads := make([dynamic]^thread.Thread, 0, workers, context.temp_allocator)
 	for _ in 0 ..< max(1, workers) {
-		append(&threads, thread.create_and_start_with_poly_data(&job, worker, init_context = context))
+		append(&threads, thread.create_and_start_with_poly_data(&job, worker))
 	}
 	for t in threads {
 		thread.join(t)
