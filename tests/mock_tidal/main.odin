@@ -6,7 +6,10 @@
 // It serves the device-code login (approved a few seconds after the code is
 // first polled), token refresh with rotated refresh tokens, the session and
 // user, liked tracks, a list of playlists with one long one, their tracks,
-// and generated JPEG covers at any size under /images. Flags:
+// generated JPEG covers at any size under /images, and playback: LOSSLESS
+// playbackinfopostpaywall answers whose BTS manifest points at FLAC files
+// under /audio, served with Range support (see audio.odin). The first three
+// liked tracks are a gapless live album. Flags:
 //
 //     -port=N            0 picks a free port; the port is printed
 //     -tracks=N          tracks in the long playlist (default 3000)
@@ -15,6 +18,10 @@
 //     -page-delay=MS     added to every track page (default 0)
 //     -cover-delay=MS    added to every cover (default 40)
 //     -rate-limit-at=N   answer the Nth request with 429 and Retry-After: 3
+//     -audio-dir=PATH    where the generated audio goes (default /tmp/tidalfast-mock-audio)
+//     -seektable=0       FLAC files without a SEEKTABLE, so seeks have to search
+//     -audio-delay=MS    added before every audio response, like network latency
+//     -audio-rate=KB     audio bandwidth in KB/s per connection (default unlimited)
 package mock_tidal
 
 import "base:runtime"
@@ -42,10 +49,15 @@ Config :: struct {
 	page_delay:    int,
 	cover_delay:   int,
 	rate_limit_at: int,
+	audio_dir:     string,
+	seektable:     bool,
+	audio_delay:   int,
+	audio_rate:    int,
 }
 
 Server :: struct {
 	config:        Config,
+	port:          int,
 	mutex:         sync.Mutex,
 	requests:      int,
 	token:         int, // the current access and refresh token number
@@ -85,6 +97,8 @@ main :: proc() {
 		approve_after = 3,
 		expires_in    = 14400,
 		cover_delay   = 40,
+		audio_dir     = "/tmp/tidalfast-mock-audio",
+		seektable     = true,
 	}
 	for arg in os.args[1:] {
 		name, _, value := strings.partition(strings.trim_prefix(arg, "-"), "=")
@@ -104,6 +118,14 @@ main :: proc() {
 			c.cover_delay = n
 		case "rate-limit-at":
 			c.rate_limit_at = n
+		case "audio-dir":
+			c.audio_dir = value
+		case "seektable":
+			c.seektable = n != 0
+		case "audio-delay":
+			c.audio_delay = n
+		case "audio-rate":
+			c.audio_rate = n
 		case:
 			fmt.eprintln("mock: unknown flag", arg)
 			os.exit(2)
@@ -119,6 +141,10 @@ main :: proc() {
 		os.exit(1)
 	}
 	ep, _ := net.bound_endpoint(sock)
+	server.port = ep.port
+	if !audio_prepare(c.audio_dir, c.seektable) {
+		fmt.eprintln("mock: couldn't make the audio files; playback won't work")
+	}
 	fmt.printfln("mock: listening on http://127.0.0.1:%d", ep.port)
 	os.flush(os.stdout)
 	for {
@@ -136,13 +162,16 @@ Request :: struct {
 	query:  map[string]string,
 	form:   map[string]string,
 	auth:   string,
+	range:  string,
 }
 
 Response :: struct {
-	status:       int,
-	content_type: string,
-	body:         []u8,
-	retry_after:  int,
+	status:        int,
+	content_type:  string,
+	body:          []u8,
+	retry_after:   int,
+	content_range: string,
+	audio:         bool, // send with -audio-delay and -audio-rate
 }
 
 serve :: proc(client: net.TCP_Socket) {
@@ -157,19 +186,50 @@ serve :: proc(client: net.TCP_Socket) {
 	if resp.retry_after > 0 {
 		head = fmt.tprintf("%sRetry-After: %d\r\n", head, resp.retry_after)
 	}
-	send_all(client, transmute([]u8)strings.concatenate({head, "\r\n"}, context.temp_allocator))
-	send_all(client, resp.body)
+	if resp.audio {
+		head = fmt.tprintf("%sAccept-Ranges: bytes\r\n", head)
+		if resp.content_range != "" {
+			head = fmt.tprintf("%sContent-Range: %s\r\n", head, resp.content_range)
+		}
+		if server.config.audio_delay > 0 {
+			time.sleep(time.Duration(server.config.audio_delay) * time.Millisecond)
+		}
+	}
+	if !send_all(client, transmute([]u8)strings.concatenate({head, "\r\n"}, context.temp_allocator)) {
+		return
+	}
+	if !resp.audio || server.config.audio_rate <= 0 {
+		send_all(client, resp.body)
+		return
+	}
+	// Throttled: a 16 KB chunk at a time, paced to -audio-rate.
+	CHUNK :: 16 << 10
+	start := time.tick_now()
+	for sent := 0; sent < len(resp.body); sent += CHUNK {
+		if !send_all(client, resp.body[sent:min(sent + CHUNK, len(resp.body))]) {
+			return
+		}
+		due := time.Duration(f64(sent + CHUNK) / f64(server.config.audio_rate * 1024) * f64(time.Second))
+		if wait := due - time.tick_since(start); wait > 0 {
+			time.sleep(wait)
+		}
+	}
 }
 
-send_all :: proc(client: net.TCP_Socket, data: []u8) {
+parse_i :: proc(s: string) -> (int, bool) {
+	return strconv.parse_int(strings.trim_space(s))
+}
+
+send_all :: proc(client: net.TCP_Socket, data: []u8) -> bool {
 	data := data
 	for len(data) > 0 {
 		n, err := net.send_tcp(client, data)
 		if err != nil {
-			return
+			return false
 		}
 		data = data[n:]
 	}
+	return true
 }
 
 read_request :: proc(client: net.TCP_Socket) -> (req: Request, ok: bool) {
@@ -193,6 +253,8 @@ read_request :: proc(client: net.TCP_Socket) -> (req: Request, ok: bool) {
 			content_length, _ = strconv.parse_int(value)
 		} else if strings.equal_fold(name, "authorization") {
 			req.auth = value
+		} else if strings.equal_fold(name, "range") {
+			req.range = value
 		}
 	}
 	for len(buf) < header_end + 4 + content_length {
@@ -252,6 +314,8 @@ route :: proc(req: ^Request) -> Response {
 		return token_response(req)
 	case strings.has_prefix(path, "/images/"):
 		return cover_response(path)
+	case strings.has_prefix(path, "/audio/"):
+		return audio_response(req)
 	}
 
 	if req.auth != fmt.tprintf("Bearer mock-access-%d", token) {
@@ -265,6 +329,10 @@ route :: proc(req: ^Request) -> Response {
 		return json_response(200, fmt.tprintf(`{{"sessionId":"00000000-0000-4000-8000-000000000001","countryCode":"PL","userId":%d}}`, USER_ID))
 	case path == fmt.tprintf("/users/%d", USER_ID):
 		return json_response(200, fmt.tprintf(`{{"id":%d,"username":"mock","firstName":"Mock","lastName":"User","email":"mock@example.com"}}`, USER_ID))
+	case strings.has_prefix(path, "/tracks/") && strings.has_suffix(path, "/playbackinfopostpaywall"):
+		id, _ := parse_i(strings.trim_suffix(strings.trim_prefix(path, "/tracks/"), "/playbackinfopostpaywall"))
+		fmt.printfln("mock: playbackinfo for %d (%s)", id, req.query["audioquality"] or_else "?")
+		return playbackinfo_response(id)
 	case path == fmt.tprintf("/users/%d/favorites/tracks", USER_ID):
 		b := list_begin(LIKED, offset, limit)
 		for i in offset ..< min(offset + limit, LIKED) {
@@ -272,7 +340,11 @@ route :: proc(req: ^Request) -> Response {
 				strings.write_byte(&b, ',')
 			}
 			fmt.sbprintf(&b, `{{"created":"%s","item":`, date(i))
-			write_track(&b, 99, i)
+			if i < 3 {
+				write_album_track(&b, i)
+			} else {
+				write_track(&b, 99, i)
+			}
 			strings.write_byte(&b, '}')
 		}
 		strings.write_string(&b, "]}")
@@ -365,10 +437,15 @@ date :: proc(i: int) -> string {
 write_track :: proc(b: ^strings.Builder, playlist, i: int) {
 	h := u32(playlist * 100_003 + i) * 2654435761
 	album := int(h >> 8) % 700 + 1
-	fmt.sbprintf(b, `{{"id":%d,"title":%q,"duration":%d,"version":null,"dateAdded":"%s","artist":{{"id":%d,"name":%q}},"artists":[{{"id":%d,"name":%q}}],"album":{{"id":%d,"title":"%s %s %d","cover":"%s"}}}}`,
-		playlist * 1_000_000 + i, TITLES[(h >> 4) % len(TITLES)], 95 + int(h >> 12) % 400, date(i),
+	fmt.sbprintf(b, `{{"id":%d,"title":%q,"duration":%d,"trackNumber":%d,"version":null,"dateAdded":"%s","artist":{{"id":%d,"name":%q}},"artists":[{{"id":%d,"name":%q}}],"album":{{"id":%d,"title":"%s %s %d","cover":"%s"}}}}`,
+		playlist * 1_000_000 + i, TITLES[(h >> 4) % len(TITLES)], 95 + int(h >> 12) % 400, 1 + i % 12, date(i),
 		h % 50, ARTISTS[(h >> 16) % len(ARTISTS)], h % 50, ARTISTS[(h >> 16) % len(ARTISTS)],
 		album, ALBUM_WORDS[album % len(ALBUM_WORDS)], ALBUM_WORDS[(album / 12) % len(ALBUM_WORDS)], album, image_id(album))
+}
+
+write_album_track :: proc(b: ^strings.Builder, i: int) {
+	fmt.sbprintf(b, `{{"id":%d,"title":%q,"duration":%d,"trackNumber":%d,"version":null,"artist":{{"id":7,"name":"The Mock Ensemble"}},"artists":[{{"id":7,"name":"The Mock Ensemble"}}],"album":{{"id":%d,"title":"Live at the Mock","cover":"%s"}}}}`,
+		ALBUM_TRACK_ID + i, ALBUM_TITLES[i], ALBUM_LENGTHS[i] / RATE, i + 1, ALBUM_ID, image_id(ALBUM_ID))
 }
 
 // cover_response draws a cover for /images/<id with / for ->/<w>x<h>.jpg:

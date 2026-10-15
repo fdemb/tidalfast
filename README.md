@@ -3,7 +3,7 @@
 A native macOS TIDAL client in Odin. A small Obj-C shell owns the window and talks to macOS. Everything else is an Odin dylib that the shell reloads while it runs. `docs/plan.md` has the plan and the phases.
 
 ```
-shell/          Obj-C executable: window, CAMetalLayer, event queue, dylib loader
+shell/          Obj-C executable: window, CAMetalLayer, event queue, dylib loader, media keys and Now Playing
 src/platform/   the ABI between shell and app (shell/platform.h mirrors it)
 src/app/        the hot-reloaded app dylib
 src/render/     Metal renderer
@@ -12,11 +12,13 @@ src/ui/         box tree, layout, input, animation, menus and tooltips
 src/kbts/       kb_text_shape 2.21: C source and Odin bindings
 assets/fonts/   Inter 4.1, static Regular/Medium/SemiBold/Bold, with its OFL licence
 src/tidal/      TIDAL API library, see src/tidal/README.md
+src/audio/      FLAC streaming, decoding and output, the play queue's rules, ReplayGain
 src/jobs/       a thread-safe priority queue for jobs and results
 src/cover/      cover sizes, decoding and the texture cache
 src/mac/        Keychain and opening URLs, called straight from Odin
 tests/          `odin test tests`
 tests/mock_tidal/  a stand-in TIDAL server for running the app without an account
+tests/audio_check/ compares a capture of the audio output with the source it came from
 examples/cli/   CLI on top of src/tidal
 ```
 
@@ -40,8 +42,15 @@ It needs macOS 14 or later, Odin and the Xcode command line tools. `build.sh` re
 
 Environment variables:
 
-- `TIDALFAST_FAKE=1` shows the fake library from phases 2 and 3 instead of logging in to TIDAL, for working on the UI without an account. `TIDALFAST_BENCH=1` and `=text` imply it.
+- `TIDALFAST_FAKE=1` shows the fake library from phases 2 and 3 instead of logging in to TIDAL, for working on the UI without an account. Its rows play sine tones. `TIDALFAST_BENCH=1` and `=text` imply it.
 - `TIDALFAST_API=url` sends every request, the login and cover downloads to `url` instead of TIDAL, for running against `tests/mock_tidal`. The login then goes in the Keychain under `tidalfast-mock`, so it never replaces a real one.
+- `TIDALFAST_KEYCHAIN=name` keeps the mock login under `name` instead of `tidalfast-mock`. It only works together with `TIDALFAST_API`, and never with `tidalfast`. A build that reads an item another build wrote makes the Keychain ask for access, so test runs can give a build its own item.
+- `TIDALFAST_VOLUME=0.2` sets the volume slider at start.
+- `TIDALFAST_AUDIO_NULL=1` plays to miniaudio's null device: the audio callback runs in real time, but nothing reaches the speakers.
+- `TIDALFAST_AUDIO_CAPTURE=path` writes every sample the audio callback hands the device, after ReplayGain and volume, to `path` as a 32-bit float WAV. Only the first player after start captures, not the ones a hot reload makes. The header's sizes are filled in when the app quits; `tests/audio_check` also reads a file whose header still says 0.
+- `TIDALFAST_AUDIO_WINDOW_KB=n` sets how much of each track is kept downloaded (8 MB by default). A small window sends seeks back to the network, for measuring them.
+- `TIDALFAST_NOW_PLAYING_LOG=1` makes the shell print Now Playing as macOS holds it, read back from `MPNowPlayingInfoCenter`, after every update, and every remote command it gets.
+- `TIDALFAST_REMOTE_TEST="8:play,12:seek=10,20:pause,24:next"` makes the shell send those remote commands that many seconds after launch, through the same path as the media keys. The commands are `play`, `pause`, `toggle`, `next`, `previous` and `seek=seconds`.
 - `TIDALFAST_SPALL=path` writes a [spall](https://gravitymoth.com/spall/) trace of every frame to `path`.
 - `TIDALFAST_LOG_EVENTS=1` prints every input event.
 - `TIDALFAST_CAPTURE=path` writes each presented frame to `path` as a TGA. It's for checking output when you can't take screenshots. Each frame goes to a temp file that's renamed over `path`, so copying `path` while the app runs gives a whole frame.
@@ -220,7 +229,7 @@ Box flags pick what's drawn, in this order: shadow, background (optionally a ver
 
 ### The library screen
 
-`src/app/library.odin` follows spotifast's layout and dark palette: a sidebar of 32 fake playlists, 250 pt wide by default, resized with a 5 pt handle between 210 and 600 pt (it stops growing once the main view would go below 360 pt). Next to it is the main view with the playlist header and the 10,000-row track table, and the 88 pt player bar runs along the bottom. Rows are 56 pt. The columns follow spotifast's `columns`, measured on the main view's width: #, cover and title always. Album shows above 560 pt (28% of the width, 140 to 360 pt), date added above 760 and added by above 920. Duration and the "more" button always show. Hovering lights a row; a click selects it; a double-click "plays" it, which updates the player bar. A right click or the "more" button opens a context menu. Dragging a row onto a playlist shows a ghost and a drop highlight. The drag goes through `ui.drag_begin` with the row index, so releasing after the row has scrolled out of view still ends it. With the table focused, the arrow keys, Page Up/Down and Home/End move the selection and scroll it into view, and Enter plays it. The prev, play/pause and next buttons and the volume slider work on the fake state. Rows whose page hasn't arrived yet show their number and grey bars. With `TIDALFAST_FAKE=1` the 32 playlists and 10,000 rows are the fake data again and covers are gradients.
+`src/app/library.odin` follows spotifast's layout and dark palette: a sidebar of 32 fake playlists, 250 pt wide by default, resized with a 5 pt handle between 210 and 600 pt (it stops growing once the main view would go below 360 pt). Next to it is the main view with the playlist header and the 10,000-row track table, and the 88 pt player bar runs along the bottom. Rows are 56 pt. The columns follow spotifast's `columns`, measured on the main view's width: #, cover and title always. Album shows above 560 pt (28% of the width, 140 to 360 pt), date added above 760 and added by above 920. Duration and the "more" button always show. Hovering lights a row; a click selects it; a double-click plays it (see Playback), and the row playing is lit. A right click or the "more" button opens a context menu. Dragging a row onto a playlist shows a ghost and a drop highlight. The drag goes through `ui.drag_begin` with the row index, so releasing after the row has scrolled out of view still ends it. With the table focused, the arrow keys, Page Up/Down and Home/End move the selection and scroll it into view, and Enter plays it. The player bar has previous, play/pause and next, a progress bar that seeks on click or drag and shows the drag position while held, elapsed and remaining time, and the volume slider. Rows whose page hasn't arrived yet show their number and grey bars. With `TIDALFAST_FAKE=1` the 32 playlists and 10,000 rows are the fake data again and covers are gradients.
 
 ### Performance
 
@@ -272,7 +281,7 @@ The plan said v2 (`openapi.tidal.com`). The reference clients show v1 still work
 
 Four worker threads (`WORKERS`) share two queues in `State`, both from `src/jobs`. The jobs queue goes from the UI thread to the workers. The results queue goes back. Each is a fixed array of 256 plain-data items behind a mutex and condition variable. Jobs come out by priority, then oldest first: data (sign-in, playlists, track pages) before visible covers, visible covers before the ones just outside the view. A job holds only fixed-size text (a playlist id, an image id, a device code) and numbers, so it never points into memory a view switch or a reload could free. A worker runs a job, pushes the result and calls the shell's `request_redraw`. The next frame takes results right after `ui.begin_frame`.
 
-Kinds of job: `Restore` (read the Keychain), `Login_Start`, `Login_Wait`, `Playlists`, `Tracks` (one page) and `Cover`.
+Kinds of job: `Restore` (read the Keychain), `Login_Start`, `Login_Wait`, `Playlists`, `Tracks` (one page), `Cover`, `Stream` (resolve a track's stream, see Playback) and `Artwork` (a cover for Now Playing, kept as pixels).
 
 Hot reload: `unload` sets the session's abort flag, which makes curl stop any transfer in flight (an `XFERINFOFUNCTION` that checks it) and `login_device_wait` return. Then it stops both queues and joins the workers. A worker whose job was cut short puts it back in the queue where it was. `unload` then copies the session's login state to a heap buffer and destroys the session, since a `tidal.Session` holds allocators and a curl handle pool made by this dylib. `reload` makes a new session, restores the login and starts new workers, which pick up the jobs that were put back. Results that were waiting stay in their queue.
 
@@ -310,6 +319,8 @@ Texture uploads don't wait on the GPU. A new texture has no earlier mip generati
 
 `tests/mock_tidal` serves the device login (approved a few seconds after the first poll), token refresh that rotates the refresh token, the session and user, 240 liked tracks, 12 playlists (one with 3,000 tracks), their tracks, and covers drawn on request as JPEGs at any size. Flags set the long playlist's length, the login delay, the access token's lifetime, delays for pages and covers, and a request to answer with 429.
 
+It also serves playback (see Playback below). Flags add a delay before every audio response (`-audio-delay=ms`), cap each audio connection's bandwidth (`-audio-rate=KB/s`), leave the SEEKTABLE out of the files (`-seektable=0`) and pick where the generated audio goes (`-audio-dir`).
+
 ```
 odin build tests/mock_tidal -out:build/mock_tidal
 ./build/mock_tidal -port=8787
@@ -327,6 +338,83 @@ TIDALFAST_API=http://127.0.0.1:8787 ./build/tidalfast
 | settle | 0.61 to 0.64 ms | 0.9 to 1.0 ms | 8.30 ms | 9.4 to 9.5 ms | 0 to 1 | 1 | 0.4 ms |
 
 Frame time includes waiting for the next drawable, so its average is the 120 Hz interval. The fake-data bench in the same build has frame maxima of 9.3 to 11.9 ms, so covers add no hitches. An upload of an 80x80 cover costs about 0.1 to 0.4 ms. The longest results step includes copying a page of 100 rows. The ui maximum comes from shaping text in rows seen for the first time, as in the fake-data bench. Afterwards the cache held about 590 covers in 21 MB, and the window went back to 0% CPU.
+
+## Playback
+
+`src/audio` plays 16-bit 44.1 kHz FLAC, TIDAL's `LOSSLESS`. `src/app/player.odin` connects it to the queue, the player bar and the shell.
+
+### Getting a stream
+
+`tidal.resolve_stream(session, track_id, quality)` asks v1 `tracks/{id}/playbackinfopostpaywall` with `playbackmode=STREAM`, `assetpresentation=FULL` and `audioquality=LOSSLESS`. The answer carries a BTS manifest: base64 JSON with `mimeType` (`audio/flac`), `codecs`, `encryptionType` and `urls`. `resolve_stream` returns the first URL, the sample rate and bit depth, and the ReplayGain fields `trackReplayGain`, `trackPeakAmplitude`, `albumReplayGain` and `albumPeakAmplitude`, the names tidalapi, riptide and the other reference clients read. It refuses DASH manifests (hi-res, phase 6), encrypted streams and anything that isn't FLAC. A missing gain is 0 dB and a missing peak 1.0. A track without album gain uses its track gain for both.
+
+Resolving runs as a `Stream` job on the data workers. Stream URLs expire, so when a download fails with a 4xx the app resolves the track once more and carries on from where it was.
+
+### Threads and buffers
+
+```
+fetch thread per track slot --bytes--> Stream window --> decode thread --float frames--> Pcm_Ring --> audio callback --> device
+```
+
+- **Fetch.** Each of the two track slots, current and next, has a thread that downloads the file with curl into an 8 MB window. The window slides forward as the decoder reads and keeps 256 KB behind the read position for short seeks back. Each request is an HTTP `Range` from where the window ends. When the window is full the thread blocks on a condition variable, so a paused track holds a connection and uses no CPU. If the server closes the connection, the thread resumes from where it got to. After 5 failures in a row, or a 4xx, the track fails.
+- **Decode.** One thread owns the slots and the device. It feeds dr_flac (`ma.decoder` with our own read and seek callbacks) the header bytes and then the file from whatever frame a seek started at, applies the track's ReplayGain and writes float frames into the ring. It waits on a semaphore for commands, bytes or room in the ring.
+- **Ring.** `Pcm_Ring` is a single-producer, single-consumer ring of 131,072 frames (3 s at 44.1 kHz) with atomic read and write positions. The decode thread drops everything not yet played by storing a flush position, which the callback skips to on its next call, so the writer never touches the reader's position. A queue of marks next to it says which track or seek starts at which ring position. The callback adopts each mark once it has read past it, so the status describes the frame being played.
+- **Callback.** It copies frames out, ramps the volume over one buffer, adopts marks, publishes the position, and posts the decode thread's semaphore when it has freed a quarter of the ring. It never locks, allocates or waits.
+- **Main thread.** The app sends commands (`play`, `seek`, `set_next`, `set_paused`) under a mutex that the decode thread holds only to copy them, and reads a `Status` snapshot each frame. Neither waits on the network or the device. The decode thread wakes the UI when the status changes, and four times a second while playing for the progress bar.
+
+### Queue and gapless
+
+Double-clicking a row copies the open list into the queue and plays from that row. The rows after it follow. Next and previous move through the queue and skip rows without a track id. Previous restarts the track instead once it has played 3 seconds. The queue follows the list while its pages load.
+
+About 30 seconds before the current track ends, or once all of it has downloaded, the player asks for the next track. The app resolves it and hands it over with `set_next`, and its fetch thread starts downloading. When the current track's decoder runs out, the decode thread writes the next track's first frames into the ring right after the last ones, with a mark between them, so the device sees one unbroken stream. When the mark plays, the queue moves on. If the next track has a different sample rate or channel count, the decode thread lets the ring play out and reopens the device, which leaves a short gap. Switching rates without that is phase 6.
+
+### ReplayGain and volume
+
+A track gets album gain when it plays as part of its album in order: the queue entry before or after it is from the same album, with the track number one away. Otherwise it gets track gain, so a playlist of singles plays at an even level. The factor is `10^(gain/20)`, lowered to `1/peak` if it would push the peak over full scale. The decode thread applies it. The volume slider applies after it, in the callback, as the cube of the slider's position, so half way is about -18 dB.
+
+### Seeking
+
+A seek shows its position in the player bar at once. The decode thread then looks for the frame to start from. It brackets the target with the SEEKTABLE's points, or with the first frame and the end of the file when there is no SEEKTABLE. It guesses a byte offset in proportion and looks there for a frame header that the next header confirms: sync code, CRC-8, and the next frame starting where this one's samples end. It narrows the bracket until it has a frame no more than 0.3 s before the target, decodes from there and drops the samples before the target. A guess outside the downloaded window empties it and starts a new range request at that offset, and playback goes on from those bytes. A seek inside the window doesn't touch the network.
+
+Measured from the seek command to the first sample at the new position leaving the callback, against the mock with `-audio-delay=50 -audio-rate=400` (50 ms before each audio response, 400 KB/s per connection, about three times the stream's bitrate) and `TIDALFAST_AUDIO_WINDOW_KB=512`, seven seeks each:
+
+| file | latencies |
+|---|---|
+| with SEEKTABLE | 25, 62, 101, 109, 113, 142, 278 ms |
+| without | 12, 101, 103, 105, 108, 142, 311 ms |
+
+The slowest in both is a seek to 18.7 s in a 20 s track, which needed a second probe. With the default 8 MB window the whole mock track is already downloaded, and a seek took 9 ms. Allowing up to 1 s before the target instead of 0.3 s made seeks that landed far from a seekpoint take 380 to 400 ms, since that second had to download and decode before being thrown away. The player logs each seek's latency to stderr.
+
+### Media keys and Now Playing
+
+`MPRemoteCommandCenter` and `MPNowPlayingInfoCenter` are Obj-C classes, and Odin dev-2026-10 crashes compiling Obj-C method calls, so both live in `shell/shell.m`. The shell enables play, pause, toggle, next, previous and `changePlaybackPosition`, and turns each command into an `EVENT_MEDIA` event: `key_code` is the `Media_Command`, `dx` the position for a seek. The app handles them in `playback_update`, the same way as the player bar's buttons.
+
+The app calls `Shell.set_now_playing` with the title, artist, album, duration, elapsed time, state and the cover as RGBA pixels, which an `Artwork` job fetches at 640x640. It calls it only when one of those changes, since macOS moves the elapsed time along by itself from the playback rate. The shell copies everything before it returns and rebuilds the artwork only when `artwork_key` changes. This is platform ABI version 2. `Shell` and `Now_Playing` have size checks on both sides.
+
+### Hot reload
+
+The callback, the decode thread and the fetch threads all run dylib code. `unload` destroys the player: it stops and closes the device, joins the threads and frees the decoders. `reload` makes a new player and plays the same tracks from where they were; their URLs live in heap memory, not in the dylib. So a reload leaves a short silence, and the next track's download starts over. Moving the callback into the shell would avoid the silence, but the shell would need its own ring and its own marks and positions, and decoding would still stop for the reload. A short silence while developing costs less. Two reloads during playback, one right after a gapless track change, resumed at the right position.
+
+### Without an account
+
+- The mock's first three liked tracks are a live album: three FLAC files cut from one continuous sine sweep with a little noise, at lengths that aren't whole FLAC frames, with an album gain of -6.02 dB and different track gains. Every other track plays one of four tones. The mock makes them at start as WAV, encodes them with `afconvert -f flac -d flac`, and adds a SEEKTABLE with a point every 2 s and a PADDING block, which afconvert leaves out. It serves the files with `Range` support.
+- `TIDALFAST_FAKE=1` plays a 30-second sine tone for each fake row, so the player bar, queue, seeking and Now Playing work without any server.
+
+To check gapless playback, play the album through with `TIDALFAST_AUDIO_CAPTURE` and compare the capture with the sweep:
+
+```
+./build/mock_tidal -port=8787
+TIDALFAST_API=http://127.0.0.1:8787 TIDALFAST_AUDIO_NULL=1 TIDALFAST_AUDIO_CAPTURE=/tmp/cap.wav \
+    TIDALFAST_REMOTE_TEST=8:play ./build/tidalfast     # quit after about 60 s
+odin run tests/audio_check -o:speed -- /tmp/cap.wav /tmp/tidalfast-mock-audio/album-source.wav 883234 1633711
+```
+
+`audio_check` finds where the sweep starts in the capture, fits the gain, and compares every frame after the first buffer's volume ramp with the source times that gain. A gap, a repeated or dropped frame, or a gain change at a track boundary fails it. The numbers after the files are the boundaries' source frames, which it reports on. It passes: 2,163,136 frames (49.05 s) across both boundaries, 0 samples off, a largest error of 6.3e-9 (float rounding), at x0.1715, which is the album gain of x0.5 times the default volume of 0.7 cubed.
+
+`tests/player_test.odin` sends media commands through `playback_update` with the fake data on the null device, and checks the queue, the player's position after a seek, and what goes to Now Playing.
+
+### CPU
+
+Apple M1, the mock album playing to the null device: 1.5% with an optimized dylib and about 4% with a debug one, mostly the four UI frames a second for the progress bar. Paused, the device is stopped and the decode thread sleeps on its semaphore: 0.0%.
 
 ## Hot reload
 
@@ -346,7 +434,7 @@ What it may not keep:
 
 - Odin globals. Each loaded copy has its own.
 - Other procedure pointers, including `mem.Allocator` values and `[dynamic]` arrays and maps, which hold an allocator. Each entry point rebuilds the allocators from the arenas.
-- Running threads. The text loader thread and the data workers run dylib code, so `unload` joins them and `reload` starts new ones.
+- Running threads. The text loader thread, the data workers and the audio player's threads run dylib code, so `unload` joins them and `reload` starts new ones. The audio callback is dylib code too, so the device stops for a reload; see Playback.
 - Anything the dylib's own runtime allocated, such as the `os.File` behind the spall trace. The app keeps only the file descriptor.
 - Data whose layout changed. Bump `STATE_VERSION` when a field changes type or moves and the size happens to stay the same.
 

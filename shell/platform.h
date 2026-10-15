@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#define PLATFORM_ABI_VERSION 1
+#define PLATFORM_ABI_VERSION 2
 
 typedef enum {
   EVENT_NONE,
@@ -18,7 +18,19 @@ typedef enum {
   EVENT_KEY_UP,
   EVENT_MODIFIERS_CHANGED,
   EVENT_RESIZE,
+  EVENT_MEDIA, // key_code is a Media_Command, dx the position for MEDIA_SEEK
 } Event_Kind;
+
+// Media keys, Control Center and headphones, from MPRemoteCommandCenter.
+typedef enum {
+  MEDIA_NONE,
+  MEDIA_PLAY,
+  MEDIA_PAUSE,
+  MEDIA_TOGGLE,
+  MEDIA_NEXT,
+  MEDIA_PREVIOUS,
+  MEDIA_SEEK,
+} Media_Command;
 
 typedef enum {
   MOUSE_BUTTON_LEFT,
@@ -68,11 +80,36 @@ typedef struct {
   size_t frame_size;
 } Memory;
 
+typedef enum {
+  NOW_PLAYING_STOPPED,
+  NOW_PLAYING_PLAYING,
+  NOW_PLAYING_PAUSED,
+} Now_Playing_State;
+
+// What macOS shows in Control Center and on the lock screen. The shell
+// copies everything before set_now_playing returns.
+typedef struct {
+  const char *title; // UTF-8; NULL clears Now Playing
+  const char *artist;
+  const char *album;
+  double duration; // seconds
+  double elapsed;
+  uint32_t state; // Now_Playing_State
+  uint32_t artwork_width;
+  uint32_t artwork_height;
+  uint32_t _pad;
+  const uint8_t *artwork; // RGBA8 sRGB, premultiplied, or NULL
+  uint64_t artwork_key; // the shell rebuilds the artwork only when this changes
+} Now_Playing;
+_Static_assert(sizeof(Now_Playing) == 72, "Now_Playing size must match platform.odin");
+
 typedef struct {
   void *metal_device;
   void *metal_layer;
   void (*request_redraw)(void);
+  void (*set_now_playing)(const Now_Playing *info); // main thread only
 } Shell;
+_Static_assert(sizeof(Shell) == 32, "Shell size must match platform.odin");
 
 typedef struct {
   Event *events;

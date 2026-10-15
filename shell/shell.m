@@ -7,6 +7,7 @@
 
 #import <Cocoa/Cocoa.h>
 #import <CoreServices/CoreServices.h>
+#import <MediaPlayer/MediaPlayer.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
 #include <copyfile.h>
@@ -234,6 +235,142 @@ static void watch_app(void) {
 }
 #endif
 
+// Now Playing and media keys
+//
+// MPNowPlayingInfoCenter shows what plays in Control Center and on the lock
+// screen. MPRemoteCommandCenter routes the media keys, Control Center's
+// buttons and headphone controls to the app that is playing; each command
+// becomes an EVENT_MEDIA in the app's next frame.
+//
+// TIDALFAST_NOW_PLAYING_LOG=1 prints nowPlayingInfo as macOS holds it after
+// every update. TIDALFAST_REMOTE_TEST="3:pause,5:play,7:seek=42,9:next"
+// sends commands through the same path as the real handlers, each that
+// many seconds after launch, for testing without a keyboard.
+
+static MPMediaItemArtwork *g_artwork;
+static uint64_t g_artwork_key;
+static bool g_now_playing_log;
+
+static void remote_command(uint32_t command, double position) {
+  push_event((Event){.kind = EVENT_MEDIA, .key_code = command, .dx = (float)position, .time = CACurrentMediaTime()});
+  if (g_now_playing_log) fprintf(stderr, "shell: remote command %u (%.3f)\n", command, position);
+  request_redraw();
+}
+
+static MPMediaItemArtwork *make_artwork(const Now_Playing *np) {
+  size_t w = np->artwork_width, h = np->artwork_height;
+  NSData *pixels = [NSData dataWithBytes:np->artwork length:w * h * 4];
+  CGDataProviderRef provider = CGDataProviderCreateWithCFData((__bridge CFDataRef)pixels);
+  CGColorSpaceRef srgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+  CGImageRef cg = CGImageCreate(w, h, 8, 32, w * 4, srgb, kCGImageAlphaPremultipliedLast | kCGBitmapByteOrderDefault,
+                                provider, NULL, true, kCGRenderingIntentDefault);
+  CGColorSpaceRelease(srgb);
+  CGDataProviderRelease(provider);
+  if (!cg) return nil;
+  NSImage *image = [[NSImage alloc] initWithCGImage:cg size:NSMakeSize(w, h)];
+  CGImageRelease(cg);
+  return [[MPMediaItemArtwork alloc] initWithBoundsSize:image.size
+                                         requestHandler:^NSImage *(CGSize size) {
+                                           return image;
+                                         }];
+}
+
+static void log_now_playing(void) {
+  MPNowPlayingInfoCenter *center = MPNowPlayingInfoCenter.defaultCenter;
+  NSDictionary *info = center.nowPlayingInfo;
+  MPMediaItemArtwork *art = info[MPMediaItemPropertyArtwork];
+  fprintf(stderr, "shell: now playing: state %ld, title \"%s\", artist \"%s\", album \"%s\", duration %.3f, elapsed %.3f, rate %.1f, artwork %s\n",
+          (long)center.playbackState, [info[MPMediaItemPropertyTitle] UTF8String] ?: "",
+          [info[MPMediaItemPropertyArtist] UTF8String] ?: "", [info[MPMediaItemPropertyAlbumTitle] UTF8String] ?: "",
+          [info[MPMediaItemPropertyPlaybackDuration] doubleValue],
+          [info[MPNowPlayingInfoPropertyElapsedPlaybackTime] doubleValue],
+          [info[MPNowPlayingInfoPropertyPlaybackRate] doubleValue],
+          art ? [NSString stringWithFormat:@"%.0fx%.0f", art.bounds.size.width, art.bounds.size.height].UTF8String : "none");
+}
+
+static void set_now_playing(const Now_Playing *np) {
+  MPNowPlayingInfoCenter *center = MPNowPlayingInfoCenter.defaultCenter;
+  if (!np || !np->title) {
+    center.nowPlayingInfo = nil;
+    center.playbackState = MPNowPlayingPlaybackStateStopped;
+    g_artwork = nil;
+    g_artwork_key = 0;
+    if (g_now_playing_log) log_now_playing();
+    return;
+  }
+  if (np->artwork_key != g_artwork_key) {
+    g_artwork_key = np->artwork_key;
+    g_artwork = np->artwork && np->artwork_width && np->artwork_height ? make_artwork(np) : nil;
+  }
+  NSMutableDictionary *info = [NSMutableDictionary dictionary];
+  info[MPMediaItemPropertyTitle] = [NSString stringWithUTF8String:np->title] ?: @"";
+  if (np->artist) info[MPMediaItemPropertyArtist] = [NSString stringWithUTF8String:np->artist] ?: @"";
+  if (np->album) info[MPMediaItemPropertyAlbumTitle] = [NSString stringWithUTF8String:np->album] ?: @"";
+  info[MPMediaItemPropertyPlaybackDuration] = @(np->duration);
+  info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = @(np->elapsed);
+  info[MPNowPlayingInfoPropertyPlaybackRate] = @(np->state == NOW_PLAYING_PLAYING ? 1.0 : 0.0);
+  info[MPNowPlayingInfoPropertyMediaType] = @(MPNowPlayingInfoMediaTypeAudio);
+  if (g_artwork) info[MPMediaItemPropertyArtwork] = g_artwork;
+  center.nowPlayingInfo = info;
+  center.playbackState = np->state == NOW_PLAYING_PLAYING  ? MPNowPlayingPlaybackStatePlaying
+                         : np->state == NOW_PLAYING_PAUSED ? MPNowPlayingPlaybackStatePaused
+                                                           : MPNowPlayingPlaybackStateStopped;
+  if (g_now_playing_log) log_now_playing();
+}
+
+static void setup_remote_commands(void) {
+  g_now_playing_log = getenv("TIDALFAST_NOW_PLAYING_LOG") != NULL;
+  MPRemoteCommandCenter *center = MPRemoteCommandCenter.sharedCommandCenter;
+  struct {
+    MPRemoteCommand *command;
+    uint32_t kind;
+  } simple[] = {
+      {center.playCommand, MEDIA_PLAY},
+      {center.pauseCommand, MEDIA_PAUSE},
+      {center.togglePlayPauseCommand, MEDIA_TOGGLE},
+      {center.nextTrackCommand, MEDIA_NEXT},
+      {center.previousTrackCommand, MEDIA_PREVIOUS},
+  };
+  for (size_t i = 0; i < sizeof simple / sizeof simple[0]; i++) {
+    uint32_t kind = simple[i].kind;
+    simple[i].command.enabled = YES;
+    [simple[i].command addTargetWithHandler:^MPRemoteCommandHandlerStatus(MPRemoteCommandEvent *event) {
+      remote_command(kind, 0);
+      return MPRemoteCommandHandlerStatusSuccess;
+    }];
+  }
+  center.changePlaybackPositionCommand.enabled = YES;
+  [center.changePlaybackPositionCommand addTargetWithHandler:^MPRemoteCommandHandlerStatus(MPRemoteCommandEvent *event) {
+    remote_command(MEDIA_SEEK, ((MPChangePlaybackPositionCommandEvent *)event).positionTime);
+    return MPRemoteCommandHandlerStatusSuccess;
+  }];
+
+  const char *script = getenv("TIDALFAST_REMOTE_TEST");
+  if (!script) return;
+  NSDictionary *names = @{
+    @"play" : @(MEDIA_PLAY),
+    @"pause" : @(MEDIA_PAUSE),
+    @"toggle" : @(MEDIA_TOGGLE),
+    @"next" : @(MEDIA_NEXT),
+    @"previous" : @(MEDIA_PREVIOUS),
+    @"seek" : @(MEDIA_SEEK),
+  };
+  for (NSString *step in [@(script) componentsSeparatedByString:@","]) {
+    NSArray *at = [step componentsSeparatedByString:@":"];
+    if (at.count != 2) continue;
+    NSArray *arg = [at[1] componentsSeparatedByString:@"="];
+    NSNumber *kind = names[arg[0]];
+    if (!kind) continue;
+    uint32_t command = kind.unsignedIntValue;
+    double value = arg.count > 1 ? [arg[1] doubleValue] : 0;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)([at[0] doubleValue] * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+                     fprintf(stderr, "shell: remote test sends %s\n", [step UTF8String]);
+                     remote_command(command, value);
+                   });
+  }
+}
+
 // Input
 
 static uint32_t modifiers(NSEventModifierFlags flags) {
@@ -432,7 +569,9 @@ static void update_display_link(void) {
       .metal_device = (__bridge void *)g_layer.device,
       .metal_layer = (__bridge void *)g_layer,
       .request_redraw = request_redraw,
+      .set_now_playing = set_now_playing,
   };
+  setup_remote_commands();
 
   if (!open_app(&g_app)) {
     [NSApp terminate:nil];

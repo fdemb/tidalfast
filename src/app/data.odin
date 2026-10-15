@@ -181,8 +181,17 @@ session_open :: proc(d: ^Data) {
 	d.session = s
 }
 
+// keychain_service is where the login goes. Against a mock server,
+// TIDALFAST_KEYCHAIN can name another item, so test runs of differently
+// signed builds don't share one and the Keychain doesn't ask for access.
 keychain_service :: proc(d: ^Data) -> string {
-	return KEYCHAIN_MOCK_SERVICE if d.mock else KEYCHAIN_SERVICE
+	if !d.mock {
+		return KEYCHAIN_SERVICE
+	}
+	if name := os.get_env("TIDALFAST_KEYCHAIN", context.temp_allocator); name != "" && name != KEYCHAIN_SERVICE {
+		return name
+	}
+	return KEYCHAIN_MOCK_SERVICE
 }
 
 // Stored_Auth is what goes in the Keychain item, as JSON.
@@ -413,6 +422,8 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 		}
 		view_add_rows(v, int(res.job.offset), res.rows, len(res.rows) < int(res.job.limit))
 		view_request_pages(d)
+	case .Stream, .Artwork:
+		playback_result(s, res)
 	case .Cover:
 		key := res.job.key
 		if failed || res.pixels == nil {
@@ -512,6 +523,9 @@ view_add_rows :: proc(v: ^Track_View, offset: int, rows: []Row, last: bool) {
 			duration = strings.clone(r.duration, a),
 			cover    = strings.clone(r.cover, a),
 			seconds  = r.seconds,
+			id       = r.id,
+			album_id = r.album_id,
+			track    = r.track,
 		}
 		v.loaded_rows += int(!v.loaded[offset + i])
 		v.loaded[offset + i] = true
