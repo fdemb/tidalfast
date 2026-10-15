@@ -125,3 +125,84 @@ media_commands :: proc(t: ^testing.T) {
 	media(s, .None)
 	testing.expect_value(t, pb.index, 2)
 }
+
+// wait_until runs frames until done says so, for up to 3 s.
+@(private = "file")
+wait_until :: proc(s: ^app.State, done: proc(s: ^app.State) -> bool) -> bool {
+	start := time.tick_now()
+	for time.tick_since(start) < 3 * time.Second {
+		app.playback_update(s, nil)
+		if done(s) {
+			return true
+		}
+		time.sleep(5 * time.Millisecond)
+	}
+	return false
+}
+
+@(private = "file")
+fake_player_state :: proc(rows: []app.Row) -> ^app.State {
+	s := new(app.State)
+	s.rows = rows
+	s.data.fake = true
+	s.library.selected = -1
+	s.playback.index = -1
+	s.playback.player = audio.create(no_redraw, 0, null_output = true)
+	return s
+}
+
+// List A plays with its row 1 preloaded. Double-clicking row 1 of list B
+// must play B's row 1, not the bytes preloaded for A's.
+@(test)
+new_queue_doesnt_reuse_the_preload :: proc(t: ^testing.T) {
+	list_a := []app.Row{{title = "A1", seconds = 30}, {title = "A2", seconds = 30}, {title = "A3", seconds = 30}}
+	list_b := []app.Row{{title = "B1", seconds = 30}, {title = "B2", seconds = 30}, {title = "B3", seconds = 30}}
+	s := fake_player_state(list_a)
+	defer free(s)
+	defer app.playback_shutdown(s)
+	pb := &s.playback
+
+	app.playback_play_row(s, 0)
+	// The fake tones are 30 s, so the player asks for the next one at once.
+	testing.expect(t, wait_until(s, proc(s: ^app.State) -> bool {return s.playback.next.resolved}))
+	testing.expect_value(t, pb.next.item, 1)
+	preloaded := pb.next.serial
+
+	s.rows = list_b
+	s.library.playlist = 1
+	app.playback_play_row(s, 1)
+	testing.expect(t, pb.cur.serial != preloaded, "B's row 1 took the source preloaded for A's")
+	testing.expect_value(t, app.playback_item(s).title, "B2")
+	testing.expect(t, wait_until(s, proc(s: ^app.State) -> bool {return s.playback.status.serial == s.playback.cur.serial}))
+}
+
+// The player bar's play button and the remote's toggle start playback when
+// nothing is loaded, and start the queue again once it has played out.
+@(test)
+toggle_plays_from_idle_and_the_end :: proc(t: ^testing.T) {
+	rows := []app.Row{{title = "One", seconds = 30}, {title = "Two", seconds = 30}}
+	s := fake_player_state(rows)
+	defer free(s)
+	defer app.playback_shutdown(s)
+	pb := &s.playback
+
+	media(s, .Toggle)
+	testing.expect_value(t, pb.index, 0)
+	testing.expect(t, app.playback_playing(s))
+	media(s, .Toggle)
+	testing.expect(t, !app.playback_playing(s))
+	media(s, .Toggle)
+	testing.expect(t, app.playback_playing(s))
+
+	// The last entry of the queue, played to its end.
+	app.playback_play_row(s, 1)
+	testing.expect(t, wait_until(s, proc(s: ^app.State) -> bool {return s.playback.status.serial == s.playback.cur.serial}))
+	app.playback_seek(s, app.FAKE_TONE_SECONDS - 0.05)
+	testing.expect(t, wait_until(s, proc(s: ^app.State) -> bool {return s.playback.status.state == .Ended}))
+	testing.expect(t, !app.playback_playing(s))
+
+	media(s, .Toggle)
+	testing.expect_value(t, pb.index, 0)
+	testing.expect(t, app.playback_playing(s))
+	testing.expect(t, wait_until(s, proc(s: ^app.State) -> bool {return s.playback.status.serial == s.playback.cur.serial && s.playback.status.state == .Playing}))
+}

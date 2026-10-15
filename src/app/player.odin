@@ -43,7 +43,9 @@ Queue_Item :: struct {
 // Track_Source is a queue entry the player knows or is about to.
 Track_Source :: struct {
 	serial:   u64, // 0 for none
+	queue:    u32, // the queue it's from, see Playback.queue_gen
 	item:     int,
+	track:    i64, // its TIDAL track id, or the fake id
 	resolved: bool, // url and gain are set
 	url:      string, // heap
 	gain:     f32,
@@ -73,6 +75,7 @@ Playback :: struct {
 	loaded:          int, // rows loaded when the snapshot was taken
 	list:            int, // sidebar entry the queue came from
 	view_gen:        u32,
+	queue_gen:       u32, // goes up each time a new list replaces the queue
 	fake:            bool,
 
 	index:           int, // current item, -1 for none
@@ -211,10 +214,47 @@ queue_snapshot :: proc(s: ^State) {
 }
 
 // playback_play_row plays row i of the open list, with the rest of the
-// list queued after it.
+// list queued after it. A track preloaded from the old queue isn't reused,
+// even at the same row.
 playback_play_row :: proc(s: ^State, i: int) {
+	if row := view_row(s, i); row == nil || (row.id == 0 && !s.data.fake) {
+		return
+	}
 	queue_snapshot(s)
+	s.playback.queue_gen += 1
 	start_item(s, i)
+}
+
+// playback_stop stops the player and forgets the queue and Now Playing,
+// as at start. The player and its settings stay.
+playback_stop :: proc(s: ^State) {
+	pb := &s.playback
+	if pb.player != nil {
+		audio.stop(pb.player)
+	}
+	source_clear(&pb.cur)
+	source_clear(&pb.next)
+	artwork_free(&pb.art)
+	artwork_free(&pb.next_art)
+	if pb.has_arena {
+		vmem.arena_destroy(&pb.arena)
+	}
+	pb^ = {
+		player          = pb.player,
+		set_now_playing = pb.set_now_playing,
+		capture         = pb.capture,
+		window          = pb.window,
+		null_output     = pb.null_output,
+		volume_sent     = pb.volume_sent,
+		serial          = pb.serial,
+		queue_gen       = pb.queue_gen,
+		index           = -1,
+	}
+	if pb.set_now_playing != nil {
+		none: platform.Now_Playing
+		pb.set_now_playing(&none)
+	}
+	s.library.playing = -1
 }
 
 // start_item makes queue item i the current track, from sample at.
@@ -229,7 +269,7 @@ start_item :: proc(s: ^State, i: int, at: i64 = 0) {
 	pb.seek_id = 0
 	pb.message = {}
 	// The preloaded next track: the player keeps its bytes.
-	if pb.next.serial != 0 && pb.next.item == i {
+	if pb.next.serial != 0 && pb.next.queue == pb.queue_gen && pb.next.item == i && pb.next.track == pb.entries[i].id {
 		source_clear(&pb.cur)
 		pb.cur = pb.next
 		pb.next = {}
@@ -249,7 +289,7 @@ start_item :: proc(s: ^State, i: int, at: i64 = 0) {
 	source_clear(&pb.next)
 	artwork_free(&pb.next_art)
 	pb.serial += 1
-	pb.cur = {serial = pb.serial, item = i, at = at}
+	pb.cur = {serial = pb.serial, queue = pb.queue_gen, item = i, track = pb.entries[i].id, at = at}
 	// Silence until the stream resolves, rather than more of the old track.
 	if !pb.fake {
 		audio.play(pb.player, {serial = pb.cur.serial}, at)
@@ -377,12 +417,15 @@ playback_previous :: proc(s: ^State) {
 	}
 }
 
+// playback_toggle plays when nothing plays (idle, paused or at the end of
+// the queue) and pauses otherwise.
 playback_toggle :: proc(s: ^State) {
-	playback_set_paused(s, !s.playback.paused || s.playback.index < 0 || s.playback.status.state == .Ended)
+	playback_set_paused(s, playback_playing(s))
 }
 
 // playback_set_paused pauses or plays. Playing with nothing loaded starts
-// the selected row, or the first.
+// the selected row, or the first; playing at the end of the queue starts
+// it again from the top.
 playback_set_paused :: proc(s: ^State, paused: bool) {
 	pb := &s.playback
 	if !paused && (pb.index < 0 || pb.cur.serial == 0) {
@@ -391,7 +434,9 @@ playback_set_paused :: proc(s: ^State, paused: bool) {
 		return
 	}
 	if !paused && pb.status.state == .Ended && pb.status.serial == pb.cur.serial {
-		start_item(s, pb.index)
+		if first := audio.queue_next(pb.entries, -1); first >= 0 {
+			start_item(s, first)
+		}
 		return
 	}
 	if pb.index < 0 {
@@ -420,7 +465,7 @@ playback_seek :: proc(s: ^State, seconds: f64) {
 		audio.play(pb.player, source_of(pb, &pb.cur), sample, pb.paused)
 		return
 	}
-	pb.seek_id = audio.seek(pb.player, sample)
+	pb.seek_id = audio.seek(pb.player, pb.cur.serial, sample)
 	pb.seek_seconds = at
 }
 
@@ -474,7 +519,8 @@ playback_item :: proc(s: ^State) -> ^Queue_Item {
 
 playback_playing :: proc(s: ^State) -> bool {
 	pb := &s.playback
-	return pb.index >= 0 && !pb.paused && pb.status.state != .Ended
+	ended := pb.status.state == .Ended && pb.status.serial == pb.cur.serial
+	return pb.index >= 0 && !pb.paused && !ended
 }
 
 // playback_update runs once a frame after data_update: media commands,
@@ -528,7 +574,7 @@ playback_update :: proc(s: ^State, events: []platform.Event) {
 	if st.want_next && pb.next.serial == 0 && st.serial == pb.cur.serial {
 		if n := audio.queue_next(pb.entries, pb.index); n >= 0 {
 			pb.serial += 1
-			pb.next = {serial = pb.serial, item = n}
+			pb.next = {serial = pb.serial, queue = pb.queue_gen, item = n, track = pb.entries[n].id}
 			resolve(s, &pb.next)
 		}
 	}

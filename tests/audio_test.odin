@@ -4,7 +4,9 @@ import "core:encoding/base64"
 import "core:encoding/json"
 import "core:fmt"
 import "core:math"
+import "core:sync"
 import "core:testing"
+import "core:time"
 
 import "../src/audio"
 import tidal "../src/tidal"
@@ -359,4 +361,105 @@ playback_info :: proc(t: ^testing.T) {
 	refused(t, playback_json(BTS, `{"mimeType":"audio/flac","codecs":"flac","encryptionType":"NONE","urls":[]}`), .Manifest_Decode)
 	refused(t, playback_json(BTS, `not json`), .Manifest_Decode)
 	refused(t, playback_json("application/dash+xml", `<MPD/>`), .Unknown_Manifest_Format)
+}
+
+@(private = "file")
+no_wake :: proc "c" () {}
+
+@(private = "file")
+tone :: proc(serial: u64) -> audio.Source {
+	return {kind = .Tone, serial = serial, gain = 1, seconds = 30, tone_hz = 440}
+}
+
+// wait_audible waits up to 3 s for serial to play past its first frames.
+@(private = "file")
+wait_audible :: proc(p: ^audio.Player, serial: u64) -> bool {
+	start := time.tick_now()
+	for time.tick_since(start) < 3 * time.Second {
+		if st := audio.status(p); st.serial == serial && st.state == .Playing && st.sample > 0 {
+			return true
+		}
+		time.sleep(5 * time.Millisecond)
+	}
+	return false
+}
+
+// A seek for A that the decode thread hasn't applied yet when B replaces A
+// doesn't move B.
+@(test)
+play_drops_a_pending_seek :: proc(t: ^testing.T) {
+	p := audio.create(no_wake, 0, null_output = true)
+	defer audio.destroy(p)
+	audio.play(p, tone(1))
+	testing.expect(t, wait_audible(p, 1))
+
+	// Hold the decode thread in its status update, so the seek and the
+	// play reach it together.
+	sync.lock(&p.status_mutex)
+	time.sleep(400 * time.Millisecond)
+	audio.seek(p, 1, 20 * 44100)
+	audio.play(p, tone(2))
+	sync.unlock(&p.status_mutex)
+
+	testing.expect(t, wait_audible(p, 2))
+	st := audio.status(p)
+	testing.expectf(t, st.sample < 44100, "B starts at sample %d, where A's seek was going", st.sample)
+}
+
+// status reads the audible mark and its position as one pair. Seeks back
+// and forth between 2 s and 20 s give the callback a new mark every buffer;
+// a position from one seek reported with another's id shows up as
+// 18 s off.
+@(test)
+status_pairs_mark_and_sample :: proc(t: ^testing.T) {
+	p := audio.create(no_wake, 0, null_output = true)
+	defer audio.destroy(p)
+	audio.play(p, tone(1))
+	testing.expect(t, wait_audible(p, 1))
+
+	targets: [1 << 12]i64
+	torn, checked := 0, 0
+	start := time.tick_now()
+	for i := 0; time.tick_since(start) < 2 * time.Second && i < len(targets) - 1; i += 1 {
+		target := i64(2 * 44100 if i % 2 == 0 else 20 * 44100)
+		id := audio.seek(p, 1, target)
+		targets[id] = target
+		for spin := time.tick_now(); time.tick_since(spin) < 15 * time.Millisecond; {
+			st := audio.status(p)
+			if st.seek_id == 0 || int(st.seek_id) >= len(targets) {
+				continue
+			}
+			checked += 1
+			if d := st.sample - targets[st.seek_id]; d < 0 || d > 44100 {
+				torn += 1
+			}
+		}
+	}
+	testing.expect(t, checked > 1000)
+	testing.expectf(t, torn == 0, "%d of %d reads paired a mark with another mark's position", torn, checked)
+}
+
+// The audio callback makes no system calls, so it never posts the decode
+// thread's semaphore, even once it has played more than a quarter of the
+// ring. With the decode thread held off the semaphore, a post would stay
+// counted.
+@(test)
+callback_never_wakes_the_decoder :: proc(t: ^testing.T) {
+	p := audio.create(no_wake, 0, null_output = true)
+	defer audio.destroy(p)
+	audio.play(p, tone(1))
+	testing.expect(t, wait_audible(p, 1))
+	time.sleep(300 * time.Millisecond) // the ring is full
+	underruns := audio.status(p).underruns
+
+	sync.lock(&p.cmd_mutex)
+	sync.atomic_store(&p.cmd_pending, true)
+	time.sleep(300 * time.Millisecond) // the decode thread is waiting for the lock
+	before := sync.atomic_load(&p.sema.count)
+	time.sleep(time.Duration(audio.RING_FRAMES / 2 * i64(time.Second) / 44100)) // half the ring
+	after := sync.atomic_load(&p.sema.count)
+	sync.unlock(&p.cmd_mutex)
+	testing.expect_value(t, after, before)
+	testing.expect(t, wait_audible(p, 1))
+	testing.expect_value(t, audio.status(p).underruns, underruns)
 }

@@ -7,10 +7,11 @@ package audio
 //
 // The decode thread owns the slots, the decoders and the device. It reads a
 // slot's bytes through dr_flac, applies the track's ReplayGain and writes
-// float frames into the ring. The callback copies frames out, applies the
-// volume and never blocks or allocates: the ring and the marks are lock-free,
-// and it wakes the decode thread with a futex post only when it has freed a
-// quarter of the ring and the thread said it's waiting for room.
+// float frames into the ring. The callback copies frames out and applies the
+// volume. It never locks, allocates, logs or makes a system call: the ring
+// and the marks are lock-free, and it doesn't wake the decode thread. While
+// the device runs, the decode thread wakes on a timer instead and tops the
+// ring up; when nothing plays it sleeps until a command or bytes arrive.
 //
 // Two slots hold the current track and the next one. The next one's bytes
 // download while the current plays, and its first frames go into the ring
@@ -25,6 +26,7 @@ package audio
 // All of it runs code from the app dylib, so the app destroys the player
 // before a hot reload and makes a new one after. See src/app/player.odin.
 
+import "base:intrinsics"
 import "base:runtime"
 import "core:c"
 import "core:fmt"
@@ -41,6 +43,21 @@ CAPTURE_FRAMES :: 1 << 19 // about 12 s at 44.1 kHz
 TICK :: 250 * time.Millisecond // how often a playing player wakes the UI
 WANT_NEXT_SECONDS :: 30 // ask for the next track this long before the end at the latest
 NEAR_SECONDS :: 0.3 // a seek decodes and drops at most about this much
+LOW_WATER :: RING_FRAMES / 4 // the decode thread checks the ring before this much has played
+
+foreign import libsystem "system:System"
+
+@(private = "file")
+Timebase :: struct {
+	numer, denom: u32,
+}
+
+@(private = "file", default_calling_convention = "c")
+foreign libsystem {
+	// Reads the commpage, so the audio callback can call it: no system call.
+	mach_absolute_time :: proc() -> u64 ---
+	mach_timebase_info :: proc(info: ^Timebase) -> c.int ---
+}
 
 Source_Kind :: enum u8 {
 	None,
@@ -116,11 +133,12 @@ Commands :: struct {
 	play_at:      i64,
 	play_paused:  bool,
 	seek:         Maybe(i64),
+	seek_serial:  u64, // the source the seek is for; it's dropped if that isn't playing
 	seek_id:      u32,
 	next:         Maybe(Source), // kind None clears it
 	paused:       Maybe(bool),
 	quit:         bool,
-	seek_tick:    time.Tick,
+	seek_tick:    u64, // mach_absolute_time
 }
 
 Player :: struct {
@@ -151,7 +169,7 @@ Player :: struct {
 	scratch:         []f32,
 	ui_tick:         i64,
 	ui_mark:         u64,
-	seek_tick:       time.Tick,
+	seek_tick:       u64, // mach_absolute_time of the last seek command
 	seek_logged:     u32,
 	capture_fd:      posix.FD,
 	capture_frames:  i64,
@@ -166,12 +184,13 @@ Player :: struct {
 	capturing:       bool,
 
 	// Written by the callback (or the decode thread while the device is
-	// stopped), read by anyone.
+	// stopped), read by anyone. pub_seq is odd while pub_mark and pub_sample
+	// change; see published.
 	cb_gain:         f32,
-	waiting_space:   bool,
+	pub_seq:         u64,
 	pub_mark:        u64, // marks adopted so far; the current one is pub_mark-1
 	pub_sample:      i64,
-	pub_seek_tick:   i64, // tick of the first frame after the last seek mark
+	pub_seek_tick:   u64, // mach_absolute_time of the first frame after the last seek mark
 	pub_seek_id:     u32,
 	underruns:       u64,
 
@@ -239,7 +258,8 @@ destroy :: proc(p: ^Player) {
 }
 
 // play replaces whatever plays with source, from sample at. The audio
-// stops at once; the new track starts when its first bytes arrive.
+// stops at once; the new track starts when its first bytes arrive. A seek
+// not yet applied goes with the track it was for.
 play :: proc(p: ^Player, source: Source, at: i64 = 0, paused := false) {
 	sync.lock(&p.cmd_mutex)
 	commands_free(&p.cmd)
@@ -247,18 +267,27 @@ play :: proc(p: ^Player, source: Source, at: i64 = 0, paused := false) {
 	p.cmd.play_at = at
 	p.cmd.play_paused = paused
 	p.cmd.paused = nil
+	p.cmd.seek = nil
 	sync.unlock(&p.cmd_mutex)
 	post(p)
 }
 
-// seek moves the current track to sample. Returns an id that Status.seek_id
-// reaches once the audio is from the new position.
-seek :: proc(p: ^Player, sample: i64) -> u32 {
+// stop ends playback and lets the device stop. The status goes back to
+// Idle with serial 0.
+stop :: proc(p: ^Player) {
+	play(p, {}, 0, true)
+}
+
+// seek moves the source with this serial to sample, if it is the one
+// playing when the command runs. Returns an id that Status.seek_id reaches
+// once the audio is from the new position.
+seek :: proc(p: ^Player, serial: u64, sample: i64) -> u32 {
 	p.next_seek_id += 1
 	sync.lock(&p.cmd_mutex)
 	p.cmd.seek = sample
+	p.cmd.seek_serial = serial
 	p.cmd.seek_id = p.next_seek_id
-	p.cmd.seek_tick = time.tick_now()
+	p.cmd.seek_tick = mach_absolute_time()
 	sync.unlock(&p.cmd_mutex)
 	post(p)
 	return p.next_seek_id
@@ -294,7 +323,8 @@ status :: proc(p: ^Player) -> Status {
 	s := p.st
 	format_of := p.st_serial
 	sync.unlock(&p.status_mutex)
-	if m := current_mark(p); m.serial != 0 {
+	m, sample := published(p)
+	if m.serial != 0 {
 		s.serial = m.serial
 		s.seek_id = m.seek_id
 		if m.end {
@@ -305,9 +335,31 @@ status :: proc(p: ^Player) -> Status {
 	if s.serial != format_of {
 		s.rate, s.total = 0, 0
 	}
-	s.sample = sync.atomic_load(&p.pub_sample)
+	s.sample = sample
 	s.underruns = sync.atomic_load(&p.underruns)
 	return s
+}
+
+// published reads the callback's current mark and position as one pair.
+// The callback makes pub_seq odd before it changes them and even after, so
+// a read that saw an odd or changed count tries again. The mark's slot is
+// only reused after the callback moves past it, which changes the count.
+@(private = "file")
+published :: proc(p: ^Player) -> (m: Mark, sample: i64) {
+	for {
+		seq := sync.atomic_load(&p.pub_seq)
+		if seq & 1 != 0 {
+			intrinsics.cpu_relax()
+			continue
+		}
+		n := sync.atomic_load(&p.pub_mark)
+		m = p.marks.items[(n - 1) % MARKS] if n > 0 else {}
+		sample = sync.atomic_load(&p.pub_sample)
+		intrinsics.atomic_thread_fence(.Seq_Cst)
+		if sync.atomic_load(&p.pub_seq) == seq {
+			return
+		}
+	}
 }
 
 // seek_latency returns the time from the last seek command to the first
@@ -315,10 +367,12 @@ status :: proc(p: ^Player) -> Status {
 seek_latency :: proc(p: ^Player) -> (id: u32, d: time.Duration, ok: bool) {
 	id = sync.atomic_load(&p.pub_seek_id)
 	t := sync.atomic_load(&p.pub_seek_tick)
-	if id == 0 || t == 0 {
+	if id == 0 || t == 0 || t < p.seek_tick {
 		return
 	}
-	return id, time.tick_diff(p.seek_tick, time.Tick{t}), true
+	tb: Timebase
+	mach_timebase_info(&tb)
+	return id, time.Duration((t - p.seek_tick) * u64(tb.numer) / u64(tb.denom)), true
 }
 
 @(private = "file")
@@ -364,7 +418,13 @@ decode_main :: proc "c" (arg: rawptr) -> rawptr {
 			continue
 		}
 		if p.device_running {
-			sync.atomic_sema_wait_with_timeout(&p.sema, TICK)
+			// The callback doesn't wake this thread, so the wait is short
+			// enough that the ring never plays down past LOW_WATER.
+			wait := TICK
+			if p.device_rate > 0 {
+				wait = min(wait, time.Duration(f64(LOW_WATER) / f64(p.device_rate) * f64(time.Second)))
+			}
+			sync.atomic_sema_wait_with_timeout(&p.sema, wait)
 		} else {
 			sync.atomic_sema_wait(&p.sema)
 		}
@@ -399,7 +459,7 @@ run_commands :: proc(p: ^Player, heavy: bool) -> bool {
 	play_src, has_play := c.play.?
 	play_at, play_paused := c.play_at, c.play_paused
 	seek_to, has_seek := c.seek.?
-	seek_id, seek_tick := c.seek_id, c.seek_tick
+	seek_serial, seek_id, seek_tick := c.seek_serial, c.seek_id, c.seek_tick
 	next, has_next := c.next.?
 	paused, has_paused := c.paused.?
 	c.play, c.seek, c.next, c.paused = nil, nil, nil, nil
@@ -420,8 +480,7 @@ run_commands :: proc(p: ^Player, heavy: bool) -> bool {
 		delete(next.url, heap)
 	}
 	if has_seek {
-		p.seek_tick = seek_tick
-		do_seek(p, seek_to, seek_id)
+		do_seek(p, seek_serial, seek_to, seek_id, seek_tick)
 	}
 	if has_paused {
 		p.paused = paused
@@ -471,13 +530,18 @@ do_play :: proc(p: ^Player, src: Source, at: i64, paused: bool) {
 	sl.discard = 0
 	sl.finished = false
 	sl.next_sample = at
-	mark_push(&p.marks, {at = sync.atomic_load(&p.pcm.write), serial = src.serial, sample = at})
+	// serial 0 is stop: an end mark, so the device stops and the status
+	// says Idle.
+	mark_push(&p.marks, {at = sync.atomic_load(&p.pcm.write), serial = src.serial, sample = at, end = src.serial == 0})
 	ring_flush(&p.pcm)
 	if !p.device_running {
 		bookkeep_stopped(p)
 	}
 	sync.lock(&p.status_mutex)
 	p.st.state = .Paused if paused else .Playing
+	if src.serial == 0 {
+		p.st.state = .Idle
+	}
 	p.st.next_serial = 0
 	p.st.want_next = false
 	p.st.error = {}
@@ -519,11 +583,16 @@ do_set_next :: proc(p: ^Player, src: Source) {
 }
 
 @(private = "file")
-do_seek :: proc(p: ^Player, target: i64, id: u32) {
+do_seek :: proc(p: ^Player, serial: u64, target: i64, id: u32, tick: u64) {
 	audible := current_mark(p).serial
+	back := p.prev_alive && p.slots[1 - p.cur].source.serial == audible && audible == serial
+	if !back && p.slots[p.cur].source.serial != serial {
+		return // for a track that no longer plays
+	}
+	p.seek_tick = tick
 	// A seek in the tail of the previous track, after the next has started
 	// decoding: go back to it.
-	if p.prev_alive && p.slots[1 - p.cur].source.serial == audible {
+	if back {
 		nxt := &p.slots[p.cur]
 		slot_close(nxt)
 		nxt.finished = false
@@ -578,9 +647,7 @@ step :: proc(p: ^Player) -> bool {
 		return false
 	}
 	if ring_free_frames(&p.pcm) < CHUNK {
-		sync.atomic_store(&p.waiting_space, true)
-		// The callback may have freed room between the check and the flag.
-		return ring_free_frames(&p.pcm) >= CHUNK
+		return false // the timed wait in decode_main comes back
 	}
 	decode_chunk(p, sl)
 	return true
@@ -1055,12 +1122,15 @@ bookkeep_stopped :: proc(p: ^Player) {
 }
 
 // publish adopts the marks up to ring position rd and stores the position.
+// The count goes odd before mark_advance, which frees the old mark's slot.
 @(private = "file")
 publish :: proc "contextless" (p: ^Player, rd: u64) -> bool {
+	sync.atomic_add(&p.pub_seq, 1)
 	changed := mark_advance(&p.marks, rd)
 	m := p.marks.cur
 	sync.atomic_store(&p.pub_sample, m.sample + i64(rd - min(rd, m.at)) if !m.end else m.sample)
 	sync.atomic_store(&p.pub_mark, sync.atomic_load(&p.marks.read))
+	sync.atomic_add(&p.pub_seq, 1)
 	return changed
 }
 
@@ -1086,15 +1156,11 @@ audio_callback :: proc "c" (device: ^ma.device, output, input: rawptr, frame_cou
 		sync.atomic_store(&p.pub_seek_tick, 0)
 	}
 	if m.seek_id != 0 && n > 0 && sync.atomic_load(&p.pub_seek_tick) == 0 {
-		sync.atomic_store(&p.pub_seek_tick, time.tick_now()._nsec)
+		sync.atomic_store(&p.pub_seek_tick, mach_absolute_time())
 		sync.atomic_store(&p.pub_seek_id, m.seek_id)
 	}
 	if p.capture.capacity > 0 && p.capture.channels == int(ch) {
 		ring_write(&p.capture, out[:u64(frame_count) * ch])
-	}
-	if sync.atomic_load(&p.waiting_space) && ring_free_frames(&p.pcm) >= RING_FRAMES / 4 {
-		sync.atomic_store(&p.waiting_space, false)
-		sync.atomic_sema_post(&p.sema)
 	}
 }
 

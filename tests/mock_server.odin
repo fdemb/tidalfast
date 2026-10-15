@@ -45,6 +45,7 @@ Mock :: struct {
 	device_status: int,
 	token_error:   string, // the OAuth error with token_status
 	token_delay:   time.Duration, // before /token answers
+	sessions_fail: int, // /sessions answers this many requests with a 503
 	// /device_token, and /oauth2/token for an app session, answers poll i
 	// with polls[i]: "pending", "slow_down", "denied", "429" or "ok"; past
 	// the end, "pending". poll_times has when each poll arrived.
@@ -238,6 +239,10 @@ mock_route :: proc(m: ^Mock, req: Mock_Request, target: string) -> (status: int,
 
 	switch {
 	case req.path == "/sessions":
+		if m.sessions_fail > 0 {
+			m.sessions_fail -= 1
+			return 503, `{"userMessage":"unavailable"}`, etag
+		}
 		if !req.authorized && "sessionId" not_in req.query {
 			return 401, `{"userMessage":"unauthorized"}`, etag
 		}

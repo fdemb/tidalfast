@@ -340,7 +340,7 @@ run_login_wait :: proc(d: ^Data, job: Job, res: ^Result) {
 	if a.access_token != "" {
 		err := tidal.load_oauth_session(s, a.token_type, a.access_token, a.refresh_token, a.expiry_time)
 		if err != nil {
-			fail(res, err)
+			fail_login(res, err)
 			return
 		}
 		auth_changed(s, d)
@@ -361,7 +361,18 @@ run_login_wait :: proc(d: ^Data, job: Job, res: ^Result) {
 	err := tidal.login_device_wait(s, &link, until_expiry = !job.once)
 	res.link.interval = f32(link.interval)
 	if err != nil {
-		fail(res, err)
+		fail_login(res, err)
+	}
+}
+
+// fail_login is fail for a Login_Wait. A 5xx or a 408 says as much about
+// the login as a network failure, so it's reported as .Network and the
+// login tries again with what it has: the code, or the tokens.
+@(private = "file")
+fail_login :: proc(res: ^Result, err: tidal.Error) {
+	fail(res, err)
+	if e, _ := err.?; e.kind == .Http && (e.status >= 500 || e.status == 408) {
+		res.err = .Network
 	}
 }
 

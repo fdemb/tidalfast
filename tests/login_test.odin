@@ -8,6 +8,7 @@ import "core:thread"
 import "core:time"
 
 import app "../src/app"
+import "../src/audio"
 import "../src/cover"
 import "../src/jobs"
 import "../src/mac"
@@ -652,4 +653,117 @@ login_requeue_keeps_the_interval :: proc(t: ^testing.T) {
 		gap := time.duration_seconds(time.tick_diff(m.poll_times[i - 1], m.poll_times[i]))
 		testing.expectf(t, gap >= interval - 0.05, "poll %d came %.3f s after the one before, interval %.1f s", i, gap, interval)
 	}
+}
+
+@(private = "file")
+now_playing_calls, now_playing_cleared: int
+
+@(private = "file")
+count_now_playing :: proc "c" (np: ^platform.Now_Playing) {
+	now_playing_calls += 1
+	if np.title == nil {
+		now_playing_cleared += 1
+	}
+}
+
+// A sign-out stops playback and forgets the queue, the track and Now
+// Playing. The player and its volume stay for the next login.
+@(test)
+sign_out_stops_playback :: proc(t: ^testing.T) {
+	s := data_state()
+	defer data_state_free(s)
+	s.rows = []app.Row{{title = "One", seconds = 30}, {title = "Two", seconds = 30}}
+	s.data.fake = true
+	s.data.account = .Signed_In
+	pb := &s.playback
+	pb.index = -1
+	pb.set_now_playing = count_now_playing
+	pb.player = audio.create(proc "c" () {}, 0.5, null_output = true)
+	pb.volume_sent = 0.5
+	defer app.playback_shutdown(s)
+
+	app.playback_play_row(s, 0)
+	start := time.tick_now()
+	for time.tick_since(start) < 3 * time.Second && !(pb.status.state == .Playing && pb.status.serial == pb.cur.serial && pb.status.sample > 0) {
+		app.playback_update(s, nil)
+		time.sleep(5 * time.Millisecond)
+	}
+	testing.expect(t, app.playback_playing(s))
+	player := pb.player
+	cleared := now_playing_cleared
+
+	app.sign_out(s, "Your TIDAL session ended. Log in again.")
+	testing.expect_value(t, pb.index, -1)
+	testing.expect_value(t, pb.cur.serial, u64(0))
+	testing.expect_value(t, pb.next.serial, u64(0))
+	testing.expect_value(t, len(pb.items), 0)
+	testing.expect(t, app.playback_item(s) == nil)
+	testing.expect_value(t, now_playing_cleared, cleared + 1)
+	testing.expect(t, pb.player == player)
+	testing.expect_value(t, pb.volume_sent, f32(0.5))
+
+	time.sleep(100 * time.Millisecond)
+	app.playback_update(s, nil)
+	st := audio.status(pb.player)
+	testing.expect_value(t, st.state, audio.Play_State.Idle)
+	testing.expect_value(t, st.serial, u64(0))
+	testing.expect(t, !app.playback_playing(s))
+}
+
+// After the approval, a 503 loading the session is passing trouble: the
+// login keeps its tokens and tries again, instead of stopping with an error
+// whose "Try again" would throw the approval away.
+@(test)
+session_5xx_after_approval_retries :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := mock_data_state(&m)
+	defer data_state_free(s)
+	d := &s.data
+	m.sessions_fail = 1
+	tidal.session_restore(d.session, {token_type = "Bearer", access_token = "device-access", refresh_token = "device-refresh"})
+	d.account = .Signed_Out
+	d.login.link.device_code = app.small("dc")
+	d.login.link.interval = 1
+	d.login.deadline = time.tick_add(time.tick_now(), -time.Second)
+	app.request_login_poll(d)
+	app.workers_start(d)
+
+	res, ok := wait_result(d, 5 * time.Second)
+	testing.expect(t, ok)
+	app.handle_result(s, &res, 0)
+	app.result_free(&res)
+	testing.expectf(t, d.login.error.len == 0, "the login stopped: %s", app.small_str(&d.login.error))
+	testing.expect(t, d.login.waiting)
+	testing.expect_value(t, tidal.session_auth(d.session, context.temp_allocator).refresh_token, "device-refresh")
+
+	res, ok = wait_result(d, 10 * time.Second)
+	testing.expect(t, ok)
+	app.handle_result(s, &res, 0)
+	app.result_free(&res)
+	testing.expect_value(t, d.account, app.Account.Signed_In)
+	testing.expect_value(t, mock_count(&m, "GET /sessions"), 2)
+	testing.expect_value(t, m.poll_count, 0)
+}
+
+// "Try again" on a login that has its tokens loads the session with them
+// rather than asking for a new code.
+@(test)
+try_again_keeps_the_tokens :: proc(t: ^testing.T) {
+	s := data_state()
+	defer data_state_free(s)
+	d := &s.data
+	tidal.session_restore(d.session, {token_type = "Bearer", access_token = "device-access", refresh_token = "device-refresh"})
+	d.account = .Signed_Out
+	d.login = {
+		error = app.small("Bad response"),
+	}
+
+	d.login.error = {}
+	app.request_login_code(d)
+	job, ok := jobs.try_pop(&d.queue)
+	testing.expect(t, ok)
+	testing.expect_value(t, job.kind, app.Job_Kind.Login_Wait)
+	testing.expect_value(t, tidal.session_auth(d.session, context.temp_allocator).access_token, "device-access")
 }

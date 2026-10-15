@@ -431,7 +431,7 @@ drop_account_job :: proc(job: ^Job, _: rawptr) -> bool {
 // before it are dropped when they arrive, so however many requests fail,
 // the login ends once and one new login starts. Queued jobs for the old
 // login go, the ones in flight are cancelled (session_clear_auth), and the
-// Keychain item is deleted.
+// Keychain item is deleted. Playback stops and its queue goes.
 sign_out :: proc(s: ^State, why: string) {
 	d := &s.data
 	d.auth_gen += 1
@@ -449,18 +449,22 @@ sign_out :: proc(s: ^State, why: string) {
 	}
 	sidebar_free(d)
 	view_close(d)
+	playback_stop(s)
 	s.library.playlist = 0
 	request_login_code(d)
 }
 
+// request_login_code starts a device login. If an approved login still
+// has its tokens, as after a failure loading the session, it loads the
+// session with them instead: the code is spent, and the user approved.
 request_login_code :: proc(d: ^Data) {
 	if d.login.requested || d.login.waiting {
 		return
 	}
-	// Tokens of a device login that never loaded its session would make
-	// the new code's Login_Wait try them again instead of polling.
 	if login_has_tokens(d) {
-		tidal.session_clear_auth(d.session)
+		d.login.note = small("Loading your account…")
+		request_login_poll(d)
+		return
 	}
 	d.login.requested = push_job(d, {kind = .Login_Start})
 }
@@ -512,7 +516,7 @@ data_retry :: proc(d: ^Data) {
 				request_login_code(d)
 			}
 		case .Login_Wait:
-			if d.account == .Signed_Out && d.login.link.device_code.len > 0 {
+			if d.account == .Signed_Out && (d.login.link.device_code.len > 0 || login_has_tokens(d)) {
 				request_login_poll(d)
 			}
 		case .Playlists:
@@ -651,9 +655,11 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 }
 
 // login_wait_done handles the end of a Login_Wait. A code that expired is
-// replaced. While TIDAL can't be reached and the code is still good, the
-// app checks again after 2, 4, 8 up to LOGIN_RETRY_MAX seconds, once per
-// try, and goes back to polling as soon as TIDAL answers.
+// replaced. While TIDAL can't be reached (a network failure, a 5xx or a
+// 408, see run_login_wait) and the code is still good, or the login has
+// its tokens, the app checks again after 2, 4, 8 up to LOGIN_RETRY_MAX
+// seconds, once per try, and goes back to polling as soon as TIDAL
+// answers.
 @(private = "file")
 login_wait_done :: proc(d: ^Data, res: ^Result, err: tidal.Error_Kind, failed: bool) {
 	l := &d.login
@@ -700,6 +706,10 @@ login_wait_done :: proc(d: ^Data, res: ^Result, err: tidal.Error_Kind, failed: b
 		l.note = small(fmt.tprintf("Can't reach TIDAL. Trying again in %d s.", wait))
 		request_login_poll(d)
 	case:
+		if err == .Authentication && login_has_tokens(d) {
+			// TIDAL refused the tokens, so "Try again" needs a new code.
+			tidal.session_clear_auth(d.session)
+		}
 		d.login = {
 			error = login_error(err, res.message),
 		}
