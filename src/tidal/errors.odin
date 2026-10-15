@@ -28,6 +28,7 @@ Error_Kind :: enum {
 	Cancelled,
 	Io,
 	Refresh_Failed,          // the token refresh failed, but TIDAL didn't refuse the refresh token
+	Lossy_Stream,            // the manifest's codec isn't FLAC (AAC for the device-code client); the codec is the detail
 }
 
 // Longest server detail kept in an Api_Error, in bytes.

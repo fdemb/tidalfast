@@ -6,6 +6,7 @@ package app
 
 import "core:fmt"
 import "core:math"
+import "core:strings"
 
 import "../render"
 import "../ui"
@@ -136,6 +137,7 @@ draw_library :: proc(s: ^State, w, h: f32) {
 	bg.background = WINDOW_BG
 	bg.child_axis = .Y
 	ui.parent(bg)
+	draw_login_notice(s)
 	{
 		ui.row("body", {}, ui.fill(), ui.fill())
 		draw_sidebar(s)
@@ -547,13 +549,23 @@ draw_player_bar :: proc(s: ^State, w: f32) {
 		ui.spacer(ui.fill())
 		ui.text_style(.Medium, 14, TEXT)
 		ui.accessible(ui.label(title, ui.fill(), ui.px(20)), .Static_Text, title)
-		// A track that couldn't play says why in place of the artist.
-		color := SECONDARY
-		if msg := small_str(&s.playback.message); msg != "" {
-			artist, color = msg, PLAYBACK_ERROR
+		// A track that couldn't play says why in place of the artist, on
+		// two lines when it's two sentences.
+		msg := small_str(&s.playback.message)
+		if msg == "" {
+			ui.text_style(.Regular, 12, SECONDARY)
+			ui.accessible(ui.label(artist, ui.fill(), ui.px(18)), .Static_Text, artist)
+		} else {
+			ui.text_style(.Regular, 12, PLAYBACK_ERROR)
+			first, rest := msg, ""
+			if i := strings.index(msg, ". "); i >= 0 {
+				first, rest = msg[:i + 1], msg[i + 2:]
+			}
+			ui.accessible(ui.label(first, ui.fill(), ui.px(16)), .Static_Text, msg)
+			if rest != "" {
+				ui.label(rest, ui.fill(), ui.px(16))
+			}
 		}
-		ui.text_style(.Regular, 12, color)
-		ui.accessible(ui.label(artist, ui.fill(), ui.px(18)), .Static_Text, artist)
 		ui.spacer(ui.fill())
 	}
 

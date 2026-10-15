@@ -60,7 +60,6 @@ hires_prepare :: proc(dir: string) -> bool {
 		}
 		if h.bits == 16 {
 			audio_files[7] = {h.name, data}
-			continue
 		}
 		d, ok := dashgen.from_flac(data, HIRES_SEGMENT_SECONDS)
 		if !ok {
@@ -118,18 +117,26 @@ write_hires_track :: proc(b: ^strings.Builder, k: int) {
 
 // hires_playbackinfo answers playbackinfopostpaywall for a hi-res album
 // track: DASH 24/96 for a PKCE login asking for HI_RES_LOSSLESS, else the
-// 16/44.1 file as BTS.
+// 16/44.1 file as BTS, or with -lossless-dash as DASH to a PKCE login.
 hires_playbackinfo :: proc(track_id: int, quality: string, pkce: bool) -> Response {
 	k := hires_index(track_id)
 	h := HIRES[k]
 	gains := `"trackReplayGain":-3.0,"trackPeakAmplitude":0.01,"albumReplayGain":-3.0,"albumPeakAmplitude":0.01`
-	if h.bits > 16 && pkce && quality == "HI_RES_LOSSLESS" && hires_dash[k].init != nil {
+	dash :: proc(track_id, k: int, tier, gains: string) -> Response {
+		h := HIRES[k]
 		base := fmt.tprintf("http://127.0.0.1:%d/dash/%s", server.port, h.name)
 		manifest := dashgen.mpd(hires_dash[k], base, context.temp_allocator)
 		encoded, _ := base64.encode(transmute([]u8)manifest, allocator = context.temp_allocator)
 		return json_response(200, fmt.tprintf(
-			`{{"trackId":%d,"assetPresentation":"FULL","audioMode":"STEREO","audioQuality":"HI_RES_LOSSLESS","manifestMimeType":"application/dash+xml","manifestHash":"mock","manifest":"%s",%s,"bitDepth":%d,"sampleRate":%d}}`,
-			track_id, encoded, gains, h.bits, h.rate))
+			`{{"trackId":%d,"assetPresentation":"FULL","audioMode":"STEREO","audioQuality":"%s","manifestMimeType":"application/dash+xml","manifestHash":"mock","manifest":"%s",%s,"bitDepth":%d,"sampleRate":%d}}`,
+			track_id, tier, encoded, gains, h.bits, h.rate))
+	}
+	if h.bits > 16 && pkce && quality == "HI_RES_LOSSLESS" && hires_dash[k].init != nil {
+		return dash(track_id, k, "HI_RES_LOSSLESS", gains)
+	}
+	if pkce && server.config.lossless_dash && hires_dash[0].init != nil {
+		fmt.printfln("mock: sending %d as the 16/44.1 track in DASH", track_id)
+		return dash(track_id, 0, "LOSSLESS", gains)
 	}
 	if h.bits > 16 {
 		fmt.printfln("mock: %d is hi-res, but only a PKCE login asking for HI_RES_LOSSLESS gets it; sending LOSSLESS", track_id)

@@ -161,7 +161,7 @@ dash_playback_info :: proc(t: ^testing.T) {
 
 	aac := `<MPD mediaPresentationDuration="PT4S"><Period><AdaptationSet><Representation codecs="mp4a.40.2"><SegmentTemplate timescale="1" media="$Number$.mp4" initialization="i.mp4"><SegmentTimeline><S d="4"/></SegmentTimeline></SegmentTemplate></Representation></AdaptationSet></Period></MPD>`
 	_, aerr := tidal.parse_playback_info(info_json(aac), allocator)
-	testing.expect(t, tidal.is_error(aerr, .Stream_Not_Available))
+	testing.expect(t, tidal.is_error(aerr, .Lossy_Stream))
 	drm := `<MPD mediaPresentationDuration="PT4S"><Period><AdaptationSet><ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011"/><Representation codecs="flac"><SegmentTemplate timescale="1" media="$Number$.mp4" initialization="i.mp4"><SegmentTimeline><S d="4"/></SegmentTimeline></SegmentTemplate></Representation></AdaptationSet></Period></MPD>`
 	_, derr := tidal.parse_playback_info(info_json(drm), allocator)
 	testing.expect(t, tidal.is_error(derr, .Stream_Not_Available))

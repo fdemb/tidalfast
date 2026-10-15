@@ -50,6 +50,31 @@ resolve_stream :: proc(s: ^Session, track_id: i64, quality: Quality, allocator :
 	return parse_playback_info(obj, allocator)
 }
 
+// resolve_stream_flac asks for the best FLAC the login can get. The PKCE
+// client asks for HI_RES_LOSSLESS, and asks again for LOSSLESS if TIDAL
+// refuses that tier: a 403, no stream at that tier, or a lossy one in its
+// place. riptide falls back the same way. Either tier may come as BTS or
+// as DASH. The device-code client asks for LOSSLESS, which it gets as AAC.
+// refused is the HI_RES_LOSSLESS answer's error when it fell back.
+resolve_stream_flac :: proc(s: ^Session, track_id: i64, allocator := context.allocator) -> (info: Stream_Info, refused: Error, err: Error) {
+	if !session_is_pkce(s) {
+		info, err = resolve_stream(s, track_id, .High_Lossless, allocator)
+		return
+	}
+	info, err = resolve_stream(s, track_id, .Hi_Res_Lossless, allocator)
+	e, failed := err.?
+	if !failed {
+		return
+	}
+	tier := (e.kind == .Http && e.status == 403) || e.kind == .Stream_Not_Available || e.kind == .Lossy_Stream
+	if !tier {
+		return
+	}
+	refused = err
+	info, err = resolve_stream(s, track_id, .High_Lossless, allocator)
+	return
+}
+
 // parse_playback_info reads a playbackinfopostpaywall response.
 parse_playback_info :: proc(obj: json.Object, allocator := context.allocator) -> (info: Stream_Info, err: Error) {
 	info = {
@@ -101,7 +126,7 @@ parse_playback_info :: proc(obj: json.Object, allocator := context.allocator) ->
 	info.codec = strings.clone(codec, allocator)
 	info.mime_type = strings.clone(jstr(m, "mimeType"), allocator)
 	if codec != "FLAC" && !strings.contains(info.mime_type, "flac") {
-		return {}, make_error(.Stream_Not_Available, "Not a FLAC stream", detail = codec)
+		return {}, make_error(.Lossy_Stream, "Not a FLAC stream", detail = codec)
 	}
 	urls, _ := jarr(m, "urls")
 	if len(urls) == 0 {
@@ -130,7 +155,7 @@ parse_dash_playback :: proc(info: Stream_Info, manifest: string, allocator := co
 	}
 	dash := dash_info_from_mpd(mpd, allocator) or_return
 	if !strings.contains(strings.to_lower(dash.codecs, context.temp_allocator), "flac") {
-		return {}, make_error(.Stream_Not_Available, "Not a FLAC stream", detail = dash.codecs)
+		return {}, make_error(.Lossy_Stream, "Not a FLAC stream", detail = strings.to_upper(dash.codecs, context.temp_allocator))
 	}
 	if dash.init_url == "" || len(dash.segments) == 0 {
 		return {}, make_error(.Manifest_Decode, "DASH manifest has no initialization or media segments")

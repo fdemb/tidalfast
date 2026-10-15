@@ -19,6 +19,11 @@ Mock_Item :: struct {
 	id:   i64,
 }
 
+Mock_Answer :: struct {
+	status: int,
+	body:   string,
+}
+
 Mock_Request :: struct {
 	method:     string,
 	path:       string,
@@ -55,6 +60,8 @@ Mock :: struct {
 	// Paths answered with these bytes, as audio files or DASH segments.
 	files:      map[string][]u8,
 	token_form: map[string]string, // the last POST to /token, decoded
+	// playbackinfopostpaywall's answer for each audioquality; 404 for others.
+	playback:   map[string]Mock_Answer,
 
 	allocator:  runtime.Allocator,
 }
@@ -66,6 +73,7 @@ mock_start :: proc(m: ^Mock, items: []Mock_Item = nil) {
 	m.poll_times = make([dynamic]time.Tick, m.allocator)
 	m.files = make(map[string][]u8, m.allocator)
 	m.token_form = make(map[string]string, m.allocator)
+	m.playback = make(map[string]Mock_Answer, m.allocator)
 	append(&m.items, ..items)
 
 	sock, err := net.listen_tcp({address = net.IP4_Loopback, port = 0})
@@ -96,6 +104,7 @@ mock_stop :: proc(m: ^Mock) {
 	clear_query(&m.token_form, m.allocator)
 	delete(m.token_form)
 	delete(m.files)
+	delete(m.playback)
 	delete(m.base_url, m.allocator)
 }
 
@@ -258,6 +267,14 @@ mock_route :: proc(m: ^Mock, req: Mock_Request, target: string) -> (status: int,
 	etag = fmt.tprintf("etag-%d", len(m.items))
 	if data, ok := m.files[req.path]; ok {
 		return 200, string(data), etag
+	}
+
+	if strings.has_suffix(req.path, "/playbackinfopostpaywall") {
+		a, ok := m.playback[req.query["audioquality"] or_else ""]
+		if !ok {
+			return 404, `{"status":404,"userMessage":"not found"}`, etag
+		}
+		return a.status, a.body, etag
 	}
 
 	switch {

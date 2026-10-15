@@ -220,6 +220,17 @@ playbackinfo_response :: proc(track_id: int) -> Response {
 		track_id, encoded, track_gain, track_peak, album_gain, album_peak))
 }
 
+// aac_playbackinfo is what the device-code client gets: HTTP 200 with a
+// BTS manifest for AAC in MP4, which the app refuses. The URL goes nowhere.
+aac_playbackinfo :: proc(track_id: int) -> Response {
+	fmt.printfln("mock: %d to the device-code login is AAC", track_id)
+	manifest := fmt.tprintf(`{{"mimeType":"audio/mp4","codecs":"mp4a.40.2","encryptionType":"NONE","urls":["http://127.0.0.1:%d/audio/none.m4a"]}}`, server.port)
+	encoded, _ := base64.encode(transmute([]u8)manifest, allocator = context.temp_allocator)
+	return json_response(200, fmt.tprintf(
+		`{{"trackId":%d,"assetPresentation":"FULL","audioMode":"STEREO","audioQuality":"HIGH","manifestMimeType":"application/vnd.tidal.bts","manifestHash":"mock","manifest":"%s","trackReplayGain":-3.0,"trackPeakAmplitude":0.3,"albumReplayGain":-3.0,"albumPeakAmplitude":0.3,"bitDepth":16,"sampleRate":44100}}`,
+		track_id, encoded))
+}
+
 // audio_response serves a FLAC file, honouring "Range: bytes=a-" and
 // "bytes=a-b".
 audio_response :: proc(req: ^Request) -> Response {

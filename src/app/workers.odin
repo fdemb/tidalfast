@@ -64,7 +64,7 @@ Job_Kind :: enum u8 {
 	Stream, // resolve a track's stream URL, see player.odin
 	Artwork, // a cover for Now Playing: download and decode, keep the pixels
 	Search, // songs, albums, artists and playlists for a query, see search.odin
-	Login_Pkce, // finish a hi-res login with the pasted address, see login.odin
+	Login_Pkce, // finish a PKCE login with the pasted address, see login.odin
 	Save_Settings, // write the output settings, see settings.odin
 }
 
@@ -127,6 +127,7 @@ Result :: struct {
 	pixels:      []u8, // from cover.decode
 	w, h:        int,
 	stream:      tidal.Stream_Info, // strings in arena
+	codec:       Small, // Stream: the manifest's codec, when that's why it failed
 	found:       Found_Lists, // Search: in arena
 }
 
@@ -259,6 +260,26 @@ fail :: proc(res: ^Result, err: tidal.Error) {
 	res.message = small(tidal.error_string(err, context.temp_allocator))
 }
 
+// log_stream_error prints why a stream didn't resolve: the error kind, the
+// HTTP status and what the server said, or the manifest's codec. Never a
+// token or a URL.
+@(private = "file")
+log_stream_error :: proc(track_id: u64, what: string, err: tidal.Error) {
+	e, _ := err.?
+	if e.kind == .Cancelled || e.kind == .Backing_Off {
+		return // the job goes back in the queue
+	}
+	detail := tidal.error_detail(&e)
+	switch {
+	case e.kind == .Lossy_Stream:
+		fmt.eprintfln("app: stream for track %d %s: %v, HTTP 200, manifest codec %s", track_id, what, e.kind, detail)
+	case e.status == 0:
+		fmt.eprintfln("app: stream for track %d %s: %v, no HTTP response, %s", track_id, what, e.kind, detail if detail != "" else e.message)
+	case:
+		fmt.eprintfln("app: stream for track %d %s: %v, HTTP %d, %s", track_id, what, e.kind, e.status, detail if detail != "" else e.message)
+	}
+}
+
 @(private = "file")
 run_job :: proc(d: ^Data, job: Job) -> (res: Result) {
 	res.job = job
@@ -287,12 +308,16 @@ run_job :: proc(d: ^Data, job: Job) -> (res: Result) {
 	case .Login_Pkce:
 		run_login_pkce(d, job, &res)
 	case .Stream:
-		// Only the PKCE client gets hi-res; the device client would get
-		// LOSSLESS for it anyway.
-		quality := tidal.Quality.Hi_Res_Lossless if tidal.session_is_pkce(s) else tidal.Quality.High_Lossless
-		info, err := tidal.resolve_stream(s, i64(job.key), quality, alloc)
+		info, refused, err := tidal.resolve_stream_flac(s, i64(job.key), alloc)
+		if refused != nil {
+			log_stream_error(job.key, "at HI_RES_LOSSLESS failed, asking for LOSSLESS", refused)
+		}
 		if err != nil {
+			log_stream_error(job.key, "failed", err)
 			fail(&res, err)
+			if e, _ := err.?; e.kind == .Lossy_Stream {
+				res.codec = small(tidal.error_detail(&e))
+			}
 			return
 		}
 		res.stream = info

@@ -39,6 +39,9 @@
 //     -audio-delay=MS    added before every audio response, like network latency
 //     -audio-rate=KB     audio bandwidth in KB/s per connection (default unlimited)
 //     -hires-only        liked tracks are only the hi-res album, so playing through them never reaches the loud test tracks
+//     -device-flac       give the device-code login FLAC, as before; by default it gets AAC, as from TIDAL
+//     -refuse-hires      answer HI_RES_LOSSLESS with 403, so the app falls back to LOSSLESS
+//     -lossless-dash     send the hi-res album's 16/44.1 track as DASH to a PKCE login, at LOSSLESS too
 //
 // It never prints tokens or Authorization headers.
 package mock_tidal
@@ -79,6 +82,9 @@ Config :: struct {
 	audio_delay:     int,
 	audio_rate:      int,
 	hires_only:      bool,
+	device_flac:     bool,
+	refuse_hires:    bool,
+	lossless_dash:   bool,
 }
 
 Server :: struct {
@@ -175,6 +181,12 @@ main :: proc() {
 			c.audio_rate = n
 		case "hires-only":
 			c.hires_only = value != "0"
+		case "device-flac":
+			c.device_flac = value != "0"
+		case "refuse-hires":
+			c.refuse_hires = value != "0"
+		case "lossless-dash":
+			c.lossless_dash = value != "0"
 		case:
 			fmt.eprintln("mock: unknown flag", arg)
 			os.exit(2)
@@ -431,6 +443,14 @@ route :: proc(req: ^Request) -> Response {
 		id, _ := parse_i(strings.trim_suffix(strings.trim_prefix(path, "/tracks/"), "/playbackinfopostpaywall"))
 		quality := req.query["audioquality"] or_else "?"
 		fmt.printfln("mock: playbackinfo for %d (%s)", id, quality)
+		if !pkce && !server.config.device_flac {
+			// What TIDAL gives the device-code client, whatever it asks for.
+			return aac_playbackinfo(id)
+		}
+		if pkce && quality == "HI_RES_LOSSLESS" && server.config.refuse_hires {
+			fmt.printfln("mock: refusing HI_RES_LOSSLESS for %d with 403", id)
+			return json_response(403, `{"status":403,"subStatus":4005,"userMessage":"This quality is not available for this account"}`)
+		}
 		if hires_index(id) >= 0 {
 			return hires_playbackinfo(id, quality, pkce)
 		}

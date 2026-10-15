@@ -334,11 +334,11 @@ auth_failures_sign_out_once :: proc(t: ^testing.T) {
 	_, status = mac.keychain_get(service, app.KEYCHAIN_ACCOUNT, context.temp_allocator)
 	testing.expect_value(t, status, mac.ERR_SEC_ITEM_NOT_FOUND)
 	testing.expect_value(t, tidal.session_auth(d.session, context.temp_allocator).access_token, "")
+	// The login screen shows the PKCE login, which waits for the user.
 	queued, _ := jobs.pending(&d.queue)
-	testing.expect_value(t, queued, 1)
-	login, _ := jobs.try_pop(&d.queue)
-	testing.expect_value(t, login.kind, app.Job_Kind.Login_Start)
-	testing.expect_value(t, login.auth, 1)
+	testing.expect_value(t, queued, 0)
+	testing.expect_value(t, d.login.pkce, app.Pkce_Step.Paste)
+	testing.expect(t, d.login.note.len > 0)
 
 	// The new login is saved before the second failure arrives.
 	tidal.session_restore(d.session, {token_type = "Bearer", access_token = "new", refresh_token = "new-r", user_id = 123, user_kind = .Logged_In_User})
@@ -892,7 +892,7 @@ pkce_retry_keeps_the_tokens :: proc(t: ^testing.T) {
 		m.polls = {"ok"}
 		m.sessions_fail = 1
 		d.account = .Signed_Out
-		app.pkce_submit(d, fmt.tprintf("%sandroid/login/auth?code=one-use", m.base_url))
+		app.pkce_submit(s, fmt.tprintf("%sandroid/login/auth?code=one-use", m.base_url))
 		testing.expect_value(t, d.login.pkce, app.Pkce_Step.Exchanging)
 		app.workers_start(d)
 		res, ok := wait_result(d, 5 * time.Second)

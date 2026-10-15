@@ -421,6 +421,14 @@ playback_result :: proc(s: ^State, res: ^Result) {
 			source_clear(&pb.next)
 			return
 		}
+		if e, _ := res.err.?; e == .Lossy_Stream {
+			// Every track comes like this for this login, so skipping on
+			// would only fail through the queue.
+			pb.message = small(lossy_message(small_str(&res.codec)))
+			source_clear(&pb.cur)
+			pb.paused = true
+			return
+		}
 		pb.message = small(fmt.tprintf("Couldn't play %s: %s", title, small_str(&res.message)))
 		skip_failed(s)
 		return
@@ -449,6 +457,15 @@ playback_result :: proc(s: ^State, res: ^Result) {
 	} else {
 		audio.set_next(pb.player, source_of(pb, t))
 	}
+}
+
+// lossy_message is the player bar's line when TIDAL sent a lossy stream
+// in place of FLAC.
+lossy_message :: proc(codec: string) -> string {
+	if codec == "" || strings.has_prefix(codec, "MP4A") || strings.has_prefix(codec, "AAC") {
+		return "TIDAL sent AAC for this login. Log in with TIDAL again for lossless."
+	}
+	return fmt.tprintf("TIDAL sent %s for this login, which TIDALfast doesn't play. Log in with TIDAL again for lossless.", codec)
 }
 
 // skip_failed moves past a track that can't play.

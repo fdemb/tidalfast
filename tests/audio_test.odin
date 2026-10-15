@@ -357,7 +357,7 @@ playback_info :: proc(t: ^testing.T) {
 		testing.expect_value(t, e.kind, kind, loc = loc)
 	}
 	refused(t, playback_json(BTS, `{"mimeType":"audio/flac","codecs":"flac","encryptionType":"OLD_AES","keyId":"abc","urls":["u"]}`), .Stream_Not_Available)
-	refused(t, playback_json(BTS, `{"mimeType":"audio/mp4","codecs":"mp4a.40.2","encryptionType":"NONE","urls":["u"]}`), .Stream_Not_Available)
+	refused(t, playback_json(BTS, `{"mimeType":"audio/mp4","codecs":"mp4a.40.2","encryptionType":"NONE","urls":["u"]}`), .Lossy_Stream)
 	refused(t, playback_json(BTS, `{"mimeType":"audio/flac","codecs":"flac","encryptionType":"NONE","urls":[]}`), .Manifest_Decode)
 	refused(t, playback_json(BTS, `not json`), .Manifest_Decode)
 	refused(t, playback_json("application/dash+xml", `<MPD/>`), .Manifest_Decode)

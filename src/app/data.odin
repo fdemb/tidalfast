@@ -34,6 +34,7 @@ COVER_BUDGET :: 48 << 20 // texture bytes
 UPLOAD_BUDGET :: 2 * time.Millisecond // cover uploads per frame
 PAGES_IN_FLIGHT :: 2
 LOGIN_RETRY_MAX :: 30 // seconds between polls while TIDAL can't be reached
+PKCE_REDIRECT_MAX :: 2048 // bytes of a pasted redirect address
 
 Account :: enum u8 {
 	Fake,
@@ -42,25 +43,28 @@ Account :: enum u8 {
 	Signed_In,
 }
 
-// Pkce_Step is where the hi-res (PKCE) login is.
+// Pkce_Step is where the login screen is. The PKCE login is the main one,
+// so it's the zero value.
 Pkce_Step :: enum u8 {
-	Off, // the device-code login shows
-	Paste, // the browser has the login page; waiting for its redirect address
+	Paste, // the PKCE login: waiting for the redirect address
 	Exchanging, // a Login_Pkce job is out
+	Off, // the device-code login shows
 }
 
 Login :: struct {
-	pkce:      Pkce_Step,
-	pkce_note: Small, // why the last paste didn't work
-	link:      Login_Link,
-	requested: bool, // a Login_Start job is out
-	waiting:   bool, // a Login_Wait job is out
-	error:     Small, // the login stopped; the screen offers "Try again"
-	note:      Small, // shown under the code while the login goes on
-	deadline:  time.Tick, // when the code expires
-	poll_at:   time.Tick, // the next Login_Wait polls no sooner
-	poll_once: bool, // it checks once whether TIDAL can be reached again
-	retries:   int, // polls in a row that couldn't reach TIDAL
+	pkce:        Pkce_Step,
+	pkce_note:   Small, // why the last paste didn't work
+	field:       ui.Text_Field, // the pasted redirect address
+	focus_field: bool, // the field takes the focus next frame
+	link:        Login_Link,
+	requested:   bool, // a Login_Start job is out
+	waiting:     bool, // a Login_Wait job is out
+	error:       Small, // the login stopped; the screen offers "Try again"
+	note:        Small, // shown on the card while the login goes on
+	deadline:    time.Tick, // when the code expires
+	poll_at:     time.Tick, // the next Login_Wait polls no sooner
+	poll_once:   bool, // it checks once whether TIDAL can be reached again
+	retries:     int, // polls in a row that couldn't reach TIDAL
 }
 
 Sidebar :: struct {
@@ -126,14 +130,19 @@ Data :: struct {
 	// The pasted redirect address, for the Login_Pkce job. The UI writes
 	// it only while no such job is out.
 	pkce_mutex:     sync.Mutex,
-	pkce_redirect:  [2048]u8,
+	pkce_redirect:  [PKCE_REDIRECT_MAX]u8,
 	pkce_len:       int,
-	device_cancel:  bool, // stops a device-code poll once the hi-res login takes over (atomic)
+	device_cancel:  bool, // stops a device-code poll once the PKCE login takes over (atomic)
 	// Goes up when a login starts or the user switches between the device
 	// and hi-res logins. Login jobs carry it (Job.view) and the session
 	// drops tokens from an older one, so a late answer to an abandoned login
 	// can't replace the one the user finished.
 	login_attempt:  u32,
+	// The signed-in login is the device-code client's, which TIDAL gives
+	// only AAC. The library says so until the user hides the notice.
+	device_login:   bool,
+	notice_hidden:  bool,
+	relogin:        bool, // the login screen shows over a signed-in account
 	// The settings file and the newest settings for it, see settings_queue.
 	// The path is Data's own copy, freed after the workers stop.
 	settings_path:    string, // heap
@@ -498,25 +507,35 @@ drop_account_job :: proc(job: ^Job, _: rawptr) -> bool {
 // Keychain item is deleted. Playback stops and its queue goes.
 sign_out :: proc(s: ^State, why: string) {
 	d := &s.data
+	account_end(s)
+	{
+		sync.guard(&d.keychain_mutex)
+		mac.keychain_delete(keychain_service(d), KEYCHAIN_ACCOUNT)
+	}
+	d.login = {
+		note = small(why),
+	}
+	d.relogin = false
+	login_next_attempt(d)
+	pkce_prepare(d)
+}
+
+// account_end drops the signed-in account but not its Keychain item:
+// queued jobs for it go, the ones in flight are cancelled, and so are
+// their results. Playback stops and its queue goes.
+account_end :: proc(s: ^State) {
+	d := &s.data
 	d.auth_gen += 1
 	d.retry = {}
 	d.held = {}
 	jobs.remove_if(&d.queue, drop_account_job, nil)
 	tidal.session_clear_auth(d.session)
-	{
-		sync.guard(&d.keychain_mutex)
-		mac.keychain_delete(keychain_service(d), KEYCHAIN_ACCOUNT)
-	}
 	d.account = .Signed_Out
-	d.login = {
-		note = small(why),
-	}
-	login_next_attempt(d)
+	d.device_login = false
 	sidebar_free(d)
 	view_close(d)
 	playback_stop(s)
 	s.library.playlist = 0
-	request_login_code(d)
 }
 
 // request_login_code starts a device login. If an approved login still
@@ -586,11 +605,11 @@ data_retry :: proc(d: ^Data) {
 				push_job(d, {kind = .Restore})
 			}
 		case .Login_Start:
-			if d.account == .Signed_Out && d.login.error.len == 0 {
+			if d.account == .Signed_Out && d.login.pkce == .Off && d.login.error.len == 0 {
 				request_login_code(d)
 			}
 		case .Login_Wait:
-			if d.account == .Signed_Out && (d.login.link.device_code.len > 0 || login_has_tokens(d)) {
+			if d.account == .Signed_Out && d.login.pkce == .Off && (d.login.link.device_code.len > 0 || login_has_tokens(d)) {
 				request_login_poll(d)
 			}
 		case .Playlists:
@@ -664,14 +683,12 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 			d.message = res.message
 		}
 		if res.signed_in {
-			d.account = .Signed_In
-			request_playlists(d)
+			signed_in(d)
 		} else {
 			d.account = .Signed_Out
+			pkce_prepare(d)
 			if redirect := pkce_redirect_env(); redirect != "" {
-				pkce_submit(d, redirect)
-			} else {
-				request_login_code(d)
+				pkce_submit(s, redirect)
 			}
 		}
 	case .Login_Start:
@@ -679,11 +696,13 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 		l.requested = false
 		if failed {
 			l^ = {
+				pkce  = .Off,
 				error = login_error(err, res.message),
 			}
 			return
 		}
 		l^ = {
+			pkce     = .Off,
 			link     = res.link,
 			note     = l.note,
 			deadline = time.tick_add(time.tick_now(), time.Duration(f64(res.link.expires) * f64(time.Second))),
@@ -786,8 +805,7 @@ login_wait_done :: proc(d: ^Data, res: ^Result, err: tidal.Error_Kind, failed: b
 	}
 	if !failed {
 		d.login = {}
-		d.account = .Signed_In
-		request_playlists(d)
+		signed_in(d)
 		return
 	}
 	expired := time.tick_diff(time.tick_now(), l.deadline) <= 0 && !login_has_tokens(d)
@@ -803,12 +821,14 @@ login_wait_done :: proc(d: ^Data, res: ^Result, err: tidal.Error_Kind, failed: b
 			return
 		}
 		d.login = {
+			pkce = .Off,
 			note = small("The code expired. Here's a new one."),
 		}
 		request_login_code(d)
 	case .Network:
 		if expired {
 			d.login = {
+				pkce = .Off,
 				note = small("The code expired. Here's a new one."),
 			}
 			request_login_code(d)
@@ -828,6 +848,7 @@ login_wait_done :: proc(d: ^Data, res: ^Result, err: tidal.Error_Kind, failed: b
 			tidal.session_clear_auth(d.session)
 		}
 		d.login = {
+			pkce  = .Off,
 			error = login_error(err, res.message),
 		}
 	}
@@ -1101,5 +1122,15 @@ view_row :: proc(s: ^State, i: int) -> ^Row {
 
 // show_login says whether the library screen should be the login screen.
 show_login :: proc(s: ^State) -> bool {
-	return s.data.account == .Signed_Out
+	return s.data.account == .Signed_Out || (s.data.account == .Signed_In && s.data.relogin)
+}
+
+// signed_in starts loading a login's account. A login from the device-code
+// client gets the notice that it only streams AAC.
+signed_in :: proc(d: ^Data) {
+	d.account = .Signed_In
+	d.relogin = false
+	d.device_login = !tidal.session_is_pkce(d.session)
+	d.notice_hidden = false
+	request_playlists(d)
 }

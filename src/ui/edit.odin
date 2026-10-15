@@ -19,7 +19,7 @@ import "core:unicode/utf8"
 
 import "../text"
 
-FIELD_CAPACITY :: 256
+FIELD_CAPACITY :: 2048 // a TIDAL login redirect address fits
 UNDO_DEPTH :: 32
 
 Edit_Kind :: enum u8 {
