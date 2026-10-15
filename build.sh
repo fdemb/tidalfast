@@ -44,7 +44,12 @@ rm -rf build/app.dylib.dSYM
 [ -d build/app.tmp.dylib.dSYM ] && mv build/app.tmp.dylib.dSYM build/app.dylib.dSYM
 mv -f build/app.tmp.dylib build/app.dylib
 
-if [ "$target" = all ]; then
+# The shell is relinked only when its source or the build mode changes.
+# clang's output differs from build to build, and each new binary has a new
+# ad-hoc signature, which the login Keychain treats as a different app: it
+# would ask again for access to the saved TIDAL login after every build.
+if [ "$target" = all ] && { [ ! -f build/tidalfast ] || [ shell/shell.m -nt build/tidalfast ] || [ shell/platform.h -nt build/tidalfast ] || [ "$(cat build/shell-mode 2>/dev/null)" != "$mode" ]; }; then
+	echo "$mode" > build/shell-mode
 	clang shell/shell.m -o build/tidalfast -fobjc-arc -mmacosx-version-min=14.0 \
 		-Wall -Wno-unused-parameter $clang_flags \
 		-framework Cocoa -framework Metal -framework QuartzCore -framework CoreServices

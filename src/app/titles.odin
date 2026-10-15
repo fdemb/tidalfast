@@ -17,6 +17,7 @@ Row :: struct {
 	added:    string, // date added
 	added_by: string,
 	duration: string,
+	cover:    string, // album cover image id, "" in the fake data
 	seconds:  int,
 }
 

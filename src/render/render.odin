@@ -796,16 +796,19 @@ encode_capture :: proc(r: ^Renderer, cmd, texture: id, w, h: uint) -> id {
 	return buf
 }
 
-// write_tga writes BGRA pixels, top row first.
+// write_tga writes BGRA pixels, top row first. It writes a temp file and
+// renames it over path, so whoever copies path mid-run gets a whole frame.
 @(private)
 write_tga :: proc(path: string, pixels: []byte, w, h: uint) {
 	header := [18]byte{2 = 2, 12 = u8(w), 13 = u8(w >> 8), 14 = u8(h), 15 = u8(h >> 8), 16 = 32, 17 = 0x28}
-	f, err := os.create(path)
+	tmp := fmt.tprintf("%s.tmp", path)
+	f, err := os.create(tmp)
 	if err != nil {
 		fmt.eprintln("render: capture failed:", err)
 		return
 	}
-	defer os.close(f)
 	os.write(f, header[:])
 	os.write(f, pixels)
+	os.close(f)
+	os.rename(tmp, path)
 }

@@ -12,10 +12,10 @@ fade :: proc(c: render.Color, a: f32) -> render.Color {
 	return {c.r, c.g, c.b, c.a * a}
 }
 
-// draw_box draws b and its children in order: shadow, background, hot and
-// active overlays, border, focus ring, label, then the children inside b's
-// clip if it has one. A box clipped away entirely draws nothing itself, but
-// its children may lie outside it.
+// draw_box draws b and its children in order: shadow, background, texture,
+// hot and active overlays, border, focus ring, label, then the children
+// inside b's clip if it has one. A box clipped away entirely draws nothing
+// itself, but its children may lie outside it.
 @(private)
 draw_box :: proc(u: ^State, b: ^Box, alpha: f32) {
 	r := u.renderer
@@ -41,6 +41,9 @@ draw_box :: proc(u: ^State, b: ^Box, alpha: f32) {
 		} else if b.background.a > 0 {
 			render.push_rect(r, rect, fade(b.background, a), b.radius)
 		}
+	}
+	if b.texture != 0 {
+		render.push_image(r, rect, b.texture, tint = {1, 1, 1, a}, radius = b.radius)
 	}
 	if .Draw_Hot_Effects in b.flags && b.hot_t > 0 {
 		render.push_rect(r, rect, fade(b.hover_color, a * b.hot_t), b.radius)

@@ -29,13 +29,15 @@ What a UI needs to know:
 - **Memory.** Every proc that returns data takes `allocator` and puts the whole result there, including nested strings and slices. Free the allocator, not individual fields. Scratch memory (HTTP bodies, JSON) comes from `context.temp_allocator` and is released before the proc returns, so don't pass `context.temp_allocator` as the result allocator.
 - **Errors.** Procs return `tidal.Error`, a union that is nil on success, so `or_return` works. Check the kind with `error_kind(err)` or `is_error(err, .Object_Not_Found)`. Errors own no memory; `error_detail(&e)` reads the server's message from an inline buffer.
 - **Threads.** Calls block on the network, so run them off the UI thread. A `Session` can be shared between threads: token refresh happens once even when several requests hit an expired token, and the rate-limit backoff state is shared. Each thread needs its own result allocator, or a thread-safe one.
+- **Saved logins.** `session_auth` copies the login state out; `session_restore` puts it back without a request, so an app can keep it somewhere safe (TIDALfast uses the Keychain). Set `Session.on_auth_change` to hear about new tokens after a login or refresh. TIDAL may rotate the refresh token on refresh, so save every time it's called. It runs on the thread that refreshed, one call at a time.
+- **Stopping.** `session_abort(s, true)` makes requests in flight and new ones fail with `.Cancelled`, and stops `login_device_wait`.
 - **Polymorphic results** are unions: `Media` (track or video), `Item` (anything a page row or search top hit can hold), `Page_Category`, `Creator`.
 
 ## API overview
 
 | Area | Procs |
 | --- | --- |
-| Session | `session_create`, `session_destroy`, `session_auth`, `session_user`, `session_set_quality`, `session_client_enable_hires`, `check_login` |
+| Session | `session_create`, `session_destroy`, `session_auth`, `session_restore`, `session_abort`, `session_user`, `session_set_quality`, `session_client_enable_hires`, `check_login` |
 | Login | `login_device_start`, `login_device_wait`, `login_oauth_simple`, `pkce_login_url`, `login_pkce_complete`, `login_pkce`, `load_oauth_session`, `load_session`, `token_refresh` |
 | Session file | `login_session_file`, `session_save_file`, `session_load_file` |
 | Tracks and videos | `track_get`, `track_stream`, `track_url`, `track_lyrics`, `track_radio`, `track_radio_mix`, `video_get`, `video_url` |
@@ -56,6 +58,8 @@ What a UI needs to know:
 - `*_paginated` procs fetch 50 items per request on two threads. If any request fails, the whole call fails.
 - Session files are JSON, written to a new 0600 file and renamed into place, so an existing file's permissions never apply. A session logged in by session id alone restores through `load_session`.
 - Requests time out after `config.timeout_seconds` (30 by default).
+- `resource_get` downloads a file outside the API, such as a cover from `resources.tidal.com`, under the same backoff as API requests.
+- Every endpoint, the device authorization one included (`config.api_device_auth`), comes from `Config`, so tests and the app's mock mode can point a session elsewhere.
 - A query string in a request path is merged with the default parameters; the path's values win over defaults, and `Request.params` win over both.
 - `Dash_Info` keeps the initialization segment (`init_url`) apart from the media `segments`, each with its own duration. `urls` lists both in download order. `manifest_hls` puts the initialization segment in `EXT-X-MAP`.
 
@@ -66,4 +70,4 @@ odin test tests
 odin build examples/cli -out:build/tidal-cli
 ```
 
-The tests parse TIDAL-shaped JSON, DASH and BTS manifests, and check the PKCE challenge, client IDs and HLS output against known values. Playlist edits, query merging and session files run against a mock HTTP server in `tests/mock_server.odin`. Nothing in them needs a TIDAL account.
+The tests parse TIDAL-shaped JSON, DASH and BTS manifests, and check the PKCE challenge, client IDs and HLS output against known values. Playlist edits, query merging, session files, the rate-limit backoff and token refresh run against a mock HTTP server in `tests/mock_server.odin`. Nothing in them needs a TIDAL account.
