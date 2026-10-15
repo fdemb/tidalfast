@@ -9,7 +9,11 @@
 // generated JPEG covers at any size under /images, and playback: LOSSLESS
 // playbackinfopostpaywall answers whose BTS manifest points at FLAC files
 // under /audio, served with Range support (see audio.odin). The first three
-// liked tracks are a gapless live album. Flags:
+// liked tracks are a gapless live album. /search finds tracks of the long
+// playlist by title or artist, with their albums and artists and the
+// playlists by name; a query that matches nothing gets made-up tracks named
+// after it, so any query has results. /albums/<id>/tracks and
+// /artists/<id>/toptracks list a dozen made-up tracks. Flags:
 //
 //     -port=N            0 picks a free port; the port is printed
 //     -tracks=N          tracks in the long playlist (default 3000)
@@ -429,6 +433,14 @@ route :: proc(req: ^Request) -> Response {
 		}
 		strings.write_string(&b, "]}")
 		return json_response(200, strings.to_string(b))
+	case path == "/search":
+		return search_response(req.query["query"] or_else "", req.query["types"] or_else "", offset, limit)
+	case strings.has_prefix(path, "/albums/") && strings.has_suffix(path, "/tracks"):
+		id, _ := parse_i(strings.trim_suffix(strings.trim_prefix(path, "/albums/"), "/tracks"))
+		return made_up_tracks(id, -1, offset, limit)
+	case strings.has_prefix(path, "/artists/") && strings.has_suffix(path, "/toptracks"):
+		id, _ := parse_i(strings.trim_suffix(strings.trim_prefix(path, "/artists/"), "/toptracks"))
+		return made_up_tracks(-1, id, offset, limit)
 	case strings.has_prefix(path, "/playlists/") && strings.has_suffix(path, "/tracks"):
 		id := strings.trim_suffix(strings.trim_prefix(path, "/playlists/"), "/tracks")
 		p := -1
@@ -524,13 +536,154 @@ date :: proc(i: int) -> string {
 	return fmt.tprintf("20%02d-%02d-%02dT10:00:00.000+0000", 18 + i % 7, 1 + i % 12, 1 + i % 28)
 }
 
+track_hash :: proc(playlist, i: int) -> u32 {
+	return u32(playlist * 100_003 + i) * 2654435761
+}
+
 write_track :: proc(b: ^strings.Builder, playlist, i: int) {
-	h := u32(playlist * 100_003 + i) * 2654435761
-	album := int(h >> 8) % 700 + 1
-	fmt.sbprintf(b, `{{"id":%d,"title":%q,"duration":%d,"trackNumber":%d,"version":null,"dateAdded":"%s","artist":{{"id":%d,"name":%q}},"artists":[{{"id":%d,"name":%q}}],"album":{{"id":%d,"title":"%s %s %d","cover":"%s"}}}}`,
-		playlist * 1_000_000 + i, TITLES[(h >> 4) % len(TITLES)], 95 + int(h >> 12) % 400, 1 + i % 12, date(i),
-		h % 50, ARTISTS[(h >> 16) % len(ARTISTS)], h % 50, ARTISTS[(h >> 16) % len(ARTISTS)],
-		album, ALBUM_WORDS[album % len(ALBUM_WORDS)], ALBUM_WORDS[(album / 12) % len(ALBUM_WORDS)], album, image_id(album))
+	h := track_hash(playlist, i)
+	write_track_as(b, playlist * 1_000_000 + i, TITLES[(h >> 4) % len(TITLES)], int(h >> 8) % 700 + 1, int(h >> 16) % len(ARTISTS), i, h)
+}
+
+// write_track_as writes a track with the given id, title, album and artist
+// (an index into ARTISTS, whose id is one more).
+write_track_as :: proc(b: ^strings.Builder, id: int, title: string, album, artist, i: int, h: u32) {
+	fmt.sbprintf(b, `{{"id":%d,"title":%q,"duration":%d,"trackNumber":%d,"version":null,"dateAdded":"%s","artist":{{"id":%d,"name":%q}},"artists":[{{"id":%d,"name":%q}}],"album":{{"id":%d,"title":%q,"cover":"%s"}}}}`,
+		id, title, 95 + int(h >> 12) % 400, 1 + i % 12, date(i),
+		artist + 1, ARTISTS[artist], artist + 1, ARTISTS[artist],
+		album, album_title(album), image_id(album))
+}
+
+album_title :: proc(album: int) -> string {
+	return fmt.tprintf("%s %s %d", ALBUM_WORDS[album % len(ALBUM_WORDS)], ALBUM_WORDS[(album / 12) % len(ALBUM_WORDS)], album)
+}
+
+SEARCH_MAX :: 300 // TIDAL's cap on results
+
+// search_response finds tracks of the long playlist whose title or artist
+// has the query in it, ignoring ASCII case. A query that matches nothing
+// gets 120 made-up tracks with the query in their titles.
+search_response :: proc(query, types: string, offset, limit: int) -> Response {
+	needle := strings.to_lower(query, context.temp_allocator)
+	Hit :: struct {
+		id, album, artist: int,
+		title:             string,
+		h:                 u32,
+	}
+	hits := make([dynamic]Hit, 0, 64, context.temp_allocator)
+	for i in 0 ..< PLAYLISTS[0].tracks {
+		h := track_hash(0, i)
+		title, artist := TITLES[(h >> 4) % len(TITLES)], int(h >> 16) % len(ARTISTS)
+		if strings.contains(strings.to_lower(title, context.temp_allocator), needle) || strings.contains(strings.to_lower(ARTISTS[artist], context.temp_allocator), needle) {
+			append(&hits, Hit{i, int(h >> 8) % 700 + 1, artist, title, h})
+		}
+		if len(hits) == SEARCH_MAX {
+			break
+		}
+	}
+	if len(hits) == 0 && needle != "" {
+		for i in 0 ..< 120 {
+			h := track_hash(77, i)
+			append(&hits, Hit{77_000_000 + i, int(h >> 8) % 700 + 1, int(h >> 16) % len(ARTISTS), fmt.tprintf("%s %d", query, i + 1), h})
+		}
+	}
+	want := proc(types, kind: string) -> bool {
+		return types == "" || strings.contains(strings.to_upper(types, context.temp_allocator), kind)
+	}
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_string(&b, "{")
+	n := 0
+	if want(types, "TRACKS") {
+		fmt.sbprintf(&b, `"tracks":{{"limit":%d,"offset":%d,"totalNumberOfItems":%d,"items":[`, limit, offset, len(hits))
+		for i in offset ..< min(offset + limit, len(hits)) {
+			if i > offset {
+				strings.write_byte(&b, ',')
+			}
+			hit := hits[i]
+			write_track_as(&b, hit.id, hit.title, hit.album, hit.artist, hit.id, hit.h)
+			n += 1
+		}
+		strings.write_string(&b, "]},")
+	}
+	albums := make([dynamic]int, 0, 16, context.temp_allocator)
+	artists := make([dynamic]int, 0, 16, context.temp_allocator)
+	for hit in hits[:min(len(hits), 50)] {
+		if !slice_has(albums[:], hit.album) {
+			append(&albums, hit.album)
+		}
+		if !slice_has(artists[:], hit.artist) {
+			append(&artists, hit.artist)
+		}
+	}
+	if want(types, "ALBUMS") {
+		strings.write_string(&b, `"albums":{"items":[`)
+		for album, i in albums[:min(len(albums), limit)] {
+			if i > 0 {
+				strings.write_byte(&b, ',')
+			}
+			artist := album % len(ARTISTS)
+			fmt.sbprintf(&b, `{{"id":%d,"title":%q,"cover":"%s","numberOfTracks":12,"artist":{{"id":%d,"name":%q}},"artists":[{{"id":%d,"name":%q}}]}}`,
+				album, album_title(album), image_id(album), artist + 1, ARTISTS[artist], artist + 1, ARTISTS[artist])
+		}
+		strings.write_string(&b, "]},")
+	}
+	if want(types, "ARTISTS") {
+		strings.write_string(&b, `"artists":{"items":[`)
+		for artist, i in artists[:min(len(artists), limit)] {
+			if i > 0 {
+				strings.write_byte(&b, ',')
+			}
+			fmt.sbprintf(&b, `{{"id":%d,"name":%q,"picture":"%s"}}`, artist + 1, ARTISTS[artist], image_id(3000 + artist))
+		}
+		strings.write_string(&b, "]},")
+	}
+	if want(types, "PLAYLISTS") {
+		strings.write_string(&b, `"playlists":{"items":[`)
+		count := 0
+		for pl, i in PLAYLISTS {
+			if !strings.contains(strings.to_lower(pl.name, context.temp_allocator), needle) {
+				continue
+			}
+			if count > 0 {
+				strings.write_byte(&b, ',')
+			}
+			fmt.sbprintf(&b, `{{"uuid":"%s","title":%q,"numberOfTracks":%d,"numberOfVideos":0,"type":"USER","creator":{{"id":%d}},"squareImage":"%s","image":"%s"}}`,
+				playlist_id(i), pl.name, pl.tracks, USER_ID, image_id(1000 + i), image_id(2000 + i))
+			count += 1
+		}
+		strings.write_string(&b, "]},")
+	}
+	strings.write_string(&b, `"videos":{"items":[]},"topHit":null}`)
+	fmt.printfln("mock: search for \"%s\", types %s, offset %d: %d of %d tracks, %d albums, %d artists", query, types, offset, n, len(hits), len(albums), len(artists))
+	return json_response(200, strings.to_string(b))
+}
+
+slice_has :: proc(s: []int, v: int) -> bool {
+	for x in s {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
+
+// made_up_tracks lists 12 tracks of an album or an artist's top 20.
+made_up_tracks :: proc(album, artist: int, offset, limit: int) -> Response {
+	total := 12 if album >= 0 else 20
+	b := list_begin(total, offset, limit)
+	for i in offset ..< min(offset + limit, total) {
+		if i > offset {
+			strings.write_byte(&b, ',')
+		}
+		h := track_hash(album if album >= 0 else 1000 + artist, i)
+		al := album if album >= 0 else int(h >> 8) % 700 + 1
+		ar := album % len(ARTISTS) if album >= 0 else max(artist - 1, 0) % len(ARTISTS)
+		id := 5_000_000 + album * 100 + i if album >= 0 else 6_000_000 + artist * 100 + i
+		write_track_as(&b, id, TITLES[(h >> 4) % len(TITLES)], al, ar, i, h)
+	}
+	strings.write_string(&b, "]}")
+	fmt.printfln("mock: %s %d, %d tracks from %d", "album" if album >= 0 else "artist", album if album >= 0 else artist, total, offset)
+	return json_response(200, strings.to_string(b))
 }
 
 write_album_track :: proc(b: ^strings.Builder, i: int) {

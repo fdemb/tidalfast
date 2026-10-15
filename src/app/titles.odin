@@ -21,6 +21,7 @@ Row :: struct {
 	seconds:  int,
 	id:       i64, // TIDAL track id, 0 in the fake data
 	album_id: i64,
+	artist_id: i64, // the first artist's
 	track:    int, // number on its album
 }
 

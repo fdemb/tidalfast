@@ -1,0 +1,649 @@
+package app
+
+// Search, and the lists that aren't sidebar entries: search results, an
+// album's tracks and an artist's top tracks.
+//
+// The field sits at the top of the sidebar; Cmd-F or Cmd-L focuses it.
+// Each edit raises the query generation. Once typing has stopped for
+// SEARCH_DEBOUNCE a Search job asks TIDAL for songs, albums, artists and
+// playlists at once, and a result for an older generation is dropped. The
+// songs open as the track list (Track_View with source .Search), so the
+// table, covers, playing a row and the queue work as for a playlist, and
+// further pages come as Tracks jobs. Albums, artists and playlists show as
+// tabs above it and open their own lists. Clearing the field, or Escape,
+// goes back to the sidebar's playlist.
+//
+// With TIDALFAST_FAKE=1 the search runs over the fake rows on the UI
+// thread, and its lists are row indices instead of a Track_View.
+
+import "base:runtime"
+import "core:fmt"
+import vmem "core:mem/virtual"
+import "core:strconv"
+import "core:strings"
+import "core:unicode"
+import "core:unicode/utf8"
+
+import "../cover"
+import "../jobs"
+import "../platform"
+import "../tidal"
+import "../ui"
+
+SEARCH_DEBOUNCE :: 0.25 // seconds without typing before the request goes
+SEARCH_PAGE :: 50
+FOUND_MAX :: 50
+
+Search_Tab :: enum u8 {
+	Songs,
+	Albums,
+	Artists,
+	Playlists,
+}
+
+// Found is an album, artist or playlist in the results.
+Found :: struct {
+	id:       i64, // album or artist
+	uuid:     string, // playlist
+	name:     string,
+	subtitle: string,
+	image:    string,
+	tracks:   int,
+}
+
+Found_Lists :: struct {
+	albums, artists, playlists: []Found,
+}
+
+Search :: struct {
+	field:       ui.Text_Field,
+	gen:         u32, // goes up with every edit; results for an older one are dropped
+	due:         f64, // when the debounce ends, 0 when no request waits
+	loading:     bool,
+	query:       Small, // what the results are for
+	tab:         Search_Tab,
+	arena:       ^vmem.Arena, // owns found, adopted from the result
+	found:       Found_Lists,
+	error:       Small,
+	// A list that isn't a sidebar entry is showing. Picking a sidebar entry
+	// ends it.
+	browsing:    bool,
+	// The fake data's lists: indices into State.rows, and for the tabs
+	// indices of rows (albums, artists) and of PLAYLISTS.
+	fake:        []i32,
+	fake_count:  int,
+	fake_source: Source, // .None while the fake data shows a playlist
+	fake_title:  Small,
+	fake_found:  [3][FOUND_MAX]i32,
+	fake_counts: [3]int,
+}
+
+search_init :: proc(s: ^State) {
+	sr := &s.search
+	sr.field.limit = len(Small{}.buf)
+	if s.data.fake {
+		sr.fake = make([]i32, len(s.rows))
+	}
+}
+
+search_shutdown :: proc(s: ^State) {
+	found_free(&s.search)
+}
+
+@(private = "file")
+found_free :: proc(sr: ^Search) {
+	if sr.arena != nil {
+		vmem.arena_destroy(sr.arena)
+		free(sr.arena, runtime.heap_allocator())
+	}
+	sr.arena = nil
+	sr.found = {}
+}
+
+// draw_search_field is the field with the sidebar's width, and runs the
+// search: the debounce, Cmd-F and Cmd-L, Return to search at once.
+draw_search_field :: proc(s: ^State) {
+	sr := &s.search
+	ui.column("", {}, ui.fill(), ui.px(44))
+	ui.spacer(ui.px(2))
+	{
+		ui.row("", {}, ui.fill(), ui.px(32))
+		ui.spacer(ui.px(12))
+		ui.text_style(.Regular, 13, TEXT)
+		sig := ui.text_field("search", &sr.field, "Search", ui.fill(), ui.px(32))
+		sig.box.background = SURFACE
+		sig.box.border_color = ACCENT if sig.focused else OUTLINE
+		ui.spacer(ui.px(12))
+		if ui.key_pressed(ui.KEY_F, {.Command}) || ui.key_pressed(ui.KEY_L, {.Command}) {
+			ui.focus_text_field(sig.box, &sr.field)
+		}
+		if sig.changed {
+			search_edited(s)
+		}
+		if sig.submitted && search_query(s) != "" {
+			sr.due = s.ui.time
+		}
+	}
+	// Nothing goes while the input method is still composing.
+	if sr.due > 0 && !sr.field.marked {
+		if s.ui.time >= sr.due {
+			search_send(s)
+		} else {
+			ui.wake_at(sr.due)
+		}
+	}
+}
+
+search_query :: proc(s: ^State) -> string {
+	return strings.trim_space(ui.field_text(&s.search.field))
+}
+
+@(private = "file")
+drop_search_jobs :: proc(job: ^Job, _: rawptr) -> bool {
+	return job.kind == .Search
+}
+
+// search_edited starts the debounce over. An empty field ends the search.
+@(private = "file")
+search_edited :: proc(s: ^State) {
+	sr := &s.search
+	sr.gen += 1
+	if !s.data.fake {
+		jobs.remove_if(&s.data.queue, drop_search_jobs, nil)
+	}
+	if search_query(s) == "" {
+		sr.due = 0
+		sr.loading = false
+		search_close(s)
+		return
+	}
+	sr.due = s.ui.time + SEARCH_DEBOUNCE
+}
+
+@(private = "file")
+search_send :: proc(s: ^State) {
+	sr := &s.search
+	sr.due = 0
+	q := search_query(s)
+	fmt.eprintfln("search: \"%s\" (query %d)", q, sr.gen)
+	if s.data.fake {
+		fake_search(s, q)
+		return
+	}
+	if s.data.account != .Signed_In {
+		return
+	}
+	sr.loading = true
+	if !push_job(&s.data, {kind = .Search, view = sr.gen, id = small(q)}) {
+		// The queue is full: try again shortly.
+		sr.due = s.ui.time + 0.1
+	}
+}
+
+// search_close leaves the results for the sidebar's playlist.
+@(private = "file")
+search_close :: proc(s: ^State) {
+	sr := &s.search
+	showing := sr.fake_source == .Search if s.data.fake else s.data.view.source == .Search
+	if showing {
+		select_playlist(s, s.library.playlist)
+	}
+	found_free(sr)
+	sr.query = {}
+	sr.error = {}
+	sr.fake_counts = {}
+}
+
+// search_leave is for select_playlist: the sidebar's list replaces
+// whatever was browsed.
+search_leave :: proc(s: ^State) -> (was_browsing: bool) {
+	sr := &s.search
+	was_browsing = sr.browsing
+	sr.browsing = false
+	sr.fake_source = .None
+	return
+}
+
+// search_result takes a Search job's result.
+search_result :: proc(s: ^State, res: ^Result) {
+	sr := &s.search
+	if res.job.view != sr.gen {
+		return // for an older query
+	}
+	sr.loading = false
+	if _, failed := res.err.?; failed {
+		sr.error = res.message
+		return
+	}
+	sr.error = {}
+	found_free(sr)
+	sr.arena = res.arena
+	res.arena = nil
+	sr.found = res.found
+	sr.query = res.job.id
+	q := small_str(&sr.query)
+	fmt.eprintfln("search: \"%s\": %d songs, %d albums, %d artists, %d playlists", q, len(res.rows), len(sr.found.albums), len(sr.found.artists), len(sr.found.playlists))
+
+	browse_begin(s)
+	d := &s.data
+	view_close(d)
+	v := &d.view
+	v.source = .Search
+	v.id = sr.query
+	v.name = small(fmt.tprintf("Results for “%s”", q))
+	v.has_arena = vmem.arena_init_growing(&v.arena) == nil
+	view_add_rows(v, 0, res.rows, len(res.rows) < SEARCH_PAGE)
+	v.next_offset = SEARCH_PAGE
+	view_request_pages(d)
+}
+
+// browse_begin resets the table's selection for a list that isn't a
+// sidebar entry.
+@(private = "file")
+browse_begin :: proc(s: ^State) {
+	lib := &s.library
+	lib.selected = -1
+	lib.playing = -1
+	lib.status = .None
+	s.search.browsing = true
+}
+
+// open_list opens an album's tracks, an artist's top tracks or a playlist
+// that isn't in the sidebar. The strings may point into the open list,
+// which this closes, so they're copied first.
+open_list :: proc(s: ^State, source: Source, id, name, image: string, hint: int) {
+	a := context.temp_allocator
+	browse_begin(s)
+	view_open(&s.data, source, strings.clone(id, a), strings.clone(name, a), strings.clone(image, a), hint)
+}
+
+// go_to_album opens the album of a track row.
+go_to_album :: proc(s: ^State, row: ^Row) {
+	if s.data.fake {
+		fake_filter(s, .Album, row.album)
+		return
+	}
+	if row.album_id != 0 {
+		open_list(s, .Album, fmt.tprint(row.album_id), row.album, row.cover, 0)
+	}
+}
+
+go_to_artist :: proc(s: ^State, row: ^Row) {
+	if s.data.fake {
+		fake_filter(s, .Artist, row.artist)
+		return
+	}
+	if row.artist_id != 0 {
+		open_list(s, .Artist, fmt.tprint(row.artist_id), row.artist, "", 0)
+	}
+}
+
+// track_link is what Copy song link puts on the clipboard.
+track_link :: proc(id: i64) -> string {
+	return fmt.tprintf("https://tidal.com/browse/track/%d", id)
+}
+
+// browse_header is the title and subtitle for a list that isn't a sidebar
+// entry; ok is false for a sidebar entry.
+browse_header :: proc(s: ^State) -> (title, subtitle: string, ok: bool) {
+	sr := &s.search
+	kinds := [Source]string {
+		.None     = "",
+		.Liked    = "Playlist",
+		.Playlist = "Playlist",
+		.Search   = "Search",
+		.Album    = "Album",
+		.Artist   = "Artist · Top tracks",
+	}
+	if s.data.fake {
+		if sr.fake_source == .None {
+			return
+		}
+		return small_str(&sr.fake_title), fmt.tprintf("%s · %d songs", kinds[sr.fake_source], sr.fake_count), true
+	}
+	v := &s.data.view
+	if !sr.browsing || v.source == .None {
+		return
+	}
+	title = small_str(&v.name)
+	if !v.done {
+		subtitle = fmt.tprintf("%s · loading, %d songs so far", kinds[v.source], v.loaded_rows)
+	} else {
+		subtitle = fmt.tprintf("%s · %d songs", kinds[v.source], v.count)
+	}
+	if v.source == .Search && (sr.loading || sr.due > 0) {
+		subtitle = fmt.tprintf("%s · searching for “%s”", subtitle, search_query(s))
+	}
+	return title, subtitle, true
+}
+
+// search_showing says whether the search results are the open list.
+search_showing :: proc(s: ^State) -> bool {
+	if s.data.fake {
+		return s.search.fake_source == .Search
+	}
+	return s.search.browsing && s.data.view.source == .Search
+}
+
+// search_status is a line for the header while a search is out or failed.
+search_status :: proc(s: ^State) -> string {
+	sr := &s.search
+	if sr.error.len > 0 && search_query(s) != "" {
+		return fmt.tprintf("Search failed: %s", small_str(&sr.error))
+	}
+	if (sr.loading || sr.due > 0) && !search_showing(s) {
+		return fmt.tprintf("Searching for “%s”…", search_query(s))
+	}
+	return ""
+}
+
+// draw_search_tabs is the row of tabs over the search results. It returns
+// false when a tab other than Songs is showing, in place of the table.
+draw_search_tabs :: proc(s: ^State) -> (songs: bool) {
+	sr := &s.search
+	counts := [Search_Tab]int {
+		.Songs     = view_count(s),
+		.Albums    = found_count(s, .Albums),
+		.Artists   = found_count(s, .Artists),
+		.Playlists = found_count(s, .Playlists),
+	}
+	names := [Search_Tab]string {
+		.Songs     = "Songs",
+		.Albums    = "Albums",
+		.Artists   = "Artists",
+		.Playlists = "Playlists",
+	}
+	ui.spacer(ui.px(4))
+	{
+		ui.row("search_tabs", {}, ui.fill(), ui.px(30))
+		ui.spacer(ui.px(20))
+		for tab in Search_Tab {
+			ui.text_style(.Medium, 13, TEXT if sr.tab == tab else SECONDARY)
+			label := fmt.tprintf("%s  %d###tab%d", names[tab], counts[tab], int(tab))
+			sig := ui.button(label, ui.text_size(12), ui.fill())
+			sig.box.background = SURFACE_ACTIVE if sr.tab == tab else {}
+			sig.box.radius = 15
+			if sig.clicked {
+				sr.tab = tab
+			}
+			ui.spacer(ui.px(6))
+		}
+	}
+	ui.spacer(ui.px(6))
+	return sr.tab == .Songs
+}
+
+@(private = "file")
+found_count :: proc(s: ^State, tab: Search_Tab) -> int {
+	sr := &s.search
+	if s.data.fake {
+		return sr.fake_counts[int(tab) - 1] if tab != .Songs else sr.fake_count
+	}
+	switch tab {
+	case .Songs:
+		return view_count(s)
+	case .Albums:
+		return len(sr.found.albums)
+	case .Artists:
+		return len(sr.found.artists)
+	case .Playlists:
+		return len(sr.found.playlists)
+	}
+	return 0
+}
+
+// found_at is item i of a tab other than Songs.
+@(private = "file")
+found_at :: proc(s: ^State, tab: Search_Tab, i: int) -> Found {
+	sr := &s.search
+	if !s.data.fake {
+		switch tab {
+		case .Songs:
+		case .Albums:
+			return sr.found.albums[i]
+		case .Artists:
+			return sr.found.artists[i]
+		case .Playlists:
+			return sr.found.playlists[i]
+		}
+		return {}
+	}
+	at := sr.fake_found[int(tab) - 1][i]
+	#partial switch tab {
+	case .Albums:
+		row := &s.rows[at]
+		return {name = row.album, subtitle = fmt.tprintf("Album · %s", row.artist)}
+	case .Artists:
+		return {name = s.rows[at].artist, subtitle = "Artist"}
+	case .Playlists:
+		return {id = i64(at), name = PLAYLISTS[at], subtitle = "Playlist"}
+	}
+	return {}
+}
+
+// draw_found_list lists the albums, artists or playlists found. A click
+// opens one.
+draw_found_list :: proc(s: ^State) {
+	sr := &s.search
+	tab := sr.tab
+	list := ui.scroll_view("found", ui.fill(), ui.fill())
+	ui.accessible(list, .List, fmt.tprintf("%v", tab))
+	n := found_count(s, tab)
+	rows := ui.virtual_rows(list, n, TRACK_ROW_H)
+	for i in rows.first ..< rows.last {
+		f := found_at(s, tab, i)
+		row := ui.row(fmt.tprintf("##found%d", i), {.Clickable, .Draw_Background, .Draw_Hot_Effects}, ui.fill(), ui.px(TRACK_ROW_H))
+		row.radius = 6
+		row.hover_color = {1, 1, 1, 0.05}
+		ui.accessible(row, .Row, fmt.tprintf("%s, %s", f.name, f.subtitle))
+		if ui.signal(row).clicked {
+			open_found(s, tab, f)
+		}
+		ui.spacer(ui.px(16))
+		kind := cover.Kind.Album if tab == .Albums else .Playlist
+		cover_art(s, kind, f.image, u32(i) * 2654435761 >> 7, 40, ui.px(52))
+		ui.spacer(ui.px(8))
+		ui.column("", {}, ui.fill(), ui.fill())
+		ui.spacer(ui.px(9))
+		ui.text_style(.Medium, 14, TEXT)
+		title := ui.label(f.name, ui.fill(), ui.px(20))
+		title.text_pad = 4
+		ui.text_style(.Regular, 13, SECONDARY)
+		sub := ui.label(f.subtitle, ui.fill(), ui.px(18))
+		sub.text_pad = 4
+	}
+}
+
+@(private = "file")
+open_found :: proc(s: ^State, tab: Search_Tab, f: Found) {
+	if s.data.fake {
+		#partial switch tab {
+		case .Albums:
+			fake_filter(s, .Album, f.name)
+		case .Artists:
+			fake_filter(s, .Artist, f.name)
+		case .Playlists:
+			select_playlist(s, int(f.id))
+		}
+		return
+	}
+	#partial switch tab {
+	case .Albums:
+		open_list(s, .Album, fmt.tprint(f.id), f.name, f.image, f.tracks)
+	case .Artists:
+		open_list(s, .Artist, fmt.tprint(f.id), f.name, f.image, 0)
+	case .Playlists:
+		open_list(s, .Playlist, f.uuid, f.name, f.image, f.tracks)
+	}
+}
+
+// view_cover is the cover the list header shows, if any.
+view_cover :: proc(s: ^State) -> (kind: cover.Kind, id: string, show: bool) {
+	v := &s.data.view
+	if s.data.fake {
+		return
+	}
+	#partial switch v.source {
+	case .None, .Search:
+		return
+	case .Album:
+		return .Album, small_str(&v.image), true
+	}
+	return .Playlist, small_str(&v.image), true
+}
+
+// The worker's side.
+
+// found_lists turns TIDAL's search results into what the tabs show.
+found_lists :: proc(r: tidal.Search_Results, a: runtime.Allocator) -> (out: Found_Lists) {
+	albums := make([]Found, min(len(r.albums), FOUND_MAX), a)
+	for &f, i in albums {
+		al := r.albums[i]
+		artist := al.artist.name if al.artist != nil else (al.artists[0].name if len(al.artists) > 0 else "")
+		f = {id = al.id, name = al.name, image = al.cover, tracks = al.num_tracks}
+		f.subtitle = fmt.aprintf("Album · %s", artist, allocator = a) if artist != "" else "Album"
+	}
+	artists := make([]Found, min(len(r.artists), FOUND_MAX), a)
+	for &f, i in artists {
+		ar := r.artists[i]
+		f = {id = ar.id, name = ar.name, image = ar.picture, subtitle = "Artist"}
+	}
+	playlists := make([]Found, min(len(r.playlists), FOUND_MAX), a)
+	for &f, i in playlists {
+		pl := r.playlists[i]
+		f = {uuid = pl.id, name = pl.name, image = pl.square_picture, tracks = pl.num_tracks}
+		f.subtitle = fmt.aprintf("Playlist · %d songs", pl.num_tracks, allocator = a)
+	}
+	return {albums, artists, playlists}
+}
+
+// more_tracks is a page of a list that isn't a sidebar entry, for a Tracks
+// job: more search results, an album's tracks or an artist's top tracks.
+more_tracks :: proc(s: ^tidal.Session, job: Job, a: runtime.Allocator) -> (tracks: []tidal.Track, err: tidal.Error) {
+	id := job.id
+	key := small_str(&id)
+	#partial switch job.source {
+	case .Search:
+		found := tidal.search(s, key, {.Track}, int(job.limit), int(job.offset), a) or_return
+		return found.tracks, nil
+	case .Album:
+		n, _ := strconv.parse_i64(key)
+		return tidal.album_tracks(s, n, int(job.limit), int(job.offset), allocator = a)
+	case .Artist:
+		n, _ := strconv.parse_i64(key)
+		return tidal.artist_top_tracks(s, n, int(job.limit), int(job.offset), a)
+	}
+	return nil, nil
+}
+
+// Fake data
+
+// fold lowercases s for matching without case.
+@(private = "file")
+fold :: proc(s: string) -> string {
+	b := make([dynamic]u8, 0, len(s), context.temp_allocator)
+	for r in s {
+		bytes, n := utf8.encode_rune(unicode.to_lower(r))
+		append(&b, ..bytes[:n])
+	}
+	return string(b[:])
+}
+
+@(private = "file")
+fake_add_found :: proc(s: ^State, kind: int, at: i32, name: proc(row: ^Row) -> string) {
+	sr := &s.search
+	if sr.fake_counts[kind] >= FOUND_MAX {
+		return
+	}
+	for j in sr.fake_found[kind][:sr.fake_counts[kind]] {
+		if name(&s.rows[j]) == name(&s.rows[at]) {
+			return
+		}
+	}
+	sr.fake_found[kind][sr.fake_counts[kind]] = at
+	sr.fake_counts[kind] += 1
+}
+
+// fake_search finds the fake rows whose title, artist or album has q in
+// it, and the albums, artists and playlists among them.
+@(private = "file")
+fake_search :: proc(s: ^State, q: string) {
+	sr := &s.search
+	needle := fold(q)
+	sr.fake_count = 0
+	sr.fake_counts = {}
+	for &row, i in s.rows {
+		title, artist, album := strings.contains(fold(row.title), needle), strings.contains(fold(row.artist), needle), strings.contains(fold(row.album), needle)
+		if !(title || artist || album) {
+			continue
+		}
+		sr.fake[sr.fake_count] = i32(i)
+		sr.fake_count += 1
+		if album {
+			fake_add_found(s, 0, i32(i), proc(r: ^Row) -> string {return r.album})
+		}
+		if artist {
+			fake_add_found(s, 1, i32(i), proc(r: ^Row) -> string {return r.artist})
+		}
+	}
+	for name, i in PLAYLISTS {
+		if strings.contains(fold(name), needle) && sr.fake_counts[2] < FOUND_MAX {
+			sr.fake_found[2][sr.fake_counts[2]] = i32(i)
+			sr.fake_counts[2] += 1
+		}
+	}
+	browse_begin(s)
+	sr.query = small(q)
+	sr.fake_source = .Search
+	sr.fake_title = small(fmt.tprintf("Results for “%s”", q))
+	fmt.eprintfln("search: \"%s\": %d songs, %d albums, %d artists, %d playlists", q, sr.fake_count, sr.fake_counts[0], sr.fake_counts[1], sr.fake_counts[2])
+}
+
+// fake_filter lists the fake rows of one album or artist.
+@(private = "file")
+fake_filter :: proc(s: ^State, source: Source, name: string) {
+	sr := &s.search
+	title := small(name)
+	sr.fake_count = 0
+	for &row, i in s.rows {
+		if (source == .Album && row.album == name) || (source == .Artist && row.artist == name) {
+			sr.fake[sr.fake_count] = i32(i)
+			sr.fake_count += 1
+		}
+	}
+	browse_begin(s)
+	sr.fake_source = source
+	sr.fake_title = title
+}
+
+// fake_row is row i of a fake list, or nil when no fake list is showing.
+fake_row :: proc(s: ^State, i: int) -> (row: ^Row, listed: bool) {
+	sr := &s.search
+	if sr.fake_source == .None {
+		return nil, false
+	}
+	if i < 0 || i >= sr.fake_count {
+		return nil, true
+	}
+	return &s.rows[sr.fake[i]], true
+}
+
+fake_count :: proc(s: ^State) -> (n: int, listed: bool) {
+	sr := &s.search
+	return sr.fake_count, sr.fake_source != .None
+}
+
+// Shell
+
+// shell_update tells the shell about the focused text field and the
+// accessibility tree when they changed. Run it after ui.end_frame.
+shell_update :: proc(s: ^State, shell: ^platform.Shell) {
+	if input, changed := ui.text_input(&s.ui); changed && shell.set_text_input != nil {
+		shell.set_text_input(&input)
+	}
+	nodes, h := ui.access_tree(&s.ui)
+	if h != s.access_sent && shell.set_accessibility != nil {
+		shell.set_accessibility(raw_data(nodes), u32(len(nodes)))
+		s.access_sent = h
+	}
+}

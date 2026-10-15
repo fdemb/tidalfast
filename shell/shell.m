@@ -3,7 +3,12 @@
 // App_API table in platform.h. It redraws only when something asks for it:
 // input, resize, a reload or request_redraw from any thread. While the app
 // reports it is animating and the window is visible, the display link adds a
-// frame every vsync, and other redraws wait for the next tick.
+// frame every vsync, and other redraws wait for the next tick. A frame can
+// also ask to be woken after a delay, which a one-shot timer does.
+//
+// The view is an NSTextInputClient, so input methods work in the app's text
+// fields, and it hands assistive apps an accessibility tree the app builds
+// from its boxes.
 
 #import <Cocoa/Cocoa.h>
 #import <CoreServices/CoreServices.h>
@@ -46,6 +51,10 @@ static bool g_animating;
 static double g_last_tick; // CACurrentMediaTime of the last display link frame
 static double g_tick_interval = 1.0 / 60;
 static CFRunLoopTimerRef g_tick_fallback;
+static CFRunLoopTimerRef g_wake_timer; // fires when a frame asked for wake_after
+static uint8_t *g_text; // bytes text events point into, reset with the events
+static uint32_t g_text_len;
+static uint32_t g_text_cap;
 static CFRunLoopRef g_main_run_loop;
 static double g_start_time;
 
@@ -55,6 +64,7 @@ static CAMetalLayer *g_layer;
 static CADisplayLink *g_display_link;
 
 static void update_display_link(void);
+static void access_frame_done(void);
 
 static void request_redraw(void) {
   atomic_store(&g_needs_redraw, true);
@@ -73,14 +83,37 @@ static void draw_frame(void) {
       .height = size.height,
       .scale = g_window.backingScaleFactor,
       .time = CACurrentMediaTime() - g_start_time,
+      .text = g_text,
+      .text_length = g_text_len,
+      .key_window = g_window.isKeyWindow,
   };
   Frame_Result result;
   @autoreleasepool {
     result = g_app.api.frame(&g_memory, &g_shell, &input);
+    access_frame_done();
   }
   g_event_count = 0;
+  g_text_len = 0;
   g_animating = result.animating;
   update_display_link();
+  if (g_wake_timer) {
+    double after = result.wake_after > 0 ? result.wake_after : 1e9;
+    CFRunLoopTimerSetNextFireDate(g_wake_timer, CFAbsoluteTimeGetCurrent() + after);
+  }
+}
+
+static void wake_timer_fired(CFRunLoopTimerRef timer, void *info) { request_redraw(); }
+
+// push_text copies text for an event into the frame's text buffer.
+static void push_text(Event *e, const char *text, size_t n) {
+  if (g_text_len + n > g_text_cap) {
+    while (g_text_len + n > g_text_cap) g_text_cap = g_text_cap ? g_text_cap * 2 : 1024;
+    g_text = realloc(g_text, g_text_cap);
+  }
+  memcpy(g_text + g_text_len, text, n);
+  e->text_offset = g_text_len;
+  e->text_length = (uint32_t)n;
+  g_text_len += (uint32_t)n;
 }
 
 static bool continuous_phase(uint32_t phase) {
@@ -371,6 +404,371 @@ static void setup_remote_commands(void) {
   }
 }
 
+// Text input
+//
+// The app tells the shell about the focused text field after each frame
+// (set_text_input): its text, selection, marked text and where the caret
+// is. Input methods ask NSTextInputClient questions synchronously, often
+// right after setMarkedText and before the app has had a frame, so the
+// shell keeps a mirror of the field and applies each edit it sends on to
+// the app to the mirror as well. The app's next state replaces the mirror.
+// The app counts in UTF-8 bytes and AppKit in UTF-16 units; the mirror
+// converts, rounding down to a whole codepoint.
+
+static struct {
+  bool active;
+  uint8_t *bytes;
+  uint32_t length, capacity;
+  uint32_t sel_start, sel_end;
+  int32_t marked_start, marked_end; // -1 without marked text
+  NSRect caret; // view points
+} g_ti = {.marked_start = -1, .marked_end = -1};
+static bool g_ime_handled; // the input method took the key being handled
+
+static uint32_t utf8_width(uint8_t c) { return c < 0xc0 ? 1 : c < 0xe0 ? 2 : c < 0xf0 ? 3 : 4; }
+
+static NSUInteger utf16_of_byte(const uint8_t *s, uint32_t len, uint32_t byte) {
+  NSUInteger n = 0;
+  for (uint32_t i = 0; i < byte && i < len;) {
+    uint32_t w = utf8_width(s[i]);
+    n += w == 4 ? 2 : 1;
+    i += w;
+  }
+  return n;
+}
+
+// byte_of_utf16 never lands between a surrogate pair's halves.
+static uint32_t byte_of_utf16(const uint8_t *s, uint32_t len, NSUInteger u16) {
+  NSUInteger n = 0;
+  uint32_t i = 0;
+  while (i < len) {
+    uint32_t w = utf8_width(s[i]);
+    NSUInteger units = w == 4 ? 2 : 1;
+    if (n + units > u16) break;
+    n += units;
+    i += w;
+  }
+  return i < len ? i : len;
+}
+
+static void mirror_replace(uint32_t lo, uint32_t hi, const char *text, uint32_t n) {
+  uint32_t length = g_ti.length - (hi - lo) + n;
+  if (length > g_ti.capacity) {
+    g_ti.capacity = length * 2 + 64;
+    g_ti.bytes = realloc(g_ti.bytes, g_ti.capacity);
+  }
+  memmove(g_ti.bytes + lo + n, g_ti.bytes + hi, g_ti.length - hi);
+  memcpy(g_ti.bytes + lo, text, n);
+  g_ti.length = length;
+}
+
+// The range an edit replaces: the one the input method gave, else the
+// marked text, else the selection.
+static void edit_range(NSRange given, Event *e, uint32_t *lo, uint32_t *hi) {
+  if (given.location != NSNotFound) {
+    *lo = byte_of_utf16(g_ti.bytes, g_ti.length, given.location);
+    *hi = byte_of_utf16(g_ti.bytes, g_ti.length, given.location + given.length);
+    if (*hi < *lo) *hi = *lo;
+    e->replace = 1;
+    e->replace_start = (int32_t)*lo;
+    e->replace_end = (int32_t)*hi;
+  } else if (g_ti.marked_start >= 0) {
+    *lo = (uint32_t)g_ti.marked_start;
+    *hi = (uint32_t)g_ti.marked_end;
+  } else {
+    *lo = g_ti.sel_start;
+    *hi = g_ti.sel_end;
+  }
+}
+
+static NSString *plain_string(id string) {
+  return [string isKindOfClass:NSAttributedString.class] ? [(NSAttributedString *)string string] : (NSString *)string;
+}
+
+static void text_insert(id string, NSRange replacement) {
+  const char *utf8 = plain_string(string).UTF8String ?: "";
+  uint32_t n = (uint32_t)strlen(utf8);
+  Event e = {.kind = EVENT_TEXT, .time = CACurrentMediaTime()};
+  push_text(&e, utf8, n);
+  uint32_t lo, hi;
+  edit_range(replacement, &e, &lo, &hi);
+  mirror_replace(lo, hi, utf8, n);
+  g_ti.sel_start = g_ti.sel_end = lo + n;
+  g_ti.marked_start = g_ti.marked_end = -1;
+  g_ime_handled = true;
+  push_event(e);
+  request_redraw();
+}
+
+static void text_set_marked(id string, NSRange selected, NSRange replacement) {
+  const char *utf8 = plain_string(string).UTF8String ?: "";
+  uint32_t n = (uint32_t)strlen(utf8);
+  Event e = {.kind = EVENT_MARKED_TEXT, .time = CACurrentMediaTime()};
+  push_text(&e, utf8, n);
+  uint32_t sel_lo = byte_of_utf16((const uint8_t *)utf8, n, selected.location);
+  uint32_t sel_hi = byte_of_utf16((const uint8_t *)utf8, n, selected.location + selected.length);
+  e.select_start = (int32_t)sel_lo;
+  e.select_end = (int32_t)(sel_hi < sel_lo ? sel_lo : sel_hi);
+  uint32_t lo, hi;
+  edit_range(replacement, &e, &lo, &hi);
+  mirror_replace(lo, hi, utf8, n);
+  if (n > 0) {
+    g_ti.marked_start = (int32_t)lo;
+    g_ti.marked_end = (int32_t)(lo + n);
+    g_ti.sel_start = lo + sel_lo;
+    g_ti.sel_end = lo + (uint32_t)e.select_end;
+  } else {
+    g_ti.marked_start = g_ti.marked_end = -1;
+    g_ti.sel_start = g_ti.sel_end = lo;
+  }
+  g_ime_handled = true;
+  push_event(e);
+  request_redraw();
+}
+
+static void text_unmark(void) {
+  if (g_ti.marked_start >= 0) g_ti.sel_start = g_ti.sel_end = (uint32_t)g_ti.marked_end;
+  g_ti.marked_start = g_ti.marked_end = -1;
+  g_ime_handled = true;
+  push_event((Event){.kind = EVENT_UNMARK_TEXT, .time = CACurrentMediaTime()});
+  request_redraw();
+}
+
+static void set_text_input(const Text_Input *ti) {
+  if (!ti || !ti->text) {
+    if (g_ti.active && g_ti.marked_start >= 0) [g_view.inputContext discardMarkedText];
+    g_ti.active = false;
+    g_ti.length = g_ti.sel_start = g_ti.sel_end = 0;
+    g_ti.marked_start = g_ti.marked_end = -1;
+    return;
+  }
+  // The app ended a composition itself, as when the field lost the focus:
+  // the input method has to forget it too.
+  bool discard = g_ti.active && g_ti.marked_start >= 0 && ti->marked_start < 0;
+  g_ti.length = 0;
+  mirror_replace(0, 0, (const char *)ti->text, ti->length);
+  g_ti.sel_start = ti->selection_start;
+  g_ti.sel_end = ti->selection_end;
+  g_ti.marked_start = ti->marked_start;
+  g_ti.marked_end = ti->marked_end;
+  NSRect caret = NSMakeRect(ti->caret[0], ti->caret[1], ti->caret[2], ti->caret[3]);
+  bool moved = !NSEqualRects(caret, g_ti.caret);
+  g_ti.caret = caret;
+  g_ti.active = true;
+  if (discard) [g_view.inputContext discardMarkedText];
+  if (moved) [g_view.inputContext invalidateCharacterCoordinates];
+}
+
+// Clipboard
+
+static void set_clipboard(const uint8_t *text, size_t length) {
+  NSString *s = [[NSString alloc] initWithBytes:text length:length encoding:NSUTF8StringEncoding];
+  if (!s) return;
+  NSPasteboard *pb = NSPasteboard.generalPasteboard;
+  [pb clearContents];
+  [pb setString:s forType:NSPasteboardTypeString];
+}
+
+static size_t get_clipboard(uint8_t *buffer, size_t capacity) {
+  NSString *s = [NSPasteboard.generalPasteboard stringForType:NSPasteboardTypeString];
+  const char *utf8 = s.UTF8String;
+  if (!utf8) return 0;
+  size_t n = strlen(utf8);
+  if (buffer && capacity) memcpy(buffer, utf8, n < capacity ? n : capacity);
+  return n;
+}
+
+// Accessibility
+//
+// The app sends the tree after any frame that changed it (set_accessibility).
+// The shell keeps a copy and makes NSAccessibilityElements from it only
+// once an assistive app has asked the view for its children, and from then
+// on after every change. Elements are kept by node id, so VoiceOver's
+// cursor stays on an element while it moves or changes. Frames are kept in
+// view points and turned into screen coordinates when asked for.
+
+typedef struct {
+  uint64_t id;
+  int32_t parent;
+  uint32_t role, flags;
+  NSRect frame;
+  char *label, *value; // malloc'd, or NULL
+} Shell_Node;
+
+static Shell_Node *g_nodes;
+static uint32_t g_node_count, g_node_cap;
+static bool g_access_dirty; // the nodes changed since the elements were made
+static bool g_access_seen; // an assistive app asked for the tree
+static bool g_access_changed; // set_accessibility ran this frame
+static NSMutableDictionary<NSNumber *, NSAccessibilityElement *> *g_elements;
+static NSArray *g_access_top; // the view's children
+static NSArray *g_access_all; // every element in node order
+static uint64_t g_access_focus;
+
+static void access_event(uint32_t kind, uint64_t id) {
+  push_event((Event){.kind = kind, .target = id, .time = CACurrentMediaTime()});
+  request_redraw();
+}
+
+@interface Access_Element : NSAccessibilityElement
+@property uint64_t node_id;
+@property NSRect view_frame;
+@property uint32_t node_flags;
+@end
+
+@implementation Access_Element
+- (NSRect)accessibilityFrame { return NSAccessibilityFrameInView(g_view, self.view_frame); }
+- (BOOL)isAccessibilityFocused { return (self.node_flags & ACCESS_FOCUSED) != 0; }
+- (BOOL)isAccessibilityEnabled { return (self.node_flags & ACCESS_DISABLED) == 0; }
+- (void)setAccessibilityFocused:(BOOL)focused {
+  if (focused) access_event(EVENT_ACCESS_FOCUS, self.node_id);
+}
+// NSAccessibilityElement answers every selector, so AXPress is only offered
+// where it does something.
+- (BOOL)isAccessibilitySelectorAllowed:(SEL)selector {
+  if (selector == @selector(accessibilityPerformPress)) return NO;
+  return [super isAccessibilitySelectorAllowed:selector];
+}
+@end
+
+// Buttons, rows and menu items: AXPress goes to the app as a click.
+@interface Access_Pressable : Access_Element
+@end
+
+@implementation Access_Pressable
+- (BOOL)isAccessibilitySelectorAllowed:(SEL)selector {
+  if (selector == @selector(accessibilityPerformPress)) return YES;
+  return [super isAccessibilitySelectorAllowed:selector];
+}
+- (BOOL)accessibilityPerformPress {
+  access_event(EVENT_ACCESS_PRESS, self.node_id);
+  return YES;
+}
+@end
+
+static NSAccessibilityRole access_role(uint32_t role) {
+  switch (role) {
+  case ACCESS_BUTTON: return NSAccessibilityButtonRole;
+  case ACCESS_TEXT_FIELD: return NSAccessibilityTextFieldRole;
+  case ACCESS_STATIC_TEXT: return NSAccessibilityStaticTextRole;
+  case ACCESS_LIST: return NSAccessibilityListRole;
+  case ACCESS_TABLE: return NSAccessibilityTableRole;
+  case ACCESS_ROW: return NSAccessibilityRowRole;
+  case ACCESS_MENU: return NSAccessibilityMenuRole;
+  case ACCESS_MENU_ITEM: return NSAccessibilityMenuItemRole;
+  case ACCESS_SLIDER: return NSAccessibilitySliderRole;
+  default: return NSAccessibilityGroupRole;
+  }
+}
+
+static bool access_pressable(uint32_t role) {
+  return role == ACCESS_BUTTON || role == ACCESS_ROW || role == ACCESS_MENU_ITEM;
+}
+
+static NSString *node_string(const char *s) { return s ? [NSString stringWithUTF8String:s] : nil; }
+
+static void set_accessibility(const Access_Node *nodes, uint32_t count) {
+  for (uint32_t i = 0; i < g_node_count; i++) {
+    free(g_nodes[i].label);
+    free(g_nodes[i].value);
+  }
+  if (count > g_node_cap) {
+    g_node_cap = count * 2;
+    g_nodes = realloc(g_nodes, g_node_cap * sizeof(Shell_Node));
+  }
+  for (uint32_t i = 0; i < count; i++) {
+    const Access_Node *n = &nodes[i];
+    g_nodes[i] = (Shell_Node){
+        .id = n->id,
+        .parent = n->parent,
+        .role = n->role,
+        .flags = n->flags,
+        .frame = NSMakeRect(n->frame[0], n->frame[1], n->frame[2], n->frame[3]),
+        .label = n->label ? strdup(n->label) : NULL,
+        .value = n->value ? strdup(n->value) : NULL,
+    };
+  }
+  g_node_count = count;
+  g_access_dirty = true;
+  g_access_changed = true;
+}
+
+static void access_materialize(void) {
+  if (!g_access_dirty) return;
+  g_access_dirty = false;
+  NSMutableDictionary *next = [NSMutableDictionary dictionaryWithCapacity:g_node_count];
+  NSMutableArray *all = [NSMutableArray arrayWithCapacity:g_node_count];
+  NSMutableArray *top = [NSMutableArray array];
+  NSMutableArray *kids = [NSMutableArray arrayWithCapacity:g_node_count];
+  for (uint32_t i = 0; i < g_node_count; i++) {
+    Shell_Node *n = &g_nodes[i];
+    Class cls = access_pressable(n->role) ? Access_Pressable.class : Access_Element.class;
+    Access_Element *el = (Access_Element *)g_elements[@(n->id)];
+    if (!el || el.class != cls) el = [cls new];
+    el.node_id = n->id;
+    el.view_frame = n->frame;
+    el.node_flags = n->flags;
+    el.accessibilityElement = YES;
+    el.accessibilityRole = access_role(n->role);
+    NSString *label = node_string(n->label), *value = node_string(n->value);
+    el.accessibilityLabel = label;
+    el.accessibilityValue = n->role == ACCESS_STATIC_TEXT ? (value ?: label) : value;
+    if (n->role == ACCESS_TEXT_FIELD) el.accessibilityPlaceholderValue = label;
+    el.accessibilitySelected = (n->flags & ACCESS_SELECTED) != 0;
+    next[@(n->id)] = el;
+    [all addObject:el];
+    [kids addObject:[NSMutableArray array]];
+    if (n->parent >= 0 && (uint32_t)n->parent < i) {
+      [kids[n->parent] addObject:el];
+      el.accessibilityParent = all[n->parent];
+    } else {
+      [top addObject:el];
+      el.accessibilityParent = g_view;
+    }
+  }
+  for (uint32_t i = 0; i < g_node_count; i++) {
+    Access_Element *el = all[i];
+    el.accessibilityChildren = kids[i];
+    if (g_nodes[i].role == ACCESS_TABLE || g_nodes[i].role == ACCESS_LIST) {
+      NSMutableArray *rows = [NSMutableArray array];
+      for (Access_Element *k in kids[i])
+        if (k.accessibilityRole == NSAccessibilityRowRole) [rows addObject:k];
+      el.accessibilityRows = rows;
+      NSMutableArray *selected = [NSMutableArray array];
+      for (Access_Element *k in rows)
+        if (k.node_flags & ACCESS_SELECTED) [selected addObject:k];
+      el.accessibilitySelectedRows = selected;
+    }
+  }
+  g_elements = next;
+  g_access_all = all;
+  g_access_top = top;
+}
+
+static Access_Element *access_focused(void) {
+  for (Access_Element *el in g_access_all)
+    if (el.node_flags & ACCESS_FOCUSED) return el;
+  return nil;
+}
+
+// After a frame that changed the tree, while an assistive app listens:
+// make the elements and say what changed.
+static void access_frame_done(void) {
+  if (!g_access_changed) return;
+  g_access_changed = false;
+  if (!g_access_seen) return;
+  access_materialize();
+  NSAccessibilityPostNotification(g_view, NSAccessibilityLayoutChangedNotification);
+  Access_Element *focus = access_focused();
+  uint64_t id = focus ? focus.node_id : 0;
+  if (id != g_access_focus) {
+    g_access_focus = id;
+    if (focus) NSAccessibilityPostNotification(focus, NSAccessibilityFocusedUIElementChangedNotification);
+  } else if (focus && focus.accessibilityRole == NSAccessibilityTextFieldRole) {
+    NSAccessibilityPostNotification(focus, NSAccessibilityValueChangedNotification);
+  }
+}
+
 // Input
 
 static uint32_t modifiers(NSEventModifierFlags flags) {
@@ -393,7 +791,7 @@ static uint32_t scroll_phase(NSEventPhase phase) {
   return SCROLL_PHASE_NONE;
 }
 
-@interface Metal_View : NSView
+@interface Metal_View : NSView <NSTextInputClient>
 @end
 
 @implementation Metal_View
@@ -505,9 +903,103 @@ static Event key_event(NSEvent *e, uint32_t kind) {
   };
 }
 
-// Not passed to super, so unhandled keys don't beep. Text input and IME come
-// with NSTextInputClient in a later phase.
-- (void)keyDown:(NSEvent *)e { push_event(key_event(e, EVENT_KEY_DOWN)); }
+// Not passed to super, so unhandled keys don't beep. While a text field has
+// the focus, keys go through the input context first. What it turns into
+// text or marked text reaches the app as text events only; keys it turns
+// into commands (arrows, Delete, Return, Escape) reach the app as key
+// events, and so do Command shortcuts. While there is marked text, every
+// key belongs to the input method.
+- (void)keyDown:(NSEvent *)e {
+  bool command = (e.modifierFlags & NSEventModifierFlagCommand) != 0;
+  if (g_ti.active && (!command || g_ti.marked_start >= 0)) {
+    bool had_marked = g_ti.marked_start >= 0;
+    g_ime_handled = false;
+    [self.inputContext handleEvent:e];
+    if (had_marked || g_ime_handled) return;
+  }
+  push_event(key_event(e, EVENT_KEY_DOWN));
+}
+
+// NSTextInputClient
+
+- (void)insertText:(id)string replacementRange:(NSRange)range { text_insert(string, range); }
+
+- (void)setMarkedText:(id)string selectedRange:(NSRange)selected replacementRange:(NSRange)range {
+  text_set_marked(string, selected, range);
+}
+
+- (void)unmarkText { text_unmark(); }
+
+// The key event that led here goes to the app as a key event.
+- (void)doCommandBySelector:(SEL)selector {}
+
+- (BOOL)hasMarkedText { return g_ti.active && g_ti.marked_start >= 0; }
+
+- (NSRange)markedRange {
+  if (!g_ti.active || g_ti.marked_start < 0) return NSMakeRange(NSNotFound, 0);
+  NSUInteger lo = utf16_of_byte(g_ti.bytes, g_ti.length, (uint32_t)g_ti.marked_start);
+  NSUInteger hi = utf16_of_byte(g_ti.bytes, g_ti.length, (uint32_t)g_ti.marked_end);
+  return NSMakeRange(lo, hi - lo);
+}
+
+- (NSRange)selectedRange {
+  if (!g_ti.active) return NSMakeRange(NSNotFound, 0);
+  NSUInteger lo = utf16_of_byte(g_ti.bytes, g_ti.length, g_ti.sel_start);
+  NSUInteger hi = utf16_of_byte(g_ti.bytes, g_ti.length, g_ti.sel_end);
+  return NSMakeRange(lo, hi - lo);
+}
+
+- (NSArray<NSAttributedStringKey> *)validAttributesForMarkedText { return @[]; }
+
+- (NSAttributedString *)attributedSubstringForProposedRange:(NSRange)range actualRange:(NSRangePointer)actual {
+  if (!g_ti.active) return nil;
+  NSString *all = [[NSString alloc] initWithBytes:g_ti.bytes length:g_ti.length encoding:NSUTF8StringEncoding];
+  NSRange r = NSIntersectionRange(range, NSMakeRange(0, all.length));
+  if (r.length == 0 && range.location > all.length) return nil;
+  r = [all rangeOfComposedCharacterSequencesForRange:r];
+  if (actual) *actual = r;
+  return [[NSAttributedString alloc] initWithString:[all substringWithRange:r]];
+}
+
+// The candidate window goes under the marked text, or the caret.
+- (NSRect)firstRectForCharacterRange:(NSRange)range actualRange:(NSRangePointer)actual {
+  if (actual) *actual = range;
+  NSRect r = g_ti.caret;
+  if (r.size.height <= 0) r.size.height = 16;
+  return [self.window convertRectToScreen:[self convertRect:r toView:nil]];
+}
+
+- (NSUInteger)characterIndexForPoint:(NSPoint)point { return NSNotFound; }
+
+// Accessibility: the view is a group whose children come from the app.
+
+- (BOOL)isAccessibilityElement { return YES; }
+- (NSAccessibilityRole)accessibilityRole { return NSAccessibilityGroupRole; }
+- (NSString *)accessibilityLabel { return @"TIDALfast"; }
+
+- (NSArray *)accessibilityChildren {
+  if (!g_access_seen) {
+    g_access_seen = true;
+    request_redraw();
+  }
+  access_materialize();
+  return g_access_top ?: @[];
+}
+
+- (id)accessibilityHitTest:(NSPoint)point {
+  g_access_seen = true;
+  access_materialize();
+  NSPoint p = [self convertPoint:[self.window convertPointFromScreen:point] fromView:nil];
+  for (Access_Element *el in g_access_all.reverseObjectEnumerator)
+    if (NSPointInRect(p, el.view_frame)) return el;
+  return self;
+}
+
+- (id)accessibilityFocusedUIElement {
+  g_access_seen = true;
+  access_materialize();
+  return access_focused() ?: self;
+}
 - (void)keyUp:(NSEvent *)e { push_event(key_event(e, EVENT_KEY_UP)); }
 - (void)flagsChanged:(NSEvent *)e { push_event(key_event(e, EVENT_MODIFIERS_CHANGED)); }
 
@@ -530,6 +1022,158 @@ static void update_display_link(void) {
   // away and fall back to drawing directly if its first tick never comes.
   if (g_display_link.paused && !paused) g_last_tick = CACurrentMediaTime();
   g_display_link.paused = paused;
+}
+
+// TIDALFAST_SHELL_TEST runs steps against the shell's own entry points,
+// for checking text input and accessibility without a person at the
+// keyboard: "2:key=cmd+f;3:mark=にほんご;4:commit=日本語;6:ax-dump;7:ax-press=Next".
+// Steps are seconds after launch and a command, separated by semicolons.
+//
+//   key=cmd+shift+z     a key down and up, as from the keyboard (letters, escape, return, tab, left...)
+//   mark=text           setMarkedText, with the caret at the end of text
+//   commit=text         insertText
+//   unmark              unmarkText
+//   ime                 print what NSTextInputClient answers
+//   ax-dump             print the window's accessibility tree, as an assistive app reads it
+//   ax-press=label      AXPress on the first element whose label or value starts with label
+//   capture=path        copy the last TIDALFAST_CAPTURE frame to path
+//   quit
+
+static uint32_t key_code_named(NSString *name) {
+  NSDictionary *named = @{
+    @"return" : @36, @"tab" : @48, @"space" : @49, @"backspace" : @51, @"escape" : @53, @"delete" : @117,
+    @"home" : @115, @"end" : @119, @"left" : @123, @"right" : @124, @"down" : @125, @"up" : @126,
+  };
+  if (named[name]) return [named[name] unsignedIntValue];
+  // kVK_ANSI_A and on, in the order of the US layout's key codes.
+  const char *letters = "asdfhgzxcv?bqweryt";
+  if (name.length == 1) {
+    const char *at = strchr(letters, [name characterAtIndex:0]);
+    if (at) return (uint32_t)(at - letters);
+    if ([name isEqualToString:@"o"]) return 31;
+    if ([name isEqualToString:@"u"]) return 32;
+    if ([name isEqualToString:@"i"]) return 34;
+    if ([name isEqualToString:@"p"]) return 35;
+    if ([name isEqualToString:@"l"]) return 37;
+    if ([name isEqualToString:@"j"]) return 38;
+    if ([name isEqualToString:@"k"]) return 40;
+    if ([name isEqualToString:@"n"]) return 45;
+    if ([name isEqualToString:@"m"]) return 46;
+  }
+  return UINT32_MAX;
+}
+
+static void test_key(NSString *spec) {
+  uint32_t mods = 0;
+  NSArray *parts = [spec componentsSeparatedByString:@"+"];
+  for (NSString *p in parts) {
+    if ([p isEqualToString:@"cmd"]) mods |= MODIFIER_COMMAND;
+    else if ([p isEqualToString:@"shift"]) mods |= MODIFIER_SHIFT;
+    else if ([p isEqualToString:@"opt"]) mods |= MODIFIER_OPTION;
+    else if ([p isEqualToString:@"ctrl"]) mods |= MODIFIER_CONTROL;
+  }
+  uint32_t code = key_code_named(parts.lastObject);
+  if (code == UINT32_MAX) {
+    fprintf(stderr, "shell: test: no key named %s\n", [parts.lastObject UTF8String]);
+    return;
+  }
+  double now = CACurrentMediaTime();
+  push_event((Event){.kind = EVENT_KEY_DOWN, .modifiers = mods, .key_code = code, .time = now});
+  push_event((Event){.kind = EVENT_KEY_UP, .modifiers = mods, .key_code = code, .time = now});
+  request_redraw();
+}
+
+static void test_ime_state(void) {
+  Metal_View *v = (Metal_View *)g_view;
+  NSRange marked = v.markedRange, sel = v.selectedRange;
+  NSAttributedString *all = [v attributedSubstringForProposedRange:NSMakeRange(0, 1 << 20) actualRange:NULL];
+  NSRect r = [v firstRectForCharacterRange:marked actualRange:NULL];
+  fprintf(stderr, "shell: ime: active %d, text \"%s\", marked %s, selected {%lu, %lu}, first rect {%.0f, %.0f, %.0f, %.0f}\n",
+          g_ti.active, all.string.UTF8String ?: "", v.hasMarkedText ? [NSString stringWithFormat:@"{%lu, %lu}", (unsigned long)marked.location, (unsigned long)marked.length].UTF8String : "none",
+          (unsigned long)sel.location, (unsigned long)sel.length, r.origin.x, r.origin.y, r.size.width, r.size.height);
+}
+
+static NSString *ax_string(id value) {
+  if (!value) return nil;
+  if ([value isKindOfClass:NSString.class]) return value;
+  if ([value isKindOfClass:NSAttributedString.class]) return [value string];
+  return [value description];
+}
+
+static bool ax_can_press(id el) {
+  return [el respondsToSelector:@selector(accessibilityPerformPress)] &&
+         (![el respondsToSelector:@selector(isAccessibilitySelectorAllowed:)] ||
+          [el isAccessibilitySelectorAllowed:@selector(accessibilityPerformPress)]);
+}
+
+// ax_walk reads the tree through the NSAccessibility protocol from the
+// window down, the way AppKit answers an assistive app.
+static void ax_walk(id el, int depth, NSString *press, bool *pressed) {
+  // AppKit puts private proxies among a window's children.
+  if (depth > 12 || ![el respondsToSelector:@selector(accessibilityRole)]) return;
+  NSString *role = [el accessibilityRole];
+  NSString *label = ax_string([el accessibilityLabel]) ?: ax_string([el accessibilityTitle]);
+  NSString *value = ax_string([el accessibilityValue]);
+  NSRect f = [el accessibilityFrame];
+  if (!press) {
+    fprintf(stderr, "shell: ax: %*s%s \"%s\"%s%s%s {%.0f, %.0f, %.0f, %.0f}%s%s\n", depth * 2, "", role.UTF8String ?: "?",
+            label.UTF8String ?: "", value ? " = \"" : "", value.UTF8String ?: "", value ? "\"" : "", f.origin.x, f.origin.y,
+            f.size.width, f.size.height, [el isAccessibilityFocused] ? " focused" : "",
+            ax_can_press(el) ? " press" : "");
+  } else if (!*pressed && ([label hasPrefix:press] || [value hasPrefix:press]) &&
+             ax_can_press(el)) {
+    fprintf(stderr, "shell: ax: pressing %s \"%s\"\n", role.UTF8String, label.UTF8String ?: value.UTF8String);
+    [el accessibilityPerformPress];
+    *pressed = true;
+    return;
+  }
+  for (id child in [el accessibilityChildren]) ax_walk(child, depth + 1, press, pressed);
+}
+
+static void test_step(NSString *command, NSString *arg) {
+  if ([command isEqualToString:@"key"]) {
+    test_key(arg);
+  } else if ([command isEqualToString:@"mark"]) {
+    [(Metal_View *)g_view setMarkedText:arg selectedRange:NSMakeRange(arg.length, 0) replacementRange:NSMakeRange(NSNotFound, 0)];
+  } else if ([command isEqualToString:@"commit"]) {
+    [(Metal_View *)g_view insertText:arg replacementRange:NSMakeRange(NSNotFound, 0)];
+  } else if ([command isEqualToString:@"unmark"]) {
+    [(Metal_View *)g_view unmarkText];
+  } else if ([command isEqualToString:@"ime"]) {
+    test_ime_state();
+  } else if ([command isEqualToString:@"ax-dump"] || [command isEqualToString:@"ax-press"]) {
+    bool pressed = false;
+    ax_walk(g_window, 0, [command isEqualToString:@"ax-press"] ? arg : nil, &pressed);
+    if ([command isEqualToString:@"ax-press"] && !pressed) fprintf(stderr, "shell: ax: nothing to press called %s\n", arg.UTF8String);
+  } else if ([command isEqualToString:@"capture"]) {
+    const char *from = getenv("TIDALFAST_CAPTURE");
+    if (!from || copyfile(from, arg.fileSystemRepresentation, NULL, COPYFILE_DATA) != 0)
+      fprintf(stderr, "shell: test: couldn't copy the capture to %s\n", arg.UTF8String);
+    else
+      fprintf(stderr, "shell: test: captured %s\n", arg.UTF8String);
+  } else if ([command isEqualToString:@"quit"]) {
+    [NSApp terminate:nil];
+  } else {
+    fprintf(stderr, "shell: test: unknown step %s\n", command.UTF8String);
+  }
+}
+
+static void setup_shell_test(void) {
+  const char *script = getenv("TIDALFAST_SHELL_TEST");
+  if (!script) return;
+  for (NSString *step in [@(script) componentsSeparatedByString:@";"]) {
+    NSRange colon = [step rangeOfString:@":"];
+    if (colon.location == NSNotFound) continue;
+    double at = [[step substringToIndex:colon.location] doubleValue];
+    NSString *rest = [step substringFromIndex:colon.location + 1];
+    NSRange eq = [rest rangeOfString:@"="];
+    NSString *command = eq.location == NSNotFound ? rest : [rest substringToIndex:eq.location];
+    NSString *arg = eq.location == NSNotFound ? @"" : [rest substringFromIndex:eq.location + 1];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(at * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+      fprintf(stderr, "shell: test step %s\n", step.UTF8String);
+      test_step(command, arg);
+    });
+  }
 }
 
 // App
@@ -564,12 +1208,25 @@ static void update_display_link(void) {
                                               usingBlock:^(NSNotification *n) {
                                                 update_display_link();
                                               }];
+  // The app stops the caret blinking without the keyboard.
+  for (NSNotificationName name in @[ NSWindowDidBecomeKeyNotification, NSWindowDidResignKeyNotification ]) {
+    [NSNotificationCenter.defaultCenter addObserverForName:name
+                                                    object:g_window
+                                                     queue:nil
+                                                usingBlock:^(NSNotification *n) {
+                                                  request_redraw();
+                                                }];
+  }
 
   g_shell = (Shell){
       .metal_device = (__bridge void *)g_layer.device,
       .metal_layer = (__bridge void *)g_layer,
       .request_redraw = request_redraw,
       .set_now_playing = set_now_playing,
+      .set_text_input = set_text_input,
+      .set_clipboard = set_clipboard,
+      .get_clipboard = get_clipboard,
+      .set_accessibility = set_accessibility,
   };
   setup_remote_commands();
 
@@ -577,6 +1234,8 @@ static void update_display_link(void) {
     [NSApp terminate:nil];
     return;
   }
+  g_wake_timer = CFRunLoopTimerCreate(NULL, CFAbsoluteTimeGetCurrent() + 1e9, 1e9, 0, 0, wake_timer_fired, NULL);
+  CFRunLoopAddTimer(g_main_run_loop, g_wake_timer, kCFRunLoopCommonModes);
   [(Metal_View *)g_view update_drawable_size];
   @autoreleasepool {
     g_app.api.init(&g_memory, &g_shell);
@@ -597,6 +1256,7 @@ static void update_display_link(void) {
   [g_window makeKeyAndOrderFront:nil];
   [g_window makeFirstResponder:g_view];
   [NSApp activateIgnoringOtherApps:YES];
+  setup_shell_test();
   request_redraw();
 }
 

@@ -105,6 +105,7 @@ pill_button :: proc(id, label: string, width: f32, background, color: render.Col
 	b.hover_color = {1, 1, 1, 0.2}
 	b.active_color = {0, 0, 0, 0.15}
 	b.radius = 20
+	ui.accessible(b, .Button, label)
 	ui.text_style(.Semibold, 14, color)
 	caption := ui.label(label, ui.fill(), ui.fill())
 	caption.text_align = .Center

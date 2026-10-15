@@ -49,10 +49,7 @@ Library :: struct {
 Status :: enum u8 {
 	None,
 	Playing,
-	Queued,
 	Added,
-	Album,
-	Artist,
 	Copied,
 }
 
@@ -152,19 +149,24 @@ draw_sidebar :: proc(s: ^State) {
 	side := ui.column("sidebar", {.Draw_Background, .Clip}, ui.px(lib.sidebar_w), ui.fill())
 	side.background = PANEL
 	{
-		ui.row("", {}, ui.fill(), ui.px(52))
+		ui.row("", {}, ui.fill(), ui.px(48))
 		ui.spacer(ui.px(16))
 		ui.text_style(.Semibold, 15, TEXT)
-		ui.label("Your Library", ui.fill(), ui.fill())
+		heading := ui.label("Your Library", ui.fill(), ui.fill())
+		ui.accessible(heading, .Static_Text, heading.label)
 	}
-	ui.scroll_view("playlists", ui.fill(), ui.fill())
+	draw_search_field(s)
+	list := ui.scroll_view("playlists", ui.fill(), ui.fill())
+	ui.accessible(list, .List, "Playlists")
 	for i in 0 ..< sidebar_count(s) {
 		entry := sidebar_entry(s, i)
 		item := ui.row(fmt.tprintf("##playlist%d", i), {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects, .Draw_Border}, ui.fill(), ui.px(PLAYLIST_ROW_H))
 		item.radius = 6
-		if lib.playlist == i {
+		current := lib.playlist == i && !s.search.browsing
+		if current {
 			item.background = SURFACE_ACTIVE
 		}
+		ui.accessible(item, .Row, fmt.tprintf("%s, %s", entry.name, entry.subtitle), selected = current)
 		if ui.drop_hover(item) {
 			lib.drop_target = i
 			item.border_color = ACCENT
@@ -212,18 +214,25 @@ draw_main_view :: proc(s: ^State, main_w: f32) {
 	{
 		ui.row("", {}, ui.fill(), ui.px(124))
 		ui.spacer(ui.px(24))
-		if !s.data.fake && s.data.view.source != .None {
-			cover_art(s, .Playlist, small_str(&s.data.view.image), u32(lib.playlist) * 7919 + 13, 92, ui.px(92))
+		if kind, image, show := view_cover(s); show {
+			cover_art(s, kind, image, u32(lib.playlist) * 7919 + 13, 92, ui.px(92))
 			ui.spacer(ui.px(18))
 		}
 		ui.column("", {}, ui.fill(), ui.fill())
 		ui.spacer(ui.px(26))
 		ui.text_style(.Bold, 28, TEXT)
-		ui.label(view_title(s), ui.fill(), ui.px(38))
+		title := ui.label(view_title(s), ui.fill(), ui.px(38))
+		ui.accessible(title, .Static_Text, title.label)
 		ui.text_style(.Regular, 13, SECONDARY)
-		ui.label(view_subtitle(s, main_w), ui.fill(), ui.px(20))
+		subtitle := ui.label(view_subtitle(s, main_w), ui.fill(), ui.px(20))
+		ui.accessible(subtitle, .Static_Text, subtitle.label)
 		ui.text_style(.Regular, 12, DIM)
-		ui.label(status_text(s), ui.fill(), ui.px(18))
+		status := ui.label(status_text(s), ui.fill(), ui.px(18))
+		ui.accessible(status, .Static_Text, status.label)
+	}
+	if search_showing(s) && !draw_search_tabs(s) {
+		draw_found_list(s)
+		return
 	}
 
 	{
@@ -249,6 +258,7 @@ draw_main_view :: proc(s: ^State, main_w: f32) {
 	}
 
 	list := ui.scroll_view("tracks", ui.fill(), ui.fill(), {.Focusable})
+	ui.accessible(list, .Table, view_title(s))
 	if s.bench.running && s.bench.ui {
 		list.view_off.y = bench_offset(s, list.rect.h)
 		list.view_off_target.y = list.view_off.y
@@ -325,11 +335,14 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 	if selected {
 		row.background = {SECONDARY.r, SECONDARY.g, SECONDARY.b, 0.2}
 	}
+	ui.accessible(row, .Row, fmt.tprintf("%s, %s, %s", track.title, track.artist, track.album), selected = selected)
 	sig := ui.signal(row)
 	if sig.pressed || sig.right_clicked {
 		lib.selected = i
 	}
-	if sig.double_clicked {
+	// A press from an assistive app comes as a keyboard click.
+	if sig.double_clicked || (sig.clicked && sig.keyboard) {
+		lib.selected = i
 		play(s, i)
 	}
 	if sig.right_clicked {
@@ -356,12 +369,16 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 		title.font = .Medium
 		title.font_size = 14
 		title.text_color = ACCENT if current else TEXT
+		ui.accessible(title, .Static_Text, track.title)
 		artist := ui.label(track.artist, ui.fill(), ui.px(18))
 		artist.text_pad = 4
 		artist.text_color = SECONDARY
+		ui.accessible(artist, .Static_Text, track.artist)
 	}
 	ui.text_style(.Regular, 13, SECONDARY)
-	cell(track.album, cols.album, .Left)
+	if album := cell(track.album, cols.album, .Left); album != nil {
+		ui.accessible(album, .Static_Text, track.album)
+	}
 	cell(track.added_by, cols.added_by, .Left)
 	cell(track.added, cols.added, .Left)
 	cell(track.duration, cols.duration, .Right)
@@ -403,35 +420,42 @@ loading_row :: proc(i: int, cols: Track_Columns) {
 	bar(180, 12, ui.fill(), SURFACE)
 }
 
-cell :: proc(s: string, width: f32, align: ui.Align) {
+cell :: proc(s: string, width: f32, align: ui.Align) -> ^ui.Box {
 	if width <= 0 {
-		return
+		return nil
 	}
 	b := ui.label(s, ui.px(width), ui.fill())
 	b.text_pad = 12
 	b.text_align = align
+	return b
 }
 
+// draw_track_menu offers what the row's data allows: the album and artist
+// need their ids (the fake data goes by name), the link a TIDAL track id.
 draw_track_menu :: proc(s: ^State) {
 	i := s.library.menu_row
+	row := view_row(s, i)
 	if ui.menu("track_menu") {
 		ui.text_style(.Regular, 13, TEXT)
 		if ui.menu_item("Play").clicked {
 			play(s, i)
 		}
-		if ui.menu_item("Add to queue").clicked {
-			set_status(s, .Queued, i)
+		fake := s.data.fake
+		if row != nil && (fake || row.album_id != 0 || row.artist_id != 0) {
+			ui.menu_separator()
 		}
-		ui.menu_separator()
-		if ui.menu_item("Go to album").clicked {
-			set_status(s, .Album, i)
+		if row != nil && (fake || row.album_id != 0) && ui.menu_item("Go to album").clicked {
+			go_to_album(s, row)
 		}
-		if ui.menu_item("Go to artist").clicked {
-			set_status(s, .Artist, i)
+		if row != nil && (fake || row.artist_id != 0) && ui.menu_item("Go to artist").clicked {
+			go_to_artist(s, row)
 		}
-		ui.menu_separator()
-		if ui.menu_item("Copy song link").clicked {
-			set_status(s, .Copied, i)
+		if row != nil && row.id > 0 {
+			ui.menu_separator()
+			if ui.menu_item("Copy song link").clicked {
+				ui.copy_to_clipboard(track_link(row.id))
+				set_status(s, .Copied, i)
+			}
 		}
 	}
 }
@@ -478,14 +502,14 @@ draw_player_bar :: proc(s: ^State, w: f32) {
 		ui.column("", {}, ui.fill(), ui.fill())
 		ui.spacer(ui.fill())
 		ui.text_style(.Medium, 14, TEXT)
-		ui.label(title, ui.fill(), ui.px(20))
+		ui.accessible(ui.label(title, ui.fill(), ui.px(20)), .Static_Text, title)
 		// A track that couldn't play says why in place of the artist.
 		color := SECONDARY
 		if msg := small_str(&s.playback.message); msg != "" {
 			artist, color = msg, PLAYBACK_ERROR
 		}
 		ui.text_style(.Regular, 12, color)
-		ui.label(artist, ui.fill(), ui.px(18))
+		ui.accessible(ui.label(artist, ui.fill(), ui.px(18)), .Static_Text, artist)
 		ui.spacer(ui.fill())
 	}
 
@@ -557,6 +581,7 @@ clock :: proc(seconds: f64) -> string {
 draw_progress :: proc(s: ^State, duration: f64, active: bool) {
 	pb := &s.playback
 	slider := ui.column("progress", {.Clickable} if active else {}, ui.fill(), ui.fill())
+	ui.accessible(slider, .Slider, "Position", fmt.tprintf("%s of %s", clock(playback_position(s)), clock(duration)))
 	sig := ui.signal(slider)
 	if active && duration > 0 && slider.rect.w > 0 && (sig.held || sig.released) {
 		frac := clamp((sig.mouse.x - slider.rect.x) / slider.rect.w, 0, 1)
@@ -590,6 +615,7 @@ play_button :: proc(playing: bool) -> ui.Signal {
 	b.radius = 18
 	b.hover_color = {1, 1, 1, 0.5}
 	b.active_color = {0, 0, 0, 0.15}
+	ui.accessible(b, .Button, "Pause" if playing else "Play")
 	if playing {
 		ui.spacer(ui.fill())
 		pause_bar()
@@ -617,6 +643,7 @@ pause_bar :: proc() {
 skip_button :: proc(id: string, forward: bool) -> ui.Signal {
 	b := ui.row(id, {.Clickable, .Focusable, .Draw_Hot_Effects, .Draw_Active_Effects}, ui.px(36), ui.px(36))
 	b.radius = 18
+	ui.accessible(b, .Button, "Next" if forward else "Previous")
 	ui.spacer(ui.fill())
 	if forward {
 		skip_glyph("▶")
@@ -647,6 +674,7 @@ skip_stop :: proc() {
 draw_volume :: proc(s: ^State) {
 	lib := &s.library
 	slider := ui.column("volume", {.Clickable}, ui.px(110), ui.fill())
+	ui.accessible(slider, .Slider, "Volume", fmt.tprintf("%d%%", int(math.round(lib.volume * 100))))
 	sig := ui.signal(slider)
 	if (sig.held || sig.released) && slider.rect.w > 0 {
 		lib.volume = clamp((sig.mouse.x - slider.rect.x) / slider.rect.w, 0, 1)
@@ -691,14 +719,8 @@ status_text :: proc(s: ^State) -> string {
 	case .None:
 	case .Playing:
 		return fmt.tprintf("Playing %s by %s", t.title, t.artist)
-	case .Queued:
-		return fmt.tprintf("Added %s to the queue", t.title)
 	case .Added:
 		return fmt.tprintf("Added %s to %s", t.title, sidebar_entry(s, lib.status_list).name)
-	case .Album:
-		return fmt.tprintf("Would open %s", t.album)
-	case .Artist:
-		return fmt.tprintf("Would open %s", t.artist)
 	case .Copied:
 		return fmt.tprintf("Copied the link to %s", t.title)
 	}
