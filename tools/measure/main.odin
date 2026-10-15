@@ -208,7 +208,7 @@ run_scenario :: proc(cfg: ^Config, setup, scenario: string, runs: int, timeout: 
 // app_env is this process's environment without TIDALFAST_ and Metal
 // variables someone left set, plus what the setup needs. Settings go to a
 // file of their own that doesn't exist, so bit-perfect output is off and
-// your settings stay as they are.
+// your settings stay as they are, and the list cache to a folder of its own.
 app_env :: proc(cfg: ^Config, setup, scenario: string) -> []string {
 	env := make([dynamic]string)
 	base, _ := os.environ(context.allocator)
@@ -221,6 +221,8 @@ app_env :: proc(cfg: ^Config, setup, scenario: string) -> []string {
 	append(&env, "TIDALFAST_AUDIO_NULL=1")
 	if setup != "real" {
 		append(&env, fmt.tprintf("TIDALFAST_SETTINGS=%s", join(cfg.log_dir, "settings.json")))
+		// The list cache too, shared by the runs: the first starts with none.
+		append(&env, fmt.tprintf("TIDALFAST_CACHE=%s", join(cfg.log_dir, "cache")))
 	}
 	switch setup {
 	case "fake":
