@@ -1,6 +1,7 @@
 package tidal
 
 import "core:fmt"
+import "core:strings"
 
 // Error_Kind says what went wrong: TIDAL's error responses, transport
 // failures, and responses that could not be parsed.
@@ -39,12 +40,16 @@ Api_Error :: struct {
 	message:           string, // static text
 	// HTTP status code, 0 when no response was received.
 	status:            int,
+	// TIDAL's subStatus from the error body, 0 when there was none.
+	sub_status:        int,
 	// Retry-After in seconds for Too_Many_Requests and Abuse_Detected, -1 if absent.
 	retry_after:       int,
 	// Seconds left before requests are sent again, for Backing_Off.
 	seconds_remaining: f64,
 	// Text from the server (error detail, userMessage or the start of the
 	// body), stored inline so errors own no memory. Read it with error_detail.
+	// It may hold anything the server sent, signed URLs included, so it is
+	// for the screen and never for a log; see error_summary.
 	detail_len:        int,
 	detail_buf:        [ERROR_DETAIL_MAX]u8,
 }
@@ -103,6 +108,56 @@ error_string :: proc(err: Error, allocator := context.allocator) -> string {
 		return fmt.aprintf("%v: %s (%s)", e.kind, e.message, detail, allocator = allocator)
 	}
 	return fmt.aprintf("%v: %s", e.kind, e.message, allocator = allocator)
+}
+
+// error_summary formats err for a log line from fields that can't carry
+// server text: the kind, the HTTP status, the subStatus, and for
+// Lossy_Stream the codec if it's one codec_name knows. Returns "" for nil.
+error_summary :: proc(err: Error, allocator := context.allocator) -> string {
+	e, ok := err.?
+	if !ok {
+		return ""
+	}
+	switch {
+	case e.kind == .Lossy_Stream:
+		return fmt.aprintf("%v, codec %s", e.kind, codec_name(error_detail(&e)), allocator = allocator)
+	case e.status == 0:
+		return fmt.aprintf("%v, no HTTP response", e.kind, allocator = allocator)
+	case e.sub_status != 0:
+		return fmt.aprintf("%v, HTTP %d, subStatus %d", e.kind, e.status, e.sub_status, allocator = allocator)
+	}
+	return fmt.aprintf("%v, HTTP %d", e.kind, e.status, allocator = allocator)
+}
+
+// codec_name is codec if it's a codec TIDAL is known to send, by its
+// name before the first dot, and "unknown" otherwise. Manifests are server
+// text, so this is how a codec gets into a log.
+codec_name :: proc(codec: string) -> string {
+	KNOWN :: [?]string{"FLAC", "ALAC", "MP4A", "AAC", "AC3", "EAC3", "AC4", "MHA1", "MHM1", "OPUS", "MP3"}
+	name := codec
+	for c, i in codec {
+		if c == '.' {
+			name = codec[:i]
+			break
+		}
+	}
+	for k in KNOWN {
+		if strings.equal_fold(name, k) {
+			return k
+		}
+	}
+	return "unknown"
+}
+
+// quality_name is quality if it's one of TIDAL's audio quality names, and
+// "unknown" otherwise.
+quality_name :: proc(quality: string) -> string {
+	for q in QUALITY_NAMES {
+		if quality == q {
+			return q
+		}
+	}
+	return "HI_RES" if quality == "HI_RES" else "unknown"
 }
 
 // Turns Object_Not_Found into a more specific kind and rewrites the

@@ -6,6 +6,7 @@ import "core:fmt"
 import "core:math"
 import "core:sync"
 import "core:testing"
+import "core:thread"
 import "core:time"
 
 import "../src/audio"
@@ -31,7 +32,7 @@ crc16 :: proc(b: []u8) -> u16 {
 
 // test_flac encodes frames*TEST_BLOCK samples of a counter signal. Seek
 // points go every seek_every frames (0 for no SEEKTABLE).
-@(private = "file")
+@(private)
 test_flac :: proc(frames: int, seek_every: int) -> (file: []u8, audio_start: int) {
 	out := make([dynamic]u8, context.temp_allocator)
 	append(&out, 'f', 'L', 'a', 'C')
@@ -456,11 +457,42 @@ callback_never_wakes_the_decoder :: proc(t: ^testing.T) {
 	sync.lock(&p.cmd_mutex)
 	sync.atomic_store(&p.cmd_pending, true)
 	time.sleep(300 * time.Millisecond) // the decode thread is waiting for the lock
-	before := sync.atomic_load(&p.sema.count)
+	before := sync.atomic_load(&p.watch.sema.count)
 	time.sleep(time.Duration(audio.RING_FRAMES / 2 * i64(time.Second) / 44100)) // half the ring
-	after := sync.atomic_load(&p.sema.count)
+	after := sync.atomic_load(&p.watch.sema.count)
 	sync.unlock(&p.cmd_mutex)
 	testing.expect_value(t, after, before)
 	testing.expect(t, wait_audible(p, 1))
 	testing.expect_value(t, audio.status(p).underruns, underruns)
+}
+
+// A CoreAudio listener may still be running after it was removed, and so
+// after the player is gone. One that runs on through the player's teardown
+// must touch nothing the player owned.
+@(test)
+listener_outlives_the_player :: proc(t: ^testing.T) {
+	Listener :: struct {
+		watch: rawptr,
+		stop:  bool,
+		runs:  int,
+	}
+	l: Listener
+	p := audio.create(no_wake, 0, null_output = true)
+	l.watch = audio.listener_watch(p)
+	th := thread.create_and_start_with_poly_data(&l, proc(l: ^Listener) {
+		for !sync.atomic_load(&l.stop) {
+			audio.run_listener(l.watch)
+			sync.atomic_add(&l.runs, 1)
+		}
+	})
+	for sync.atomic_load(&l.runs) == 0 {
+		time.sleep(time.Millisecond)
+	}
+	audio.destroy(p)
+	after := sync.atomic_load(&l.runs)
+	time.sleep(20 * time.Millisecond)
+	testing.expect(t, sync.atomic_load(&l.runs) > after, "the listener ran on after the teardown")
+	sync.atomic_store(&l.stop, true)
+	thread.join(th)
+	thread.destroy(th)
 }

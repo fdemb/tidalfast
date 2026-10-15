@@ -242,7 +242,7 @@ login_device_start :: proc(s: ^Session, allocator := context.allocator) -> (link
 	resp, obj := post_form(s, s.config.api_device_auth, form, session_epoch(s), context.temp_allocator) or_return
 	if !http_ok(resp) {
 		if !is_rate_limit(resp) {
-			log.errorf("Login failed: %s", body_prefix(resp, 500))
+			log.errorf("Login failed: HTTP %d", resp.status)
 		}
 		return {}, http_error(resp)
 	}
@@ -384,7 +384,7 @@ login_pkce_complete :: proc(s: ^Session, url_redirect: string, attempt: Maybe(u6
 	resp, obj := post_form(s, s.config.api_oauth2_token, form, epoch, context.temp_allocator) or_return
 	if !http_ok(resp) {
 		if !is_rate_limit(resp) {
-			log.errorf("Login failed: %s", body_prefix(resp, 500))
+			log.errorf("Login failed: HTTP %d", resp.status)
 		}
 		if resp.status == 400 || resp.status == 401 {
 			// invalid_grant: a code used twice, too old, or for another verifier.

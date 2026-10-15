@@ -150,11 +150,15 @@ device_reason :: proc(d: ^Device_Info) -> string {
 }
 
 // Device_Watch is where the CoreAudio listeners leave their news for the
-// decode thread. A listener may still be running while it's removed, so
-// the watch is never freed, and player goes to nil before removal.
+// decode thread, and the semaphore the decode thread sleeps on. A listener
+// may still be running after it's removed, so it touches nothing but the
+// watch, and the watch is never freed. Clearing a pointer to the Player
+// before removal wouldn't do: a listener that loaded it just before could
+// still post to the freed Player. Once the player is destroyed nobody
+// waits on the semaphore, and a late post to it does nothing.
 @(private)
 Device_Watch :: struct {
-	player:          ^Player, // atomic
+	sema:            sync.Atomic_Sema, // the decode thread's wake-up: commands, fetch threads, listeners
 	device_changed:  bool, // the HAL device's alive state changed (atomic)
 	default_changed: bool, // the system's default output changed (atomic)
 	lost_for_test:   bool, // simulate_device_loss (atomic)
@@ -228,7 +232,6 @@ Commands :: struct {
 
 Player :: struct {
 	wake_ui:         proc "c" (),
-	sema:            sync.Atomic_Sema,
 	thread:          posix.pthread_t,
 	cmd_mutex:       sync.Mutex,
 	cmd:             Commands,
@@ -319,7 +322,6 @@ create :: proc(wake_ui: proc "c" (), volume: f32, capture_path := "", window := 
 	p.hal_scratch = make([]f32, HAL_MAX_FRAMES * 8, heap)
 	p.device = new(ma.device, heap)
 	p.watch = new(Device_Watch, heap)
-	p.watch.player = p
 	if !null_output {
 		listen(SYSTEM_OBJECT, PROP_DEFAULT_OUTPUT, device_listener, p.watch)
 	}
@@ -336,7 +338,7 @@ create :: proc(wake_ui: proc "c" (), volume: f32, capture_path := "", window := 
 		sl.dash.starts = make([dynamic]i64, heap)
 		sl.dash.samples = make([dynamic]Mp4_Sample, heap)
 		sl.dash.box = make([dynamic]u8, heap)
-		stream_init(&sl.stream, &p.sema, max(window, 64 << 10))
+		stream_init(&sl.stream, &p.watch.sema, max(window, 64 << 10))
 	}
 	posix.pthread_create(&p.thread, nil, decode_main, p)
 	return p
@@ -352,9 +354,8 @@ destroy :: proc(p: ^Player) {
 	p.cmd.quit = true
 	sync.unlock(&p.cmd_mutex)
 	sync.atomic_store(&p.cmd_pending, true)
-	sync.atomic_sema_post(&p.sema)
+	sync.atomic_sema_post(&p.watch.sema)
 	posix.pthread_join(p.thread)
-	sync.atomic_store(&p.watch.player, nil)
 	if !p.null_output {
 		unlisten(SYSTEM_OBJECT, PROP_DEFAULT_OUTPUT, device_listener, p.watch)
 	}
@@ -445,7 +446,19 @@ when ODIN_TEST {
 	// device had gone away, as the alive listener would.
 	simulate_device_loss :: proc(p: ^Player) {
 		sync.atomic_store(&p.watch.lost_for_test, true)
-		sync.atomic_sema_post(&p.sema)
+		sync.atomic_sema_post(&p.watch.sema)
+	}
+
+	// listener_watch is what CoreAudio hands p's listeners, kept after p
+	// is destroyed.
+	listener_watch :: proc(p: ^Player) -> rawptr {
+		return p.watch
+	}
+
+	// run_listener runs the default output listener as CoreAudio would.
+	run_listener :: proc "c" (watch: rawptr) {
+		address := Property_Address{selector = PROP_DEFAULT_OUTPUT}
+		device_listener(SYSTEM_OBJECT, 1, &address, watch)
 	}
 }
 
@@ -517,7 +530,7 @@ seek_latency :: proc(p: ^Player) -> (id: u32, d: time.Duration, ok: bool) {
 @(private = "file")
 post :: proc(p: ^Player) {
 	sync.atomic_store(&p.cmd_pending, true)
-	sync.atomic_sema_post(&p.sema)
+	sync.atomic_sema_post(&p.watch.sema)
 }
 
 // source_clone copies s with its URL and segments on the heap.
@@ -589,9 +602,9 @@ decode_main :: proc "c" (arg: rawptr) -> rawptr {
 				left := f64(ring_buffered(&p.pcm)) / f64(p.device_rate)
 				wait = min(wait, time.Duration(left * f64(time.Second)) + time.Millisecond)
 			}
-			sync.atomic_sema_wait_with_timeout(&p.sema, wait)
+			sync.atomic_sema_wait_with_timeout(&p.watch.sema, wait)
 		} else {
-			sync.atomic_sema_wait(&p.sema)
+			sync.atomic_sema_wait(&p.watch.sema)
 		}
 	}
 	device_close(p, restore = true)
@@ -788,9 +801,7 @@ device_listener :: proc "c" (id: Audio_Object_ID, count: u32, addresses: [^]Prop
 			sync.atomic_store(&w.device_changed, true)
 		}
 	}
-	if pl := sync.atomic_load(&w.player); pl != nil {
-		sync.atomic_sema_post(&pl.sema)
-	}
+	sync.atomic_sema_post(&w.sema)
 	return 0
 }
 

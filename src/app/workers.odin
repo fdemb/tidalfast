@@ -82,7 +82,7 @@ Job :: struct {
 	source:     Source,
 	once:       bool, // Login_Wait: poll once, to see if TIDAL answers again
 	auth:       u32, // the auth generation it was queued in, see sign_out
-	view:       u32, // Tracks: the view generation it's for; Stream: the track's serial; Search: the query's generation; Login_Wait, Login_Pkce: the login attempt
+	view:       u32, // Tracks: the view generation it's for; Stream: the track's serial; Search: the query's generation; Login_Start, Login_Wait, Login_Pkce: the login attempt
 	offset:     i32,
 	limit:      i32,
 	key:        u64, // Cover: the cache key; Stream: the track id; Artwork: the track's serial
@@ -261,23 +261,22 @@ fail :: proc(res: ^Result, err: tidal.Error) {
 	res.message = small(tidal.error_string(err, context.temp_allocator))
 }
 
-// log_stream_error prints why a stream didn't resolve: the error kind, the
-// HTTP status and what the server said, or the manifest's codec. Never a
-// token or a URL.
-@(private = "file")
-log_stream_error :: proc(track_id: u64, what: string, err: tidal.Error) {
+// stream_error_line is the log line for a stream that didn't resolve, or
+// "" when there's nothing to log. It holds only fields that can't carry
+// server text (see tidal.error_summary): what the server said may hold a
+// signed URL.
+stream_error_line :: proc(track_id: u64, what: string, err: tidal.Error, allocator := context.allocator) -> string {
 	e, _ := err.?
 	if e.kind == .Cancelled || e.kind == .Backing_Off {
-		return // the job goes back in the queue
+		return "" // the job goes back in the queue
 	}
-	detail := tidal.error_detail(&e)
-	switch {
-	case e.kind == .Lossy_Stream:
-		fmt.eprintfln("app: stream for track %d %s: %v, HTTP 200, manifest codec %s", track_id, what, e.kind, detail)
-	case e.status == 0:
-		fmt.eprintfln("app: stream for track %d %s: %v, no HTTP response, %s", track_id, what, e.kind, detail if detail != "" else e.message)
-	case:
-		fmt.eprintfln("app: stream for track %d %s: %v, HTTP %d, %s", track_id, what, e.kind, e.status, detail if detail != "" else e.message)
+	return fmt.aprintf("app: stream for track %d %s: %s", track_id, what, tidal.error_summary(err, context.temp_allocator), allocator = allocator)
+}
+
+@(private = "file")
+log_stream_error :: proc(track_id: u64, what: string, err: tidal.Error) {
+	if line := stream_error_line(track_id, what, err, context.temp_allocator); line != "" {
+		fmt.eprintln(line)
 	}
 }
 

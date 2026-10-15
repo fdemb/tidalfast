@@ -32,6 +32,7 @@ import "core:strings"
 import "../audio"
 import "../cover"
 import "../platform"
+import "../tidal"
 
 ARTWORK_SIZE :: 640
 FAKE_TONE_SECONDS :: 30
@@ -88,6 +89,10 @@ Playback :: struct {
 	serial:          u64, // the last one given out
 	cur:             Track_Source,
 	next:            Track_Source,
+	// The next track whose stream failed to resolve, by queue, item and
+	// track id. It isn't asked for again until it's current or the queue
+	// changes; serial is 0 for none.
+	next_failed:     Track_Source,
 	paused:          bool,
 	status:          audio.Status,
 	resume_sample:   i64, // position kept across a reload
@@ -334,6 +339,9 @@ start_item :: proc(s: ^State, i: int, at: i64 = 0) {
 	pb.paused = false
 	pb.seek_id = 0
 	pb.message = {}
+	if next_failed(pb, i) {
+		pb.next_failed = {}
+	}
 	// The preloaded next track: the player keeps its bytes.
 	if pb.next.serial != 0 && pb.next.queue == pb.queue_gen && pb.next.item == i && pb.next.track == pb.entries[i].id {
 		source_clear(&pb.cur)
@@ -425,7 +433,9 @@ playback_result :: proc(s: ^State, res: ^Result) {
 	if _, failed := res.err.?; failed {
 		title := pb.items[t.item].title
 		if t == &pb.next {
-			// Try it again when it's current, and say so then.
+			// Try it again when it's current, and say so then. Until then
+			// the player's want_next stays up, and it isn't asked for again.
+			pb.next_failed = {serial = pb.next.serial, queue = pb.next.queue, item = pb.next.item, track = pb.next.track}
 			source_clear(&pb.next)
 			return
 		}
@@ -459,7 +469,7 @@ playback_result :: proc(s: ^State, res: ^Result) {
 	t.gain = audio.replay_gain_linear(rg, mode)
 	t.rate = info.sample_rate
 	t.resolved = true
-	fmt.eprintfln("app: track %d resolved: %s %s%s, %d-bit %d Hz, %s gain %.2f dB -> x%.3f", info.track_id, info.quality, info.codec, fmt.tprintf(" in DASH, %d segments", len(info.segments)) if info.dash else "", info.bit_depth, info.sample_rate, mode, 20 * math.log10(f64(t.gain)), t.gain)
+	fmt.eprintfln("app: track %d resolved: %s %s%s, %d-bit %d Hz, %s gain %.2f dB -> x%.3f", info.track_id, tidal.quality_name(info.quality), tidal.codec_name(info.codec), fmt.tprintf(" in DASH, %d segments", len(info.segments)) if info.dash else "", info.bit_depth, info.sample_rate, mode, 20 * math.log10(f64(t.gain)), t.gain)
 	if t == &pb.cur {
 		audio.play(pb.player, source_of(pb, t), t.at, pb.paused)
 	} else {
@@ -675,7 +685,7 @@ playback_update :: proc(s: ^State, events: []platform.Event) {
 	}
 	// It wants the track after the current one.
 	if st.want_next && pb.next.serial == 0 && st.serial == pb.cur.serial {
-		if n := audio.queue_next(pb.entries, pb.index); n >= 0 {
+		if n := audio.queue_next(pb.entries, pb.index); n >= 0 && !next_failed(pb, n) {
 			pb.serial += 1
 			pb.next = {serial = pb.serial, queue = pb.queue_gen, item = n, track = pb.entries[n].id}
 			resolve(s, &pb.next)
@@ -715,9 +725,20 @@ playback_update :: proc(s: ^State, events: []platform.Event) {
 		if pb.next.serial != 0 {
 			pb.next.item = queue_find(pb, pb.next.track, pb.next.item)
 		}
+		if pb.next_failed.serial != 0 {
+			pb.next_failed.item = queue_find(pb, pb.next_failed.track, pb.next_failed.item)
+		}
 	}
 	s.library.playing = playing_row(s)
 	update_now_playing(s)
+}
+
+// next_failed says whether queue item i is the next track that failed to
+// resolve in this queue.
+@(private = "file")
+next_failed :: proc(pb: ^Playback, i: int) -> bool {
+	f := &pb.next_failed
+	return f.serial != 0 && f.queue == pb.queue_gen && f.item == i && i < len(pb.entries) && f.track == pb.entries[i].id
 }
 
 // queue_find is the queue entry holding track: at, if it does, or else the

@@ -4,11 +4,13 @@ package tidal_tests
 // the device-code login's AAC notice and player bar message, and the
 // stream quality fallback.
 
+import "base:runtime"
 import "core:crypto"
 import "core:encoding/base64"
 import "core:fmt"
 import "core:strings"
 import "core:testing"
+import "core:time"
 
 import app "../src/app"
 import "../src/audio"
@@ -381,4 +383,228 @@ stream_quality_fallback :: proc(t: ^testing.T) {
 		tidal.session_destroy(s)
 		mock_stop(&m)
 	}
+}
+
+// The code login asked TIDAL for a code, and the user went back to the
+// PKCE login before TIDAL answered. The late answer leaves the PKCE login
+// on screen and polls nothing. If the user is back on the code login by
+// then, it asks for a code of its own.
+@(test)
+stale_login_start_is_dropped :: proc(t: ^testing.T) {
+	s := login_state()
+	defer login_state_free(s)
+	d := &s.data
+	d.account = .Signed_Out
+	answer :: proc(job: app.Job) -> app.Result {
+		return {job = job, link = {user_code = app.small("ABCDE"), device_code = app.small("dc"), interval = 1, expires = 300}}
+	}
+	start_job :: proc(t: ^testing.T, d: ^app.Data) -> app.Job {
+		kinds, queued := queued_kinds(d)
+		testing.expect_value(t, kinds, bit_set[app.Job_Kind; u16]{.Login_Start})
+		if len(queued) == 0 {
+			return {}
+		}
+		testing.expect_value(t, queued[0].view, d.login_attempt)
+		return queued[0]
+	}
+
+	app.device_begin(d)
+	first := start_job(t, d)
+	app.pkce_show(d)
+	late := answer(first)
+	app.handle_result(s, &late, 0)
+	testing.expect_value(t, d.login.pkce, app.Pkce_Step.Paste)
+	testing.expect_value(t, d.login.link.device_code.len, 0)
+	kinds, _ := queued_kinds(d)
+	testing.expect_value(t, kinds, bit_set[app.Job_Kind; u16]{})
+
+	app.device_begin(d)
+	second := start_job(t, d)
+	app.pkce_show(d)
+	app.device_begin(d)
+	kinds, _ = queued_kinds(d)
+	testing.expect_value(t, kinds, bit_set[app.Job_Kind; u16]{})
+	stale := answer(second)
+	app.handle_result(s, &stale, 0)
+	testing.expect_value(t, d.login.link.device_code.len, 0)
+	third := start_job(t, d)
+
+	fresh := answer(third)
+	app.handle_result(s, &fresh, 0)
+	testing.expect_value(t, d.login.pkce, app.Pkce_Step.Off)
+	testing.expect_value(t, app.small_str(&d.login.link.user_code), "ABCDE")
+	kinds, _ = queued_kinds(d)
+	testing.expect_value(t, kinds, bit_set[app.Job_Kind; u16]{.Login_Wait})
+}
+
+// stream_jobs empties the queue and returns the Stream jobs in it.
+@(private = "file")
+stream_jobs :: proc(d: ^app.Data) -> [dynamic]app.Job {
+	out := make([dynamic]app.Job, context.temp_allocator)
+	_, queued := queued_kinds(d)
+	for job in queued {
+		if job.kind == .Stream {
+			append(&out, job)
+		}
+	}
+	return out
+}
+
+// The next track's stream fails to resolve while the current one plays.
+// The player keeps asking for a next track, but that one isn't asked for
+// again until it's current. Then it's tried once, the player bar says why,
+// and the queue skips on.
+@(test)
+failed_prefetch_is_not_retried :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	file, _ := test_flac(200, 0) // 5.2 s
+	m.files["/a.flac"] = file
+	s := login_state()
+	defer login_state_free(s)
+	d := &s.data
+	pb := &s.playback
+	pb.player = audio.create(quiet, 0, null_output = true)
+	d.account = .Signed_In
+	app.view_open(d, .Playlist, "pl", "pl", "", 3)
+	rows := make([]app.Row, 3, context.temp_allocator)
+	for &r, i in rows {
+		r.title = fmt.tprintf("Track %d", i + 1)
+		r.id = i64(1000 + i)
+		r.seconds = 5
+	}
+	app.view_add_rows(&d.view, 0, len(rows), rows, len(rows))
+
+	app.playback_play_row(s, 0)
+	queued := stream_jobs(d)
+	testing.expect_value(t, len(queued), 1)
+	if len(queued) != 1 {
+		return
+	}
+	resolved := app.Result {
+		job = queued[0],
+		stream = {track_id = 1000, quality = "LOSSLESS", codec = "FLAC", url = fmt.tprintf("%sa.flac", m.base_url), sample_rate = 44100, bit_depth = 16, track_peak = 1, album_peak = 1},
+	}
+	app.handle_result(s, &resolved, 0)
+
+	// The whole file is in at once, so the player asks for the next track.
+	next: app.Job
+	start := time.tick_now()
+	for next.kind == .None && time.tick_since(start) < 3 * time.Second {
+		app.playback_update(s, nil)
+		for job in stream_jobs(d) {
+			next = job
+		}
+		time.sleep(5 * time.Millisecond)
+	}
+	testing.expect_value(t, next.key, u64(1001))
+	failed := app.Result {
+		job     = next,
+		err     = .Stream_Not_Available,
+		message = app.small("Stream_Not_Available: Stream not available for this track"),
+	}
+	app.handle_result(s, &failed, 0)
+
+	asked := 0
+	start = time.tick_now()
+	for time.tick_since(start) < 500 * time.Millisecond {
+		app.playback_update(s, nil)
+		asked += len(stream_jobs(d))
+		time.sleep(5 * time.Millisecond)
+	}
+	testing.expect_value(t, asked, 0)
+	testing.expect(t, pb.status.want_next, "the player still wants a next track")
+	testing.expect_value(t, pb.index, 0)
+
+	// Track one ends and track two is current: one more try.
+	app.playback_seek(s, 5.1)
+	start = time.tick_now()
+	for pb.index == 0 && time.tick_since(start) < 3 * time.Second {
+		app.playback_update(s, nil)
+		time.sleep(5 * time.Millisecond)
+	}
+	testing.expect_value(t, pb.index, 1)
+	queued = stream_jobs(d)
+	testing.expect_value(t, len(queued), 1)
+	if len(queued) != 1 {
+		return
+	}
+	testing.expect_value(t, queued[0].key, u64(1001))
+	again := failed
+	again.job = queued[0]
+	app.handle_result(s, &again, 0)
+	testing.expect(t, strings.has_prefix(app.small_str(&pb.message), "Couldn't play Track 2"))
+	testing.expect_value(t, pb.index, 2)
+	queued = stream_jobs(d)
+	testing.expect_value(t, len(queued), 1)
+	if len(queued) == 1 {
+		testing.expect_value(t, queued[0].key, u64(1002))
+	}
+}
+
+@(private = "file")
+capture_log :: proc(data: rawptr, level: runtime.Logger_Level, text: string, options: runtime.Logger_Options, location := #caller_location) {
+	b := (^strings.Builder)(data)
+	strings.write_string(b, text)
+	strings.write_byte(b, '\n')
+}
+
+// Error bodies are server text and may hold a signed URL. Neither the
+// app's stream error line nor what src/tidal logs on the way may print
+// them: only the kind, the HTTP status, the subStatus and a known codec.
+@(test)
+stream_errors_log_no_server_text :: proc(t: ^testing.T) {
+	URL :: "https://cdn.example/audio?token=FAKE-SIGNED-SECRET"
+	Case :: struct {
+		name:   string,
+		answer: Mock_Answer,
+		want:   string, // in the app's line
+	}
+	cases := []Case {
+		{"userMessage", {500, `{"status":500,"subStatus":1234,"userMessage":"` + URL + `"}`}, "Http, HTTP 500, subStatus 1234"},
+		{"errors detail", {500, `{"errors":[{"detail":"` + URL + `"}]}`}, "Http, HTTP 500"},
+		{"not JSON", {502, `<html>` + URL + `</html>`}, "Http, HTTP 502"},
+		{"anti-abuse", {403, `abuse detected ` + URL}, "Abuse_Detected, HTTP 403"},
+		{"codec", dash_answer("HI_RES_LOSSLESS", URL), "Lossy_Stream, codec unknown"},
+	}
+	for c in cases {
+		m: Mock
+		mock_start(&m)
+		m.playback["HI_RES_LOSSLESS"] = c.answer
+		m.playback["LOSSLESS"] = c.answer
+		// Not the temp allocator: log.logf frees what's allocated from it
+		// while the logger runs.
+		log := strings.builder_make()
+		s := tidal.session_create()
+		s.config.api_v1_location = m.base_url
+		s.config.api_oauth2_token = fmt.tprintf("%stoken", m.base_url)
+		tidal.session_restore(s, {token_type = "Bearer", access_token = "a", refresh_token = "r", user_id = 123, user_kind = .Logged_In_User, country_code = "PL", is_pkce = true})
+		// Only around the request: the test's own failures go to the
+		// runner's logger.
+		runner := context.logger
+		context.logger = {capture_log, &log, .Debug, {}}
+		_, refused, err := tidal.resolve_stream_flac(s, 1, context.temp_allocator)
+		context.logger = runner
+		testing.expectf(t, err != nil, "%s: resolved", c.name)
+		line := app.stream_error_line(1, "failed", err, context.temp_allocator)
+		testing.expectf(t, strings.contains(line, c.want), "%s: %q", c.name, line)
+		if refused != nil {
+			strings.write_string(&log, app.stream_error_line(1, "refused", refused, context.temp_allocator))
+			strings.write_byte(&log, '\n')
+		}
+		strings.write_string(&log, line)
+		all := strings.to_lower(strings.to_string(log), context.temp_allocator)
+		testing.expectf(t, !strings.contains(all, "fake-signed-secret") && !strings.contains(all, "cdn.example"), "%s: logged %q", c.name, strings.to_string(log))
+		tidal.session_destroy(s)
+		mock_stop(&m)
+		strings.builder_destroy(&log)
+		if c.name == "codec" {
+			delete(c.answer.body) // dash_answer's
+		}
+	}
+	testing.expect_value(t, tidal.codec_name("mp4a.40.2"), "MP4A")
+	testing.expect_value(t, tidal.codec_name("flac"), "FLAC")
+	testing.expect_value(t, tidal.quality_name("HI_RES_LOSSLESS"), "HI_RES_LOSSLESS")
+	testing.expect_value(t, tidal.quality_name(URL), "unknown")
 }

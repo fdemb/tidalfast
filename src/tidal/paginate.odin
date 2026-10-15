@@ -64,7 +64,7 @@ fetch_pages :: proc(s: ^Session, r: Request, total: int, chunk_size := PAGE_CHUN
 
 			resp, err := request(job.s, r, heap)
 			if err != nil {
-				log.errorf("Failed to fetch %s (offset=%d): %s", r.path, offset, error_string(err, context.temp_allocator))
+				log.errorf("Failed to fetch %s (offset=%d): %s", r.path, offset, error_summary(err, context.temp_allocator))
 				delete(resp.body, heap)
 				delete(resp.etag, heap)
 				sync.guard(&job.err_mutex)

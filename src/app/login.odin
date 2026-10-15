@@ -259,8 +259,14 @@ pkce_prepare :: proc(d: ^Data) {
 }
 
 // pkce_begin opens TIDAL's login page for the PKCE client in the browser.
-// A device-code poll stops.
 pkce_begin :: proc(d: ^Data) {
+	pkce_show(d)
+	mac.open_url(tidal.pkce_login_url(d.session, context.temp_allocator))
+}
+
+// pkce_show switches to the PKCE login as a new attempt, without the
+// browser. A device-code poll stops.
+pkce_show :: proc(d: ^Data) {
 	l := &d.login
 	pkce_prepare(d)
 	login_next_attempt(d)
@@ -268,7 +274,6 @@ pkce_begin :: proc(d: ^Data) {
 	l.pkce = .Paste
 	l.pkce_note = {}
 	l.focus_field = true
-	mac.open_url(tidal.pkce_login_url(d.session, context.temp_allocator))
 }
 
 // device_begin switches to the device-code login.

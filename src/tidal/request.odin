@@ -101,7 +101,7 @@ start_backoff_if_needed :: proc(s: ^Session, resp: Http_Response) {
 	} else {
 		return
 	}
-	log.warnf("Backing off from TIDAL for %ds: %s", seconds, reason)
+	log.warnf("Backing off from TIDAL for %ds: HTTP %d", seconds, resp.status)
 
 	sync.guard(&s.backoff_mutex)
 	until := time.tick_add(time.tick_now(), time.Duration(seconds) * time.Second)
@@ -235,7 +235,7 @@ basic_request :: proc(s: ^Session, r: Request, allocator := context.allocator) -
 		if _, rerr := refresh_access_token(s, auth.access_token); rerr != nil {
 			// Don't fail the request: the token may still be accepted, and if it
 			// isn't, the expired-token handling below reports the failure.
-			log.warnf("Proactive access token refresh failed: %s", error_string(rerr, tmp))
+			log.warnf("Proactive access token refresh failed: %s", error_summary(rerr, tmp))
 			early_refresh = rerr
 		}
 	}
@@ -278,7 +278,6 @@ basic_request :: proc(s: ^Session, r: Request, allocator := context.allocator) -
 			return resp, early_refresh
 		} else {
 			log.debugf("HTTP error on %d", resp.status)
-			log.debugf("Response text\n%s", body_prefix(resp, 2000))
 		}
 	}
 	return resp, nil
@@ -342,9 +341,15 @@ request_object_resp :: proc(s: ^Session, r: Request, allocator := context.alloca
 @(private)
 http_error :: proc(resp: Http_Response) -> Error {
 	detail := ""
+	sub_status := 0
 	if len(resp.body) > 0 {
 		if v, jerr := json.parse(resp.body, .JSON, true, context.temp_allocator); jerr == nil {
 			if obj, ok := v.(json.Object); ok {
+				if n, is_num := obj["subStatus"].(json.Integer); is_num {
+					sub_status = int(n)
+				} else if f, is_float := obj["subStatus"].(json.Float); is_float && f == f64(int(f)) {
+					sub_status = int(f)
+				}
 				if errs, has := jarr(obj, "errors"); has && len(errs) > 0 {
 					if first, is_obj := errs[0].(json.Object); is_obj {
 						detail = jstr(first, "detail")
@@ -358,17 +363,21 @@ http_error :: proc(resp: Http_Response) -> Error {
 			detail = body_prefix(resp, 200)
 		}
 	}
-	log.debugf("Request response: '%s'", detail)
-
+	err: Error
 	switch {
 	case resp.status == 404:
-		return make_error(.Object_Not_Found, "Object not found", resp.status, detail = detail)
+		err = make_error(.Object_Not_Found, "Object not found", resp.status, detail = detail)
 	case resp.status == 429:
-		return make_error(.Too_Many_Requests, "Too many requests", resp.status, resp.retry_after, detail)
+		err = make_error(.Too_Many_Requests, "Too many requests", resp.status, resp.retry_after, detail)
 	case is_abuse_response(resp):
-		return make_error(.Abuse_Detected, "Abuse detected by TIDAL", resp.status, resp.retry_after, detail)
+		err = make_error(.Abuse_Detected, "Abuse detected by TIDAL", resp.status, resp.retry_after, detail)
+	case:
+		err = make_error(.Http, "HTTP error", resp.status, detail = detail)
 	}
-	return make_error(.Http, "HTTP error", resp.status, detail = detail)
+	if e, ok := &err.(Api_Error); ok {
+		e.sub_status = sub_status
+	}
+	return err
 }
 
 // POSTs a form without TIDAL's default params, as the OAuth endpoints

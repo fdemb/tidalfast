@@ -58,6 +58,7 @@ Login :: struct {
 	focus_field: bool, // the field takes the focus next frame
 	link:        Login_Link,
 	requested:   bool, // a Login_Start job is out
+	start_for:   u32, // the login attempt that Login_Start is for
 	waiting:     bool, // a Login_Wait job is out
 	error:       Small, // the login stopped; the screen offers "Try again"
 	note:        Small, // shown on the card while the login goes on
@@ -561,7 +562,8 @@ request_login_code :: proc(d: ^Data) {
 		return
 	}
 	sync.atomic_store(&d.device_cancel, false)
-	d.login.requested = push_job(d, {kind = .Login_Start})
+	d.login.requested = push_job(d, {kind = .Login_Start, view = d.login_attempt})
+	d.login.start_for = d.login_attempt
 }
 
 // login_has_tokens says whether the device login got its tokens but hasn't
@@ -703,6 +705,19 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 		}
 	case .Login_Start:
 		l := &d.login
+		if res.job.view != d.login_attempt {
+			// The user went on to another login. If that's the device login
+			// again, it waited for this answer to ask for a code of its own.
+			// A Login_Start from before d.login was reset is no one's.
+			if !l.requested || l.start_for != res.job.view {
+				return
+			}
+			l.requested = false
+			if d.account == .Signed_Out && l.pkce == .Off && l.error.len == 0 {
+				request_login_code(d)
+			}
+			return
+		}
 		l.requested = false
 		if failed {
 			l^ = {
