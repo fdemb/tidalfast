@@ -395,7 +395,7 @@ request_artwork :: proc(s: ^State, t: ^Track_Source) {
 	if pb.fake || pb.items[t.item].cover == "" {
 		return
 	}
-	push_job(&s.data, {kind = .Artwork, key = t.serial, size = ARTWORK_SIZE, id = small(pb.items[t.item].cover)}, PRIORITY_COVER)
+	push_job(&s.data, {kind = .Artwork, key = t.serial, size = ARTWORK_SIZE, fetch = ARTWORK_SIZE, id = small(pb.items[t.item].cover)}, PRIORITY_COVER)
 }
 
 // playback_result takes a Stream or Artwork job's result.

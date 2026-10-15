@@ -544,11 +544,17 @@ run_playlists :: proc(s: ^tidal.Session, res: ^Result, alloc: mem.Allocator) {
 	res.playlists = items[:]
 }
 
+// fetch_size is the size a Cover or Artwork job downloads. Artwork is shown
+// at the size it's fetched, so it may leave fetch at 0.
+fetch_size :: proc(job: Job) -> int {
+	return int(job.fetch) if job.fetch != 0 else int(job.size)
+}
+
 @(private = "file")
 run_cover :: proc(d: ^Data, job: Job, res: ^Result) {
 	s := d.session
 	id := job.id
-	url := cover.url(s.config.image_url, small_str(&id), int(job.fetch), context.temp_allocator)
+	url := cover.url(s.config.image_url, small_str(&id), fetch_size(job), context.temp_allocator)
 	heap := runtime.heap_allocator()
 	body, err := tidal.resource_get(s, url, heap)
 	if err != nil {

@@ -608,3 +608,31 @@ stream_errors_log_no_server_text :: proc(t: ^testing.T) {
 	testing.expect_value(t, tidal.quality_name("HI_RES_LOSSLESS"), "HI_RES_LOSSLESS")
 	testing.expect_value(t, tidal.quality_name(URL), "unknown")
 }
+
+// Playing a track with a cover asks for its Now Playing artwork at 640 px.
+// The shared cover pages split the job's size into the size drawn and the
+// size downloaded, and artwork used to download at size 0.
+@(test)
+artwork_downloads_at_its_size :: proc(t: ^testing.T) {
+	s := login_state()
+	defer login_state_free(s)
+	d := &s.data
+	pb := &s.playback
+	pb.player = audio.create(quiet, 0, null_output = true)
+	d.account = .Signed_In
+	app.view_open(d, .Playlist, "pl", "pl", "", 1)
+	rows := make([]app.Row, 1, context.temp_allocator)
+	rows[0] = {title = "Track", id = 1000, seconds = 5, cover = "aa-bb-cc"}
+	app.view_add_rows(&d.view, 0, len(rows), rows, len(rows))
+
+	app.playback_play_row(s, 0)
+	_, queued := queued_kinds(d)
+	found := false
+	for job in queued {
+		if job.kind == .Artwork {
+			found = true
+			testing.expect_value(t, app.fetch_size(job), 640)
+		}
+	}
+	testing.expect(t, found, "playing a track with a cover queues its artwork")
+}
