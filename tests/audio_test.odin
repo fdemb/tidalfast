@@ -360,7 +360,8 @@ playback_info :: proc(t: ^testing.T) {
 	refused(t, playback_json(BTS, `{"mimeType":"audio/mp4","codecs":"mp4a.40.2","encryptionType":"NONE","urls":["u"]}`), .Stream_Not_Available)
 	refused(t, playback_json(BTS, `{"mimeType":"audio/flac","codecs":"flac","encryptionType":"NONE","urls":[]}`), .Manifest_Decode)
 	refused(t, playback_json(BTS, `not json`), .Manifest_Decode)
-	refused(t, playback_json("application/dash+xml", `<MPD/>`), .Unknown_Manifest_Format)
+	refused(t, playback_json("application/dash+xml", `<MPD/>`), .Manifest_Decode)
+	refused(t, playback_json("application/x-unknown", `x`), .Unknown_Manifest_Format)
 }
 
 @(private = "file")

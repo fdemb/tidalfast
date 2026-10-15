@@ -63,6 +63,8 @@ Job_Kind :: enum u8 {
 	Cover, // download and decode one cover
 	Stream, // resolve a track's stream URL, see player.odin
 	Artwork, // a cover for Now Playing: download and decode, keep the pixels
+	Login_Pkce, // finish a hi-res login with the pasted address, see login.odin
+	Save_Settings, // write the output settings, see settings.odin
 }
 
 Source :: enum u8 {
@@ -79,7 +81,7 @@ Job :: struct {
 	view:       u32, // Tracks: the view generation it's for; Stream: the track's serial
 	offset:     i32,
 	limit:      i32,
-	key:        u64, // Cover: the cache key; Stream: the track id; Artwork: the track's serial
+	key:        u64, // Cover: the cache key; Stream: the track id; Artwork: the track's serial; Save_Settings: the settings
 	size:       u16, // Cover: pixels across
 	interval:   f32, // Login_Wait: seconds between polls
 	deadline:   time.Tick, // Login_Wait: when the code expires
@@ -272,8 +274,21 @@ run_job :: proc(d: ^Data, job: Job) -> (res: Result) {
 	id := job.id
 	switch job.kind {
 	case .None, .Cover, .Artwork:
+	case .Save_Settings:
+		if !settings_save(d.settings_path, settings_decode(job.key)) {
+			res.err = .Io
+			res.message = small("Couldn't save the output settings")
+		}
+	case .Login_Pkce:
+		sync.guard(&d.pkce_mutex)
+		if err := tidal.login_pkce_complete(s, string(d.pkce_redirect[:d.pkce_len])); err != nil {
+			fail_login(&res, err)
+		}
 	case .Stream:
-		info, err := tidal.resolve_stream(s, i64(job.key), STREAM_QUALITY, alloc)
+		// Only the PKCE client gets hi-res; the device client would get
+		// LOSSLESS for it anyway.
+		quality := tidal.Quality.Hi_Res_Lossless if tidal.session_is_pkce(s) else tidal.Quality.High_Lossless
+		info, err := tidal.resolve_stream(s, i64(job.key), quality, alloc)
 		if err != nil {
 			fail(&res, err)
 			return
@@ -338,7 +353,7 @@ run_login_wait :: proc(d: ^Data, job: Job, res: ^Result) {
 		return
 	}
 	if a.access_token != "" {
-		err := tidal.load_oauth_session(s, a.token_type, a.access_token, a.refresh_token, a.expiry_time)
+		err := tidal.load_oauth_session(s, a.token_type, a.access_token, a.refresh_token, a.expiry_time, a.is_pkce)
 		if err != nil {
 			fail_login(res, err)
 			return
@@ -358,7 +373,7 @@ run_login_wait :: proc(d: ^Data, job: Job, res: ^Result) {
 		interval    = f64(job.interval),
 		expires_in  = left,
 	}
-	err := tidal.login_device_wait(s, &link, until_expiry = !job.once)
+	err := tidal.login_device_wait(s, &link, until_expiry = !job.once, cancel = &d.device_cancel)
 	res.link.interval = f32(link.interval)
 	if err != nil {
 		fail_login(res, err)

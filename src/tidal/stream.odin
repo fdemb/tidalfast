@@ -272,7 +272,7 @@ dash_info_from_mpd :: proc(mpd_xml: string, allocator := context.allocator) -> (
 			for _ in 0 ..< count {
 				vars.number = number
 				vars.time = t
-				append(&segments, Dash_Segment{url = expand_template(media_template, vars, allocator), duration = f64(d) / timescale})
+				append(&segments, Dash_Segment{url = expand_template(media_template, vars, allocator), duration = f64(d) / timescale, start = t, length = d})
 				t += d
 				number += 1
 			}
@@ -292,7 +292,7 @@ dash_info_from_mpd :: proc(mpd_xml: string, allocator := context.allocator) -> (
 			vars.number = info.start_number + int(k)
 			vars.time = k * d
 			remaining := period_end - k * d
-			append(&segments, Dash_Segment{url = expand_template(media_template, vars, allocator), duration = f64(min(d, remaining)) / timescale})
+			append(&segments, Dash_Segment{url = expand_template(media_template, vars, allocator), duration = f64(min(d, remaining)) / timescale, start = k * d, length = min(d, remaining)})
 		}
 	}
 	info.segments = segments[:]

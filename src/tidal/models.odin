@@ -322,6 +322,8 @@ Stream :: struct {
 Dash_Segment :: struct {
 	url:      string,
 	duration: f64, // seconds
+	start:    i64, // in timescale units, from the start of the period
+	length:   i64, // in timescale units
 }
 
 Dash_Info :: struct {

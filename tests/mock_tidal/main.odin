@@ -9,7 +9,13 @@
 // generated JPEG covers at any size under /images, and playback: LOSSLESS
 // playbackinfopostpaywall answers whose BTS manifest points at FLAC files
 // under /audio, served with Range support (see audio.odin). The first three
-// liked tracks are a gapless live album. Flags:
+// liked tracks are a gapless live album. The next three are a hi-res test
+// album (hires.odin): a quiet 16/44.1 track, then two quiet 24/96 tracks
+// that come as DASH when a PKCE login asks for HI_RES_LOSSLESS.
+//
+// The PKCE login: GET /authorize redirects to /android/login/auth with a
+// code, and POST /oauth2/token trades it, with the Android client's id,
+// for tokens that refresh only with that client id. Flags:
 //
 //     -port=N            0 picks a free port; the port is printed
 //     -tracks=N          tracks in the long playlist (default 3000)
@@ -28,6 +34,7 @@
 //     -seektable=0       FLAC files without a SEEKTABLE, so seeks have to search
 //     -audio-delay=MS    added before every audio response, like network latency
 //     -audio-rate=KB     audio bandwidth in KB/s per connection (default unlimited)
+//     -hires-only        liked tracks are only the hi-res album, so playing through them never reaches the loud test tracks
 //
 // It never prints tokens or Authorization headers.
 package mock_tidal
@@ -67,6 +74,7 @@ Config :: struct {
 	seektable:       bool,
 	audio_delay:     int,
 	audio_rate:      int,
+	hires_only:      bool,
 }
 
 Server :: struct {
@@ -84,6 +92,8 @@ Server :: struct {
 	was_revoked:   bool,
 	last_poll:     time.Tick,
 	covers_401:    int, // covers answered 401 since the last device login
+	pkce:          bool, // the current tokens came from the PKCE login
+	pkce_codes:    int,
 }
 
 server: Server
@@ -159,6 +169,8 @@ main :: proc() {
 			c.audio_delay = n
 		case "audio-rate":
 			c.audio_rate = n
+		case "hires-only":
+			c.hires_only = value != "0"
 		case:
 			fmt.eprintln("mock: unknown flag", arg)
 			os.exit(2)
@@ -177,6 +189,9 @@ main :: proc() {
 	server.port = ep.port
 	if !audio_prepare(c.audio_dir, c.seektable) {
 		fmt.eprintln("mock: couldn't make the audio files; playback won't work")
+	}
+	if !hires_prepare(c.audio_dir) {
+		fmt.eprintln("mock: couldn't make the hi-res files")
 	}
 	fmt.printfln("mock: listening on http://127.0.0.1:%d", ep.port)
 	os.flush(os.stdout)
@@ -204,6 +219,7 @@ Response :: struct {
 	body:          []u8,
 	retry_after:   int,
 	content_range: string,
+	location:      string,
 	audio:         bool, // send with -audio-delay and -audio-rate
 }
 
@@ -218,6 +234,9 @@ serve :: proc(client: net.TCP_Socket) {
 	head := fmt.tprintf("HTTP/1.1 %d X\r\nContent-Type: %s\r\nContent-Length: %d\r\nConnection: close\r\n", resp.status, resp.content_type, len(resp.body))
 	if resp.retry_after > 0 {
 		head = fmt.tprintf("%sRetry-After: %d\r\n", head, resp.retry_after)
+	}
+	if resp.location != "" {
+		head = fmt.tprintf("%sLocation: %s\r\n", head, resp.location)
 	}
 	if resp.audio {
 		head = fmt.tprintf("%sAccept-Ranges: bytes\r\n", head)
@@ -331,6 +350,7 @@ route :: proc(req: ^Request) -> Response {
 	server.requests += 1
 	n := server.requests
 	token := server.token
+	pkce := server.pkce
 	sync.mutex_unlock(&server.mutex)
 	if n == server.config.rate_limit_at {
 		fmt.println("mock: rate limiting request", n)
@@ -372,6 +392,12 @@ route :: proc(req: ^Request) -> Response {
 		return cover_response(path)
 	case strings.has_prefix(path, "/audio/"):
 		return audio_response(req)
+	case strings.has_prefix(path, "/dash/"):
+		return dash_response(req)
+	case path == "/authorize":
+		return authorize_response(req)
+	case path == "/android/login/auth":
+		return {status = 200, content_type = "text/html", body = transmute([]u8)string("<html><body><h1>Oops</h1><p>Copy this page's address into TIDALfast.</p></body></html>")}
 	}
 
 	sync.mutex_lock(&server.mutex)
@@ -386,7 +412,7 @@ route :: proc(req: ^Request) -> Response {
 		fmt.printfln("mock: request %d, %s %s after the login was revoked, 401", n, req.method, path)
 		return json_response(401, `{"status":401,"subStatus":11002,"userMessage":"Session is not valid"}`)
 	}
-	if req.auth != fmt.tprintf("Bearer mock-access-%d", token) {
+	if req.auth != fmt.tprintf("Bearer mock-%saccess-%d", "pkce-" if pkce else "", token) {
 		fmt.printfln("mock: request %d, %s %s with a stale or missing token, 401", n, req.method, path)
 		return json_response(401, `{"status":401,"subStatus":11003,"userMessage":"The token has expired. (Expired on time)"}`)
 	}
@@ -399,17 +425,26 @@ route :: proc(req: ^Request) -> Response {
 		return json_response(200, fmt.tprintf(`{{"id":%d,"username":"mock","firstName":"Mock","lastName":"User","email":"mock@example.com"}}`, USER_ID))
 	case strings.has_prefix(path, "/tracks/") && strings.has_suffix(path, "/playbackinfopostpaywall"):
 		id, _ := parse_i(strings.trim_suffix(strings.trim_prefix(path, "/tracks/"), "/playbackinfopostpaywall"))
-		fmt.printfln("mock: playbackinfo for %d (%s)", id, req.query["audioquality"] or_else "?")
+		quality := req.query["audioquality"] or_else "?"
+		fmt.printfln("mock: playbackinfo for %d (%s)", id, quality)
+		if hires_index(id) >= 0 {
+			return hires_playbackinfo(id, quality, pkce)
+		}
 		return playbackinfo_response(id)
 	case path == fmt.tprintf("/users/%d/favorites/tracks", USER_ID):
-		b := list_begin(LIKED, offset, limit)
-		for i in offset ..< min(offset + limit, LIKED) {
+		liked := len(HIRES) if server.config.hires_only else LIKED
+		b := list_begin(liked, offset, limit)
+		for i in offset ..< min(offset + limit, liked) {
 			if i > offset {
 				strings.write_byte(&b, ',')
 			}
 			fmt.sbprintf(&b, `{{"created":"%s","item":`, date(i))
-			if i < 3 {
+			if server.config.hires_only {
+				write_hires_track(&b, i)
+			} else if i < 3 {
 				write_album_track(&b, i)
+			} else if i < 3 + len(HIRES) {
+				write_hires_track(&b, i - 3)
 			} else {
 				write_track(&b, 99, i)
 			}
@@ -484,16 +519,36 @@ token_response :: proc(req: ^Request) -> Response {
 			return json_response(400, `{"status":400,"error":"authorization_pending","sub_status":1002,"error_description":"Device Authorization code is not authorized yet"}`)
 		}
 		server.token += 1
+		server.pkce = false
 		server.revoked = false
 		server.api_requests = 0
 		server.covers_401 = 0
 		fmt.printfln("mock: device login approved, tokens %d", server.token)
+	case "authorization_code":
+		f := req.form
+		switch {
+		case f["client_id"] != PKCE_CLIENT_ID:
+			fmt.println("mock: PKCE login with the wrong client id, 400")
+			return json_response(400, `{"status":400,"error":"invalid_client"}`)
+		case !strings.has_prefix(f["code"] or_else "", "mock-pkce-code-"), f["code_verifier"] == "", !strings.has_suffix(f["redirect_uri"] or_else "", "/android/login/auth"):
+			fmt.println("mock: PKCE login with a bad code, verifier or redirect, 400")
+			return json_response(400, `{"status":400,"error":"invalid_grant","error_description":"Bad authorization code"}`)
+		}
+		server.token += 1
+		server.pkce = true
+		server.revoked = false
+		server.api_requests = 0
+		fmt.printfln("mock: PKCE login, tokens %d", server.token)
 	case "refresh_token":
 		if server.revoked {
 			fmt.println("mock: refresh after the login was revoked, 400")
 			return json_response(400, `{"status":400,"error":"invalid_grant","sub_status":11101,"error_description":"Token could not be verified"}`)
 		}
-		if req.form["refresh_token"] != fmt.tprintf("mock-refresh-%d", server.token) {
+		if server.pkce && req.form["client_id"] != PKCE_CLIENT_ID {
+			fmt.println("mock: PKCE tokens refreshed with another client id, 400")
+			return json_response(400, `{"status":400,"error":"invalid_client","error_description":"Wrong client for this refresh token"}`)
+		}
+		if req.form["refresh_token"] != fmt.tprintf("mock-%srefresh-%d", "pkce-" if server.pkce else "", server.token) {
 			fmt.println("mock: refresh with an old refresh token, 400")
 			return json_response(400, `{"status":400,"error":"invalid_grant","sub_status":11101,"error_description":"Token could not be verified"}`)
 		}
@@ -502,8 +557,9 @@ token_response :: proc(req: ^Request) -> Response {
 	case:
 		return json_response(400, `{"status":400,"error":"unsupported_grant_type"}`)
 	}
-	return json_response(200, fmt.tprintf(`{{"access_token":"mock-access-%d","refresh_token":"mock-refresh-%d","token_type":"Bearer","expires_in":%d,"user_id":%d}}`,
-		server.token, server.token, server.config.expires_in, USER_ID))
+	kind := "pkce-" if server.pkce else ""
+	return json_response(200, fmt.tprintf(`{{"access_token":"mock-%saccess-%d","refresh_token":"mock-%srefresh-%d","token_type":"Bearer","expires_in":%d,"user_id":%d}}`,
+		kind, server.token, kind, server.token, server.config.expires_in, USER_ID))
 }
 
 list_begin :: proc(total, offset, limit: int) -> strings.Builder {

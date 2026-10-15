@@ -9,6 +9,11 @@ package audio
 // The fetch thread blocks when the window is full, so a paused track holds
 // one connection and no CPU. If the server drops the connection meanwhile,
 // the next request resumes where the window ends.
+//
+// A DASH stream is a list of URLs, the initialization segment and then the
+// media segments, fetched one after the other into the same window as one
+// run of bytes. It can't seek by byte offset, only start again at a
+// segment (stream_restart_segment), and offsets count from there.
 
 import "base:runtime"
 import "core:c"
@@ -35,6 +40,10 @@ Stream :: struct {
 	length:      i64, // file size, -1 until a response says
 	gen:         u64, // bumped by stream_restart; a transfer for an older gen stops
 	active:      bool, // has a URL; the fetch thread works on it
+	dash:        bool, // segments instead of url
+	seg_urls:    []cstring, // heap, owned
+	seg_next:    int, // the segment being fetched
+	seg_base:    i64, // the offset its first byte lands at
 	failed:      bool, // gave up after FETCH_RETRIES
 	http_status: int, // of the last failed response, 0 for transport errors
 	error:       [96]u8,
@@ -75,6 +84,38 @@ stream_open :: proc(st: ^Stream, url: string) {
 	sync.cond_broadcast(&st.cond)
 }
 
+// stream_open_segments points the stream at DASH segments, fetched in
+// order from the first.
+stream_open_segments :: proc(st: ^Stream, urls: []string) {
+	sync.guard(&st.mutex)
+	stream_clear_locked(st)
+	heap := runtime.heap_allocator()
+	st.seg_urls = make([]cstring, len(urls), heap)
+	for u, i in urls {
+		st.seg_urls[i] = strings.clone_to_cstring(u, heap)
+	}
+	st.dash = true
+	st.active = true
+	st.gen += 1
+	sync.cond_broadcast(&st.cond)
+}
+
+// stream_restart_segment drops the bytes held and fetches from segment
+// index on. Offset 0 is then that segment's first byte.
+stream_restart_segment :: proc(st: ^Stream, index: int) {
+	sync.guard(&st.mutex)
+	st.seg_next = clamp(index, 0, len(st.seg_urls))
+	st.seg_base = 0
+	st.win_start, st.win_end, st.read_pos = 0, 0, 0
+	st.length = -1
+	if st.seg_next == len(st.seg_urls) {
+		st.length = 0
+	}
+	st.failed = false
+	st.gen += 1
+	sync.cond_broadcast(&st.cond)
+}
+
 // stream_clear stops the transfer and forgets the URL and header.
 stream_clear :: proc(st: ^Stream) {
 	sync.guard(&st.mutex)
@@ -88,8 +129,15 @@ stream_clear_locked :: proc(st: ^Stream) {
 	heap := runtime.heap_allocator()
 	delete(st.url, heap)
 	delete(st.head, heap)
+	for u in st.seg_urls {
+		delete(u, heap)
+	}
+	delete(st.seg_urls, heap)
 	st.url = nil
 	st.head = nil
+	st.seg_urls = nil
+	st.dash = false
+	st.seg_next, st.seg_base = 0, 0
 	st.has_header = false
 	st.active = false
 	st.failed = false
@@ -127,7 +175,11 @@ Read_Result :: enum u8 {
 stream_read :: proc(st: ^Stream, offset: i64, dst: []u8, interrupt: proc(data: rawptr) -> bool, data: rawptr) -> (n: int, res: Read_Result) {
 	for {
 		sync.lock(&st.mutex)
-		if offset < st.win_start || offset > st.win_end {
+		if st.dash && offset < st.win_start {
+			sync.unlock(&st.mutex)
+			return 0, .Failed
+		}
+		if !st.dash && (offset < st.win_start || offset > st.win_end) {
 			// Not held and not next: move the window here.
 			sync.unlock(&st.mutex)
 			stream_restart(st, offset)
@@ -151,9 +203,11 @@ stream_read :: proc(st: ^Stream, offset: i64, dst: []u8, interrupt: proc(data: r
 			}
 			return int(want), .Ok
 		}
-		// The fetcher may be waiting for room that only moving read_pos frees.
-		if st.read_pos != offset {
-			st.read_pos = offset
+		// The fetcher may be waiting for room that only moving read_pos
+		// frees. A DASH read can be ahead of what has arrived, when it skips
+		// a box; bytes before it may go as they arrive.
+		if pos := min(offset, st.win_end); st.read_pos != pos {
+			st.read_pos = pos
 			sync.cond_broadcast(&st.cond)
 		}
 		failed := st.failed
@@ -190,7 +244,8 @@ stream_error :: proc(st: ^Stream, buf: []u8) -> (status: int, msg: string) {
 Transfer :: struct {
 	st:      ^Stream,
 	gen:     u64,
-	pos:     i64, // file offset of the next byte to arrive
+	base:    i64, // the stream offset of the URL's first byte
+	pos:     i64, // stream offset of the next byte to arrive
 	skip:    i64, // bytes to drop, when a server ignores the Range header
 	status:  int,
 	aborted: bool,
@@ -209,7 +264,7 @@ fetch_main :: proc "c" (arg: rawptr) -> rawptr {
 	last_gen: u64
 	for {
 		sync.lock(&st.mutex)
-		for !st.stop && (!st.active || st.failed || (st.length >= 0 && st.win_end >= st.length) || window_full(st)) {
+		for !st.stop && (!st.active || st.failed || (st.length >= 0 && st.win_end >= st.length) || (st.dash && st.seg_next >= len(st.seg_urls)) || window_full(st)) {
 			sync.cond_wait(&st.cond, &st.mutex)
 		}
 		if st.stop {
@@ -222,16 +277,24 @@ fetch_main :: proc "c" (arg: rawptr) -> rawptr {
 			last_gen = gen
 		}
 		start := st.win_end
-		url := strings.clone_from_cstring(st.url, context.temp_allocator)
+		base := i64(0)
+		url: string
+		if st.dash {
+			base = st.seg_base
+			url = strings.clone_from_cstring(st.seg_urls[st.seg_next], context.temp_allocator)
+		} else {
+			url = strings.clone_from_cstring(st.url, context.temp_allocator)
+		}
 		sync.unlock(&st.mutex)
 
 		t := Transfer {
 			st     = st,
 			gen    = gen,
+			base   = base,
 			pos    = start,
 			status = 0,
 		}
-		code := transfer(h, &t, url, start)
+		code := transfer(h, &t, url, start - base)
 		free_all(context.temp_allocator)
 
 		sync.lock(&st.mutex)
@@ -239,11 +302,20 @@ fetch_main :: proc "c" (arg: rawptr) -> rawptr {
 			sync.unlock(&st.mutex)
 			continue
 		}
-		ok := code == .E_OK && (t.status == 200 || t.status == 206 || t.status == 416)
-		if t.status == 416 && st.length < 0 {
+		ok := code == .E_OK && (t.status == 200 || t.status == 206 || (t.status == 416 && !st.dash))
+		if t.status == 416 && st.length < 0 && !st.dash {
 			st.length = st.win_end
 		}
-		if ok && st.length >= 0 && st.win_end >= st.length {
+		if ok && st.dash {
+			// A whole segment: on to the next. After the last the length is known.
+			failures = 0
+			st.seg_next += 1
+			st.seg_base = st.win_end
+			if st.seg_next == len(st.seg_urls) {
+				st.length = st.win_end
+				sync.atomic_sema_post(st.wake)
+			}
+		} else if ok && st.length >= 0 && st.win_end >= st.length {
 			failures = 0
 		} else if ok && t.pos > start {
 			// The server closed early, as after a long pause. Go on from here.
@@ -328,6 +400,13 @@ header_callback :: proc "c" (buffer: [^]byte, size: c.size_t, nitems: c.size_t, 
 	name, _, value := strings.partition(line, ":")
 	value = strings.trim_space(value)
 	st := t.st
+	if sync.atomic_load(&st.dash) {
+		// Segment sizes say nothing about the stream's length.
+		if strings.equal_fold(name, "content-length") && t.status == 200 {
+			t.skip = t.pos - t.base
+		}
+		return c.size_t(n)
+	}
 	if strings.equal_fold(name, "content-range") && t.status == 206 {
 		// bytes a-b/total
 		if slash := strings.last_index_byte(value, '/'); slash >= 0 {

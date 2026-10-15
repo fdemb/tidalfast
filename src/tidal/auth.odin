@@ -141,12 +141,11 @@ process_auth_token :: proc(s: ^Session, obj: json.Object, is_pkce: bool, epoch: 
 		s.expiry_time = time.time_add(time.now(), time.Duration(ji64(obj, "expires_in")) * time.Second)
 		set_owned(s, &s.refresh_token, jstr(obj, "refresh_token"))
 		set_owned(s, &s.token_type, jstr(obj, "token_type"))
-	}
-	finish_login(s) or_return
-	{
-		sync.guard(&s.mutex)
+		// Before finish_login: if that fails, the tokens are kept and a
+		// retry must still refresh them with the client they're for.
 		s.is_pkce = is_pkce
 	}
+	finish_login(s) or_return
 	notify_auth_change(s)
 	return nil
 }
@@ -359,10 +358,7 @@ login_pkce_complete :: proc(s: ^Session, url_redirect: string) -> (err: Error) {
 	// w_usr=WRITE_USR, r_usr=READ_USR_DATA, w_sub=WRITE_SUBSCRIPTION
 	SCOPE_DEFAULT :: "r_usr+w_usr+w_sub"
 
-	code, found := query_value(url_redirect, "code")
-	if !strings.contains(url_redirect, "https://") || !found {
-		return make_error(.Invalid_Argument, "The provided redirect url looks wrong", detail = url_redirect)
-	}
+	code := pkce_redirect_code(url_redirect, s.config.pkce_uri_redirect) or_return
 	form := []Param {
 		{"code", code},
 		{"client_id", s.config.client_id_pkce},
@@ -375,13 +371,38 @@ login_pkce_complete :: proc(s: ^Session, url_redirect: string) -> (err: Error) {
 	epoch := session_epoch(s)
 	resp, obj := post_form(s, s.config.api_oauth2_token, form, epoch, context.temp_allocator) or_return
 	if !http_ok(resp) {
-		log.errorf("Login failed: %s", body_prefix(resp, 500))
+		if !is_rate_limit(resp) {
+			log.errorf("Login failed: %s", body_prefix(resp, 500))
+		}
+		if resp.status == 400 || resp.status == 401 {
+			// invalid_grant: a code used twice, too old, or for another verifier.
+			return make_error(.Authentication, "TIDAL didn't accept this login. Log in again for a new address.", resp.status, detail = jstr(obj, "error"))
+		}
 		return http_error(resp)
 	}
 	if obj == nil {
 		return make_error(.Authentication, "Wrong one-time authorization code", resp.status)
 	}
 	return process_auth_token(s, obj, true, epoch)
+}
+
+// pkce_redirect_code takes the authorization code out of the address TIDAL
+// redirected the browser to after a PKCE login. The address must start
+// with redirect_uri, the one the login URL named. Spaces and quotes around
+// it, as a copy from a browser's address bar may bring, are dropped.
+pkce_redirect_code :: proc(url_redirect: string, redirect_uri: string) -> (code: string, err: Error) {
+	url := strings.trim(url_redirect, " \t\r\n\"'<>")
+	if !strings.has_prefix(url, redirect_uri) || (len(url) > len(redirect_uri) && url[len(redirect_uri)] != '?' && url[len(redirect_uri)] != '/') {
+		return "", make_error(.Invalid_Argument, "That isn't the address TIDAL sends you to after the login", detail = url)
+	}
+	if e, has_error := query_value(url, "error"); has_error {
+		return "", make_error(.Authentication, "The login was denied", detail = e)
+	}
+	c, found := query_value(url, "code")
+	if !found || c == "" {
+		return "", make_error(.Invalid_Argument, "The address has no login code in it", detail = url)
+	}
+	return c, nil
 }
 
 @(private = "file")

@@ -110,6 +110,7 @@ Auth :: struct {
 	country_code:  string,
 	locale:        string,
 	is_pkce:       bool,
+	client_id:     string, // the OAuth client the tokens are for, which refreshes them
 	user_id:       i64, // 0 when no user is loaded
 	user_kind:     User_Kind,
 	epoch:         u64, // the session's auth_epoch; session_restore ignores it
@@ -128,6 +129,13 @@ session_auth :: proc(s: ^Session, allocator := context.allocator) -> Auth {
 		locale        = strings.clone(s.locale, allocator),
 		is_pkce       = s.is_pkce,
 		epoch         = s.auth_epoch,
+	}
+	if s.is_pkce {
+		a.client_id = strings.clone(s.config.client_id_pkce, allocator)
+	} else if s.device_client_id != "" {
+		a.client_id = strings.clone(s.device_client_id, allocator)
+	} else {
+		a.client_id = strings.clone(s.config.client_id, allocator)
 	}
 	if u, ok := s.user.?; ok {
 		a.user_id = u.id
@@ -217,6 +225,24 @@ session_client_enable_hires :: proc(s: ^Session) {
 	}
 	s.config.client_id = s.config.client_id_pkce
 	s.config.client_secret = s.config.client_secret_pkce
+}
+
+// session_is_pkce says whether the login came from the PKCE client, which
+// TIDAL gives hi-res streams.
+session_is_pkce :: proc(s: ^Session) -> bool {
+	sync.guard(&s.mutex)
+	return s.is_pkce
+}
+
+// session_set_pkce_state replaces the PKCE verifier and client key that
+// config_make generated, so a login URL opened by one session can be
+// finished by another, as after a hot reload.
+session_set_pkce_state :: proc(s: ^Session, code_verifier, client_unique_key: string) {
+	sync.guard(&s.mutex)
+	a := vmem.arena_allocator(&s.arena)
+	s.config.code_verifier = strings.clone(code_verifier, a)
+	s.config.client_unique_key = strings.clone(client_unique_key, a)
+	s.config.code_challenge = pkce_challenge(code_verifier, a)
 }
 
 @(private)

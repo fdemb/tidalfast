@@ -3,8 +3,18 @@ package app
 // The login screen for TIDAL's device-code login: the app asks TIDAL for a
 // short code, the user enters it at link.tidal.com (or opens the link with
 // the code in it), and a worker polls until they approve.
+//
+// "Log in for hi-res" runs the PKCE login of TIDAL's Android client instead,
+// the only one TIDAL gives hi-res streams: the login page opens in the
+// browser, which ends on an "Oops" page whose address holds a one-time
+// code. The user copies that address and clicks "Paste the address", which
+// reads the clipboard. A worker trades the code for tokens. This stands in
+// for a text field until there is one.
 
 import "core:fmt"
+import "core:os"
+import "core:strings"
+import "core:sync"
 
 import "../mac"
 import "../render"
@@ -12,8 +22,8 @@ import "../text"
 import "../tidal"
 import "../ui"
 
-LOGIN_W :: 420
-LOGIN_H :: 360
+LOGIN_W :: 440
+LOGIN_H :: 380
 
 draw_login :: proc(s: ^State) {
 	bg := ui.box_make("", {.Draw_Background}, ui.fill(), ui.fill())
@@ -49,6 +59,10 @@ line :: proc(str: string, font: text.Font, size, height: f32, color: render.Colo
 login_card :: proc(s: ^State) {
 	l := &s.data.login
 	ui.spacer(ui.px(32))
+	if l.pkce != .Off {
+		pkce_card(s)
+		return
+	}
 	line("Log in to TIDAL", .Bold, 24, 34, TEXT)
 	ui.spacer(ui.px(12))
 
@@ -66,6 +80,8 @@ login_card :: proc(s: ^State) {
 			}
 			ui.spacer(ui.fill())
 		}
+		ui.spacer(ui.px(14))
+		hires_button(s)
 	case code != "":
 		line("On your phone or computer, go to", .Regular, 14, 20, SECONDARY)
 		line(small_str(&l.link.uri), .Semibold, 15, 22, ACCENT)
@@ -87,6 +103,8 @@ login_card :: proc(s: ^State) {
 		} else {
 			line("Waiting for you to approve this device…", .Regular, 12, 18, DIM)
 		}
+		ui.spacer(ui.px(14))
+		hires_button(s)
 	case:
 		line("Getting a code from TIDAL…", .Regular, 14, 20, SECONDARY)
 		if l.note.len > 0 {
@@ -109,4 +127,137 @@ pill_button :: proc(id, label: string, width: f32, background, color: render.Col
 	caption := ui.label(label, ui.fill(), ui.fill())
 	caption.text_align = .Center
 	return ui.signal(b).clicked
+}
+
+@(private = "file")
+hires_button :: proc(s: ^State) {
+	ui.row("", {}, ui.fill(), ui.px(32))
+	ui.spacer(ui.fill())
+	if pill_button("hires", "Log in for hi-res", 200, SURFACE_ACTIVE, TEXT) {
+		pkce_begin(&s.data)
+	}
+	ui.spacer(ui.fill())
+}
+
+@(private = "file")
+pkce_card :: proc(s: ^State) {
+	d := &s.data
+	l := &d.login
+	line("Log in for hi-res", .Bold, 24, 34, TEXT)
+	ui.spacer(ui.px(12))
+	if l.pkce == .Exchanging {
+		line("Logging you in…", .Regular, 14, 20, SECONDARY)
+		return
+	}
+	line("Log in on the TIDAL page in your browser.", .Regular, 14, 20, SECONDARY)
+	line("It ends on a page that says Oops.", .Regular, 14, 20, SECONDARY)
+	line("Copy that page's address, then come back here.", .Regular, 14, 20, SECONDARY)
+	ui.spacer(ui.px(18))
+	{
+		ui.row("", {}, ui.fill(), ui.px(40))
+		ui.spacer(ui.fill())
+		if pill_button("paste", "Paste the address", 220, ACCENT, PANEL) {
+			text := pkce_redirect_env()
+			if text == "" {
+				text = mac.clipboard_text(context.temp_allocator)
+			}
+			pkce_submit(d, text)
+		}
+		ui.spacer(ui.fill())
+	}
+	ui.spacer(ui.px(12))
+	note := small_str(&l.pkce_note)
+	line(note if note != "" else fmt.tprintf("The address starts with %s", d.session.config.pkce_uri_redirect), .Regular, 12, 18, PLAYBACK_ERROR if note != "" else DIM)
+	ui.spacer(ui.px(14))
+	{
+		ui.row("", {}, ui.fill(), ui.px(32))
+		ui.spacer(ui.fill())
+		if pill_button("reopen", "Open the page again", 180, SURFACE_ACTIVE, TEXT) {
+			pkce_begin(d)
+		}
+		ui.spacer(ui.px(10))
+		if pill_button("back", "Use a code instead", 180, SURFACE_ACTIVE, TEXT) {
+			l.pkce = .Off
+			l.pkce_note = {}
+			sync.atomic_store(&d.device_cancel, false)
+			if l.link.device_code.len > 0 {
+				request_login_poll(d)
+			} else {
+				request_login_code(d)
+			}
+		}
+		ui.spacer(ui.fill())
+	}
+}
+
+// pkce_begin opens TIDAL's login page for the PKCE client in the browser.
+// The verifier is kept in Data, so a hot reload doesn't lose it. The
+// device-code poll stops; going back starts it again.
+pkce_begin :: proc(d: ^Data) {
+	l := &d.login
+	if d.pkce_verifier.len == 0 {
+		// A fresh verifier for each login.
+		verifier, key := tidal.pkce_new_state(context.temp_allocator)
+		d.pkce_verifier = small(verifier)
+		d.pkce_key = small(key)
+	}
+	tidal.session_set_pkce_state(d.session, small_str(&d.pkce_verifier), small_str(&d.pkce_key))
+	sync.atomic_store(&d.device_cancel, true)
+	l.pkce = .Paste
+	l.pkce_note = {}
+	mac.open_url(tidal.pkce_login_url(d.session, context.temp_allocator))
+}
+
+// pkce_submit checks a pasted redirect address and sends it to a worker,
+// which trades its code for tokens.
+pkce_submit :: proc(d: ^Data, text: string) {
+	l := &d.login
+	url := strings.trim_space(text)
+	if _, err := tidal.pkce_redirect_code(url, d.session.config.pkce_uri_redirect); err != nil {
+		l.pkce = .Paste
+		l.pkce_note = small("The clipboard is empty. Copy the Oops page's address first." if url == "" else tidal.error_string(err, context.temp_allocator))
+		return
+	}
+	if len(url) > len(d.pkce_redirect) {
+		l.pkce = .Paste
+		l.pkce_note = small("That address is too long to be TIDAL's.")
+		return
+	}
+	sync.lock(&d.pkce_mutex)
+	d.pkce_len = copy(d.pkce_redirect[:], url)
+	sync.unlock(&d.pkce_mutex)
+	sync.atomic_store(&d.device_cancel, true)
+	l.pkce = .Exchanging
+	l.pkce_note = {}
+	if !push_job(d, {kind = .Login_Pkce}) {
+		l.pkce = .Paste
+		l.pkce_note = small("Busy. Try again.")
+	}
+}
+
+// pkce_done takes a Login_Pkce result.
+pkce_done :: proc(d: ^Data, res: ^Result, failed: bool) {
+	l := &d.login
+	if !failed {
+		d.login = {}
+		d.pkce_verifier, d.pkce_key = {}, {}
+		d.account = .Signed_In
+		request_playlists(d)
+		return
+	}
+	// The next try opens the login page again, with a new verifier.
+	l.pkce = .Paste
+	l.pkce_note = res.message
+	d.pkce_verifier, d.pkce_key = {}, {}
+}
+
+// pkce_redirect_env is TIDALFAST_PKCE_REDIRECT in debug builds: what
+// "Paste the address" uses instead of the clipboard, and, with no saved
+// login, finishes the hi-res login with at start, for testing against
+// tests/mock_tidal.
+pkce_redirect_env :: proc() -> string {
+	if !ODIN_DEBUG {
+		return ""
+	}
+	return os.get_env("TIDALFAST_PKCE_REDIRECT", context.temp_allocator)
 }

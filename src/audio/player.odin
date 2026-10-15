@@ -23,6 +23,20 @@ package audio
 // volume) that never block on the network or the device, and reads a
 // Status snapshot.
 //
+// A DASH track (TIDAL's hi-res) arrives as fragmented MP4 segments. The
+// fetch thread downloads them in order into the same kind of window, and
+// the decoder sees the FLAC stream inside: "fLaC" and the metadata blocks
+// from the initialization segment, then the frames from each fragment
+// (fmp4.odin). A seek starts again at the segment holding the target.
+//
+// Output goes through miniaudio, which plays at whatever rate the device
+// runs at and converts. In bit-perfect mode it goes to the CoreAudio HAL
+// instead (coreaudio.odin): the device is switched to the track's rate,
+// ReplayGain and the volume are skipped, and the samples reach the device
+// as they were decoded. A rate change between tracks lets the ring play
+// out, re-clocks the device and starts again: a short gap. Tracks at the
+// same rate stay gapless.
+//
 // All of it runs code from the app dylib, so the app destroys the player
 // before a hot reload and makes a new one after. See src/app/player.odin.
 
@@ -62,19 +76,36 @@ foreign libsystem {
 Source_Kind :: enum u8 {
 	None,
 	Flac, // a FLAC file over HTTP
+	Dash, // FLAC in fragmented MP4 segments over HTTP
 	Tone, // a sine wave, for TIDALFAST_FAKE
+}
+
+// Segment is a DASH media segment: its URL and its first sample, in the
+// source's timescale.
+Segment :: struct {
+	url:   string,
+	start: i64,
 }
 
 // Source is one track for the player. The app picks a serial for each,
 // unique and increasing; the status reports serials so the app can tell
 // which track is audible.
 Source :: struct {
-	kind:    Source_Kind,
-	serial:  u64,
-	url:     string, // Flac; copied
-	gain:    f32, // linear, ReplayGain already worked out
-	seconds: f64, // the length the app knows, used until the file says
-	tone_hz: f32,
+	kind:      Source_Kind,
+	serial:    u64,
+	url:       string, // Flac: the file; Dash: the initialization segment; copied
+	segments:  []Segment, // Dash; copied
+	timescale: i64, // Dash: units of Segment.start per second
+	dash_end:  i64, // Dash: the end of the last segment, in timescale units
+	gain:      f32, // linear, ReplayGain already worked out
+	seconds:   f64, // the length the app knows, used until the file says
+	tone_hz:   f32,
+}
+
+// Output is how the player reaches the device.
+Output :: struct {
+	bit_perfect: bool, // HAL output at the track's rate, no gain or volume
+	hog:         bool, // with bit_perfect: take the device for this app alone
 }
 
 Play_State :: enum u8 {
@@ -96,6 +127,17 @@ Status :: struct {
 	next_serial: u64, // the source set_next gave, 0 for none
 	error:       Error_Info,
 	underruns:   u64,
+	bits:        int, // the audible source's bit depth, 0 if unknown
+	device:      Device_Info,
+}
+
+// Device_Info describes the open output.
+Device_Info :: struct {
+	bit_perfect: bool, // the HAL path is in use: no conversion, gain or volume
+	hogged:      bool,
+	rate:        int, // the device's rate, 0 when closed
+	bits:        int, // the physical format's bits per sample
+	float:       bool, // the physical format is floating point
 }
 
 Error_Info :: struct {
@@ -112,7 +154,7 @@ error_text :: proc(e: ^Error_Info) -> string {
 @(private)
 Slot :: struct {
 	player:      ^Player,
-	source:      Source,
+	source:      Source, // its url and segments aren't kept: the stream has them
 	stream:      Stream,
 	decoder:     ^ma.decoder, // heap, nil when closed
 	vpos:        i64, // dr_flac's position in the stream it sees: header, then frames from frame_off
@@ -121,10 +163,32 @@ Slot :: struct {
 	discard:     i64, // frames to drop before output, after a seek
 	rate:        int,
 	channels:    int,
+	bits:        int,
 	total:       i64,
 	finished:    bool, // nothing more to decode
 	interrupted: bool,
 	failed:      bool,
+	dash:        Dash_Demux,
+}
+
+// Dash_Demux follows a DASH slot's byte stream box by box and hands the
+// decoder the FLAC frames in it. Offsets are the stream's, which start at
+// 0 at the segment the stream last started from.
+@(private)
+Dash_Demux :: struct {
+	starts:      [dynamic]i64, // each media segment's first sample, in the source's timescale; heap
+	init:        Mp4_Init, // flac_head is in stream.head instead
+	pos:         i64, // the next box header
+	moof:        i64, // where the current fragment's moof starts
+	covered:     i64, // where its samples end
+	samples:     [dynamic]Mp4_Sample, // the current fragment's; heap
+	sample:      int, // the next one to read
+	consumed:    i64, // bytes of it read
+	fpos:        i64, // frame bytes handed out since the decoder opened
+	after_init:  bool, // the stream is right after the init segment, at the first media segment
+	target:      i64, // the sample the decoder was opened for
+	synced:      bool, // the first fragment's tfdt has set next_sample
+	box:         [dynamic]u8, // a moof being read; heap
 }
 
 @(private)
@@ -137,6 +201,7 @@ Commands :: struct {
 	seek_id:      u32,
 	next:         Maybe(Source), // kind None clears it
 	paused:       Maybe(bool),
+	output:       Maybe(Output),
 	quit:         bool,
 	seek_tick:    u64, // mach_absolute_time
 }
@@ -161,10 +226,18 @@ Player :: struct {
 	device:          ^ma.device,
 	null_output:     bool, // miniaudio's null backend: real-time callbacks, no sound
 	null_ctx:        ^ma.context_type, // heap, for null_output
+	output:          Output,
+	hal:             Hal,
+	hal_scratch:     []f32, // for devices whose buffers don't match the ring's layout
+	using_hal:       bool, // the open device is hal, not miniaudio's
 	device_open:     bool,
 	device_running:  bool,
 	device_rate:     int,
 	device_channels: int,
+	device_bits:     int,
+	draining:        bool, // a format change waits for the ring to play out
+	reclock_from:    u64, // mach_absolute_time of the old device's last frames, at a re-clock
+	reclock_rates:   [2]int,
 	end_pushed:      bool,
 	scratch:         []f32,
 	ui_tick:         i64,
@@ -187,6 +260,9 @@ Player :: struct {
 	// stopped), read by anyone. pub_seq is odd while pub_mark and pub_sample
 	// change; see published.
 	cb_gain:         f32,
+	bypass:          bool, // bit-perfect: the callback leaves the volume out
+	first_tick:      u64, // mach_absolute_time of the first callback with frames since the device opened
+	last_tick:       u64, // and of the latest
 	pub_seq:         u64,
 	pub_mark:        u64, // marks adopted so far; the current one is pub_mark-1
 	pub_sample:      i64,
@@ -206,14 +282,16 @@ Player :: struct {
 // 32-bit float WAV. window is each track's download window in bytes. With
 // null_output the callback runs on miniaudio's null device, in real time
 // but silent, for tests.
-create :: proc(wake_ui: proc "c" (), volume: f32, capture_path := "", window := STREAM_WINDOW, null_output := false) -> ^Player {
+create :: proc(wake_ui: proc "c" (), volume: f32, capture_path := "", window := STREAM_WINDOW, null_output := false, output := Output{}) -> ^Player {
 	heap := runtime.heap_allocator()
 	p := new(Player, heap)
 	p.wake_ui = wake_ui
 	p.null_output = null_output
+	p.output = output
 	p.capture_fd = -1
 	set_volume(p, volume)
 	p.scratch = make([]f32, CHUNK * 8, heap)
+	p.hal_scratch = make([]f32, HAL_MAX_FRAMES * 8, heap)
 	p.device = new(ma.device, heap)
 	if capture_path != "" {
 		p.capture_fd = posix.open(strings.clone_to_cstring(capture_path, context.temp_allocator), {.WRONLY, .CREAT, .TRUNC}, {.IRUSR, .IWUSR, .IRGRP, .IROTH})
@@ -225,6 +303,9 @@ create :: proc(wake_ui: proc "c" (), volume: f32, capture_path := "", window := 
 	}
 	for &sl in p.slots {
 		sl.player = p
+		sl.dash.starts = make([dynamic]i64, heap)
+		sl.dash.samples = make([dynamic]Mp4_Sample, heap)
+		sl.dash.box = make([dynamic]u8, heap)
 		stream_init(&sl.stream, &p.sema, max(window, 64 << 10))
 	}
 	posix.pthread_create(&p.thread, nil, decode_main, p)
@@ -247,10 +328,14 @@ destroy :: proc(p: ^Player) {
 	for &sl in p.slots {
 		slot_close(&sl)
 		stream_destroy(&sl.stream)
+		delete(sl.dash.starts)
+		delete(sl.dash.samples)
+		delete(sl.dash.box)
 	}
 	commands_free(&p.cmd)
-	delete(p.pending_next.url, heap)
+	source_free(&p.pending_next)
 	delete(p.scratch, heap)
+	delete(p.hal_scratch, heap)
 	delete(p.pcm_data, heap)
 	delete(p.capture.data, heap)
 	free(p.device, heap)
@@ -298,7 +383,7 @@ seek :: proc(p: ^Player, serial: u64, sample: i64) -> u32 {
 set_next :: proc(p: ^Player, source: Source) {
 	sync.lock(&p.cmd_mutex)
 	if old, ok := p.cmd.next.?; ok {
-		delete(old.url, runtime.heap_allocator())
+		source_free(&old)
 	}
 	p.cmd.next = source_clone(source)
 	sync.unlock(&p.cmd_mutex)
@@ -308,6 +393,15 @@ set_next :: proc(p: ^Player, source: Source) {
 set_paused :: proc(p: ^Player, paused: bool) {
 	sync.lock(&p.cmd_mutex)
 	p.cmd.paused = paused
+	sync.unlock(&p.cmd_mutex)
+	post(p)
+}
+
+// set_output switches between miniaudio and bit-perfect output. The
+// current track goes on from where it is, through the new output.
+set_output :: proc(p: ^Player, o: Output) {
+	sync.lock(&p.cmd_mutex)
+	p.cmd.output = o
 	sync.unlock(&p.cmd_mutex)
 	post(p)
 }
@@ -381,21 +475,40 @@ post :: proc(p: ^Player) {
 	sync.atomic_sema_post(&p.sema)
 }
 
-@(private = "file")
+// source_clone copies s with its URL and segments on the heap.
 source_clone :: proc(s: Source) -> Source {
+	heap := runtime.heap_allocator()
 	c := s
-	c.url = strings.clone(s.url, runtime.heap_allocator())
+	c.url = strings.clone(s.url, heap)
+	c.segments = nil
+	if len(s.segments) > 0 {
+		c.segments = make([]Segment, len(s.segments), heap)
+		for seg, i in s.segments {
+			c.segments[i] = {strings.clone(seg.url, heap), seg.start}
+		}
+	}
 	return c
+}
+
+// source_free frees what source_clone copied.
+source_free :: proc(s: ^Source) {
+	heap := runtime.heap_allocator()
+	delete(s.url, heap)
+	for seg in s.segments {
+		delete(seg.url, heap)
+	}
+	delete(s.segments, heap)
+	s.url = ""
+	s.segments = nil
 }
 
 @(private = "file")
 commands_free :: proc(c: ^Commands) {
-	heap := runtime.heap_allocator()
-	if s, ok := c.play.?; ok {
-		delete(s.url, heap)
+	if s, ok := &c.play.?; ok {
+		source_free(s)
 	}
-	if s, ok := c.next.?; ok {
-		delete(s.url, heap)
+	if s, ok := &c.next.?; ok {
+		source_free(s)
 	}
 	c.play = nil
 	c.next = nil
@@ -424,12 +537,18 @@ decode_main :: proc "c" (arg: rawptr) -> rawptr {
 			if p.device_rate > 0 {
 				wait = min(wait, time.Duration(f64(LOW_WATER) / f64(p.device_rate) * f64(time.Second)))
 			}
+			// At a format change, come back as soon as the ring has played
+			// out, so the gap is no longer than it must be.
+			if p.draining && p.device_rate > 0 {
+				left := f64(ring_buffered(&p.pcm)) / f64(p.device_rate)
+				wait = min(wait, time.Duration(left * f64(time.Second)) + time.Millisecond)
+			}
 			sync.atomic_sema_wait_with_timeout(&p.sema, wait)
 		} else {
 			sync.atomic_sema_wait(&p.sema)
 		}
 	}
-	device_close(p)
+	device_close(p, restore = true)
 	if p.null_ctx != nil {
 		ma.context_uninit(p.null_ctx)
 		free(p.null_ctx, runtime.heap_allocator())
@@ -450,7 +569,7 @@ run_commands :: proc(p: ^Player, heavy: bool) -> bool {
 	}
 	sync.lock(&p.cmd_mutex)
 	c := &p.cmd
-	if !heavy && (c.quit || c.play != nil || c.seek != nil) {
+	if !heavy && (c.quit || c.play != nil || c.seek != nil || c.output != nil) {
 		sync.unlock(&p.cmd_mutex)
 		return false
 	}
@@ -462,22 +581,25 @@ run_commands :: proc(p: ^Player, heavy: bool) -> bool {
 	seek_serial, seek_id, seek_tick := c.seek_serial, c.seek_id, c.seek_tick
 	next, has_next := c.next.?
 	paused, has_paused := c.paused.?
-	c.play, c.seek, c.next, c.paused = nil, nil, nil, nil
+	output, has_output := c.output.?
+	c.play, c.seek, c.next, c.paused, c.output = nil, nil, nil, nil, nil
 	sync.unlock(&p.cmd_mutex)
 
-	heap := runtime.heap_allocator()
 	if quit {
-		delete(play_src.url, heap)
-		delete(next.url, heap)
+		source_free(&play_src)
+		source_free(&next)
 		return false
+	}
+	if has_output && output != p.output {
+		do_set_output(p, output)
 	}
 	if has_play {
 		do_play(p, play_src, play_at, play_paused)
-		delete(play_src.url, heap)
+		source_free(&play_src)
 	}
 	if has_next {
 		do_set_next(p, next)
-		delete(next.url, heap)
+		source_free(&next)
 	}
 	if has_seek {
 		do_seek(p, seek_serial, seek_to, seek_id, seek_tick)
@@ -509,19 +631,12 @@ do_play :: proc(p: ^Player, src: Source, at: i64, paused: bool) {
 		p.cur = 1 - p.cur
 	} else {
 		for &sl in p.slots {
-			slot_close(&sl)
-			stream_clear(&sl.stream)
-			sl.source = {}
+			slot_assign(&sl, {})
 		}
-		sl := &p.slots[p.cur]
-		sl.source = src
-		sl.source.url = ""
-		if src.kind == .Flac {
-			stream_open(&sl.stream, src.url)
-		}
+		slot_assign(&p.slots[p.cur], src)
 	}
 	p.prev_alive = false
-	delete(p.pending_next.url, runtime.heap_allocator())
+	source_free(&p.pending_next)
 	p.pending_next = {}
 	p.has_pending = false
 	p.paused = paused
@@ -553,11 +668,38 @@ do_play :: proc(p: ^Player, src: Source, at: i64, paused: bool) {
 	p.wake_ui()
 }
 
+// slot_assign gives sl a new source, or none, and starts its download.
+@(private = "file")
+slot_assign :: proc(sl: ^Slot, src: Source) {
+	slot_close(sl)
+	stream_clear(&sl.stream)
+	sl.source = src
+	sl.source.url = ""
+	sl.source.segments = nil
+	sl.finished = false
+	sl.next_sample = 0
+	sl.discard = 0
+	sl.rate, sl.channels, sl.bits, sl.total = 0, 0, 0, 0
+	clear(&sl.dash.starts)
+	switch src.kind {
+	case .Flac:
+		stream_open(&sl.stream, src.url)
+	case .Dash:
+		urls := make([]string, len(src.segments) + 1, context.temp_allocator)
+		urls[0] = src.url
+		for seg, i in src.segments {
+			urls[i + 1] = seg.url
+			append(&sl.dash.starts, seg.start)
+		}
+		stream_open_segments(&sl.stream, urls)
+	case .None, .Tone:
+	}
+}
+
 @(private = "file")
 do_set_next :: proc(p: ^Player, src: Source) {
-	heap := runtime.heap_allocator()
 	if p.prev_alive {
-		delete(p.pending_next.url, heap)
+		source_free(&p.pending_next)
 		p.pending_next = source_clone(src)
 		p.has_pending = true
 		return
@@ -566,20 +708,25 @@ do_set_next :: proc(p: ^Player, src: Source) {
 	if other.source.serial == src.serial && src.kind != .None {
 		return
 	}
-	slot_close(other)
-	stream_clear(&other.stream)
-	other.source = src
-	other.source.url = ""
-	other.finished = false
-	other.next_sample = 0
-	other.discard = 0
-	if src.kind == .Flac {
-		stream_open(&other.stream, src.url)
-	}
+	slot_assign(other, src)
 	sync.lock(&p.status_mutex)
 	p.st.next_serial = src.serial
 	p.st.want_next = false
 	sync.unlock(&p.status_mutex)
+}
+
+// do_set_output closes the device, which puts it back as it was if bit-
+// perfect output had changed it, and plays on from the audible position:
+// what's in the ring went through the old output's gain.
+@(private = "file")
+do_set_output :: proc(p: ^Player, o: Output) {
+	m, sample := published(p)
+	p.output = o
+	device_close(p, restore = true)
+	if m.serial != 0 && !m.end {
+		do_seek(p, m.serial, sample, m.seek_id, 0)
+	}
+	p.wake_ui()
 }
 
 @(private = "file")
@@ -635,12 +782,12 @@ step :: proc(p: ^Player) -> bool {
 	if sl.finished {
 		return advance(p)
 	}
-	if sl.source.kind == .Flac && sl.decoder == nil {
+	if (sl.source.kind == .Flac || sl.source.kind == .Dash) && sl.decoder == nil {
 		if !slot_open(p, sl) {
 			return true // a command interrupted it, or it failed and advance comes next
 		}
 	} else if sl.source.kind == .Tone && sl.rate == 0 {
-		sl.rate, sl.channels = 44100, 2
+		sl.rate, sl.channels, sl.bits = 44100, 2, 16
 		sl.total = i64(sl.source.seconds * 44100)
 	}
 	if !format_ready(p, sl) {
@@ -684,21 +831,33 @@ advance :: proc(p: ^Player) -> bool {
 	return false
 }
 
-// format_ready opens the device for the slot's rate and channels. A change
-// waits until the ring has played out, then reopens: a short gap.
+// format_ready opens the device for the slot's rate and channels, and in
+// bit-perfect mode its bit depth. A change waits until the ring has played
+// out, then reopens: a short gap.
 @(private = "file")
 format_ready :: proc(p: ^Player, sl: ^Slot) -> bool {
-	if p.device_open && p.device_rate == sl.rate && p.device_channels == sl.channels {
+	bits := sl.bits if p.output.bit_perfect else p.device_bits
+	if p.device_open && p.device_rate == sl.rate && p.device_channels == sl.channels && p.device_bits == bits {
 		return true
 	}
 	if p.device_running && ring_buffered(&p.pcm) > 0 {
-		return false // the TICK wait comes back to check
+		p.draining = true
+		return false // decode_main's wait comes back once it has played out
 	}
+	p.draining = false
 	// Paused at the change: what's left of the old track would play at the
 	// wrong rate, so it goes.
 	ring_flush(&p.pcm)
+	if p.device_open && p.using_hal {
+		p.reclock_from = sync.atomic_load(&p.last_tick)
+		p.reclock_rates = {p.device_rate, sl.rate}
+	}
 	device_close(p)
-	if !device_open(p, sl.rate, sl.channels) {
+	opened := device_open(p, sl.rate, sl.channels, sl.bits)
+	if !p.using_hal {
+		p.reclock_from = 0
+	}
+	if !opened {
 		slot_fail(p, sl, 0, "couldn't open the audio device")
 		return false
 	}
@@ -713,14 +872,23 @@ update_device :: proc(p: ^Player) {
 	if !p.device_open {
 		return
 	}
-	want := !p.paused && !current_mark(p).end
+	// The audible mark may be the end while a newer one, a track played
+	// just as the queue ran out, waits in the ring: that keeps it going.
+	newer := sync.atomic_load(&p.marks.write) != sync.atomic_load(&p.pub_mark)
+	want := !p.paused && (!current_mark(p).end || newer)
 	if want && !p.device_running {
 		ring_skip_flush(&p.pcm)
-		if ma.device_start(p.device) == .SUCCESS {
+		if p.using_hal {
+			p.device_running = hal_start(&p.hal, hal_io_proc, p)
+		} else if ma.device_start(p.device) == .SUCCESS {
 			p.device_running = true
 		}
 	} else if !want && p.device_running {
-		ma.device_stop(p.device)
+		if p.using_hal {
+			hal_stop(&p.hal)
+		} else {
+			ma.device_stop(p.device)
+		}
 		p.device_running = false
 		bookkeep_stopped(p)
 	}
@@ -750,7 +918,7 @@ after_step :: proc(p: ^Player) {
 			p.pending_next = {}
 			p.has_pending = false
 			do_set_next(p, pn)
-			delete(pn.url, runtime.heap_allocator())
+			source_free(&pn)
 		}
 	}
 	if m.end && p.device_running && ring_buffered(&p.pcm) == 0 {
@@ -769,11 +937,20 @@ after_step :: proc(p: ^Player) {
 	if cur.rate > 0 && cur.source.serial == m.serial {
 		p.st.rate = cur.rate
 		p.st.total = cur.total
+		p.st.bits = cur.bits
 		p.st_serial = m.serial
 	}
 	sync.unlock(&p.status_mutex)
 
 	capture_drain(p)
+
+	if p.reclock_from != 0 {
+		if first := sync.atomic_load(&p.first_tick); first != 0 && first > p.reclock_from {
+			p.wake_ui()
+			fmt.eprintfln("audio: re-clocked %d -> %d Hz: %.1f ms from the last callback at the old rate to the first at the new; the rate change took %.1f ms", p.reclock_rates[0], p.reclock_rates[1], ticks_ms(first - p.reclock_from), p.hal.settle_ms)
+			p.reclock_from = 0
+		}
+	}
 
 	if id, d, ok := seek_latency(p); ok && id != p.seek_logged {
 		p.seek_logged = id
@@ -809,6 +986,9 @@ slot_fail :: proc(p: ^Player, sl: ^Slot, http_status: int, msg: string) {
 // command or failed (then finished is set).
 @(private = "file")
 slot_open :: proc(p: ^Player, sl: ^Slot) -> bool {
+	if sl.source.kind == .Dash {
+		return slot_open_dash(p, sl)
+	}
 	st := &sl.stream
 	sl.failed = false
 	if !st.has_header {
@@ -819,6 +999,7 @@ slot_open :: proc(p: ^Player, sl: ^Slot) -> bool {
 	h := &st.header
 	sl.rate = h.info.sample_rate
 	sl.channels = h.info.channels
+	sl.bits = h.info.bits
 	sl.total = h.info.total_samples
 	if sl.total == 0 {
 		sl.total = i64(sl.source.seconds * f64(sl.rate))
@@ -838,7 +1019,12 @@ slot_open :: proc(p: ^Player, sl: ^Slot) -> bool {
 	sl.discard = target - frame_sample
 	sl.vpos = 0
 	stream_restart(st, frame_off)
+	return decoder_open(p, sl)
+}
 
+// decoder_open starts dr_flac on the slot's stream as vread presents it.
+@(private = "file")
+decoder_open :: proc(p: ^Player, sl: ^Slot) -> bool {
 	dec := new(ma.decoder, runtime.heap_allocator())
 	cfg := ma.decoder_config_init(.f32, 0, 0)
 	cfg.encodingFormat = .flac
@@ -855,6 +1041,244 @@ slot_open :: proc(p: ^Player, sl: ^Slot) -> bool {
 	}
 	sl.decoder = dec
 	return true
+}
+
+// slot_open_dash reads the initialization segment the first time, then
+// starts the decoder at the media segment holding next_sample. The first
+// fragment's tfdt says exactly which sample its first frame is, and the
+// frames before the target are dropped.
+@(private = "file")
+slot_open_dash :: proc(p: ^Player, sl: ^Slot) -> bool {
+	st := &sl.stream
+	dm := &sl.dash
+	sl.failed = false
+	if !st.has_header {
+		if !read_init(p, sl) {
+			return false
+		}
+	}
+	h := &st.header
+	sl.rate = h.info.sample_rate
+	sl.channels = h.info.channels
+	sl.bits = h.info.bits
+	sl.total = h.info.total_samples
+	if sl.total == 0 && sl.source.timescale > 0 {
+		sl.total = sl.source.dash_end * i64(sl.rate) / sl.source.timescale
+	}
+	if sl.total == 0 {
+		sl.total = i64(sl.source.seconds * f64(sl.rate))
+	}
+	target := clamp(sl.next_sample, 0, max(sl.total, 0))
+	k := dash_segment_index(dm.starts[:], sl.source.timescale, sl.rate, target)
+	start := dash_segment_sample(dm.starts[:], sl.source.timescale, sl.rate, k)
+	if !(dm.after_init && k == 0) {
+		stream_restart_segment(st, k + 1) // url 0 is the initialization segment
+		dm.pos = 0
+	}
+	dm.after_init = false
+	dm.moof, dm.covered, dm.sample, dm.consumed, dm.fpos = 0, 0, 0, 0, 0
+	clear(&dm.samples)
+	dm.target = target
+	dm.synced = false
+	sl.next_sample = start
+	sl.discard = target - start
+	sl.vpos = 0
+	return decoder_open(p, sl)
+}
+
+// read_init reads the initialization segment at the start of a freshly
+// opened DASH stream and keeps "fLaC" and the metadata blocks from its dfLa
+// as the slot's header.
+@(private = "file")
+read_init :: proc(p: ^Player, sl: ^Slot) -> bool {
+	st := &sl.stream
+	dm := &sl.dash
+	heap := runtime.heap_allocator()
+	buf := make([dynamic]u8, 0, 16 << 10, heap)
+	defer delete(buf)
+	chunk: [4096]u8
+	for {
+		n, res := stream_read(st, i64(len(buf)), chunk[:], interrupt, p)
+		append(&buf, ..chunk[:n])
+		#partial switch res {
+		case .Interrupted:
+			return false
+		case .Failed:
+			status, msg := stream_error(st, chunk[:96])
+			slot_fail(p, sl, status, fmt.tprintf("download failed: %s", msg))
+			return false
+		}
+		init, used, ist := parse_mp4_init(buf[:], heap)
+		switch ist {
+		case .Ok:
+			head := init.flac_head
+			init.flac_head = nil
+			if parse_flac_header(head, &st.header) != .Ok {
+				delete(head, heap)
+				slot_fail(p, sl, 0, "the FLAC header in the MP4 is broken")
+				return false
+			}
+			// As in read_header: the decoder mustn't stop at a sample count
+			// counted from wherever it starts.
+			s := st.header.streaminfo
+			head[s + 13] &= 0xf0
+			head[s + 14], head[s + 15], head[s + 16], head[s + 17] = 0, 0, 0, 0
+			st.head = head
+			st.has_header = true
+			dm.init = init
+			dm.pos = i64(used)
+			dm.after_init = true
+			return true
+		case .Invalid:
+			slot_fail(p, sl, 0, "not FLAC in MP4")
+			return false
+		case .Need_More:
+			if res == .Eof {
+				slot_fail(p, sl, 0, "the stream ends inside its initialization segment")
+				return false
+			}
+		}
+	}
+}
+
+// demux_read fills dst with the FLAC frames of the slot's fragments, in
+// order: it reads each moof for the sizes of its samples and copies them
+// out of the mdat that follows. Other boxes are skipped.
+@(private = "file")
+demux_read :: proc(p: ^Player, sl: ^Slot, dst: []u8) -> (n: int, res: Read_Result) {
+	st := &sl.stream
+	dm := &sl.dash
+	for n < len(dst) {
+		if dm.sample < len(dm.samples) {
+			smp := dm.samples[dm.sample]
+			want := min(i64(len(dst) - n), i64(smp.size) - dm.consumed)
+			got, r := stream_read(st, dm.moof + smp.offset + dm.consumed, dst[n:n + int(want)], interrupt, p)
+			n += got
+			dm.consumed += i64(got)
+			dm.fpos += i64(got)
+			if dm.consumed == i64(smp.size) {
+				dm.sample += 1
+				dm.consumed = 0
+			}
+			if r != .Ok {
+				return n, r
+			}
+			continue
+		}
+		if len(dm.samples) > 0 {
+			clear(&dm.samples)
+			dm.sample = 0
+			dm.pos = max(dm.pos, dm.covered)
+		}
+		box, r := read_box_header(p, sl, dm.pos)
+		if r != .Ok {
+			return n, r
+		}
+		size := box.size
+		switch {
+		case box.kind == mp4_fourcc("moof"):
+			if size < 0 || size > MP4_MAX_BOX {
+				slot_fail(p, sl, 0, "a moof box is too big")
+				return n, .Failed
+			}
+			resize(&dm.box, int(size))
+			got, rr := stream_read(st, dm.pos, dm.box[:], interrupt, p)
+			if rr != .Ok {
+				return n, rr
+			}
+			assert(got == int(size))
+			frag, fst := parse_mp4_moof(dm.box[:], &dm.init, &dm.samples)
+			if fst != .Ok {
+				slot_fail(p, sl, 0, "a moof box is broken")
+				return n, .Failed
+			}
+			dm.moof = dm.pos
+			dm.pos += size
+			dm.covered = dm.pos
+			for smp in dm.samples {
+				dm.covered = max(dm.covered, dm.moof + smp.offset + i64(smp.size))
+			}
+			if !dm.synced && frag.has_base_time && dm.init.timescale > 0 {
+				// The fragment says which sample it starts at.
+				first := i64(frag.base_time) * i64(sl.rate) / i64(dm.init.timescale)
+				if first <= dm.target {
+					sl.next_sample = first
+					sl.discard = dm.target - first
+				}
+			}
+			dm.synced = true
+		case box.kind == mp4_fourcc("mdat") && dm.pos >= dm.covered:
+			// No moof described it: take the whole payload as frames.
+			if size < 0 {
+				size = max(i64) / 2
+			}
+			if size - i64(box.header) > i64(max(u32)) {
+				slot_fail(p, sl, 0, "an mdat box is too big")
+				return n, .Failed
+			}
+			dm.moof = dm.pos
+			append(&dm.samples, Mp4_Sample{offset = i64(box.header), size = u32(size - i64(box.header))})
+			dm.pos += size
+			dm.covered = dm.pos
+			dm.synced = true
+		case:
+			if size < 0 {
+				return n, .Eof
+			}
+			dm.pos += size
+		}
+	}
+	return n, .Ok
+}
+
+// read_box_header reads the box header at offset, Eof if the stream ends
+// there.
+@(private = "file")
+read_box_header :: proc(p: ^Player, sl: ^Slot, offset: i64) -> (box: Mp4_Box, res: Read_Result) {
+	hdr: [16]u8
+	got, r := stream_read(&sl.stream, offset, hdr[:8], interrupt, p)
+	if r == .Eof || (r == .Ok && got < 8) {
+		return {}, .Eof
+	}
+	if r != .Ok {
+		return {}, r
+	}
+	b, bst := mp4_box_header(hdr[:8])
+	if bst == .Need_More {
+		got, r = stream_read(&sl.stream, offset + 8, hdr[8:16], interrupt, p)
+		if r != .Ok {
+			return {}, .Eof if r == .Eof else r
+		}
+		b, bst = mp4_box_header(hdr[:])
+	}
+	if bst != .Ok {
+		slot_fail(p, sl, 0, "broken MP4 box")
+		return {}, .Failed
+	}
+	return b, .Ok
+}
+
+// dash_segment_index is the media segment holding sample target: the last
+// whose start, given in timescale units, is at or before it.
+dash_segment_index :: proc(starts: []i64, timescale: i64, rate: int, target: i64) -> int {
+	lo, hi := 0, len(starts) - 1
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		if dash_segment_sample(starts, timescale, rate, mid) <= target {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	return max(lo, 0)
+}
+
+// dash_segment_sample is segment k's first sample at rate.
+dash_segment_sample :: proc(starts: []i64, timescale: i64, rate: int, k: int) -> i64 {
+	if k < 0 || k >= len(starts) || timescale <= 0 {
+		return 0
+	}
+	return starts[k] * i64(rate) / timescale
 }
 
 @(private = "file")
@@ -992,7 +1416,35 @@ vread :: proc "c" (dec: ^ma.decoder, out: rawptr, n: c.size_t, read: ^c.size_t) 
 		done += k
 		sl.vpos += i64(k)
 	}
-	if done < len(dst) {
+	if done < len(dst) && sl.source.kind == .Dash {
+		// The frames come out of the fragments in order, so the decoder can
+		// only go on from where it is, or skip ahead.
+		dm := &sl.dash
+		res := Read_Result.Ok
+		for dm.fpos < sl.vpos - head && res == .Ok {
+			skip: [4096]u8
+			_, res = demux_read(sl.player, sl, skip[:min(i64(len(skip)), sl.vpos - head - dm.fpos)])
+		}
+		if dm.fpos > sl.vpos - head {
+			fmt.eprintfln("audio: the decoder went back in a DASH stream (%d -> %d)", dm.fpos, sl.vpos - head)
+			res = .Failed
+		}
+		got := 0
+		if res == .Ok {
+			got, res = demux_read(sl.player, sl, dst[done:])
+		}
+		done += got
+		sl.vpos += i64(got)
+		#partial switch res {
+		case .Interrupted:
+			sl.interrupted = true
+		case .Failed:
+			if !sl.failed {
+				status, msg := stream_error(st, make([]u8, 96, context.temp_allocator))
+				slot_fail(sl.player, sl, status, fmt.tprintf("download failed: %s", msg))
+			}
+		}
+	} else if done < len(dst) {
 		got, res := stream_read(st, sl.frame_off + sl.vpos - head, dst[done:], interrupt, sl.player)
 		done += got
 		sl.vpos += i64(got)
@@ -1053,8 +1505,10 @@ decode_chunk :: proc(p: ^Player, sl: ^Slot) {
 	drop := min(sl.discard, i64(frames))
 	sl.discard -= drop
 	out = out[int(drop) * ch:]
-	for &v in out {
-		v *= sl.source.gain
+	if !p.output.bit_perfect {
+		for &v in out {
+			v *= sl.source.gain
+		}
 	}
 	ring_write(&p.pcm, out)
 	sl.next_sample += i64(frames)
@@ -1062,8 +1516,10 @@ decode_chunk :: proc(p: ^Player, sl: ^Slot) {
 
 // The device.
 
+HAL_MAX_FRAMES :: 8192 // per IOProc call, when the device's buffers need rearranging
+
 @(private = "file")
-device_open :: proc(p: ^Player, rate, channels: int) -> bool {
+device_open :: proc(p: ^Player, rate, channels, bits: int) -> bool {
 	heap := runtime.heap_allocator()
 	if p.pcm.channels != channels {
 		delete(p.pcm_data, heap)
@@ -1073,44 +1529,109 @@ device_open :: proc(p: ^Player, rate, channels: int) -> bool {
 		// Positions carry on, so marks pushed before still line up.
 		p.pcm.write, p.pcm.read, p.pcm.flush_to = w, w, w
 	}
-	cfg := ma.device_config_init(.playback)
-	cfg.playback.format = .f32
-	cfg.playback.channels = u32(channels)
-	cfg.sampleRate = u32(rate)
-	cfg.dataCallback = audio_callback
-	cfg.pUserData = p
-	cfg.noPreSilencedOutputBuffer = true
-	if p.null_output && p.null_ctx == nil {
-		p.null_ctx = new(ma.context_type, heap)
-		backends := [1]ma.backend{.null}
-		if r := ma.context_init(&backends[0], 1, nil, p.null_ctx); r != .SUCCESS {
-			fmt.eprintfln("audio: no null backend: %v", r)
-			free(p.null_ctx, heap)
-			p.null_ctx = nil
+	sync.atomic_store(&p.first_tick, 0)
+	sync.atomic_store(&p.last_tick, 0)
+	sync.atomic_store(&p.bypass, p.output.bit_perfect)
+	info := Device_Info {
+		rate = rate,
+		bits = 32,
+		float = true,
+	}
+	if p.output.bit_perfect && !p.null_output && hal_open(p, rate, channels, bits) {
+		info = {
+			bit_perfect = true,
+			hogged      = p.hal.hogged,
+			rate        = rate,
+			bits        = int(p.hal.format.bits),
+			float       = p.hal.format.format_flags & FLAG_FLOAT != 0,
+		}
+	} else {
+		cfg := ma.device_config_init(.playback)
+		cfg.playback.format = .f32
+		cfg.playback.channels = u32(channels)
+		cfg.sampleRate = u32(rate)
+		cfg.dataCallback = audio_callback
+		cfg.pUserData = p
+		cfg.noPreSilencedOutputBuffer = true
+		if p.null_output && p.null_ctx == nil {
+			p.null_ctx = new(ma.context_type, heap)
+			backends := [1]ma.backend{.null}
+			if r := ma.context_init(&backends[0], 1, nil, p.null_ctx); r != .SUCCESS {
+				fmt.eprintfln("audio: no null backend: %v", r)
+				free(p.null_ctx, heap)
+				p.null_ctx = nil
+				return false
+			}
+		}
+		if r := ma.device_init(p.null_ctx, &cfg, p.device); r != .SUCCESS {
+			fmt.eprintfln("audio: device_init failed: %v", r)
 			return false
 		}
-	}
-	if r := ma.device_init(p.null_ctx, &cfg, p.device); r != .SUCCESS {
-		fmt.eprintfln("audio: device_init failed: %v", r)
-		return false
+		if !p.null_output {
+			info.rate = int(device_nominal_rate(default_output_device()))
+		}
+		fmt.eprintfln("audio: %s device open at %d Hz, %d channels", "null" if p.null_output else "output", rate, channels)
 	}
 	p.device_open = true
 	p.device_rate = rate
 	p.device_channels = channels
+	p.device_bits = bits
+	sync.lock(&p.status_mutex)
+	p.st.device = info
+	sync.unlock(&p.status_mutex)
 	capture_begin(p, rate, channels)
-	fmt.eprintfln("audio: %s device open at %d Hz, %d channels", "null" if p.null_output else "output", rate, channels)
 	return true
 }
 
+// hal_open readies the default output device for bit-perfect playback. On
+// failure the device is put back as it was, and miniaudio plays instead.
 @(private = "file")
-device_close :: proc(p: ^Player) {
-	if !p.device_open {
-		return
+hal_open :: proc(p: ^Player, rate, channels, bits: int) -> bool {
+	// The device the last track played on, until the output is restored.
+	// While we hog it, it is no longer the system's default output, so
+	// asking for the default again would find another device.
+	dev := p.hal.device if p.hal.device != 0 else default_output_device()
+	if !hal_configure(&p.hal, dev, rate, channels, bits, p.output.hog) {
+		hal_close(&p.hal, restore = true)
+		fmt.eprintfln("audio: no bit-perfect output at %d Hz; the system mixer converts it", rate)
+		return false
 	}
-	ma.device_uninit(p.device)
-	p.device_open = false
-	p.device_running = false
-	bookkeep_stopped(p)
+	// The IOProc sees the virtual format. The HAL converts it to the
+	// physical one, which is exact for 32-bit float holding 24-bit values.
+	vf, ok := stream_virtual_format(p.hal.stream)
+	if !ok || vf.format_flags & FLAG_FLOAT == 0 || vf.bits != 32 {
+		hal_close(&p.hal, restore = true)
+		fmt.eprintln("audio: the device doesn't take 32-bit float; the system mixer converts it")
+		return false
+	}
+	p.using_hal = true
+	fmt.eprintfln("audio: bit-perfect output on %s: %s%s, set in %.1f ms", device_name(dev), format_name(p.hal.format), ", hog mode" if p.hal.hogged else "", p.hal.settle_ms)
+	return true
+}
+
+// device_close stops and closes the device. With restore, a device that
+// bit-perfect output changed gets its rate, format and hog mode back;
+// without it they stay for the next track.
+@(private = "file")
+device_close :: proc(p: ^Player, restore := false) {
+	if p.device_open {
+		if p.using_hal {
+			hal_close(&p.hal, restore)
+		} else {
+			ma.device_uninit(p.device)
+		}
+		p.device_open = false
+		p.device_running = false
+		p.using_hal = false
+		p.device_rate = 0
+		bookkeep_stopped(p)
+		sync.lock(&p.status_mutex)
+		p.st.device = {}
+		sync.unlock(&p.status_mutex)
+	}
+	if restore {
+		hal_close(&p.hal, true)
+	}
 }
 
 // bookkeep_stopped does the callback's bookkeeping while the device is
@@ -1134,34 +1655,103 @@ publish :: proc "contextless" (p: ^Player, rd: u64) -> bool {
 	return changed
 }
 
+// miniaudio's callback. Bit-perfect mode on miniaudio (the null device, or
+// a rate the HAL couldn't do) leaves the volume out too.
 @(private = "file")
 audio_callback :: proc "c" (device: ^ma.device, output, input: rawptr, frame_count: u32) {
 	p := (^Player)(device.pUserData)
 	out := ([^]f32)(output)
 	ch := u64(p.pcm.channels)
 	target := transmute(f32)sync.atomic_load(&p.volume_bits)
+	if sync.atomic_load(&p.bypass) {
+		target, p.cb_gain = 1, 1
+	}
 	n := ring_read(&p.pcm, out, u64(frame_count), p.cb_gain, target)
 	p.cb_gain = target
 	for i in n * ch ..< u64(frame_count) * ch {
 		out[i] = 0
 	}
+	after_render(p, out, u64(frame_count), n)
+}
+
+// hal_io_proc is the HAL's IOProc: the ring's frames as they are, into
+// the device's buffers. Usually that's one interleaved buffer with the
+// ring's channels, written in place. Otherwise the frames go through
+// hal_scratch, channel by channel, with silence on channels the source
+// doesn't have. It keeps the callback's rules: no locks, allocation or
+// system calls.
+@(private = "file")
+hal_io_proc :: proc "c" (device: Audio_Object_ID, now: rawptr, input: ^Audio_Buffer_List, input_time: rawptr, output: ^Audio_Buffer_List, output_time: rawptr, client: rawptr) -> OS_Status {
+	p := (^Player)(client)
+	if output == nil || output.count == 0 || output.buffers[0].channels == 0 {
+		return 0
+	}
+	bufs := ([^]Audio_Buffer)(&output.buffers[0])[:output.count]
+	ch := u64(p.pcm.channels)
+	frames := u64(bufs[0].size) / (u64(bufs[0].channels) * size_of(f32))
+	direct := len(bufs) == 1 && u64(bufs[0].channels) == ch
+	out := ([^]f32)(bufs[0].data) if direct else raw_data(p.hal_scratch)
+	if !direct {
+		frames = min(frames, u64(len(p.hal_scratch)) / ch)
+	}
+	n := ring_read(&p.pcm, out, frames, 1, 1)
+	for i in n * ch ..< frames * ch {
+		out[i] = 0
+	}
+	if !direct {
+		c := u64(0) // the source channel of the buffer's first channel
+		for b in bufs {
+			dst := ([^]f32)(b.data)
+			bch := u64(b.channels)
+			for i in 0 ..< frames {
+				for k in 0 ..< bch {
+					dst[i * bch + k] = out[i * ch + c + k] if c + k < ch else 0
+				}
+			}
+			c += bch
+		}
+	}
+	after_render(p, out, frames, n)
+	return 0
+}
+
+// after_render is the callbacks' bookkeeping once out has frame_count
+// frames, n of them from the ring: marks, the position, underruns, the
+// seek latency, the re-clock times and the capture.
+@(private = "file")
+after_render :: proc "contextless" (p: ^Player, out: [^]f32, frame_count, n: u64) {
+	ch := u64(p.pcm.channels)
 	before := p.marks.cur.seek_id
 	publish(p, sync.atomic_load(&p.pcm.read))
 	m := p.marks.cur
-	if n < u64(frame_count) && !m.end {
+	if n < frame_count && !m.end {
 		sync.atomic_add(&p.underruns, 1)
 	}
 	// The first frames of a seek: note when, for the latency log.
 	if m.seek_id != before {
 		sync.atomic_store(&p.pub_seek_tick, 0)
 	}
-	if m.seek_id != 0 && n > 0 && sync.atomic_load(&p.pub_seek_tick) == 0 {
-		sync.atomic_store(&p.pub_seek_tick, mach_absolute_time())
-		sync.atomic_store(&p.pub_seek_id, m.seek_id)
+	if n > 0 {
+		t := mach_absolute_time()
+		if m.seek_id != 0 && sync.atomic_load(&p.pub_seek_tick) == 0 {
+			sync.atomic_store(&p.pub_seek_tick, t)
+			sync.atomic_store(&p.pub_seek_id, m.seek_id)
+		}
+		if sync.atomic_load(&p.first_tick) == 0 {
+			sync.atomic_store(&p.first_tick, t)
+		}
+		sync.atomic_store(&p.last_tick, t)
 	}
 	if p.capture.capacity > 0 && p.capture.channels == int(ch) {
-		ring_write(&p.capture, out[:u64(frame_count) * ch])
+		ring_write(&p.capture, out[:frame_count * ch])
 	}
+}
+
+@(private = "file")
+ticks_ms :: proc(ticks: u64) -> f64 {
+	tb: Timebase
+	mach_timebase_info(&tb)
+	return f64(ticks) * f64(tb.numer) / f64(tb.denom) / 1e6
 }
 
 // The capture file: a WAV of 32-bit floats, with sizes filled in when it

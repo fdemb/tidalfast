@@ -52,6 +52,9 @@ Mock :: struct {
 	polls:      []string,
 	poll_count: int,
 	poll_times: [dynamic]time.Tick,
+	// Paths answered with these bytes, as audio files or DASH segments.
+	files:      map[string][]u8,
+	token_form: map[string]string, // the last POST to /token, decoded
 
 	allocator:  runtime.Allocator,
 }
@@ -61,6 +64,8 @@ mock_start :: proc(m: ^Mock, items: []Mock_Item = nil) {
 	m.items = make([dynamic]Mock_Item, m.allocator)
 	m.requests = make([dynamic]string, m.allocator)
 	m.poll_times = make([dynamic]time.Tick, m.allocator)
+	m.files = make(map[string][]u8, m.allocator)
+	m.token_form = make(map[string]string, m.allocator)
 	append(&m.items, ..items)
 
 	sock, err := net.listen_tcp({address = net.IP4_Loopback, port = 0})
@@ -88,6 +93,9 @@ mock_stop :: proc(m: ^Mock) {
 	delete(m.poll_times)
 	clear_query(&m.last_query, m.allocator)
 	delete(m.last_query)
+	clear_query(&m.token_form, m.allocator)
+	delete(m.token_form)
+	delete(m.files)
 	delete(m.base_url, m.allocator)
 }
 
@@ -197,6 +205,18 @@ mock_handle :: proc(m: ^Mock, client: net.TCP_Socket) {
 		req.query[dk] = dv
 	}
 
+	if req.path == "/token" {
+		sync.guard(&m.mutex)
+		clear_query(&m.token_form, m.allocator)
+		form := string(buf[header_end + 4:])
+		for pair in strings.split_iterator(&form, "&") {
+			k, _, v := strings.partition(pair, "=")
+			plus, _ := strings.replace_all(v, "+", " ", context.temp_allocator)
+			dk, _ := net.percent_decode(k, context.temp_allocator)
+			dv, _ := net.percent_decode(plus, context.temp_allocator)
+			m.token_form[strings.clone(dk, m.allocator)] = strings.clone(dv, m.allocator)
+		}
+	}
 	status, body, etag := mock_route(m, req, target)
 	// A 429 always asks for one second.
 	extra := "Retry-After: 1\r\n" if status == 429 else ""
@@ -236,6 +256,9 @@ mock_route :: proc(m: ^Mock, req: Mock_Request, target: string) -> (status: int,
 		}
 	}
 	etag = fmt.tprintf("etag-%d", len(m.items))
+	if data, ok := m.files[req.path]; ok {
+		return 200, string(data), etag
+	}
 
 	switch {
 	case req.path == "/sessions":

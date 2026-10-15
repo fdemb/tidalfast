@@ -536,6 +536,7 @@ draw_player_bar :: proc(s: ^State, w: f32) {
 	{
 		ui.row("extras", {}, ui.px(side), ui.fill())
 		ui.spacer(ui.fill())
+		draw_output_button(s)
 		ui.text_style(.Regular, 12, SECONDARY)
 		ui.label(fmt.tprintf("Volume %d%%", int(math.round(lib.volume * 100))), ui.px(84), ui.fill())
 		draw_volume(s)
