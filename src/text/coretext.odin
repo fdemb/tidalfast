@@ -71,11 +71,13 @@ foreign CoreFoundation {
 	kCFTypeDictionaryKeyCallBacks:   CFDictionaryKeyCallBacks
 	kCFTypeDictionaryValueCallBacks: CFDictionaryValueCallBacks
 	kCFTypeArrayCallBacks:           CFArrayCallBacks
+	kCFAllocatorNull:                rawptr
 
 	CFRelease :: proc(cf: CFTypeRef) ---
 	CFRetain :: proc(cf: CFTypeRef) -> CFTypeRef ---
 	CFEqual :: proc(a, b: CFTypeRef) -> bool ---
 	CFDataCreate :: proc(allocator: rawptr, bytes: [^]u8, length: CFIndex) -> CFDataRef ---
+	CFDataCreateWithBytesNoCopy :: proc(allocator: rawptr, bytes: [^]u8, length: CFIndex, bytes_deallocator: rawptr) -> CFDataRef ---
 	CFDataGetBytePtr :: proc(data: CFDataRef) -> [^]u8 ---
 	CFDataGetLength :: proc(data: CFDataRef) -> CFIndex ---
 	CFStringCreateWithBytes :: proc(allocator: rawptr, bytes: [^]u8, num_bytes: CFIndex, encoding: u32, external_representation: bool) -> CFStringRef ---

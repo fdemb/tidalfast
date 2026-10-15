@@ -199,10 +199,18 @@ init :: proc(t: ^State, wake: proc "c" () = nil) -> bool {
 	atlas_init(&t.atlas)
 
 	for font in Font {
-		// The #load data lives in this dylib's image, so take a copy.
-		data := make([]byte, len(FONT_FILES[font]))
-		copy(data, FONT_FILES[font])
-		cf_data := CFDataCreate(nil, raw_data(data), len(data))
+		// The #load data lives in this dylib's image. A debug build, which
+		// hot reload may replace, takes a copy. A release build never
+		// reloads, and the shell never closes a dylib, so CoreText and
+		// kb_text_shape read the image's bytes in place.
+		data := FONT_FILES[font]
+		cf_data: CFDataRef
+		when ODIN_DEBUG {
+			data = slice.clone(data)
+			cf_data = CFDataCreate(nil, raw_data(data), len(data))
+		} else {
+			cf_data = CFDataCreateWithBytesNoCopy(nil, raw_data(data), len(data), kCFAllocatorNull)
+		}
 		desc := CTFontManagerCreateFontDescriptorFromData(cf_data)
 		ct := CTFontCreateWithFontDescriptor(desc, BASE_SIZE, nil)
 		cf_release(desc)
