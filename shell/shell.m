@@ -41,7 +41,9 @@ typedef struct {
 
 static Loaded_App g_app;
 static NSString *g_app_path;
+#if HOT_RELOAD
 static int g_reload_count;
+#endif
 
 static Memory g_memory;
 static Shell g_shell;
@@ -220,14 +222,18 @@ static bool file_identity(NSString *path, ino_t *inode, struct timespec *mtime) 
   return true;
 }
 
-// Copies the dylib to a unique temp path and opens the copy, so the linker
-// can replace the original while this copy is loaded. dlopen runs the Odin
-// runtime's startup in the new image.
+// With hot reload, copies the dylib to a unique temp path and opens the
+// copy, so the linker can replace the original while this copy is loaded.
+// Without it the dylib is opened in place: macOS checks the signature of a
+// file it hasn't seen before on every dlopen, about 100 ms for a fresh copy
+// against under 10 for the same file again. dlopen runs the Odin runtime's
+// startup in the new image.
 static bool open_app(Loaded_App *out) {
   if (!file_identity(g_app_path, &out->inode, &out->mtime)) {
     fprintf(stderr, "shell: no app dylib at %s\n", g_app_path.UTF8String);
     return false;
   }
+#if HOT_RELOAD
   NSString *name = [NSString stringWithFormat:@"tidalfast-app-%d-%d.dylib", getpid(), g_reload_count++];
   NSString *copy = [NSTemporaryDirectory() stringByAppendingPathComponent:name];
   if (copyfile(g_app_path.fileSystemRepresentation, copy.fileSystemRepresentation, NULL, COPYFILE_ALL) != 0) {
@@ -236,6 +242,9 @@ static bool open_app(Loaded_App *out) {
   }
   void *handle = dlopen(copy.fileSystemRepresentation, RTLD_NOW | RTLD_LOCAL);
   unlink(copy.fileSystemRepresentation);
+#else
+  void *handle = dlopen(g_app_path.fileSystemRepresentation, RTLD_NOW | RTLD_LOCAL);
+#endif
   if (!handle) {
     fprintf(stderr, "shell: dlopen failed: %s\n", dlerror());
     return false;
