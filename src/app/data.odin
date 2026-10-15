@@ -175,9 +175,9 @@ Data :: struct {
 	next_gen:       u32, // the last Track_View.gen handed out
 	lists:          Lists, // closed lists and the disk cache, see lists.odin
 	window_key:     bool, // the window had the keyboard last frame
-	// Debug builds and tests keep the last closed list's arena, filled with
-	// POISON, until the next list closes, so a string still borrowed from it
-	// reads as garbage instead of whatever the next list put there.
+	// Debug builds and tests keep the last list arena freed (arena_free),
+	// filled with POISON, until the next one is, so a string still borrowed
+	// from it reads as garbage instead of whatever the next list put there.
 	poison:         bool,
 	retired:        vmem.Arena,
 	has_retired:    bool,
