@@ -1,6 +1,7 @@
 // The library screen, laid out like spotifast: a resizable sidebar of
 // playlists, the main view with the playlist's track table, and the 88 pt
-// player bar along the bottom. All of it is fake data until phase 4.
+// player bar along the bottom. The data comes from data.odin: TIDAL, or
+// the fake data with TIDALFAST_FAKE=1.
 package app
 
 import "core:fmt"
@@ -55,7 +56,6 @@ Status :: enum u8 {
 	Copied,
 }
 
-@(private = "file")
 PLAYLISTS := [?]string {
 	"Liked Songs",
 	"Discover Weekly",
@@ -158,7 +158,8 @@ draw_sidebar :: proc(s: ^State) {
 		ui.label("Your Library", ui.fill(), ui.fill())
 	}
 	ui.scroll_view("playlists", ui.fill(), ui.fill())
-	for name, i in PLAYLISTS {
+	for i in 0 ..< sidebar_count(s) {
+		entry := sidebar_entry(s, i)
 		item := ui.row(fmt.tprintf("##playlist%d", i), {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects, .Draw_Border}, ui.fill(), ui.px(PLAYLIST_ROW_H))
 		item.radius = 6
 		if lib.playlist == i {
@@ -173,34 +174,18 @@ draw_sidebar :: proc(s: ^State) {
 		}
 		sig := ui.signal(item)
 		if sig.clicked {
-			lib.playlist = i
+			select_playlist(s, i)
 		}
 		ui.spacer(ui.px(10))
-		cover_box(u32(i) * 7919 + 13, 40, ui.px(40))
+		cover_art(s, .Playlist, entry.image, entry.seed, 40, ui.px(40))
 		ui.spacer(ui.px(12))
 		ui.column("", {}, ui.fill(), ui.fill())
 		ui.spacer(ui.px(10))
 		ui.text_style(.Medium, 14, TEXT)
-		ui.label(name, ui.fill(), ui.px(19))
+		ui.label(entry.name, ui.fill(), ui.px(19))
 		ui.text_style(.Regular, 12, SECONDARY)
-		ui.label(fmt.tprintf("Playlist · %d songs", ROW_COUNT if i == 0 else 20 + i * 37 % 300), ui.fill(), ui.px(17))
+		ui.label(entry.subtitle, ui.fill(), ui.px(17))
 	}
-}
-
-// cover_box is a placeholder cover: a gradient picked by seed, size points
-// square, centred in a cell of the given height.
-cover_box :: proc(seed: u32, size: f32, cell_w: ui.Size) {
-	ui.column("", {}, cell_w, ui.fill())
-	ui.spacer(ui.fill())
-	{
-		ui.row("", {}, ui.fill(), ui.px(size))
-		b := ui.box_make("", {.Draw_Background}, ui.px(size), ui.px(size))
-		hue := f32(seed % 997) / 997
-		b.background = hsv(hue, 0.55, 0.75)
-		b.gradient = hsv(hue + 0.08, 0.7, 0.35)
-		b.radius = 4
-	}
-	ui.spacer(ui.fill())
 }
 
 draw_sidebar_handle :: proc(s: ^State, window_w: f32) {
@@ -227,13 +212,16 @@ draw_main_view :: proc(s: ^State, main_w: f32) {
 	{
 		ui.row("", {}, ui.fill(), ui.px(124))
 		ui.spacer(ui.px(24))
+		if !s.data.fake && s.data.view.source != .None {
+			cover_art(s, .Playlist, small_str(&s.data.view.image), u32(lib.playlist) * 7919 + 13, 92, ui.px(92))
+			ui.spacer(ui.px(18))
+		}
 		ui.column("", {}, ui.fill(), ui.fill())
 		ui.spacer(ui.px(26))
 		ui.text_style(.Bold, 28, TEXT)
-		ui.label(PLAYLISTS[lib.playlist], ui.fill(), ui.px(38))
+		ui.label(view_title(s), ui.fill(), ui.px(38))
 		ui.text_style(.Regular, 13, SECONDARY)
-		count := ROW_COUNT if lib.playlist == 0 else 20 + lib.playlist * 37 % 300
-		ui.label(fmt.tprintf("Playlist · %d songs · %d px wide", count, int(main_w)), ui.fill(), ui.px(20))
+		ui.label(view_subtitle(s, main_w), ui.fill(), ui.px(20))
 		ui.text_style(.Regular, 12, DIM)
 		ui.label(status_text(s), ui.fill(), ui.px(18))
 	}
@@ -264,13 +252,18 @@ draw_main_view :: proc(s: ^State, main_w: f32) {
 	if s.bench.running && s.bench.ui {
 		list.view_off.y = bench_offset(s, list.rect.h)
 		list.view_off_target.y = list.view_off.y
+	} else if s.data.bench.running {
+		list.view_off.y = cover_bench_offset(s, list)
+		list.view_off_target.y = list.view_off.y
 	}
 	table_keys(s, list)
 	{
-		rows := ui.virtual_rows(list, ROW_COUNT, TRACK_ROW_H)
+		rows := ui.virtual_rows(list, view_count(s), TRACK_ROW_H)
 		for i in rows.first ..< rows.last {
 			track_row(s, i, cols)
 		}
+		cover_prefetch(s, rows.first - COVER_PREFETCH_ROWS, rows.first, 40)
+		cover_prefetch(s, rows.last, rows.last + COVER_PREFETCH_ROWS, 40)
 	}
 }
 
@@ -308,19 +301,23 @@ table_keys :: proc(s: ^State, list: ^ui.Box) {
 	case ui.key_pressed(ui.KEY_HOME):
 		sel = 0
 	case ui.key_pressed(ui.KEY_END):
-		sel = ROW_COUNT - 1
+		sel = view_count(s) - 1
 	case:
 		moved = false
 	}
 	if moved {
-		lib.selected = clamp(sel, 0, ROW_COUNT - 1)
+		lib.selected = clamp(sel, 0, view_count(s) - 1)
 		ui.scroll_to(list, f32(lib.selected) * TRACK_ROW_H, f32(lib.selected + 1) * TRACK_ROW_H)
 	}
 }
 
 track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 	lib := &s.library
-	track := s.rows[i]
+	track := view_row(s, i)
+	if track == nil {
+		loading_row(i, cols)
+		return
+	}
 	row := ui.row(fmt.tprintf("##track%d", i), {.Clickable, .Draw_Background, .Draw_Hot_Effects}, ui.fill(), ui.px(TRACK_ROW_H))
 	row.radius = 6
 	row.hover_color = {1, 1, 1, 0.05}
@@ -350,7 +347,7 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 		num := ui.label(fmt.tprint(i + 1), ui.px(cols.number), ui.fill())
 		num.text_align = .Center
 	}
-	cover_box(u32(i) * 2654435761 >> 7, 40, ui.px(cols.cover))
+	cover_art(s, .Album, track.cover, u32(i) * 2654435761 >> 7, 40, ui.px(cols.cover))
 	{
 		ui.column("", {}, ui.fill(), ui.fill())
 		ui.spacer(ui.px(9))
@@ -383,6 +380,27 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 	}
 	ui.tooltip(more_sig, fmt.tprintf("More options for %s", track.title))
 	ui.spacer(ui.px(8))
+}
+
+// loading_row stands in for a row whose page hasn't arrived: its number
+// and grey bars where the cover and text go.
+loading_row :: proc(i: int, cols: Track_Columns) {
+	ui.row(fmt.tprintf("##track%d", i), {}, ui.fill(), ui.px(TRACK_ROW_H))
+	ui.spacer(ui.px(8))
+	ui.text_style(.Regular, 14, DIM)
+	num := ui.label(fmt.tprint(i + 1), ui.px(cols.number), ui.fill())
+	num.text_align = .Center
+	bar :: proc(w, h: f32, cell: ui.Size, color: render.Color) {
+		ui.column("", {}, cell, ui.fill())
+		ui.spacer(ui.fill())
+		b := ui.box_make("", {.Draw_Background}, ui.px(w), ui.px(h))
+		b.background = color
+		b.radius = 4
+		ui.spacer(ui.fill())
+	}
+	bar(40, 40, ui.px(cols.cover), SURFACE)
+	ui.spacer(ui.px(4))
+	bar(180, 12, ui.fill(), SURFACE)
 }
 
 cell :: proc(s: string, width: f32, align: ui.Align) {
@@ -433,7 +451,8 @@ draw_drag_ghost :: proc(s: ^State) {
 	ghost.radius = 6
 	ghost.opacity = 0.95
 	ui.text_style(.Medium, 13, TEXT)
-	b := ui.label(s.rows[track].title, ui.fill(), ui.fill())
+	row := view_row(s, int(track))
+	b := ui.label(row.title if row != nil else "", ui.fill(), ui.fill())
 	b.text_pad = 12
 }
 
@@ -450,9 +469,9 @@ draw_player_bar :: proc(s: ^State, w: f32) {
 	{
 		ui.row("now_playing", {}, ui.px(side), ui.fill())
 		title, artist := "Nothing playing", "Double-click a song to play it"
-		if lib.playing >= 0 {
-			title, artist = s.rows[lib.playing].title, s.rows[lib.playing].artist
-			cover_box(u32(lib.playing) * 2654435761 >> 7, 56, ui.px(56))
+		if row := view_row(s, lib.playing); row != nil {
+			title, artist = row.title, row.artist
+			cover_art(s, .Album, row.cover, u32(lib.playing) * 2654435761 >> 7, 56, ui.px(56))
 			ui.spacer(ui.px(12))
 		}
 		ui.column("", {}, ui.fill(), ui.fill())
@@ -485,7 +504,7 @@ draw_player_bar :: proc(s: ^State, w: f32) {
 			ui.spacer(ui.px(16))
 			next := skip_button("next", true)
 			if next.clicked && lib.playing >= 0 {
-				play(s, min(lib.playing + 1, ROW_COUNT - 1))
+				play(s, min(lib.playing + 1, view_count(s) - 1))
 			}
 			ui.tooltip(next, "Next")
 			ui.spacer(ui.fill())
@@ -494,7 +513,10 @@ draw_player_bar :: proc(s: ^State, w: f32) {
 		{
 			ui.row("", {}, ui.fill(), ui.px(16))
 			ui.text_style(.Regular, 11, DIM)
-			total := s.rows[lib.playing].duration if lib.playing >= 0 else "0:00"
+			total := "0:00"
+			if row := view_row(s, lib.playing); row != nil {
+				total = row.duration
+			}
 			at := ui.label("0:00", ui.px(44), ui.fill())
 			at.text_align = .Right
 			at.text_pad = 8
@@ -603,6 +625,9 @@ draw_volume :: proc(s: ^State) {
 }
 
 play :: proc(s: ^State, i: int) {
+	if view_row(s, i) == nil {
+		return
+	}
 	s.library.playing = i
 	s.library.paused = false
 	set_status(s, .Playing, i)
@@ -625,10 +650,13 @@ set_status :: proc(s: ^State, status: Status, track: int, list := -1) {
 
 status_text :: proc(s: ^State) -> string {
 	lib := &s.library
-	if lib.status == .None || lib.status_track < 0 {
+	if status := data_status(s); status != "" {
+		return status
+	}
+	t := view_row(s, lib.status_track)
+	if lib.status == .None || t == nil {
 		return "Double-click to play, right-click for more, drag a song onto a playlist"
 	}
-	t := s.rows[lib.status_track]
 	switch lib.status {
 	case .None:
 	case .Playing:
@@ -636,7 +664,7 @@ status_text :: proc(s: ^State) -> string {
 	case .Queued:
 		return fmt.tprintf("Added %s to the queue", t.title)
 	case .Added:
-		return fmt.tprintf("Added %s to %s", t.title, PLAYLISTS[lib.status_list])
+		return fmt.tprintf("Added %s to %s", t.title, sidebar_entry(s, lib.status_list).name)
 	case .Album:
 		return fmt.tprintf("Would open %s", t.album)
 	case .Artist:

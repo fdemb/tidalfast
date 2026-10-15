@@ -29,7 +29,7 @@ import "../ui"
 
 CLEAR_COLOR :: render.Color{0.10, 0.11, 0.13, 1}
 
-STATE_VERSION :: 6
+STATE_VERSION :: 7
 
 FRAME_HISTORY :: 120
 
@@ -69,6 +69,7 @@ State :: struct {
 	log_events:   bool,
 	ui:           ui.State,
 	library:      Library,
+	data:         Data,
 	scroll:       [2]f32, // the test screens' scroll offset
 	bench:        Bench,
 	slide_start:  f64,
@@ -129,13 +130,16 @@ app_reload :: proc "c" (m: ^platform.Memory, shell: ^platform.Shell) {
 	text.reload(&s.text, shell.request_redraw)
 	// The old dylib may have missed a release.
 	ui.cancel_pointer(&s.ui)
+	data_reload(s, shell)
 	fmt.eprintfln("app: reloaded at frame %d, clear colour %v", s.frame_count, CLEAR_COLOR)
 }
 
 app_unload :: proc "c" (m: ^platform.Memory) {
 	context = runtime.default_context()
 	s := (^State)(m.persistent)
+	context = app_context(s)
 	text.unload(&s.text)
+	data_unload(s)
 	if s.profiling {
 		spall.buffer_flush(&s.spall_ctx, &s.spall_buf)
 	}
@@ -149,6 +153,7 @@ app_shutdown :: proc "c" (m: ^platform.Memory) {
 		spall.buffer_destroy(&s.spall_ctx, &s.spall_buf)
 		posix.close(posix.FD(s.spall_ctx.fd))
 	}
+	data_shutdown(s)
 	text.destroy(&s.text, &s.renderer)
 	render.destroy(&s.renderer)
 }
@@ -172,6 +177,11 @@ app_frame :: proc "c" (m: ^platform.Memory, shell: ^platform.Shell, input: ^plat
 		// Glyphs left over from the raster budget or a full atlas. The
 		// display link may be paused (window covered), so ask directly.
 		shell.request_redraw()
+	}
+	if s.data.bench.running {
+		cover_bench_record(s, frame_ms)
+		shell.request_redraw()
+		result.animating = true
 	}
 	if s.bench.running {
 		bench_record(s, frame_ms)
@@ -236,10 +246,11 @@ start :: proc(s: ^State, shell: ^platform.Shell) {
 	s.rows = make_rows()
 	ui.init(&s.ui)
 	library_init(&s.library)
+	data_start(s, shell)
 	// TIDALFAST_BENCH=1 scrolls the library's track table, =text the text
 	// test screen's list.
 	switch os.get_env("TIDALFAST_BENCH", context.temp_allocator) {
-	case "":
+	case "", "covers":
 	case "text":
 		s.bench.running = true
 		s.screen = .Text
@@ -289,6 +300,7 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input) -> platform.Fra
 	ui_begin := time.tick_now()
 	text.begin_frame(&s.text, r)
 	ui.begin_frame(&s.ui, events, r, &s.text, w, h, input.time, ui.hardware_buttons())
+	data_update(s, input.time)
 
 	// Backtick toggles the frame-time overlay. Cmd-1, 2 and 3 switch between
 	// the library and the phase 2 and phase 1 test screens.
@@ -309,13 +321,18 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input) -> platform.Fra
 
 	switch s.screen {
 	case .Library:
-		draw_library(s, w, h)
+		if show_login(s) {
+			draw_login(s)
+		} else {
+			draw_library(s, w, h)
+		}
 	case .Text:
 		draw_text_screen(s, w, h)
 	case .Shapes:
 		draw_test_screen(s, w, h)
 	}
 	animating := ui.end_frame()
+	covers_schedule(s)
 
 	if s.sliding {
 		t := f32((input.time - s.slide_start) / SLIDE_SECONDS)

@@ -50,6 +50,7 @@ DEFAULT_VIDEO_QUALITY :: Video_Quality.High
 // from several threads.
 Config :: struct {
 	api_oauth2_token:    string,
+	api_device_auth:     string,
 	api_pkce_auth:       string,
 	api_v1_location:     string,
 	api_v2_location:     string,
@@ -96,6 +97,7 @@ config_make :: proc(
 ) -> Config {
 	c := Config {
 		api_oauth2_token    = "https://auth.tidal.com/v1/oauth2/token",
+		api_device_auth     = "https://auth.tidal.com/v1/oauth2/device_authorization",
 		api_pkce_auth       = "https://login.tidal.com/authorize",
 		api_v1_location     = "https://api.tidal.com/v1/",
 		api_v2_location     = "https://api.tidal.com/v2/",

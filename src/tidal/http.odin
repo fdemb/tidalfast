@@ -45,6 +45,9 @@ http_send :: proc(
 	err: Error,
 ) {
 	sync.once_do(&curl_once, proc() {curl.global_init(curl.GLOBAL_DEFAULT)})
+	if sync.atomic_load(&s.abort) {
+		return {}, make_error(.Cancelled, "Request cancelled")
+	}
 
 	h := curl_acquire(s)
 	defer curl_release(s, h)
@@ -97,8 +100,15 @@ http_send :: proc(
 	curl.easy_setopt(h, .WRITEDATA, &sink)
 	curl.easy_setopt(h, .HEADERFUNCTION, header_callback)
 	curl.easy_setopt(h, .HEADERDATA, &capture)
+	curl.easy_setopt(h, .NOPROGRESS, c.long(0))
+	curl.easy_setopt(h, .XFERINFOFUNCTION, abort_callback)
+	curl.easy_setopt(h, .XFERINFODATA, &s.abort)
 
 	code := curl.easy_perform(h)
+	if code == .E_ABORTED_BY_CALLBACK {
+		delete(sink)
+		return {}, make_error(.Cancelled, "Request cancelled")
+	}
 	if code != .E_OK {
 		delete(sink)
 		return {}, make_error(.Network, "HTTP request failed", detail = string(curl.easy_strerror(code)))
@@ -123,6 +133,13 @@ write_callback :: proc "c" (buffer: [^]byte, size: c.size_t, nitems: c.size_t, u
 	sink := (^[dynamic]u8)(userdata)
 	append(sink, ..buffer[:n])
 	return c.size_t(n)
+}
+
+// Called by curl about once a second and whenever data moves. A non-zero
+// return aborts the transfer.
+@(private = "file")
+abort_callback :: proc "c" (abort: rawptr, dltotal, dlnow, ultotal, ulnow: curl.off_t) -> c.int {
+	return 1 if sync.atomic_load((^bool)(abort)) else 0
 }
 
 @(private = "file")

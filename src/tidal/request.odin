@@ -252,6 +252,22 @@ basic_request :: proc(s: ^Session, r: Request, allocator := context.allocator) -
 	return resp, nil
 }
 
+// resource_get downloads a file outside the API, such as cover art from
+// resources.tidal.com: no token, no default parameters. It shares the
+// session's backoff, so a rate limit on either side holds back both.
+resource_get :: proc(s: ^Session, url: string, allocator := context.allocator) -> (body: []u8, err: Error) {
+	check_backoff(s) or_return
+	headers := []string{fmt.tprintf("User-Agent: %s", s.user_agent)}
+	resp := http_send(s, .GET, url, headers, "", allocator) or_return
+	start_backoff_if_needed(s, resp)
+	delete(resp.etag, allocator)
+	if !http_ok(resp) {
+		defer delete(resp.body, allocator)
+		return nil, http_error(resp)
+	}
+	return resp.body, nil
+}
+
 // request is basic_request, with non-2xx responses turned into Errors.
 request :: proc(s: ^Session, r: Request, allocator := context.allocator) -> (resp: Http_Response, err: Error) {
 	resp = basic_request(s, r, allocator) or_return

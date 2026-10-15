@@ -48,11 +48,11 @@ fetch_pages :: proc(s: ^Session, r: Request, total: int, chunk_size := PAGE_CHUN
 			if chunk >= len(job.bodies) {
 				return
 			}
-			{
-				sync.guard(&job.err_mutex)
-				if job.err != nil {
-					return
-				}
+			sync.mutex_lock(&job.err_mutex)
+			failed := job.err != nil
+			sync.mutex_unlock(&job.err_mutex)
+			if failed {
+				return
 			}
 			offset := chunk * job.chunk_size
 			params := make([dynamic]Param, 0, len(job.r.params) + 2, context.temp_allocator)

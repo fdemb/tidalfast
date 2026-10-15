@@ -59,14 +59,17 @@ token_refresh :: proc(s: ^Session, refresh_token: string) -> (ok: bool, err: Err
 		return false, make_error(.Bad_Response, "Token response is not valid JSON", resp.status)
 	}
 
-	sync.guard(&s.mutex)
-	set_owned(s, &s.access_token, jstr(obj, "access_token"))
-	s.expiry_time = time.time_add(time.now(), time.Duration(ji64(obj, "expires_in")) * time.Second)
-	set_owned(s, &s.token_type, jstr(obj, "token_type"))
-	// When the field is absent the existing refresh token is still valid.
-	if new_refresh := jstr(obj, "refresh_token"); new_refresh != "" {
-		set_owned(s, &s.refresh_token, new_refresh)
+	{
+		sync.guard(&s.mutex)
+		set_owned(s, &s.access_token, jstr(obj, "access_token"))
+		s.expiry_time = time.time_add(time.now(), time.Duration(ji64(obj, "expires_in")) * time.Second)
+		set_owned(s, &s.token_type, jstr(obj, "token_type"))
+		// When the field is absent the existing refresh token is still valid.
+		if new_refresh := jstr(obj, "refresh_token"); new_refresh != "" {
+			set_owned(s, &s.refresh_token, new_refresh)
+		}
 	}
+	notify_auth_change(s)
 	return true, nil
 }
 
@@ -99,8 +102,11 @@ process_auth_token :: proc(s: ^Session, obj: json.Object, is_pkce: bool) -> Erro
 		set_owned(s, &s.token_type, jstr(obj, "token_type"))
 	}
 	finish_login(s) or_return
-	sync.guard(&s.mutex)
-	s.is_pkce = is_pkce
+	{
+		sync.guard(&s.mutex)
+		s.is_pkce = is_pkce
+	}
+	notify_auth_change(s)
 	return nil
 }
 
@@ -135,20 +141,18 @@ load_session :: proc(s: ^Session, session_id: string, country_code := "", user_i
 		log.error("Session id did not have a valid UUID format")
 		return make_error(.Invalid_Argument, "Session id did not have a valid UUID format")
 	}
-	{
-		sync.guard(&s.mutex)
-		set_owned(s, &s.session_id, session_id)
-	}
+	sync.mutex_lock(&s.mutex)
+	set_owned(s, &s.session_id, session_id)
+	sync.mutex_unlock(&s.mutex)
 	country, uid := country_code, user_id
 	if uid == 0 || country == "" {
 		obj := request_object(s, {method = .GET, path = "sessions"}, context.temp_allocator) or_return
 		country = jstr(obj, "countryCode")
 		uid = ji64(obj, "userId")
 	}
-	{
-		sync.guard(&s.mutex)
-		set_owned(s, &s.country_code, country)
-	}
+	sync.mutex_lock(&s.mutex)
+	set_owned(s, &s.country_code, country)
+	sync.mutex_unlock(&s.mutex)
 	u := user_get(s, uid, context.temp_allocator) or_return
 	sync.guard(&s.mutex)
 	set_user(s, u)
@@ -191,7 +195,7 @@ login_device_start :: proc(s: ^Session, allocator := context.allocator) -> (link
 	scratch_begin(allocator)
 	client_id, _ := device_client_credentials(s)
 	form := []Param{{"client_id", client_id}, {"scope", "r_usr w_usr w_sub"}}
-	resp, obj := post_form(s, "https://auth.tidal.com/v1/oauth2/device_authorization", form, context.temp_allocator) or_return
+	resp, obj := post_form(s, s.config.api_device_auth, form, context.temp_allocator) or_return
 	if !http_ok(resp) {
 		log.errorf("Login failed: %s", body_prefix(resp, 500))
 		return {}, http_error(resp)
@@ -244,7 +248,7 @@ login_device_wait :: proc(s: ^Session, link: Link_Login, until_expiry := true, c
 		}
 		deadline := time.tick_add(time.tick_now(), time.Duration(interval * f64(time.Second)))
 		for time.tick_diff(time.tick_now(), deadline) > 0 {
-			if cancel != nil && sync.atomic_load(cancel) {
+			if (cancel != nil && sync.atomic_load(cancel)) || sync.atomic_load(&s.abort) {
 				return make_error(.Cancelled, "Login cancelled")
 			}
 			time.sleep(100 * time.Millisecond)

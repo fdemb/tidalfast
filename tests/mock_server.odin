@@ -9,8 +9,8 @@ import "core:sync"
 import "core:thread"
 
 // A one-connection-at-a-time HTTP server on 127.0.0.1 standing in for TIDAL.
-// It models one playlist's items, the session endpoints and an echo endpoint,
-// and records every request line.
+// It models one playlist's items, the session endpoints, an echo endpoint,
+// a rate-limited endpoint and token refresh, and records every request line.
 
 Mock_Item :: struct {
 	kind: string, // "track" or "video"
@@ -35,6 +35,7 @@ Mock :: struct {
 	// Accept DELETEs without removing anything.
 	stuck:      bool,
 	requests:   [dynamic]string, // "METHOD /path?query"
+	refreshes:  int, // POSTs to /token
 	last_query: map[string]string,
 
 	allocator:  runtime.Allocator,
@@ -180,11 +181,14 @@ mock_handle :: proc(m: ^Mock, client: net.TCP_Socket) {
 	}
 
 	status, body, etag := mock_route(m, req, target)
+	// A 429 always asks for one second.
+	extra := "Retry-After: 1\r\n" if status == 429 else ""
 	resp := fmt.tprintf(
-		"HTTP/1.1 %d X\r\nContent-Type: application/json\r\nContent-Length: %d\r\nETag: %s\r\nConnection: close\r\n\r\n%s",
+		"HTTP/1.1 %d X\r\nContent-Type: application/json\r\nContent-Length: %d\r\nETag: %s\r\n%sConnection: close\r\n\r\n%s",
 		status,
 		len(body),
 		etag,
+		extra,
 		body,
 	)
 	data := transmute([]u8)resp
@@ -228,6 +232,12 @@ mock_route :: proc(m: ^Mock, req: Mock_Request, target: string) -> (status: int,
 		return 200, `{}`, etag
 	case req.path == "/echo":
 		return 200, `{}`, etag
+	case req.path == "/limited":
+		return 429, `{"userMessage":"Too many requests"}`, etag
+	case req.path == "/token":
+		// A refresh that rotates the refresh token, as TIDAL may.
+		m.refreshes += 1
+		return 200, fmt.tprintf(`{{"access_token":"access-%d","refresh_token":"refresh-%d","token_type":"Bearer","expires_in":3600}}`, m.refreshes, m.refreshes), etag
 	case strings.has_prefix(req.path, "/playlists/pl/items/") && req.method == "DELETE":
 		if !m.stuck {
 			index_list := strings.trim_prefix(req.path, "/playlists/pl/items/")

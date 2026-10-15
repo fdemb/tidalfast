@@ -47,6 +47,16 @@ Session :: struct {
 	curl_mutex:           sync.Mutex,
 	curl_pool:            [dynamic]^curl.CURL,
 
+	// Set atomically (session_abort) to make requests in flight and
+	// login_device_wait fail with .Cancelled.
+	abort:                bool,
+
+	// Called after a login or token refresh changed the tokens, on the
+	// thread that changed them. Refreshes run one at a time, so calls never
+	// overlap. Set it before the session is shared between threads.
+	on_auth_change:       proc(s: ^Session, data: rawptr),
+	on_auth_change_data:  rawptr,
+
 	allocator:            mem.Allocator, // token strings, freed when replaced
 	arena:                vmem.Arena,    // config and user strings, freed by session_destroy
 }
@@ -117,6 +127,38 @@ session_auth :: proc(s: ^Session, allocator := context.allocator) -> Auth {
 		a.user_kind = u.kind
 	}
 	return a
+}
+
+// session_restore puts back login state from session_auth without asking
+// TIDAL, e.g. tokens kept from an earlier run. The user is known only by id
+// and kind. An expired access token is refreshed by the first request.
+session_restore :: proc(s: ^Session, a: Auth) {
+	sync.guard(&s.mutex)
+	set_owned(s, &s.token_type, a.token_type)
+	set_owned(s, &s.access_token, a.access_token)
+	set_owned(s, &s.refresh_token, a.refresh_token)
+	set_owned(s, &s.session_id, a.session_id)
+	set_owned(s, &s.country_code, a.country_code)
+	set_owned(s, &s.locale, a.locale)
+	s.expiry_time = a.expiry_time
+	s.is_pkce = a.is_pkce
+	s.user = nil
+	if a.user_id != 0 {
+		set_user(s, User{kind = a.user_kind, id = a.user_id})
+	}
+}
+
+// session_abort makes requests in flight, and any made while it's on, fail
+// with .Cancelled. Safe from any thread.
+session_abort :: proc(s: ^Session, on: bool) {
+	sync.atomic_store(&s.abort, on)
+}
+
+@(private)
+notify_auth_change :: proc(s: ^Session) {
+	if s.on_auth_change != nil {
+		s.on_auth_change(s, s.on_auth_change_data)
+	}
 }
 
 // session_user returns a copy of the logged in user.

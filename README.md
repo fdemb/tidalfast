@@ -12,7 +12,11 @@ src/ui/         box tree, layout, input, animation, menus and tooltips
 src/kbts/       kb_text_shape 2.21: C source and Odin bindings
 assets/fonts/   Inter 4.1, static Regular/Medium/SemiBold/Bold, with its OFL licence
 src/tidal/      TIDAL API library, see src/tidal/README.md
+src/jobs/       a thread-safe priority queue for jobs and results
+src/cover/      cover sizes, decoding and the texture cache
+src/mac/        Keychain and opening URLs, called straight from Odin
 tests/          `odin test tests`
+tests/mock_tidal/  a stand-in TIDAL server for running the app without an account
 examples/cli/   CLI on top of src/tidal
 ```
 
@@ -25,7 +29,7 @@ examples/cli/   CLI on top of src/tidal
 ./build/tidalfast
 ```
 
-It needs macOS 14 or later, Odin and the Xcode command line tools. Shaders are compiled at runtime from source in `src/render`, so the Metal toolchain isn't needed.
+It needs macOS 14 or later, Odin and the Xcode command line tools. `build.sh` relinks the shell only when `shell/` changes or you switch between debug and release, for the Keychain's sake (see TIDAL data below). Shaders are compiled at runtime from source in `src/render`, so the Metal toolchain isn't needed.
 
 `src/kbts` holds kb_text_shape's C source and a copy of Odin's `vendor:kb_text_shape` bindings that link `build/kbts/kb_text_shape.a`. `build.sh` compiles that archive when it's missing or older than the source, so nothing is written to the Odin install. Run `./build.sh` once before `odin test tests`. The project adds one function to `kb_text_shape.c`, `tidalfast_bidi_class`, which exports the library's Unicode bidi class table.
 
@@ -36,14 +40,16 @@ It needs macOS 14 or later, Odin and the Xcode command line tools. Shaders are c
 
 Environment variables:
 
+- `TIDALFAST_FAKE=1` shows the fake library from phases 2 and 3 instead of logging in to TIDAL, for working on the UI without an account. `TIDALFAST_BENCH=1` and `=text` imply it.
+- `TIDALFAST_API=url` sends every request, the login and cover downloads to `url` instead of TIDAL, for running against `tests/mock_tidal`. The login then goes in the Keychain under `tidalfast-mock`, so it never replaces a real one.
 - `TIDALFAST_SPALL=path` writes a [spall](https://gravitymoth.com/spall/) trace of every frame to `path`.
 - `TIDALFAST_LOG_EVENTS=1` prints every input event.
-- `TIDALFAST_CAPTURE=path` writes each presented frame to `path` as a TGA. It's for checking output when you can't take screenshots.
-- `TIDALFAST_BENCH=1` scrolls the library's track table by itself and logs the CPU time per frame in three phases (see UI below). `TIDALFAST_BENCH=text` does the same for the text test list (see Text). Both keep asking for frames even when the window is covered.
+- `TIDALFAST_CAPTURE=path` writes each presented frame to `path` as a TGA. It's for checking output when you can't take screenshots. Each frame goes to a temp file that's renamed over `path`, so copying `path` while the app runs gives a whole frame.
+- `TIDALFAST_BENCH=1` scrolls the library's track table by itself and logs the CPU time per frame in three phases (see UI below). `TIDALFAST_BENCH=text` does the same for the text test list (see Text). `TIDALFAST_BENCH=covers` does it on live data while covers stream in (see TIDAL data). All of them keep asking for frames even when the window is covered.
 
 The backtick key toggles the frame-time overlay, which plots the CPU time of the last 120 frames against 120 Hz and 60 Hz lines. Under the plot are the last frame's total CPU time and the time spent building it (ui: everything before `end_frame`), its draw calls (blue dot) and instances (green dot), and the text cache's run count and atlas pages. The app also logs draw calls and instances to stderr whenever they change.
 
-The app opens on the library screen. Cmd-1 goes back to it, Cmd-2 shows the text test screen (specimen lines and a 10,000-row list) and Cmd-3 the phase 1 renderer test screen. F1 or Cmd-Shift-D outlines every UI box and shows the key, ID and size of the box under the mouse.
+The app opens on the library screen, or the login screen when there's no saved login. Cmd-1 goes back to it, Cmd-2 shows the text test screen (specimen lines and a 10,000-row list) and Cmd-3 the phase 1 renderer test screen. F1 or Cmd-Shift-D outlines every UI box and shows the key, ID and size of the box under the mouse.
 
 To run with Metal's validation layer, set `MTL_DEBUG_LAYER=1 METAL_DEVICE_WRAPPER_TYPE=1`.
 
@@ -214,7 +220,7 @@ Box flags pick what's drawn, in this order: shadow, background (optionally a ver
 
 ### The library screen
 
-`src/app/library.odin` follows spotifast's layout and dark palette: a sidebar of 32 fake playlists, 250 pt wide by default, resized with a 5 pt handle between 210 and 600 pt (it stops growing once the main view would go below 360 pt). Next to it is the main view with the playlist header and the 10,000-row track table, and the 88 pt player bar runs along the bottom. Rows are 56 pt. The columns follow spotifast's `columns`, measured on the main view's width: #, cover and title always. Album shows above 560 pt (28% of the width, 140 to 360 pt), date added above 760 and added by above 920. Duration and the "more" button always show. Hovering lights a row; a click selects it; a double-click "plays" it, which updates the player bar. A right click or the "more" button opens a context menu. Dragging a row onto a playlist shows a ghost and a drop highlight. The drag goes through `ui.drag_begin` with the row index, so releasing after the row has scrolled out of view still ends it. With the table focused, the arrow keys, Page Up/Down and Home/End move the selection and scroll it into view, and Enter plays it. The prev, play/pause and next buttons and the volume slider work on the fake state. The progress bar doesn't seek yet. Covers are gradients until phase 4.
+`src/app/library.odin` follows spotifast's layout and dark palette: a sidebar of 32 fake playlists, 250 pt wide by default, resized with a 5 pt handle between 210 and 600 pt (it stops growing once the main view would go below 360 pt). Next to it is the main view with the playlist header and the 10,000-row track table, and the 88 pt player bar runs along the bottom. Rows are 56 pt. The columns follow spotifast's `columns`, measured on the main view's width: #, cover and title always. Album shows above 560 pt (28% of the width, 140 to 360 pt), date added above 760 and added by above 920. Duration and the "more" button always show. Hovering lights a row; a click selects it; a double-click "plays" it, which updates the player bar. A right click or the "more" button opens a context menu. Dragging a row onto a playlist shows a ghost and a drop highlight. The drag goes through `ui.drag_begin` with the row index, so releasing after the row has scrolled out of view still ends it. With the table focused, the arrow keys, Page Up/Down and Home/End move the selection and scroll it into view, and Enter plays it. The prev, play/pause and next buttons and the volume slider work on the fake state. Rows whose page hasn't arrived yet show their number and grey bars. With `TIDALFAST_FAKE=1` the 32 playlists and 10,000 rows are the fake data again and covers are gradients.
 
 ### Performance
 
@@ -229,6 +235,98 @@ Box flags pick what's drawn, in this order: shadow, background (optionally a ver
 With the overlay off, warm is 0.53 to 0.60 ms. Of a warm frame, building the tree takes about 0.13 ms, layout about 0.1 ms, and drawing labels about 0.37 ms (89 labels, so about 4 µs each, inside `text.draw_run` and `render.push`). The cold maximum is the phase's first frame. It jumps 2,000 rows and meets emoji in Medium 14 for the first time. Timed inside `src/text`, that frame spends about 2 ms shaping 40 runs and the rest rasterizing 3 glyphs. Rasterizing the first Apple Color Emoji glyph took 6 ms, and the first line CoreText lays out in Geeza Pro (Arabic) 3.8 ms, against 30 to 200 µs for later lines at any size. The text loader now lays out and draws the character it loaded a fallback face for, on its own thread, which took the cold maximum from 9.3 to 11.9 ms down to 3.8 to 5.4 ms. What remains is per glyph: each emoji glyph costs 0.4 to 2.4 ms to rasterize, decoding its bitmap.
 
 Shaping a run costs 60 to 280 µs. Most of it is kb_text_shape, not CoreText: `ShapeRun`, where kb_text_shape applies Inter's lookups, takes about 2 µs a character (130 to 170 µs for a 70 character title), and push, begin and end take about 1 µs. kb_text_shape keeps its shape configs in the context, so that isn't set up again per run. For text in morx-only fonts (Arabic in Geeza Pro, emoji) CoreText adds 30 to 200 µs per run in `CTLineCreateWithAttributedString`. Building the CFString and attribute dictionary costs 3 to 20 µs and the CTFont per size is cached.
+
+## TIDAL data
+
+`src/app/data.odin`, `workers.odin`, `covers.odin` and `login.odin` connect the library screen to TIDAL through `src/tidal`.
+
+### Login
+
+With no saved login the app shows a login screen and asks TIDAL for a device code straight away. It shows the code and `link.tidal.com`. "Open in your browser" opens the link with the code already in it, through LaunchServices (`LSOpenCFURLRef`). The app doesn't open the browser on its own: a window that launches a browser every time it starts without a login is rude, and scripts run it that way too. A worker polls TIDAL (`login_device_wait`) until the user approves, then the library loads. If the code expires a new one is fetched. Errors show with a "Try again" button.
+
+This is TIDAL's device login for limited-input clients. The Android PKCE login, which hi-res needs, comes with phase 6.
+
+### Keychain
+
+The tokens go in the login Keychain as one generic password item: service `tidalfast`, account `auth`, label `TIDALfast`. Its data is JSON: token type, access and refresh tokens, expiry, session id, country code and user id. Nothing goes in a file.
+
+`src/mac` calls Security's `SecItemAdd`, `SecItemUpdate`, `SecItemCopyMatching` and `SecItemDelete` directly from Odin with hand-written foreign declarations, along with the CoreFoundation calls to build their dictionaries. These are plain C functions, so they don't hit the compiler's Obj-C bug, and going through the shell would have meant a new ABI version for no gain. They're thread safe, which matters because the tokens are saved from workers.
+
+`src/tidal` refreshes the access token one request at a time: concurrent requests that find it expired wait on one refresh (`refresh_access_token` holds `refresh_mutex`). TIDAL may send a new refresh token with each refresh and the old one stops working, so the session now calls `Session.on_auth_change` after every refresh and login, on the thread that did it, while still holding that mutex. The app's handler writes the item. So the Keychain always has the latest refresh token, and writes never overlap.
+
+At start a worker reads the item and puts it in the session with `tidal.session_restore`, without asking TIDAL anything. An expired access token is refreshed by the first request. If a refresh fails or TIDAL answers 401, the app deletes the item and shows the login screen.
+
+Reading happens on a worker for a reason. The login Keychain ties an item to the code signature of the program that made it. Our builds are ad-hoc signed and clang's output differs from build to build, so a rebuilt `build/tidalfast` counts as a different program, and macOS asks the user whether it may read the item. That dialog blocks the calling thread until it's answered. Meanwhile the library says it's reading the Keychain. To keep the dialog rare, `build.sh` relinks the shell only when `shell/` changes or the build mode does, so `./build.sh` and `./build.sh app` leave the binary, and its signature, alone. The data protection Keychain would avoid this, but it needs an entitlement, which needs a real signing identity (`-34018` without one). The `security` command line tool isn't on the item's access list either, so `security find-generic-password -w` prompts too; without `-w` it shows the item without reading it.
+
+### API version
+
+Everything goes through TIDAL's v1 API at `api.tidal.com/v1` using what `src/tidal` already has:
+
+- `users/{id}/playlistsAndFavoritePlaylists` for the sidebar: playlists the user made and the ones they follow, 50 at a time.
+- `users/{id}/favorites/tracks` for Liked Songs, newest first.
+- `playlists/{id}/tracks` for a playlist.
+
+The plan said v2 (`openapi.tidal.com`). The reference clients show v1 still works with a device-code token: lumitide logs in the same way and reads `users/{id}/favorites/tracks`, `users/{id}/playlists` and `playlists/{id}/items` from v1, and tidalapi (behind high-tide) has all three endpoints above. riptide moved to v2 and says it works, but riptide still needs v1 for playback, so v1 isn't going away for us either. v2 is JSON:API, where a playlist's tracks come back as references that need `include` and a second lookup per page, and `src/tidal` has none of that yet. v1 returns whole tracks with their album covers in one response. If TIDAL turns these endpoints off, `user_playlist_and_favorite_playlists`, `favorites_tracks` and `playlist_tracks` are the three calls to replace.
+
+### Jobs and threads
+
+Four worker threads (`WORKERS`) share two queues in `State`, both from `src/jobs`. The jobs queue goes from the UI thread to the workers. The results queue goes back. Each is a fixed array of 256 plain-data items behind a mutex and condition variable. Jobs come out by priority, then oldest first: data (sign-in, playlists, track pages) before visible covers, visible covers before the ones just outside the view. A job holds only fixed-size text (a playlist id, an image id, a device code) and numbers, so it never points into memory a view switch or a reload could free. A worker runs a job, pushes the result and calls the shell's `request_redraw`. The next frame takes results right after `ui.begin_frame`.
+
+Kinds of job: `Restore` (read the Keychain), `Login_Start`, `Login_Wait`, `Playlists`, `Tracks` (one page) and `Cover`.
+
+Hot reload: `unload` sets the session's abort flag, which makes curl stop any transfer in flight (an `XFERINFOFUNCTION` that checks it) and `login_device_wait` return. Then it stops both queues and joins the workers. A worker whose job was cut short puts it back in the queue where it was. `unload` then copies the session's login state to a heap buffer and destroys the session, since a `tidal.Session` holds allocators and a curl handle pool made by this dylib. `reload` makes a new session, restores the login and starts new workers, which pick up the jobs that were put back. Results that were waiting stay in their queue.
+
+### Memory
+
+Each job that returns data gets its own virtual-memory arena (`core:mem/virtual`), and `src/tidal` parses into it. Scratch memory is the worker's thread-local temp allocator, reset after each job, never the result allocator. The UI thread then:
+
+- adopts the Playlists result's arena as the sidebar's, and destroys the previous one;
+- copies a track page's rows into the open list's arena and destroys the page's;
+- uploads a cover's pixels and frees them.
+
+The open list's arena lives in `State` and is destroyed when another list opens. Pages carry the list's generation number, so a page for a list that's been closed is dropped when it arrives.
+
+### Pages
+
+A list opens with the track count TIDAL gave for it, so the table has its full height straight away and rows not yet loaded show as placeholders. The first page is 50 tracks so it shows sooner. The rest come 100 at a time, two pages in flight. A short page means the list has ended.
+
+### Rate limits
+
+`src/tidal` already backs off after a 429 (for `Retry-After`, or 60 s) or an anti-abuse 403 (for `Retry-After`, or 30 minutes), and refuses requests locally until then. All workers share one session, so they share that state. Covers now go through it as well: `tidal.resource_get` downloads from `resources.tidal.com` with the session's backoff check and curl pool, without the API's token and parameters. A worker checks `backoff_remaining` before each job. While it's above zero, the worker puts the job back and sleeps until the backoff ends or the queue stops. A job refused with `Backing_Off`, or the one that got the 429 or 403, goes back in the queue too, instead of failing. The library's status line says how long TIDAL asked us to wait.
+
+### Covers
+
+1. Drawing a cover asks the cache (`src/cover`) for it at the size it's shown on this display: `pick_size` takes the smallest size TIDAL serves that's at least the box's points times the backing scale. Track rows are 40 pt, so 80x80 at 2x. The 92 pt header asks for 320x320, and the sidebar's playlist images start at 160x160, the smallest TIDAL has for playlists. Rows within 4 of the view ask for theirs too, at a lower priority.
+2. After the frame is built, `covers_schedule` queues a job for each cover asked for this frame with no job yet. Queued covers that weren't asked for this frame, because their rows scrolled away, come out of the queue. A worker that already has one finishes it, and the cover stays in the cache.
+3. The worker downloads the JPEG, decodes it with `stb_image`, and runs `render.convert_premultiplied` on the pixels, so the upload can pass `converted = true`.
+4. The UI thread uploads it as a mipmapped RGBA8 texture. Uploads stop for the frame after 2 ms; what's left waits for the next frame.
+5. The cache keeps up to 2,048 covers within 48 MB of texture memory, counting the mips. Over that, it destroys the least recently drawn textures, never one drawn in the current frame.
+
+A cover shows a flat placeholder until its texture arrives, then fades in over 0.25 s. The fade asks for frames only until it finishes. A cover that failed is tried again once it has left the screen and comes back, or after 30 s.
+
+Texture uploads don't wait on the GPU. A new texture has no earlier mip generation to wait for, which is the only thing `texture_update` waits on.
+
+### The mock server
+
+`tests/mock_tidal` serves the device login (approved a few seconds after the first poll), token refresh that rotates the refresh token, the session and user, 240 liked tracks, 12 playlists (one with 3,000 tracks), their tracks, and covers drawn on request as JPEGs at any size. Flags set the long playlist's length, the login delay, the access token's lifetime, delays for pages and covers, and a request to answer with 429.
+
+```
+odin build tests/mock_tidal -out:build/mock_tidal
+./build/mock_tidal -port=8787
+TIDALFAST_API=http://127.0.0.1:8787 ./build/tidalfast
+```
+
+### Performance
+
+`TIDALFAST_BENCH=covers` against the mock (40 ms per cover), release build, Apple M1, 120 Hz, 1100x700 window. Once the sidebar loads it opens the longest playlist and waits for 300 rows. Then it scrolls one row a frame for 600 frames, so a new cover is wanted about every frame, then four rows a frame for 300 frames, so most covers are dropped before a worker gets to them, then holds still for 120 frames. Two runs:
+
+| phase | ui avg | ui max | frame avg | frame max | covers uploaded | most uploads in a frame | longest results step |
+|---|---|---|---|---|---|---|---|
+| scroll | 0.74 to 0.78 ms | 2.9 to 3.8 ms | 8.27 ms | 9.8 to 10.5 ms | 410 | 4 (0.43 to 0.48 ms) | 1.2 to 1.3 ms |
+| fast | 0.89 to 0.90 ms | 2.8 to 3.9 ms | 8.30 ms | 9.4 ms | 163 to 167 | 3 to 4 (0.70 to 0.93 ms) | 0.8 to 0.9 ms |
+| settle | 0.61 to 0.64 ms | 0.9 to 1.0 ms | 8.30 ms | 9.4 to 9.5 ms | 0 to 1 | 1 | 0.4 ms |
+
+Frame time includes waiting for the next drawable, so its average is the 120 Hz interval. The fake-data bench in the same build has frame maxima of 9.3 to 11.9 ms, so covers add no hitches. An upload of an 80x80 cover costs about 0.1 to 0.4 ms. The longest results step includes copying a page of 100 rows. The ui maximum comes from shaping text in rows seen for the first time, as in the fake-data bench. Afterwards the cache held about 590 covers in 21 MB, and the window went back to 0% CPU.
 
 ## Hot reload
 
@@ -248,7 +346,7 @@ What it may not keep:
 
 - Odin globals. Each loaded copy has its own.
 - Other procedure pointers, including `mem.Allocator` values and `[dynamic]` arrays and maps, which hold an allocator. Each entry point rebuilds the allocators from the arenas.
-- Running threads. The text loader thread runs dylib code, so `unload` joins it and `reload` starts a new one.
+- Running threads. The text loader thread and the data workers run dylib code, so `unload` joins them and `reload` starts new ones.
 - Anything the dylib's own runtime allocated, such as the `os.File` behind the spall trace. The app keeps only the file descriptor.
 - Data whose layout changed. Bump `STATE_VERSION` when a field changes type or moves and the size happens to stay the same.
 
