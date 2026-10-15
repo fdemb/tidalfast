@@ -207,8 +207,13 @@ app_frame :: proc "c" (m: ^platform.Memory, shell: ^platform.Shell, input: ^plat
 }
 
 state_reset :: proc(m: ^platform.Memory) -> ^State {
+	// Fresh zero pages over the whole block, so an old State's pages go back
+	// to the system and nothing here or in the arena needs zeroing, see
+	// persistent_allocator_proc.
+	if posix.mmap(m.persistent, m.persistent_size, {.READ, .WRITE}, {.PRIVATE, .ANONYMOUS, .FIXED}) == posix.MAP_FAILED {
+		mem.zero(m.persistent, int(m.persistent_size))
+	}
 	s := (^State)(m.persistent)
-	s^ = {}
 	s.magic = STATE_MAGIC
 	s.version = STATE_VERSION
 	s.size = size_of(State)
@@ -221,9 +226,18 @@ state_reset :: proc(m: ^platform.Memory) -> ^State {
 
 app_context :: proc(s: ^State) -> runtime.Context {
 	c := runtime.default_context()
-	c.allocator = mem.arena_allocator(&s.arena)
+	c.allocator = {persistent_allocator_proc, &s.arena}
 	c.temp_allocator = mem.arena_allocator(&s.frame_arena)
 	return c
+}
+
+// persistent_allocator_proc is the persistent arena without zeroing. The
+// arena only ever moves forward through memory that is still zero, since
+// state_reset maps fresh pages over the block, so zeroing would only touch
+// every page of the caches made at init, most of which are never written,
+// and make them count against the app's memory.
+persistent_allocator_proc :: proc(data: rawptr, mode: mem.Allocator_Mode, size, alignment: int, old_memory: rawptr, old_size: int, loc := #caller_location) -> ([]byte, mem.Allocator_Error) {
+	return mem.arena_allocator_proc(data, .Alloc_Non_Zeroed if mode == .Alloc else mode, size, alignment, old_memory, old_size, loc)
 }
 
 start :: proc(s: ^State, shell: ^platform.Shell) {
