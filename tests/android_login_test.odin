@@ -303,14 +303,14 @@ aac_stream_message :: proc(t: ^testing.T) {
 bts_answer :: proc(quality, codec, mime: string) -> Mock_Answer {
 	manifest := fmt.tprintf(`{{"mimeType":"%s","codecs":"%s","encryptionType":"NONE","urls":["http://127.0.0.1/a"]}}`, mime, codec)
 	encoded, _ := base64.encode(transmute([]u8)manifest, allocator = context.temp_allocator)
-	return {200, fmt.aprintf(`{{"trackId":1,"audioQuality":"%s","manifestMimeType":"application/vnd.tidal.bts","manifest":"%s","bitDepth":16,"sampleRate":44100}}`, quality, encoded)}
+	return {200, fmt.tprintf(`{{"trackId":1,"audioQuality":"%s","manifestMimeType":"application/vnd.tidal.bts","manifest":"%s","bitDepth":16,"sampleRate":44100}}`, quality, encoded)}
 }
 
 @(private = "file")
 dash_answer :: proc(quality, codecs: string) -> Mock_Answer {
 	mpd := fmt.tprintf(`<MPD mediaPresentationDuration="PT4S"><Period><AdaptationSet><Representation codecs="%s"><SegmentTemplate timescale="1" media="$Number$.mp4" initialization="i.mp4"><SegmentTimeline><S d="4"/></SegmentTimeline></SegmentTemplate></Representation></AdaptationSet></Period></MPD>`, codecs)
 	encoded, _ := base64.encode(transmute([]u8)mpd, allocator = context.temp_allocator)
-	return {200, fmt.aprintf(`{{"trackId":1,"audioQuality":"%s","manifestMimeType":"application/dash+xml","manifest":"%s","bitDepth":24,"sampleRate":96000}}`, quality, encoded)}
+	return {200, fmt.tprintf(`{{"trackId":1,"audioQuality":"%s","manifestMimeType":"application/dash+xml","manifest":"%s","bitDepth":24,"sampleRate":96000}}`, quality, encoded)}
 }
 
 @(private = "file")
