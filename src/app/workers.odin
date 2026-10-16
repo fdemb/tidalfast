@@ -611,26 +611,34 @@ run_cover :: proc(d: ^Data, job: Job, res: ^Result) {
 
 MONTHS := [12]string{"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"}
 
+// join_artists joins artists' names with commas, and says where each one
+// is. Without artists it takes artist, which may be nil.
+join_artists :: proc(artists: []tidal.Artist, artist: ^tidal.Artist, alloc: mem.Allocator) -> (joined: string, refs: []Artist_Ref) {
+	if len(artists) == 0 {
+		if artist == nil {
+			return
+		}
+		refs = make([]Artist_Ref, 1, alloc)
+		refs[0] = {id = artist.id, start = 0, end = i32(len(artist.name))}
+		return artist.name, refs
+	}
+	refs = make([]Artist_Ref, len(artists), alloc)
+	b := strings.builder_make(alloc)
+	for a, i in artists {
+		if i > 0 {
+			strings.write_string(&b, ", ")
+		}
+		start := strings.builder_len(b)
+		strings.write_string(&b, a.name)
+		refs[i] = {id = a.id, start = i32(start), end = i32(strings.builder_len(b))}
+	}
+	return strings.to_string(b), refs
+}
+
 // row_from_track turns a track into the strings the table shows.
 row_from_track :: proc(t: tidal.Track, alloc: mem.Allocator) -> (row: Row) {
 	row.title = t.full_name if t.full_name != "" else t.title
-	if len(t.artists) > 0 {
-		b := strings.builder_make(alloc)
-		for a, i in t.artists {
-			if i > 0 {
-				strings.write_string(&b, ", ")
-			}
-			strings.write_string(&b, a.name)
-		}
-		row.artist = strings.to_string(b)
-	} else if t.artist != nil {
-		row.artist = t.artist.name
-	}
-	if len(t.artists) > 0 {
-		row.artist_id = t.artists[0].id
-	} else if t.artist != nil {
-		row.artist_id = t.artist.id
-	}
+	row.artist, row.artists = join_artists(t.artists, t.artist, alloc)
 	if t.album != nil {
 		row.album = t.album.name
 		row.cover = t.album.cover

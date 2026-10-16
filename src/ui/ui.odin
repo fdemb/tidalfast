@@ -81,6 +81,7 @@ Box_Flag :: enum u32 {
 	Draw_Shadow,
 	Draw_Hot_Effects, // hover_color fades in while hot
 	Draw_Active_Effects, // active_color fades in while pressed
+	Draw_Hot_Underline, // the label is underlined while hot
 	Text_Input, // a text field: with the focus it takes Return, Space, the arrows and Escape
 }
 Box_Flags :: bit_set[Box_Flag; u32]

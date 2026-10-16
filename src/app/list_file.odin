@@ -14,9 +14,10 @@ import "base:runtime"
 import "core:hash"
 import "core:mem"
 import "core:os"
+import "core:slice"
 
 FILE_MAGIC :: 0x434c_4654 // "TFLC"
-FILE_FORMAT :: 1
+FILE_FORMAT :: 2
 
 File_Str :: struct {
 	off, len: u32,
@@ -37,14 +38,15 @@ File_Header :: struct {
 	sum:     u64, // FNV-1a of everything after the header
 }
 
-// File_Row is a Row on disk.
+// File_Row is a Row on disk. Its artists are their Artist_Refs' bytes,
+// in the text.
 File_Row :: struct {
-	text:      [7]File_Str, // title, artist, album, added, added_by, duration, cover
-	seconds:   i32,
-	track:     i32,
-	id:        i64,
-	album_id:  i64,
-	artist_id: i64,
+	text:     [7]File_Str, // title, artist, album, added, added_by, duration, cover
+	artists:  File_Str,
+	seconds:  i32,
+	track:    i32,
+	id:       i64,
+	album_id: i64,
 }
 
 // File_Item is a Sidebar_Item on disk.
@@ -110,6 +112,7 @@ list_encode :: proc(v: ^Track_View, allocator: runtime.Allocator) -> []u8 {
 	text := 0
 	for &r in v.rows[:n] {
 		text += len(r.title) + len(r.artist) + len(r.album) + len(r.added) + len(r.added_by) + len(r.duration) + len(r.cover)
+		text += len(r.artists) * size_of(Artist_Ref)
 	}
 	w, h := writer_make(v.source, small_str(&v.id), n, text, allocator)
 	h.fetched = v.fetched
@@ -118,12 +121,12 @@ list_encode :: proc(v: ^Track_View, allocator: runtime.Allocator) -> []u8 {
 	rows := ([^]File_Row)(raw_data(w.buf[size_of(File_Header):]))[:n]
 	for &r, i in v.rows[:n] {
 		rows[i] = {
-			text      = {put(&w, r.title), put(&w, r.artist), put(&w, r.album), put(&w, r.added), put(&w, r.added_by), put(&w, r.duration), put(&w, r.cover)},
-			seconds   = i32(r.seconds),
-			track     = i32(r.track),
-			id        = r.id,
-			album_id  = r.album_id,
-			artist_id = r.artist_id,
+			text     = {put(&w, r.title), put(&w, r.artist), put(&w, r.album), put(&w, r.added), put(&w, r.added_by), put(&w, r.duration), put(&w, r.cover)},
+			artists  = put(&w, string(slice.to_bytes(r.artists))),
+			seconds  = i32(r.seconds),
+			track    = i32(r.track),
+			id       = r.id,
+			album_id = r.album_id,
 		}
 	}
 	return writer_finish(&w)
@@ -193,6 +196,28 @@ file_str :: proc(text: []u8, s: File_Str) -> (string, bool) {
 	return string(text[s.off:][:s.len]), true
 }
 
+// file_artists copies a row's artists out of the text, which isn't aligned
+// for them, and checks that each name lies inside an artist string of
+// artist_len bytes.
+@(private = "file")
+file_artists :: proc(text: []u8, s: File_Str, artist_len: int, allocator: runtime.Allocator) -> ([]Artist_Ref, bool) {
+	b, ok := file_str(text, s)
+	if !ok || len(b) % size_of(Artist_Ref) != 0 {
+		return nil, false
+	}
+	if len(b) == 0 {
+		return nil, true
+	}
+	refs := make([]Artist_Ref, len(b) / size_of(Artist_Ref), allocator)
+	copy(slice.to_bytes(refs), b)
+	for a in refs {
+		if a.start < 0 || a.start > a.end || int(a.end) > artist_len {
+			return nil, false
+		}
+	}
+	return refs, true
+}
+
 // list_decode turns a list file read into the list's arena into rows whose
 // strings point into it.
 list_decode :: proc(data: []u8, source: Source, id: string, allocator: runtime.Allocator) -> (h: ^File_Header, rows: []Row, err: File_Error) {
@@ -213,11 +238,14 @@ list_decode :: proc(data: []u8, source: Source, id: string, allocator: runtime.A
 				return nil, nil, .Damaged
 			}
 		}
+		ok: bool
+		if r.artists, ok = file_artists(text, f.artists, len(r.artist), allocator); !ok {
+			return nil, nil, .Damaged
+		}
 		r.seconds = int(f.seconds)
 		r.track = int(f.track)
 		r.id = f.id
 		r.album_id = f.album_id
-		r.artist_id = f.artist_id
 	}
 	return
 }

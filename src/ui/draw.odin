@@ -94,6 +94,9 @@ draw_label :: proc(u: ^State, b: ^Box, a: f32) {
 	}
 	y := b.rect.y + (b.rect.h - (run.ascent + run.descent)) / 2
 	text.draw_run(u.texts, u.renderer, run, {x, y}, fade(b.text_color, a), avail)
+	if .Draw_Hot_Underline in b.flags && b.hot_t > 0 {
+		render.push_rect(u.renderer, {x, y + run.ascent + 1.5, w, 1}, fade(b.text_color, a * b.hot_t))
+	}
 }
 
 // draw_debug outlines every box, and for the innermost box under the mouse
