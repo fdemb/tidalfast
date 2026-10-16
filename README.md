@@ -55,6 +55,7 @@ Environment variables:
 - `TIDALFAST_AUDIO_NULL=1` plays to miniaudio's null device: the audio callback runs in real time, but nothing reaches the speakers.
 - `TIDALFAST_AUDIO_CAPTURE=path` writes every sample the audio callback hands the device, after ReplayGain and volume, to `path` as a 32-bit float WAV. In bit-perfect mode it's what the HAL IOProc hands CoreAudio. Only the first player after start captures, not the ones a hot reload makes. The header's sizes are filled in when the app quits; `tests/audio_check` and `tests/bitperfect_check` also read a file whose header still says 0. The header has the rate of the first device open; after a rate change the frames carry on at the new rate in the same file.
 - `TIDALFAST_SETTINGS=path` keeps the settings (bit-perfect, hog mode, scrollbars) in `path` instead of `~/Library/Application Support/tidalfast/settings.json`.
+- `TIDALFAST_CACHE=dir` keeps the list cache's files in `dir/<user id>` instead of `~/Library/Caches/tidalfast/<user id>` (see The list cache). Against `TIDALFAST_API` the default is `~/Library/Caches/tidalfast-mock`, so a mock never writes into a real account's cache.
 - `TIDALFAST_PKCE_REDIRECT=url`: with no saved login the app finishes the PKCE login (see Login) with this address at start, so a script can log in to `tests/mock_tidal` without a browser. Debug and `./build.sh measure` builds only.
 - `TIDALFAST_AUDIO_WINDOW_KB=n` sets how much of each track is kept downloaded (8 MB by default). A small window sends seeks back to the network, for measuring them.
 - `TIDALFAST_NOW_PLAYING_LOG=1` makes the shell print Now Playing as macOS holds it, read back from `MPNowPlayingInfoCenter`, after every update, and every remote command it gets.
@@ -315,7 +316,7 @@ Reading happens on a worker for a reason. The login Keychain ties an item to the
 Everything goes through TIDAL's v1 API at `api.tidal.com/v1` using what `src/tidal` already has:
 
 - `users/{id}/playlistsAndFavoritePlaylists` for the sidebar: playlists the user made and the ones they follow, 50 at a time.
-- `users/{id}/favorites/tracks` for Liked Songs, newest first.
+- `users/{id}/favorites/tracks` for Liked Songs, newest first. The sidebar asks it for one track too, which gives the count and the newest liked track.
 - `playlists/{id}/tracks` for a playlist.
 
 The plan said v2 (`openapi.tidal.com`). The reference clients show v1 still works with a device-code token: lumitide logs in the same way and reads `users/{id}/favorites/tracks`, `users/{id}/playlists` and `playlists/{id}/items` from v1, and tidalapi (behind high-tide) has all three endpoints above. riptide moved to v2 and says it works, but riptide still needs v1 for playback, so v1 isn't going away for us either. v2 is JSON:API, where a playlist's tracks come back as references that need `include` and a second lookup per page, and `src/tidal` has none of that yet. v1 returns whole tracks with their album covers in one response. If TIDAL turns these endpoints off, `user_playlist_and_favorite_playlists`, `favorites_tracks` and `playlist_tracks` are the three calls to replace.
@@ -324,7 +325,7 @@ The plan said v2 (`openapi.tidal.com`). The reference clients show v1 still work
 
 Four worker threads (`WORKERS`) share two queues in `State`, both from `src/jobs`. The jobs queue goes from the UI thread to the workers. The results queue goes back. Each is a fixed array of 256 plain-data items behind a mutex and condition variable. Jobs come out by priority, then oldest first: data (sign-in, playlists, track pages) before visible covers, visible covers before the ones just outside the view. A job a worker has taken keeps its slot until it's done or put back, so a job cut short always has room to go back, however full the UI made the queue meanwhile. Covers leave 16 slots free for data jobs. If the queue refuses a data job anyway, its kind goes in `Data.retry` and the next frame pushes it again; a worker finishing a job frees a slot and asks for that frame. A refused cover stays wanted and is pushed again the same way. A job holds only fixed-size text (a playlist id, an image id, a device code) and numbers, so it never points into memory a view switch or a reload could free. A worker runs a job, pushes the result and calls the shell's `request_redraw`. The next frame takes results right after `ui.begin_frame`.
 
-Kinds of job: `Restore` (read the Keychain), `Login_Start`, `Login_Wait`, `Login_Pkce` (finish the PKCE login with the pasted address), `Playlists`, `Tracks` (one page), `Cover`, `Stream` (resolve a track's stream, see Playback), `Artwork` (a cover for Now Playing, kept as pixels), `Search` (see Search) and `Save_Settings` (write the output settings, so a click never waits on the disk; see Output settings). `Tracks` also pages through search results, an album's tracks and an artist's top tracks.
+Kinds of job: `Restore` (read the Keychain), `Login_Start`, `Login_Wait`, `Login_Pkce` (finish the PKCE login with the pasted address), `Playlists`, `Tracks` (one page), `Cover`, `Stream` (resolve a track's stream, see Playback), `Artwork` (a cover for Now Playing, kept as pixels), `Search` (see Search), `Save_Settings` (write the output settings, so a click never waits on the disk; see Output settings) and `Disk` (read or write a list cache file). `Tracks` also pages through search results, an album's tracks and an artist's top tracks. `Disk` jobs go to a queue of their own with one thread, so reading a cached list never waits behind the network, and writes happen in the order they were asked for. Its results come back through the same results queue.
 
 Hot reload: `unload` sets the session's abort flag, which makes curl stop any transfer in flight (an `XFERINFOFUNCTION` that checks it) and `login_device_wait` return. Then it stops both queues and joins the workers. A worker whose job was cut short puts it back in the queue where it was. `unload` then copies the session's login state to a heap buffer, keeps the backoff's end and reason in `State`, and destroys the session, since a `tidal.Session` holds allocators and a curl handle pool made by this dylib. `reload` makes a new session, restores the login and the backoff, and starts new workers, which pick up the jobs that were put back. So a reload during a 30 minute anti-abuse hold doesn't end it. A device login that got its tokens but hadn't loaded the session when the reload came keeps them too: `reload` restores tokens without a user only then, and the `Login_Wait` that was put back finishes the login with them. Results that were waiting stay in their queue. A `Login_Wait` job holds the code's expiry as a time, not a duration, so a reload doesn't stretch it.
 
@@ -334,15 +335,46 @@ Each job that returns data gets its own virtual-memory arena (`core:mem/virtual`
 
 - adopts the Playlists result's arena as the sidebar's, and destroys the previous one;
 - copies a track page's rows into the open list's arena and destroys the page's;
+- adopts a cache file's arena as the list's or the sidebar's, since the rows' strings point into the file read into it;
 - uploads a cover's pixels and frees them.
 
-The open list's arena lives in `State` and is destroyed when another list opens, which gives its pages back. A worker's temp allocator is one 4 MB block, and parsing a page of tracks dirties about 750 KB of it; rolling it back keeps those pages. So a worker that finds the queue empty after a job gives back all but 64 KB of the block with `MADV_FREE_REUSABLE`, and takes it back with `MADV_FREE_REUSE` before its next job. On the mock that's about 2.3 MB after a list has loaded. Pages carry the list's generation number, so a page for a list that's been closed is dropped when it arrives.
+The open list's arena lives in `State`. When another list opens, a list that loaded whole goes to the list cache in memory with its arena (see The list cache), and anything else is destroyed, which gives its pages back. A worker's temp allocator is one 4 MB block, and parsing a page of tracks dirties about 750 KB of it; rolling it back keeps those pages. So a worker that finds the queue empty after a job gives back all but 64 KB of the block with `MADV_FREE_REUSABLE`, and takes it back with `MADV_FREE_REUSE` before its next job. On the mock that's about 2.3 MB after a list has loaded. Pages carry the list's generation number, so a page for a list that's been closed is dropped when it arrives.
 
-The frame's boxes and its accessibility tree borrow strings from the open list, the search results and the play queue until `end_frame`. So nothing a frame does while it's being built may free them. A click that opens another list, closes the search or plays from the track menu goes in `State.pending`, and `pending_apply` does it once the frame is drawn, then asks for the next one. Results from the workers are handled at the start of a frame, before anything borrows from them. Debug builds keep the last closed list's arena, filled with `0xdb`, until the next list closes, so a string still borrowed from it shows up as garbage instead of passing for the next list's data. The tests turn the same thing on.
+The frame's boxes and its accessibility tree borrow strings from the open list, the search results and the play queue until `end_frame`. So nothing a frame does while it's being built may free them. A click that opens another list, closes the search or plays from the track menu goes in `State.pending`, and `pending_apply` does it once the frame is drawn, then asks for the next one. Results from the workers are handled at the start of a frame, before anything borrows from them. Debug builds keep the last list arena that was freed, filled with `0xdb`, until the next one is freed, so a string still borrowed from it shows up as garbage instead of passing for the next list's data. That covers a list that closed without loading whole, one the cache dropped and the old rows a refresh replaced. A list that goes to the cache isn't freed, so its strings stay good. The tests turn the same thing on.
 
 ### Pages
 
 A list opens with the track count TIDAL gave for it, so the table has its full height straight away and rows not yet loaded show as placeholders. The first page is 50 tracks so it shows sooner. The rest come 100 at a time, two pages in flight. Each page of Liked Songs or a playlist carries TIDAL's `totalNumberOfItems`, and the page that reaches it ends the list. TIDAL leaves tracks that can't be played out of their page but still counts them, so a page can come back short in the middle of a list. That's a gap: the rows after it move up, and later pages land where TIDAL's offset minus the gaps before it puts them. A list of 1,433 liked tracks with three unavailable shows 1,430 rows. Before this, a short page ended the list, which cut Liked Songs off at 149. Lists without a total (search, albums, artists) still end at a short page. Pages can arrive out of order, so the earliest end found stands: an empty page asked for past the end can't raise the count again, and rows past the end are dropped. If a list without a total turns out longer than TIDAL said, full pages keep raising the count and one more page is asked for at a time until a short one.
+
+### The list cache
+
+`src/app/lists.odin` keeps track lists so that opening one again doesn't ask TIDAL for it, unless there's a sign it changed. It keeps them in two places:
+
+- In memory: a list that loaded whole keeps its arena when another list opens. Up to 64 lists stay, within 16 MB of arena pages; past that the list used longest ago goes. They live in `State`, so they survive a hot reload.
+- On disk: every list but search results, and the sidebar, as one file each under `~/Library/Caches/tidalfast/<user id>/`. The directory stays under 50 MB: after each write, the files opened longest ago (by modification time, which a read or a reopen from memory moves on) go first. The sidebar's file stays. Sign-out deletes the directory, and the memory copies go with any account change. With `TIDALFAST_FAKE` nothing is kept, against `TIDALFAST_API` the files go to `~/Library/Caches/tidalfast-mock`, and the tests use a folder under `/tmp`.
+
+Each kept list has the version TIDAL said it was at and when it was fetched. Opening it shows the kept rows at once. Then the version is checked against what the sidebar says now, and the list is fetched again in the background only if:
+
+| list | fetched again when |
+|---|---|
+| playlist in the sidebar | its `lastUpdated` or track count differs from the one it was fetched at |
+| playlist from a search | it's a day old (the sidebar doesn't list it, so there's no version to check) |
+| Liked Songs | the favorites count or the newest liked track differs, or it's three days old |
+| album | it's 30 days old |
+| artist's top tracks | it's a day old |
+| search results | kept in memory only, for five minutes, then searched for again |
+
+So a playlist that didn't change opens with no request at all. The sidebar's request gives both versions: `lastUpdated` and the count for each playlist, and a one-track page of Liked Songs for its count and newest track. Whether TIDAL answers `If-None-Match` with 304 isn't known, so nothing relies on it.
+
+At sign-in the sidebar is read from disk while it's fetched from TIDAL as before. Whichever comes first shows; a file that arrives after TIDAL's answer is ignored. Liked Songs opens from disk too, so a second launch shows the sidebar and the list without waiting on the network. When TIDAL's sidebar arrives, the open list is checked against it. The sidebar is fetched again when the window becomes key or a sidebar entry opens, once it's more than five minutes old. Both are things the user does, so an idle window never wakes for it.
+
+A refresh fetches the list into a second `Track_View` (`Data.refresh`) while the old rows stay on screen. When its last page arrives it replaces the open list's rows before the frame is built. The selection, the track menu, the status line and the scroll position follow their tracks by id, not their row numbers: the row that was first in view stays first. The playing row follows by itself, as after reopening a list. The play queue is a copy, so playback goes on as it was. A refresh that fails leaves the kept rows.
+
+`list_edited` puts the app's own edits into the kept copies and their files with the version TIDAL answers, so the next launch doesn't fetch the list again: a track added to a playlist goes at the end, a liked track on top of Liked Songs, a removed one goes. Nothing calls it yet, because the app makes no edits on TIDAL: dropping a row on a playlist only says it was added.
+
+Covers go to disk too, as the JPEGs TIDAL sent, in `covers/` in the same folder, named by image id and size. An image id always shows the same picture, so a cover file is never stale. The workers read and write them themselves, around the download. A cover file that doesn't decode is deleted. The folder has a 50 MB budget of its own, checked at the first cover written each session and every 256 after; the files used longest ago go first. Sign-out deletes them with the lists, and a download that finishes after it isn't written.
+
+A file is a header (magic, format version, the list's kind and id, its version, when it was fetched and TIDAL's count), then fixed-size records, then the text their strings point into, with an FNV-1a sum of everything after the header. Loading reads the whole file into the list's arena and points the rows' strings into it, with no copy. A file of another format version, with a wrong sum or sizes, or for another list is deleted when it's read, and the list comes from TIDAL. Writes go to a temp file that's renamed into place. Files hold names, ids, image ids and counts only: never tokens, headers or URLs. The log names lists by kind and TIDAL id, at debug level.
 
 ### Rate limits
 
@@ -352,7 +384,7 @@ A list opens with the track count TIDAL gave for it, so the table has its full h
 
 1. Drawing a cover asks the cache (`src/cover`) for it at the size it's drawn at on this display, in pixels: the box's points times the backing scale. Track rows are 40 pt, so 80x80 at 2x; the 92 pt header is 184x184 and the 56 pt Now Playing cover 112x112. `pick_size` picks what to download: the smallest size TIDAL serves that's at least that many pixels, so 80x80 for rows, 320x320 for the header, and 160x160 for the sidebar's playlist images, the smallest TIDAL has for playlists. Rows within 4 of the view ask for theirs too, at a lower priority.
 2. After the frame is built, `covers_schedule` queues a job for each cover asked for this frame with no job yet. Queued covers that weren't asked for this frame, because their rows scrolled away, come out of the queue. A worker that already has one finishes it, and the cover stays in the cache.
-3. The worker downloads the JPEG, decodes it with `stb_image`, scales it to the drawn size with `stb_image_resize` (filtering in linear light) when the two differ, and runs `render.convert_premultiplied` on the pixels, so the upload can pass `converted = true`.
+3. The worker reads the JPEG from disk if it has it (see The list cache), or downloads it and keeps it there. It decodes it with `stb_image`, scales it to the drawn size with `stb_image_resize` (filtering in linear light) when the two differ, and runs `render.convert_premultiplied` on the pixels, so the upload can pass `converted = true`.
 4. The UI thread copies it into a slot of a shared page. Uploads stop for the frame after 2 ms; what's left waits for the next frame.
 5. A page is one RGBA8 texture holding a grid of covers of one pixel size, up to 8x8 and at most 640 texels across (one cover per page if it's wider): 64 row covers in 1.6 MB, 9 header covers in 1.2 MB. Every cover is drawn at exactly its pixel size, so no page needs mipmaps. A new cover takes a free slot of its size, or opens a page while the pages stay within 8 MB, or else takes the slot of the least recently drawn cover of its size. That cover can't have been drawn in the last three frames, which the GPU may still be drawing, so overwriting its slot never shows in a frame. If every cover of that size was drawn lately, a page opens over the budget, and after the frame the cache gives back whole pages until it's within budget again: the page whose newest cover was drawn longest ago first, never one with a cover drawn this frame. The cache keeps up to 2,048 entries.
 
@@ -367,6 +399,8 @@ Texture uploads don't wait on the GPU. Pages have no mips, and a mip generation 
 `tests/mock_tidal` serves the device login (approved a few seconds after the first poll), token refresh that rotates the refresh token, the session and user, 1,433 liked tracks (at most 100 a page, with three unavailable ones left out of their pages but counted in `totalNumberOfItems`, as TIDAL does), 12 playlists (one with 3,000 tracks), their tracks, and covers drawn on request as JPEGs at any size. Flags set the long playlist's length, the login delay, the access token's lifetime, delays for pages and covers, a request to answer with 429, 429s for the first device code requests, `slow_down` answers to the first polls, a 429 to one poll of each code, a point after which it refuses the login with 401 until the next device login, and 401s to the first covers after each device login, held back for as long as you ask. It prints the time between polls. The comment at the top of `main.odin` lists them. It never prints tokens or Authorization headers, and neither does the app.
 
 It answers `/search` too. Tracks of the long playlist match by title or artist, ignoring ASCII case, up to TIDAL's 300, with their albums and artists and the playlists whose names match. A query that matches nothing, such as 日本語, gets 120 made-up tracks named after it, so every query has results. `/albums/<id>/tracks` and `/artists/<id>/toptracks` return 12 and 20 made-up tracks. It logs each search with its query.
+
+Each playlist has a `lastUpdated`. `GET /mock/change?playlist=N` adds a track to playlist N and moves its `lastUpdated` on, and `/mock/change?liked=1` likes a new track, which goes on top. They need no token, so a script can change things while the app runs, for checking the list cache.
 
 It also serves playback (see Playback below). Flags add a delay before every audio response (`-audio-delay=ms`), cap each audio connection's bandwidth (`-audio-rate=KB/s`), leave the SEEKTABLE out of the files (`-seektable=0`) and pick where the generated audio goes (`-audio-dir`).
 
@@ -721,7 +755,7 @@ The shell merges mouse moves, and scroll events in the same phase, into one even
 
 `./build.sh measure` builds an optimized app in `build/measure/app` (its own shell and dylib, hot reload off), `tests/mock_tidal` and the tool. The app is the release build plus `TIDALFAST_MOCK_API`, which lets it read `TIDALFAST_API` and `TIDALFAST_PKCE_REDIRECT`. The real release build never reads them (see TIDAL data), so it can't run against the mock.
 
-Each run is a cold launch with `TIDALFAST_MEASURE` set, `TIDALFAST_AUDIO_NULL=1` and a settings file of its own, so bit-perfect output is off and your settings stay as they are. Other `TIDALFAST_` variables in your environment are dropped. The tool prints a table per scenario and setup, writes `build/measure/<time>.json`, and keeps each run's stderr in `build/measure/logs-<time>/`. Flags: `-runs=N`, `-setup=fake` or `mock` or `fake,mock`, `-app=path`, `-timeout=seconds` and `-out=path`.
+Each run is a cold launch with `TIDALFAST_MEASURE` set, `TIDALFAST_AUDIO_NULL=1` and a settings file of its own, so bit-perfect output is off and your settings stay as they are. The runs share a list cache folder in the logs folder: the mock's first run starts with an empty cache, and later runs read the sidebar and Liked Songs from it. Other `TIDALFAST_` variables in your environment are dropped. The tool prints a table per scenario and setup, writes `build/measure/<time>.json`, and keeps each run's stderr in `build/measure/logs-<time>/`. Flags: `-runs=N`, `-setup=fake` or `mock` or `fake,mock`, `-app=path`, `-timeout=seconds` and `-out=path`.
 
 The setups:
 
@@ -788,30 +822,32 @@ Startup, in ms since the process started. Run 1 is on its own. The other 9 runs 
 
 | mark | fake run 1 | fake median (min to max) | mock run 1 | mock median (min to max) |
 |---|---|---|---|---|
-| main | 9.2 | 9.8 (6.7 to 15.3) | 14.1 | 11.2 (5.0 to 12.2) |
-| launched | 94.3 | 86.7 (82.5 to 92.4) | 94.8 | 93.8 (89.6 to 103.7) |
-| dylib | 365.2 | 117.3 (112.8 to 123.3) | 125.1 | 126.9 (121.1 to 135.4) |
-| init | 396.7 | 129.3 (124.9 to 135.3) | 133.3 | 135.5 (129.6 to 144.0) |
-| window | 406.5 | 134.3 (128.6 to 139.1) | 137.9 | 139.5 (132.9 to 149.0) |
-| first_frame | 461.9 | 179.5 (172.7 to 186.3) | 180.6 | 186.8 (178.3 to 197.0) |
-| library | 461.9 | 179.5 (172.7 to 186.3) | 225.8 | 191.8 (182.6 to 200.8) |
-| tracks | 466.4 | 188.6 (179.5 to 192.6) | 454.8 | 417.3 (407.9 to 428.8) |
+| main | 7.5 | 4.8 (4.8 to 4.9) | 7.4 | 4.8 (4.7 to 7.1) |
+| launched | 79.6 | 76.9 (76.1 to 77.9) | 87.9 | 77.7 (76.7 to 87.7) |
+| dylib | 364.7 | 118.3 (115.9 to 122.6) | 129.3 | 118.8 (113.9 to 130.1) |
+| init | 397.9 | 130.2 (127.9 to 134.5) | 137.5 | 126.8 (121.9 to 138.1) |
+| window | 401.2 | 132.1 (129.7 to 137.1) | 139.3 | 128.7 (123.7 to 139.9) |
+| first_frame | 433.0 | 154.2 (152.0 to 158.9) | 159.5 | 150.4 (144.9 to 161.4) |
+| library | 433.0 | 154.3 (152.0 to 159.0) | 178.9 | 158.7 (153.2 to 169.7) |
+| tracks | 440.1 | 162.6 (160.4 to 167.4) | 412.1 | 182.4 (177.9 to 194.5) |
 
-At `tracks` the footprint is 56 MB with the fake data and 93 MB with the mock, gpu 27 and 41 MB.
+At `tracks` the footprint is 50 MB with the fake data and 70 MB with the mock, gpu 27 and 29 MB.
 
-The fake run 1 came straight after a build, so it includes macOS checking the new dylib's signature: `dylib` at 365 ms instead of 117. Later launches open the same file and skip that. The mock's run 1 also logs in.
+The fake run 1 came straight after a build, so it includes macOS checking the new dylib's signature: `dylib` at 365 ms instead of 118. Later launches open the same file and skip that. The mock's run 1 also logs in, and starts with an empty list cache. The later mock runs read the sidebar, Liked Songs and its covers from the cache (see The list cache), so their `tracks` came at 182 ms. Before the cache it was 417 ms, about what run 1 still takes: on the mock most of it was waiting for covers.
 
 Memory, MB. `-runs` applies to startup; the memory scenario ran once with each setup, and earlier runs of the same build with two or three runs each were within 1 MB of these:
 
 | stage | fake footprint | resident | gpu | mock footprint | resident | gpu | mock covers |
 |---|---|---|---|---|---|---|---|
-| startup_idle | 66.4 | 111.9 | 27.3 | 69.4 | 116.6 | 28.9 | 22 |
-| list_open | 66.5 | 111.9 | 27.3 | 71.6 | 118.2 | 30.2 | 37 |
-| scrolled | 72.6 | 120.7 | 28.4 | 78.0 | 124.6 | 35.8 | 257 (7.4 MB of pages) |
-| playing | 78.3 | 124.2 | 28.4 | 83.0 | 126.5 | 35.5 | 195 |
-| idle_after | 73.9 | 122.7 | 28.4 | 78.7 | 126.0 | 35.5 | 195 |
+| startup_idle | 67.6 | 107.6 | 27.3 | 66.6 | 111.9 | 28.9 | 22 |
+| list_open | 76.8 | 107.6 | 39.5 | 69.5 | 114.1 | 30.2 | 37 |
+| scrolled | 85.1 | 116.4 | 40.5 | 75.9 | 121.6 | 35.0 | 257 (7.4 MB of pages) |
+| playing | 88.0 | 120.0 | 40.5 | 90.0 | 131.9 | 35.5 | 195 |
+| idle_after | 83.5 | 118.6 | 40.5 | 84.1 | 129.8 | 35.5 | 195 |
 
-The peak footprint was 93 MB with the fake data and 110 MB with the mock, both while scrolling, when the layer has three drawables. Fallback fonts: 601 MB mapped, 23 MB of it resident.
+The peak footprint was 88 MB with the fake data and 96 MB with the mock, both while playing. Fallback fonts: 601 MB mapped, 23 MB of it resident.
+
+The fake data's gpu is 12 MB higher than in the baseline before this one from `list_open` on, one drawable's worth: the layer held three at those samples. The fake data doesn't use the list cache, and the build before the cache, measured the same day, showed the same, so it isn't the cache. Against that build, one memory run each and before covers went to disk, the mock's footprint was within 0.4 MB up to `scrolled` and 2 MB higher at `playing` and `idle_after`. About 0.6 MB of that is Liked Songs, kept in memory while the long playlist is open; the rest wasn't tracked down.
 
 Before the memory work (the previous baseline, same machine) the footprint was 104 MB at `startup_idle` with the fake data and 114 MB with the mock, 174 MB on the mock after scrolling and 185 MB after playing, with a 198 MB peak, and `tracks` came at 312 and 581 ms. What took it down, in the order it went in, measured each time against the build before:
 

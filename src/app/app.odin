@@ -30,7 +30,7 @@ import "../ui"
 
 CLEAR_COLOR :: render.Color{0.063, 0.063, 0.063, 1}
 
-STATE_VERSION :: 15
+STATE_VERSION :: 16
 
 FRAME_HISTORY :: 120
 
@@ -343,6 +343,7 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input, shell: ^platfor
 	ui.set_window_key(&s.ui, bool(input.key_window))
 	ui.set_clipboard(&s.ui, shell.get_clipboard, shell.set_clipboard)
 	data_update(s, input.time)
+	lists_window_key(s, bool(input.key_window))
 	playback_update(s, events)
 	s.ui.scrollbars = s.playback.settings.scrollbars
 
