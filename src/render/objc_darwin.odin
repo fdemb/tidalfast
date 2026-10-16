@@ -69,12 +69,3 @@ error_string :: proc "contextless" (err: id) -> string {
 	desc := msg(err, "localizedDescription")
 	return string(cstring(msg(desc, "UTF8String")))
 }
-
-// gpu_allocated is the Metal device's currentAllocatedSize: every buffer and
-// texture the app holds, in bytes. Safe from any thread.
-gpu_allocated :: proc "contextless" (r: ^Renderer) -> int {
-	if r.device == nil {
-		return 0
-	}
-	return int(msg_proc(proc "c" (id, SEL) -> uint)(r.device, sel_registerName("currentAllocatedSize")))
-}

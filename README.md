@@ -7,7 +7,7 @@ shell/          Obj-C executable: window, CAMetalLayer, event queue, dylib loade
                 input methods, clipboard and accessibility
 src/platform/   the ABI between shell and app (shell/platform.h mirrors it)
 src/app/        the hot-reloaded app dylib
-src/render/     Metal renderer
+src/render/     renderer, with Metal as its backend (metal_darwin.odin)
 src/text/       fonts, shaping (kb_text_shape), rasterizing (CoreText), glyph atlas
 src/ui/         box tree, layout, input, animation, menus, tooltips and the text field
 src/kbts/       kb_text_shape 2.21: C source and Odin bindings

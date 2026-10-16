@@ -34,7 +34,7 @@ Region :: struct {
 @(private = "file")
 read_texels :: proc(r: ^render.Renderer, t: render.Texture, x, y, w, h: int) -> []u8 {
 	out := make([]u8, w * h, context.temp_allocator)
-	tex := r.textures[t & 0xffff].texture
+	tex := r.textures[t & 0xffff].gpu.texture
 	region := Region{{uint(x), uint(y), 0}, {uint(w), uint(h), 1}}
 	render.msg_proc(proc "c" (render.id, render.SEL, rawptr, uint, Region, uint))(tex, render.sel_registerName("getBytes:bytesPerRow:fromRegion:mipmapLevel:"), raw_data(out), uint(w), region, 0)
 	return out
@@ -55,8 +55,8 @@ atlas_pages_grow_and_keep_their_glyphs :: proc(t: ^testing.T) {
 	mem.arena_init(&arena, backing)
 	context.allocator = mem.arena_allocator(&arena)
 	r := new(render.Renderer)
-	r.device = device
-	r.queue = render.msg(device, "newCommandQueue")
+	r.gpu.device = device
+	r.gpu.queue = render.msg(device, "newCommandQueue")
 	s := new(text.State)
 	testing.expect(t, text.init(s))
 	defer {
@@ -97,7 +97,7 @@ atlas_pages_grow_and_keep_their_glyphs :: proc(t: ^testing.T) {
 	testing.expect_value(t, a.pages[0].size, text.PAGE_SIZE >> (text.PAGE_START_SHIFT - 1))
 
 	// The copy runs on the GPU ahead of anything committed after it.
-	cmd := render.msg(r.queue, "commandBuffer")
+	cmd := render.msg(r.gpu.queue, "commandBuffer")
 	render.msg(cmd, "commit")
 	render.msg(cmd, "waitUntilCompleted")
 	after := read_texels(r, a.pages[0].texture, int(glyph.x), int(glyph.y), int(glyph.w), int(glyph.h))
