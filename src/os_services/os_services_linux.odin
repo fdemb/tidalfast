@@ -191,18 +191,34 @@ secret_delete :: proc(service, account: string) -> Status {
 }
 
 // open_url opens url in the default browser with xdg-open. A URL without a
-// scheme gets https://. The child forks again and exits, so xdg-open runs
-// on as an orphan and leaves no zombie behind.
+// scheme gets https://, and any scheme but http and https is refused.
 open_url :: proc(url: string) -> bool {
 	full := url if strings.contains(url, "://") else strings.concatenate({"https://", url}, context.temp_allocator)
+	if !strings.has_prefix(full, "https://") && !strings.has_prefix(full, "http://") {
+		log.warn("os_services: not opening a URL that isn't http or https")
+		return false
+	}
 	argv := [3]cstring{"xdg-open", strings.clone_to_cstring(full, context.temp_allocator), nil}
+	return spawn_detached(argv[:])
+}
+
+// spawn_detached runs argv, which ends in nil, with the default signal
+// mask and SIGPIPE back to default: the shell blocks the quit signals for
+// its signalfd and ignores SIGPIPE, and both would survive exec. The child
+// forks again and exits, so the program runs on as an orphan and leaves no
+// zombie behind.
+spawn_detached :: proc(argv: []cstring) -> bool {
 	pid := posix.fork()
 	if pid < 0 {
 		return false
 	}
 	if pid == 0 {
 		if posix.fork() == 0 {
-			posix.execvp(argv[0], &argv[0])
+			none: posix.sigset_t
+			posix.sigemptyset(&none)
+			posix.pthread_sigmask(.SETMASK, &none, nil)
+			posix.signal(.SIGPIPE, nil) // SIG_DFL
+			posix.execvp(argv[0], raw_data(argv))
 		}
 		posix._exit(0)
 	}
