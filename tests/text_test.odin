@@ -4,6 +4,7 @@ import "core:mem"
 import "core:testing"
 import "core:time"
 
+import "../src/kbts"
 import "../src/render"
 import "../src/text"
 
@@ -518,4 +519,22 @@ test_fallback_cache_limit :: proc(t: ^testing.T) {
 		testing.expect(t, !text.loading(state), "nothing asked again")
 	}
 	testing.expect_value(t, state.generation, generation)
+}
+
+// A default ignorable a font doesn't map, like U+FE0F in Noto Color Emoji,
+// doesn't stop the font covering the cluster: the shaper hides it anyway.
+// Inter has no U+180B, a Mongolian variation selector.
+@(test)
+test_coverage_skips_default_ignorables :: proc(t: ^testing.T) {
+	s: Shaper
+	context.allocator = shaper_init(&s)
+	defer shaper_destroy(&s)
+
+	inter := &s.state.faces[text.Font.Regular].kb
+	testing.expect(t, kbts.CodepointToGlyphId(inter, 0x180b) == 0, "Inter has no U+180B")
+	test: kbts.font_coverage_test
+	kbts.FontCoverageTestBegin(&test, inter)
+	kbts.FontCoverageTestCodepoint(&test, 'a')
+	kbts.FontCoverageTestCodepoint(&test, 0x180b)
+	testing.expect(t, bool(kbts.FontCoverageTestEnd(&test)), "a + U+180B is covered")
 }
