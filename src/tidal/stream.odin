@@ -4,6 +4,7 @@ import "core:encoding/base64"
 import "core:encoding/json"
 import "core:encoding/xml"
 import "core:fmt"
+import "core:log"
 import "core:math"
 import "core:mem"
 import "core:strconv"
@@ -152,7 +153,11 @@ dash_info_from_mpd :: proc(mpd_xml: string, allocator := context.allocator) -> (
 
 	doc, xerr := xml.parse_string(mpd_xml, allocator = context.temp_allocator)
 	if xerr != nil || doc == nil || doc.element_count == 0 {
+		log.debugf("MPD is not XML: %v, %d bytes, first byte 0x%02x", xerr, len(mpd_xml), mpd_xml[0] if len(mpd_xml) > 0 else 0)
 		return {}, decode_error("MPD: not XML")
+	}
+	if context.logger.lowest_level <= .Debug {
+		log.debugf("MPD outline, %d bytes: %s", len(mpd_xml), mpd_outline(doc, context.temp_allocator))
 	}
 	root: xml.Element_ID = 0
 	if doc.elements[0].ident != "MPD" {
@@ -421,6 +426,86 @@ dash_hls :: proc(d: Dash_Info, allocator := context.allocator) -> string {
 	}
 	strings.write_string(&b, "#EXT-X-ENDLIST\n")
 	return strings.to_string(b)
+}
+
+// mpd_outline describes an MPD for the debug log without its text: element
+// and attribute names, and each value's shape with digits as 9. URLs and
+// long values show only their length, and runs of S elements are counted.
+mpd_outline :: proc(doc: ^xml.Document, allocator := context.allocator) -> string {
+	b := strings.builder_make(allocator)
+	outline_element(&b, doc, 0)
+	return strings.to_string(b)
+
+	outline_element :: proc(b: ^strings.Builder, doc: ^xml.Document, id: xml.Element_ID) {
+		e := doc.elements[id]
+		strings.write_string(b, e.ident)
+		for a in e.attribs {
+			strings.write_byte(b, ' ')
+			strings.write_string(b, a.key)
+			strings.write_byte(b, '=')
+			outline_value(b, a.val)
+		}
+		children := 0
+		for v in e.value {
+			if _, is_child := v.(xml.Element_ID); is_child {
+				children += 1
+			}
+		}
+		if children == 0 {
+			return
+		}
+		strings.write_string(b, " {")
+		// A run of S elements prints its first one and its length.
+		run_first: xml.Element_ID
+		run := 0
+		for v in e.value {
+			child := v.(xml.Element_ID) or_continue
+			if doc.elements[child].ident == "S" {
+				if run == 0 {
+					run_first = child
+				}
+				run += 1
+				continue
+			}
+			outline_run(b, doc, run_first, run)
+			run = 0
+			strings.write_byte(b, ' ')
+			outline_element(b, doc, child)
+		}
+		outline_run(b, doc, run_first, run)
+		strings.write_string(b, " }")
+	}
+
+	outline_run :: proc(b: ^strings.Builder, doc: ^xml.Document, first: xml.Element_ID, count: int) {
+		if count == 0 {
+			return
+		}
+		if count > 1 {
+			fmt.sbprintf(b, " %d S elements, first:", count)
+		}
+		strings.write_byte(b, ' ')
+		outline_element(b, doc, first)
+	}
+
+	outline_value :: proc(b: ^strings.Builder, v: string) {
+		if len(v) > 40 || strings.contains(v, "://") {
+			fmt.sbprintf(b, "<%d bytes>", len(v))
+			return
+		}
+		strings.write_byte(b, '"')
+		for i in 0 ..< len(v) {
+			c := v[i]
+			switch {
+			case c >= '0' && c <= '9':
+				strings.write_byte(b, '9')
+			case c > ' ' && c < 0x7f && c != '"' && c != '\\':
+				strings.write_byte(b, c)
+			case:
+				fmt.sbprintf(b, "\\x%02x", c)
+			}
+		}
+		strings.write_byte(b, '"')
+	}
 }
 
 // parse_iso_duration parses ISO 8601 durations like "PT3M25.123S".

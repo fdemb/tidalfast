@@ -2,6 +2,7 @@ package tidal_tests
 
 import "core:encoding/base64"
 import "core:encoding/json"
+import "core:encoding/xml"
 import "core:fmt"
 import "core:mem"
 import vmem "core:mem/virtual"
@@ -406,6 +407,18 @@ dash_duration_fallbacks :: proc(t: ^testing.T) {
 	open_ended := `<MPD><Period><AdaptationSet><Representation><SegmentTemplate timescale="1" media="$Number$.mp4"><SegmentTimeline><S d="4" r="-1"/></SegmentTimeline></SegmentTemplate></Representation></AdaptationSet></Period></MPD>`
 	_, err4 := tidal.dash_info_from_mpd(open_ended, allocator)
 	testing.expect(t, err4 != nil)
+}
+
+@(test)
+mpd_outline_hides_text :: proc(t: ^testing.T) {
+	doc, err := xml.parse_string(MPD, allocator = context.temp_allocator)
+	testing.expect_value(t, err, nil)
+	outline := tidal.mpd_outline(doc, context.temp_allocator)
+	testing.expect(t, strings.contains(outline, `mediaPresentationDuration="PT9M9.999S"`))
+	testing.expect(t, strings.contains(outline, `initialization=<32 bytes>`))
+	testing.expect(t, strings.contains(outline, `2 S elements, first: S d="999999" r="9"`))
+	testing.expect(t, !strings.contains(outline, "sp.example"))
+	testing.expect(t, !strings.contains(outline, "176128"))
 }
 
 @(test)
