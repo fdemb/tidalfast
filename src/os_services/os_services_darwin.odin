@@ -1,11 +1,13 @@
 // The few OS services the app needs that aren't windows, drawing or audio:
-// a secret store and opening a URL in the default browser. Each OS has its
-// own file. On macOS the secret store is the login Keychain, and all of it
-// is C APIs (Security, CoreFoundation, LaunchServices), so it's called
-// straight from Odin without going through the shell, and it's safe on any
-// thread.
+// a secret store, opening a URL in the default browser and where settings
+// and caches go. Each OS has its own file. On macOS the secret store is the
+// login Keychain, and all of it is C APIs (Security, CoreFoundation,
+// LaunchServices), so it's called straight from Odin without going through
+// the shell, and it's safe on any thread.
 package os_services
 
+import "base:runtime"
+import "core:os"
 import "core:strings"
 import "core:sys/posix"
 
@@ -175,4 +177,24 @@ open_url :: proc(url: string) -> bool {
 	}
 	defer CFRelease(u)
 	return LSOpenCFURLRef(u, nil) == 0
+}
+
+// config_dir is where settings go: ~/Library/Application Support. Empty
+// without HOME.
+config_dir :: proc(allocator: runtime.Allocator) -> string {
+	return home_path("/Library/Application Support", allocator)
+}
+
+// cache_dir is where caches go: ~/Library/Caches. Empty without HOME.
+cache_dir :: proc(allocator: runtime.Allocator) -> string {
+	return home_path("/Library/Caches", allocator)
+}
+
+@(private)
+home_path :: proc(path: string, allocator: runtime.Allocator) -> string {
+	home := os.get_env("HOME", context.temp_allocator)
+	if home == "" {
+		return ""
+	}
+	return strings.concatenate({home, path}, allocator)
 }

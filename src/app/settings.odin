@@ -26,6 +26,7 @@ import "core:strings"
 import "core:sync"
 
 import "../audio"
+import "../os_services"
 import "../render"
 import "../ui"
 
@@ -53,17 +54,17 @@ Device_Change_File :: struct {
 	rate:        f64,
 }
 
-// settings_default_path is TIDALFAST_SETTINGS, or the file under
-// ~/Library/Application Support. Allocated with allocator.
+// settings_default_path is TIDALFAST_SETTINGS, or tidalfast/settings.json
+// in the OS's config directory. Allocated with allocator.
 settings_default_path :: proc(allocator: runtime.Allocator) -> string {
 	if p := os.get_env("TIDALFAST_SETTINGS", context.temp_allocator); p != "" {
 		return strings.clone(p, allocator)
 	}
-	home := os.get_env("HOME", context.temp_allocator)
-	if home == "" {
+	dir := os_services.config_dir(context.temp_allocator)
+	if dir == "" {
 		return ""
 	}
-	return strings.concatenate({home, "/Library/Application Support/tidalfast/settings.json"}, allocator)
+	return strings.concatenate({dir, "/tidalfast/settings.json"}, allocator)
 }
 
 // settings_load reads the file at path. A missing or broken file gives
