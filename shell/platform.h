@@ -127,8 +127,8 @@ _Static_assert(KEY_COUNT == 65, "Key must match platform.odin");
 enum {
   MODIFIER_SHIFT = 1 << 0,
   MODIFIER_CONTROL = 1 << 1,
-  MODIFIER_OPTION = 1 << 2,
-  MODIFIER_COMMAND = 1 << 3,
+  MODIFIER_ALT = 1 << 2,
+  MODIFIER_SUPER = 1 << 3,
   MODIFIER_CAPS_LOCK = 1 << 4,
 };
 

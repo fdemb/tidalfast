@@ -91,8 +91,8 @@ Key :: enum u32 {
 Modifier :: enum u32 {
 	Shift,
 	Control,
-	Option,
-	Command,
+	Alt, // Option on macOS
+	Super, // Command on macOS, the Windows key on Windows
 	Caps_Lock,
 }
 Modifiers :: bit_set[Modifier; u32]

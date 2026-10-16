@@ -224,8 +224,8 @@ focus_text_field :: proc(b: ^Box, f: ^Text_Field) {
 }
 
 // field_key applies one key press, reporting whether the field used it and
-// whether it gave up the focus. Movement and deletion keys are macOS's:
-// Option by word, Command or Control-A and Control-E to the line's ends.
+// whether it gave up the focus. Control-A and Control-E also go to the
+// line's ends, as everywhere on macOS.
 @(private)
 field_key :: proc(u: ^State, f: ^Text_Field, key: Key, k: Key_Press, sig: ^Field_Signal) -> (used, gave_up: bool) {
 	shift := .Shift in k.modifiers
@@ -236,15 +236,15 @@ field_key :: proc(u: ^State, f: ^Text_Field, key: Key, k: Key_Press, sig: ^Field
 		switch base {
 		case {}:
 			field_move(f, dir, .Cluster, shift)
-		case {.Option}:
+		case {WORD}:
 			field_move(f, dir, .Word, shift)
-		case {.Command}:
+		case {LINE}:
 			field_move(f, dir, .Line, shift)
 		case:
 			return
 		}
 	case .Up, .Home, .Down, .End:
-		if base != {} && base != {.Command} {
+		if base != {} && base != {LINE} {
 			return
 		}
 		field_move(f, -1 if k.code == .Up || k.code == .Home else 1, .Line, shift)
@@ -253,9 +253,9 @@ field_key :: proc(u: ^State, f: ^Text_Field, key: Key, k: Key_Press, sig: ^Field
 		switch k.modifiers {
 		case {}, {.Shift}:
 			field_delete(f, dir, .Cluster)
-		case {.Option}:
+		case {WORD}:
 			field_delete(f, dir, .Word)
-		case {.Command}:
+		case {LINE}:
 			field_delete(f, dir, .Line)
 		case:
 			return

@@ -900,8 +900,8 @@ static uint32_t modifiers(NSEventModifierFlags flags) {
   uint32_t m = 0;
   if (flags & NSEventModifierFlagShift) m |= MODIFIER_SHIFT;
   if (flags & NSEventModifierFlagControl) m |= MODIFIER_CONTROL;
-  if (flags & NSEventModifierFlagOption) m |= MODIFIER_OPTION;
-  if (flags & NSEventModifierFlagCommand) m |= MODIFIER_COMMAND;
+  if (flags & NSEventModifierFlagOption) m |= MODIFIER_ALT;
+  if (flags & NSEventModifierFlagCommand) m |= MODIFIER_SUPER;
   if (flags & NSEventModifierFlagCapsLock) m |= MODIFIER_CAPS_LOCK;
   return m;
 }
@@ -1224,9 +1224,9 @@ static void test_key(NSString *spec) {
   uint32_t mods = 0;
   NSArray *parts = [spec componentsSeparatedByString:@"+"];
   for (NSString *p in parts) {
-    if ([p isEqualToString:@"cmd"]) mods |= MODIFIER_COMMAND;
+    if ([p isEqualToString:@"cmd"]) mods |= MODIFIER_SUPER;
     else if ([p isEqualToString:@"shift"]) mods |= MODIFIER_SHIFT;
-    else if ([p isEqualToString:@"opt"]) mods |= MODIFIER_OPTION;
+    else if ([p isEqualToString:@"opt"]) mods |= MODIFIER_ALT;
     else if ([p isEqualToString:@"ctrl"]) mods |= MODIFIER_CONTROL;
   }
   Key key = key_named(parts.lastObject);

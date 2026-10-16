@@ -682,7 +682,7 @@ queue_edit :: proc(u: ^State, e: Edit_Event) {
 
 @(private)
 key_down :: proc(u: ^State, e: platform.Event) {
-	mods := e.modifiers & {.Shift, .Control, .Option, .Command}
+	mods := e.modifiers & {.Shift, .Control, .Alt, .Super}
 	code := e.key
 	switch {
 	case !e.repeat && (code == .F1 || (code == .D && mods == {PRIMARY, .Shift})):
