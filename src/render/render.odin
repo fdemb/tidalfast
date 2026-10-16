@@ -385,8 +385,14 @@ push :: proc(r: ^Renderer, rect: Rect, style: Style) {
 		b.textures[kind] = texture
 	}
 
+	if r.instances == nil {
+		return
+	}
 	if r.instance_count == r.capacity[r.slot] {
 		grow_instances(r)
+		if r.instance_count == r.capacity[r.slot] {
+			return
+		}
 	}
 	r.instances[r.instance_count] = inst
 	r.instance_count += 1

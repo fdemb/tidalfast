@@ -104,9 +104,16 @@ Gpu_Texture :: struct {
 	levels: u32,
 }
 
-// init draws to surface, a platform.Wayland_Surface.
-init :: proc(r: ^Renderer, surface: rawptr) -> bool {
+// init draws to surface, a platform.Wayland_Surface. If it fails, it
+// tears down what it made, so g.device is nil and the renderer draws
+// nothing.
+init :: proc(r: ^Renderer, surface: rawptr) -> (ok: bool) {
 	g := &r.gpu
+	defer if !ok {
+		path := r.capture_path
+		destroy(r)
+		r.capture_path = path
+	}
 	ws := (^platform.Wayland_Surface)(surface)
 	if ws == nil || ws.display == nil || ws.surface == nil {
 		log.error("render: no Wayland surface")
@@ -176,8 +183,8 @@ init :: proc(r: ^Renderer, surface: rawptr) -> bool {
 		flags            = {.RESET_COMMAND_BUFFER},
 		queueFamilyIndex = g.queue_family,
 	}
-	vk.CreateCommandPool(g.device, &pool_info, nil, &g.pool)
-	sizes := [2]vk.DescriptorPoolSize{{.STORAGE_BUFFER, FRAMES_IN_FLIGHT}, {.SAMPLED_IMAGE, MAX_TEXTURES + 1}}
+	// The frame layout's two immutable samplers count against the pool.
+	sizes := [3]vk.DescriptorPoolSize{{.STORAGE_BUFFER, FRAMES_IN_FLIGHT}, {.SAMPLER, 2 * FRAMES_IN_FLIGHT}, {.SAMPLED_IMAGE, MAX_TEXTURES + 1}}
 	descriptor_info := vk.DescriptorPoolCreateInfo {
 		sType         = .DESCRIPTOR_POOL_CREATE_INFO,
 		flags         = {.FREE_DESCRIPTOR_SET},
@@ -185,7 +192,10 @@ init :: proc(r: ^Renderer, surface: rawptr) -> bool {
 		poolSizeCount = len(sizes),
 		pPoolSizes    = &sizes[0],
 	}
-	vk.CreateDescriptorPool(g.device, &descriptor_info, nil, &g.descriptors)
+	if vk.CreateCommandPool(g.device, &pool_info, nil, &g.pool) != .SUCCESS || vk.CreateDescriptorPool(g.device, &descriptor_info, nil, &g.descriptors) != .SUCCESS {
+		log.error("render: can't make the command or descriptor pool")
+		return false
+	}
 	for &f in g.frames {
 		buffers: [2]vk.CommandBuffer
 		alloc := vk.CommandBufferAllocateInfo {
@@ -211,11 +221,18 @@ init :: proc(r: ^Renderer, surface: rawptr) -> bool {
 			descriptorSetCount = 1,
 			pSetLayouts        = &g.frame_layout,
 		}
-		vk.AllocateDescriptorSets(g.device, &set_info, &f.set)
+		if vk.AllocateDescriptorSets(g.device, &set_info, &f.set) != .SUCCESS {
+			log.error("render: can't allocate the frame descriptor sets")
+			return false
+		}
 	}
 
 	// Slot 0 is the white texture behind the zero handle.
 	r.textures[0] = new_texture_slot(r, 1, 1, .RGBA8, false)
+	if r.textures[0].width == 0 {
+		log.error("render: can't make the white texture")
+		return false
+	}
 	white := [4]u8{255, 255, 255, 255}
 	texture_update(r, 0, white[:], 0, 0, 1, 1)
 	g.pipeline = build_pipeline(r)
@@ -731,6 +748,9 @@ image_barrier :: proc(cmd: vk.CommandBuffer, image: vk.Image, from, to: vk.Image
 @(private)
 new_texture_slot :: proc(r: ^Renderer, width, height: int, format: Texture_Format, mipmapped: bool) -> Texture_Slot {
 	g := &r.gpu
+	if g.device == nil {
+		return {}
+	}
 	vk_format: vk.Format
 	switch format {
 	case .R8:
@@ -813,6 +833,9 @@ new_texture_slot :: proc(r: ^Renderer, width, height: int, format: Texture_Forma
 // are done.
 @(private)
 gpu_texture_free :: proc(r: ^Renderer, t: Gpu_Texture) {
+	if r.gpu.device == nil {
+		return
+	}
 	f := slot_ready(r)
 	if f.dead_count == MAX_DEAD {
 		vk.DeviceWaitIdle(r.gpu.device)
@@ -841,6 +864,9 @@ free_texture_now :: proc(g: ^Gpu, t: Gpu_Texture) {
 // the next frame, then the mips if it has them.
 @(private)
 gpu_texture_write :: proc(r: ^Renderer, slot: ^Texture_Slot, pixels: []byte, x, y, w, h, bpp: int) {
+	if r.gpu.device == nil {
+		return
+	}
 	buffer, offset, ok := stage(r, pixels[:w * h * bpp])
 	if !ok {
 		log.error("render: out of staging memory")
@@ -886,6 +912,9 @@ generate_mips :: proc(cmd: vk.CommandBuffer, t: Gpu_Texture, width, height: int)
 
 @(private)
 gpu_texture_copy :: proc(r: ^Renderer, from, to: ^Texture_Slot, w, h: int) {
+	if r.gpu.device == nil {
+		return
+	}
 	cmd := upload_cmd(r)
 	src, dst := from.gpu.image, to.gpu.image
 	image_barrier(cmd, src, .SHADER_READ_ONLY_OPTIMAL, .TRANSFER_SRC_OPTIMAL, 0, 1, {.FRAGMENT_SHADER}, {.TRANSFER}, {.SHADER_READ}, {.TRANSFER_READ})
@@ -903,9 +932,12 @@ gpu_texture_copy :: proc(r: ^Renderer, from, to: ^Texture_Slot, w, h: int) {
 // Frame
 
 // gpu_frame_begin waits until the GPU is done with this frame's slot and
-// returns its instance buffer.
+// returns its instance buffer, or nil if there is none.
 @(private)
 gpu_frame_begin :: proc(r: ^Renderer) -> [^]Instance {
+	if r.gpu.device == nil {
+		return nil
+	}
 	f := slot_ready(r)
 	if f.instances.buffer == 0 {
 		set_instance_buffer(r, f, INITIAL_INSTANCES)
@@ -915,13 +947,16 @@ gpu_frame_begin :: proc(r: ^Renderer) -> [^]Instance {
 
 // grow_instances replaces the current slot's buffer with one twice the
 // size and copies over what this frame has pushed so far. Nothing has read
-// this frame's buffer yet, so the old one can go at once.
+// this frame's buffer yet, so the old one can go at once. If there's no
+// memory for it, the old buffer and capacity stay.
 @(private)
 grow_instances :: proc(r: ^Renderer) {
 	f := &r.gpu.frames[r.slot]
 	old := f.instances
-	f.instances = {}
 	set_instance_buffer(r, f, r.capacity[r.slot] * 2)
+	if f.instances.buffer == old.buffer {
+		return
+	}
 	mem.copy(f.instances.mapped, old.mapped, r.instance_count * size_of(Instance))
 	free_buffer(&r.gpu, &old)
 	r.instances = ([^]Instance)(f.instances.mapped)
@@ -1073,10 +1108,10 @@ end_frame :: proc(r: ^Renderer) {
 	// Counts frames that drew nothing too, so frame_index - FRAMES_IN_FLIGHT
 	// is always a frame the GPU has finished once begin_frame returns.
 	defer r.frame_index += 1
-	f := slot_ready(r)
 	if g.device == nil {
 		return
 	}
+	f := slot_ready(r)
 	want := vk.Extent2D{u32(math.round(r.width * r.scale)), u32(math.round(r.height * r.scale))}
 	image := max(u32)
 	if g.pipeline != 0 && want.width > 0 && want.height > 0 {
