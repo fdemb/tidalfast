@@ -151,23 +151,7 @@ dash_info_from_mpd :: proc(mpd_xml: string, allocator := context.allocator) -> (
 		return make_error(.Manifest_Decode, what, detail = what)
 	}
 
-	// core:encoding/xml since its hot path rework keeps attributes and
-	// their values in an arena with blocks of a quarter of the input, and an
-	// allocation between the block size and the arena's out-of-band size
-	// (6554 bytes) fails. append ignores that, so the ninth attribute of an
-	// element, mediaPresentationDuration in TIDAL's MPD, is dropped. Trailing
-	// whitespace makes the blocks big enough that nothing falls in between.
-	MIN_XML_INPUT :: 4 * 6554
-	input := mpd_xml
-	if len(input) < MIN_XML_INPUT {
-		padded := make([]byte, MIN_XML_INPUT, context.temp_allocator)
-		copy(padded, input)
-		for i in len(input) ..< len(padded) {
-			padded[i] = ' '
-		}
-		input = string(padded)
-	}
-	doc, xerr := xml.parse_string(input, allocator = context.temp_allocator)
+	doc, xerr := xml.parse_string(mpd_xml, allocator = context.temp_allocator)
 	if xerr != nil || doc == nil || doc.element_count == 0 {
 		log.debugf("MPD is not XML: %v, %d bytes, first byte 0x%02x", xerr, len(mpd_xml), mpd_xml[0] if len(mpd_xml) > 0 else 0)
 		return {}, decode_error("MPD: not XML")

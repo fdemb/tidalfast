@@ -415,7 +415,8 @@ mpd_keeps_ninth_attribute :: proc(t: ^testing.T) {
 	allocator := arena_begin(&a)
 	defer vmem.arena_destroy(&a.arena)
 
-	// TIDAL's root element: the duration is its ninth attribute.
+	// TIDAL's root element: the duration is its ninth attribute. Odin's
+	// core:encoding/xml from 2026-10-09 to at least 2026-10-16 drops it.
 	mpd := `<?xml version='1.0' encoding='UTF-8'?><MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:cenc="urn:mpeg:cenc:2013" xsi:schemaLocation="urn:mpeg:dash:schema:mpd:2011 DASH-MPD.xsd" profiles="urn:mpeg:dash:profile:isoff-main:2011" type="static" minBufferTime="PT3.993S" mediaPresentationDuration="PT10S"><Period id="0"><AdaptationSet><Representation codecs="flac"><SegmentTemplate timescale="1" media="$Number$.mp4" initialization="i.mp4"><SegmentTimeline><S d="4" r="-1"/></SegmentTimeline></SegmentTemplate></Representation></AdaptationSet></Period></MPD>`
 	d, err := tidal.dash_info_from_mpd(mpd, allocator)
 	testing.expect_value(t, err, nil)
