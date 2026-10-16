@@ -1,6 +1,6 @@
 # Working on TIDALfast
 
-TIDALfast is a native macOS TIDAL client in Odin, with a small Obj-C shell (`shell/shell.m`) that owns the window and loads the app as a hot-reloaded dylib (`src/app`). `docs/plan.md` has the plan and layout, and `README.md` has the details of every part. This file covers what an agent needs to check its own work, since you can't see the window or hear the audio.
+TIDALfast is a native macOS TIDAL client in Odin, with a small Obj-C shell (`shell/shell.m`) that owns the window and loads the app as a hot-reloaded dylib (`src/app`). `docs/plan.md` has the plan and layout, and the other files in `docs/` have the details of every part. This file covers what an agent needs to check its own work, since you can't see the window or hear the audio.
 
 ## Build and test
 
@@ -40,7 +40,7 @@ Run this before and after any change that could affect memory or startup:
 ./build/measure/measure compare docs/measure-baseline.json build/measure/<time>.json
 ```
 
-It does 10 cold launches and a memory scenario (idle, a large list open, scrolled with covers, playing, idle again), with fake data and against its own mock. It prints medians and writes JSON. `compare` marks changes of 10% and at least 1 ms or MB. Footprint is what Activity Monitor shows, and on Apple silicon it includes GPU memory, so don't add the `ram` and `gpu` numbers together. The first launch after a build is slow because macOS checks the new binary's signature; the tool reports it separately. Update `docs/measure-baseline.json` and the README numbers when a change moves them on purpose. `-real` uses the user's account and is only for the user to run.
+It does 10 cold launches and a memory scenario (idle, a large list open, scrolled with covers, playing, idle again), with fake data and against its own mock. It prints medians and writes JSON. `compare` marks changes of 10% and at least 1 ms or MB. Footprint is what Activity Monitor shows, and on Apple silicon it includes GPU memory, so don't add the `ram` and `gpu` numbers together. The first launch after a build is slow because macOS checks the new binary's signature; the tool reports it separately. Update `docs/measure-baseline.json` and the numbers in `docs/measuring.md` when a change moves them on purpose. `-real` uses the user's account and is only for the user to run.
 
 ## Idle CPU
 

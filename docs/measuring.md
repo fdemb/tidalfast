@@ -1,0 +1,120 @@
+# Measuring RAM and startup
+
+```
+./build.sh measure
+./build/measure/measure startup     # 10 cold launches with the fake data, then 10 against the mock
+./build/measure/measure memory      # the memory scenario, once with each
+./build/measure/measure all         # both
+./build/measure/measure compare docs/measure-baseline.json build/measure/20261015-114141.json
+```
+
+`./build.sh measure` builds an optimized app in `build/measure/app` (its own shell and dylib, hot reload off), `tests/mock_tidal` and the tool. The app is the release build plus `TIDALFAST_MOCK_API`, which lets it read `TIDALFAST_API` and `TIDALFAST_PKCE_REDIRECT`. The real release build never reads them (see [TIDAL data](tidal-data.md#the-mock-server)), so it can't run against the mock.
+
+Each run is a cold launch with `TIDALFAST_MEASURE` set, `TIDALFAST_AUDIO_NULL=1` and a settings file of its own, so bit-perfect output is off and your settings stay as they are. The runs share a list cache folder in the logs folder: the mock's first run starts with an empty cache, and later runs read the sidebar and Liked Songs from it. Other `TIDALFAST_` variables in your environment are dropped. The tool prints a table per scenario and setup, writes `build/measure/<time>.json`, and keeps each run's stderr in `build/measure/logs-<time>/`. Flags: `-runs=N`, `-setup=fake` or `mock` or `fake,mock`, `-app=path`, `-timeout=seconds` and `-out=path`.
+
+The setups:
+
+- `fake` runs with `TIDALFAST_FAKE=1`: no account, no network, 10,000 fake rows.
+- `mock` starts its own `mock_tidal` on a free loopback port and logs in with `TIDALFAST_PKCE_REDIRECT` under a Keychain item called `tidalfast-measure-` and a random suffix. So the first run logs in and later runs read the login from the Keychain, as you would. The tool deletes the item at the end with `security delete-generic-password`. Deleting it from the tool itself fails with -25244, because the item's access list names the app.
+- `-real` runs `build/tidalfast` against your own account and your `tidalfast` Keychain item. Build it with `./build.sh release` first. It's for you to run by hand: macOS may ask for Keychain access, and the memory scenario plays a track from your longest list to the null device.
+
+`measure compare a.json b.json` prints every number in both files with its change. A time or size that changed by 10% and at least 1 ms or MB is marked `worse` or `better`. Startup times move a few percent from run to run, so compare medians from the same machine.
+
+## What the app prints
+
+With `TIDALFAST_MEASURE` set, the shell and the app print lines like these to stderr:
+
+```
+measure: {"mark":"main","ms":10.4}
+measure: {"mark":"tracks","ms":312.1,"footprint":84210000,"resident":137700000,"gpu":32100000,...}
+measure: {"sample":"scrolled","ms":31291.9,...,"fonts_mapped_bytes":630429612,"fonts_resident":31195136}
+```
+
+`ms` is milliseconds since the kernel started the process (`p_starttime` from `sysctl` `KERN_PROC_PID`), so time spent in dyld before `main` counts. The lines never hold tokens or addresses. `=1` prints the marks and nothing more. `=startup` quits once it reaches `tracks`. `=memory` runs the memory scenario and quits. The tool sets the mode.
+
+The startup marks, in order:
+
+| mark | what has happened |
+|---|---|
+| `main` | the shell's `main` started: dyld has loaded the executable and its frameworks |
+| `launched` | `applicationDidFinishLaunching`: AppKit is set up |
+| `dylib` | the app dylib is copied and opened |
+| `init` | the app's `init` returned: renderer, shaders, Inter, caches, workers |
+| `window` | the window is ordered front |
+| `first_frame` | the first frame is committed and its drawable presented |
+| `library` | the first frame with the sidebar's playlists (fake: the first frame) |
+| `tracks` | the first frame with track rows and every cover on screen ready |
+
+"Presented" means the app called `presentDrawable` and committed. The frame reaches the display a vsync or two later.
+
+Samples carry the same memory numbers as the marks plus the mapped fonts. The memory scenario takes one after each of these stages:
+
+1. `startup_idle`: the library is up and its covers are in, then 5 s with nothing happening.
+2. `list_open`: the longest list is open with every row loaded: the mock's 3,000-track playlist, or the fake data's 10,000 rows. 3 s to settle.
+3. `scrolled`: the bench's auto-scroll went through it (`TIDALFAST_BENCH=covers` on the mock: 600 rows one a frame, then 1,200 four a frame; the library bench on the fake data), covers loading as it went. 3 s to settle.
+4. `playing`: 30 s after playback started on the first playable row.
+5. `idle_after`: playback stopped, then 10 s, which shows what stays allocated.
+
+Then it quits through SIGTERM, the same path as Ctrl-C, so shutdown runs.
+
+## The numbers
+
+- **footprint** is `phys_footprint` from `task_info(TASK_VM_INFO)`. It's what Activity Monitor's Memory column shows and what macOS counts against the app under memory pressure: dirty memory the app owns, compressed or swapped memory included. On Apple silicon it includes Metal's allocations, since the GPU uses the same RAM. So gpu is part of footprint, not on top of it.
+- **resident** is the pages in RAM right now, clean ones included. That takes in the code of the app and every framework it touched, and mapped files. Pages of a mapped file that nobody wrote to are clean: the kernel can drop them and read them back from disk, so they count toward resident but not footprint.
+- **gpu** is the Metal device's `currentAllocatedSize`: glyph atlas pages, cover pages, instance buffers, the drawables' textures.
+- **fonts map** and **fonts res** are the fallback fonts the text loader mapped with `mmap`, and how much of them is resident (from `mincore`). Apple Color Emoji alone is 180 MB of file, but only the pages of glyphs drawn get read in. Those pages count toward resident and not footprint.
+- The rest is the app's own accounting: `arena` (the persistent arena's used bytes), `frame_peak` (the frame arena's high-water mark), `atlas_pages`, `runs` (shaped runs in the text cache), `covers` and `cover_bytes` (the cover cache's entries and its pages' bytes), `rows` and `view_bytes` (the open list and its arena).
+
+Measuring costs nothing with `TIDALFAST_MEASURE` unset: the app counts drawn rows and covers in the frame it's building, which is two additions each. With it set, marks and samples come from frames that happen anyway. Only the memory scenario starts a thread, which samples once a second (`tick` lines) and wakes the UI when a stage's wait is over. A sample costs a few milliseconds because of `mincore` over 600 MB of fonts, so marks leave that out. An idle window shows 0 CPU time over 10 s with it unset and with `=1`.
+
+The frame-time overlay (backtick) shows footprint and gpu under the frame times.
+
+## Baseline
+
+`docs/measure-baseline.json`, from `./build/measure/measure all -runs=10` on a MacBook Air (M1, 8 GB, MacBookAir10,1), macOS 27.0.1, 1100x700 window at 2x. MB is 2^20 bytes.
+
+Startup, in ms since the process started. Run 1 is on its own. The other 9 runs give the median and range.
+
+| mark | fake run 1 | fake median (min to max) | mock run 1 | mock median (min to max) |
+|---|---|---|---|---|
+| main | 7.5 | 4.8 (4.8 to 4.9) | 7.4 | 4.8 (4.7 to 7.1) |
+| launched | 79.6 | 76.9 (76.1 to 77.9) | 87.9 | 77.7 (76.7 to 87.7) |
+| dylib | 364.7 | 118.3 (115.9 to 122.6) | 129.3 | 118.8 (113.9 to 130.1) |
+| init | 397.9 | 130.2 (127.9 to 134.5) | 137.5 | 126.8 (121.9 to 138.1) |
+| window | 401.2 | 132.1 (129.7 to 137.1) | 139.3 | 128.7 (123.7 to 139.9) |
+| first_frame | 433.0 | 154.2 (152.0 to 158.9) | 159.5 | 150.4 (144.9 to 161.4) |
+| library | 433.0 | 154.3 (152.0 to 159.0) | 178.9 | 158.7 (153.2 to 169.7) |
+| tracks | 440.1 | 162.6 (160.4 to 167.4) | 412.1 | 182.4 (177.9 to 194.5) |
+
+At `tracks` the footprint is 50 MB with the fake data and 70 MB with the mock, gpu 27 and 29 MB.
+
+The fake run 1 came straight after a build, so it includes macOS checking the new dylib's signature: `dylib` at 365 ms instead of 118. Later launches open the same file and skip that. The mock's run 1 also logs in, and starts with an empty list cache. The later mock runs read the sidebar, Liked Songs and its covers from the cache (see [The list cache](tidal-data.md#the-list-cache)), so their `tracks` came at 182 ms. Before the cache it was 417 ms, about what run 1 still takes: on the mock most of it was waiting for covers.
+
+Memory, MB. `-runs` applies to startup; the memory scenario ran once with each setup, and earlier runs of the same build with two or three runs each were within 1 MB of these:
+
+| stage | fake footprint | resident | gpu | mock footprint | resident | gpu | mock covers |
+|---|---|---|---|---|---|---|---|
+| startup_idle | 67.6 | 107.6 | 27.3 | 66.6 | 111.9 | 28.9 | 22 |
+| list_open | 76.8 | 107.6 | 39.5 | 69.5 | 114.1 | 30.2 | 37 |
+| scrolled | 85.1 | 116.4 | 40.5 | 75.9 | 121.6 | 35.0 | 257 (7.4 MB of pages) |
+| playing | 88.0 | 120.0 | 40.5 | 90.0 | 131.9 | 35.5 | 195 |
+| idle_after | 83.5 | 118.6 | 40.5 | 84.1 | 129.8 | 35.5 | 195 |
+
+The peak footprint was 88 MB with the fake data and 96 MB with the mock, both while playing. Fallback fonts: 601 MB mapped, 23 MB of it resident.
+
+The fake data's gpu is 12 MB higher than in the baseline before this one from `list_open` on, one drawable's worth: the layer held three at those samples. The fake data doesn't use the list cache, and the build before the cache, measured the same day, showed the same, so it isn't the cache. Against that build, one memory run each and before covers went to disk, the mock's footprint was within 0.4 MB up to `scrolled` and 2 MB higher at `playing` and `idle_after`. About 0.6 MB of that is Liked Songs, kept in memory while the long playlist is open; the rest wasn't tracked down.
+
+Before the memory work (the previous baseline, same machine) the footprint was 104 MB at `startup_idle` with the fake data and 114 MB with the mock, 174 MB on the mock after scrolling and 185 MB after playing, with a 198 MB peak, and `tracks` came at 312 and 581 ms. What took it down, in the order it went in, measured each time against the build before:
+
+- Covers in shared pages of exact-size covers, without mips, within 8 MB: the mock's scrolled footprint went from 174 to 119 MB, gpu from 103 to 51 MB. See Covers.
+- Opening the dylib in place in release builds: `tracks` 320 to 187 ms with the fake data, 589 to 437 ms on the mock, all of it between `launched` and `dylib`.
+- The persistent arena not zeroing what it hands out: about 16 to 17 MB at every stage.
+- One draw call for a colour and a coverage texture: the mock's library from 37 draw calls a frame to 3. No memory change.
+- The fake rows made only for the fake data: 2.5 MB with an account.
+- Inter's embedded bytes used in place in release builds: 3.3 MB.
+- 3 MB stream windows given back when cleared: nothing on the mock's memory scenario, whose tracks are smaller than either window. After the hi-res album played out, the old build still counted 5.9 MB of window and the new one none.
+- Two drawables while idle: 12 MB at every idle stage.
+- Glyph pages starting at a quarter size: 3.3 to 6.7 MB.
+- Idle workers giving back their temp pages: about 2.3 MB on the mock.
+
+What's left at idle with the fake data: two drawables (24 MB of gpu, as IOSurfaces), about 25 MB of malloc (7 MB of it kb_text_shape's tables for the 16 fallback faces the loader loads at start, the rest mostly AppKit, Core Text and Metal), and a few MB of the persistent arena actually written.

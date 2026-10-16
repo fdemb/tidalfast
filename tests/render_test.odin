@@ -18,7 +18,7 @@ test_premultiplied_lut :: proc(t: ^testing.T) {
 			}
 		}
 	}
-	// 50% white comes out as 188, as the README says.
+	// 50% white comes out as 188, as docs/renderer.md says.
 	pixels = {128, 128, 128, 128}
 	render.convert_premultiplied(pixels[:])
 	testing.expect_value(t, pixels, [4]u8{188, 188, 188, 128})
