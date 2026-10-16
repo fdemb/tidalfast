@@ -1096,7 +1096,26 @@ static struct {
 #define MOMENTUM_MIN 30.0 // points per second where it stops
 #define MOMENTUM_TICK (1.0 / 120)
 
+// libinput sends finger scrolls at about the finger's own speed, where macOS
+// accelerates them. Slow drags stay 1:1 for control and fast swipes go up to
+// SCROLL_GAIN_MAX times, so one swipe can cross a screen as in Chromium.
+#define SCROLL_GAIN_SLOW 100.0 // points per second below which the gain is 1
+#define SCROLL_GAIN_RAMP 300.0 // points per second for each extra 1x
+#define SCROLL_GAIN_MAX 4.0
+// A wheel notch scrolls this many lines, as GTK and Firefox do.
+#define WHEEL_LINES 3.0
+
+static double scroll_gain(double distance, double dt) {
+  if (dt < 0.004) dt = 0.004; // frames arrive at up to a few hundred Hz
+  double gain = 1 + (distance / dt - SCROLL_GAIN_SLOW) / SCROLL_GAIN_RAMP;
+  return gain < 1 ? 1 : gain > SCROLL_GAIN_MAX ? SCROLL_GAIN_MAX : gain;
+}
+
+static double g_test_scrolled_points, g_test_scrolled_lines; // for the scrolled test step
+
 static void scroll_event(float dx, float dy, bool precise, uint32_t phase, uint32_t momentum) {
+  if (precise) g_test_scrolled_points += dy;
+  else g_test_scrolled_lines += dy;
   push_event((Event){
       .kind = EVENT_SCROLL,
       .modifiers = g_modifiers,
@@ -1168,6 +1187,9 @@ static void pointer_frame(void *data, struct wl_pointer *p) {
         uint32_t phase = g_axis.fingers ? SCROLL_PHASE_CHANGED : SCROLL_PHASE_BEGAN;
         double dt = now - g_momentum.last;
         if (!g_axis.fingers || dt > 0.1) g_momentum.vx = g_momentum.vy = 0;
+        double gain = scroll_gain(hypot(g_axis.dx, g_axis.dy), g_axis.fingers ? dt : 0.016);
+        g_axis.dx *= gain;
+        g_axis.dy *= gain;
         if (dt > 0.001) {
           double k = dt / (dt + 0.03);
           g_momentum.vx += (g_axis.dx / dt - g_momentum.vx) * k;
@@ -1191,8 +1213,8 @@ static void pointer_frame(void *data, struct wl_pointer *p) {
     } else if (g_axis.has_axis) {
       momentum_stop();
       // A wheel: lines, from value120 where the compositor sends it.
-      double lx = g_axis.value120_x ? g_axis.value120_x / 120.0 : g_axis.dx / 10;
-      double ly = g_axis.value120_y ? g_axis.value120_y / 120.0 : g_axis.dy / 10;
+      double lx = (g_axis.value120_x ? g_axis.value120_x / 120.0 : g_axis.dx / 10) * WHEEL_LINES;
+      double ly = (g_axis.value120_y ? g_axis.value120_y / 120.0 : g_axis.dy / 10) * WHEEL_LINES;
       scroll_event((float)lx, (float)ly, false, SCROLL_PHASE_NONE, SCROLL_PHASE_NONE);
     }
   }
@@ -1503,6 +1525,10 @@ static const struct wl_registry_listener g_registry_listener = {.global = regist
 //   ax-press=label      press the first pressable node whose label or value starts with label
 //   capture=path        copy the last TIDALFAST_CAPTURE frame to path
 //   size=w,h            make the window w by h points, as a floating window may
+//   wheel=n             n wheel notches down, negative for up
+//   finger=dy           one touchpad frame moving content up by dy, as libinput sends it
+//   lift                the fingers leave the touchpad
+//   scrolled            print the scroll the app was sent: points from touchpads, lines from wheels
 //   quit
 
 typedef struct {
@@ -1664,6 +1690,22 @@ static void test_step(const char *command, char *arg) {
     g_height = h;
     push_event((Event){.kind = EVENT_RESIZE, .x = g_width, .y = g_height});
     request_redraw();
+  } else if (!strcmp(command, "wheel")) {
+    int n = atoi(arg);
+    pointer_axis_source(NULL, NULL, WL_POINTER_AXIS_SOURCE_WHEEL);
+    pointer_axis_value120(NULL, NULL, WL_POINTER_AXIS_VERTICAL_SCROLL, 120 * n);
+    pointer_axis(NULL, NULL, 0, WL_POINTER_AXIS_VERTICAL_SCROLL, wl_fixed_from_double(15.0 * n));
+    pointer_frame(NULL, NULL);
+  } else if (!strcmp(command, "finger")) {
+    pointer_axis_source(NULL, NULL, WL_POINTER_AXIS_SOURCE_FINGER);
+    pointer_axis(NULL, NULL, 0, WL_POINTER_AXIS_VERTICAL_SCROLL, wl_fixed_from_double(atof(arg)));
+    pointer_frame(NULL, NULL);
+  } else if (!strcmp(command, "lift")) {
+    pointer_axis_source(NULL, NULL, WL_POINTER_AXIS_SOURCE_FINGER);
+    pointer_axis_stop(NULL, NULL, 0, WL_POINTER_AXIS_VERTICAL_SCROLL);
+    pointer_frame(NULL, NULL);
+  } else if (!strcmp(command, "scrolled")) {
+    fprintf(stderr, "shell: test: scrolled %.1f points, %.1f lines\n", g_test_scrolled_points, g_test_scrolled_lines);
   } else if (!strcmp(command, "quit")) {
     g_quit = true;
   } else {
