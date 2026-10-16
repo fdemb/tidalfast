@@ -863,4 +863,33 @@ Before the memory work (the previous baseline, same machine) the footprint was 1
 - Glyph pages starting at a quarter size: 3.3 to 6.7 MB.
 - Idle workers giving back their temp pages: about 2.3 MB on the mock.
 
-What's left at idle with the fake data: two drawables (24 MB of gpu, as IOSurfaces), about 25 MB of malloc (7 MB of it kb_text_shape's tables for the 16 fallback faces the loader loads at start, the rest mostly AppKit, Core Text and Metal), and a few MB of the persistent arena actually written.
+- Compacted kb_text_shape blobs (see Building and running): measured on Linux only so far, 20 MB less at every stage there with Noto Sans CJK (see Measuring on Linux). The Mac numbers above are from before it.
+
+What's left at idle with the fake data: two drawables (24 MB of gpu, as IOSurfaces), about 25 MB of malloc (7 MB of it kb_text_shape's tables for the 16 fallback faces the loader loads at start, before they were compacted, the rest mostly AppKit, Core Text and Metal), and a few MB of the persistent arena actually written.
+
+### Measuring on Linux
+
+Without a Mac, `tools/linux/build.sh` builds a headless harness in `build/linux` that runs the same `src/app` and the same measure tool:
+
+```
+tools/linux/build.sh
+build/linux/measure all
+build/linux/measure compare docs/measure-baseline-linux.json build/linux/<time>.json
+```
+
+`tools/linux/shell.c` stands in for `shell.m`: no window and no input, a frame when the app asks for one or at 120 Hz while it animates, two drawables while idle and three while animating. `tools/linux/stubs.c` stands in for the frameworks: Metal keeps buffers and textures in malloc'd, written memory and counts it for `gpu`, CoreText finds fallback fonts with fontconfig and draws glyphs with FreeType, and the Keychain is an in-memory table. Fallback fonts map to Noto: Noto Sans CJK for Han, kana and Hangul, Noto Sans Arabic, Hebrew and Color Emoji. It needs `fonts-noto-cjk`, `fonts-noto-core`, `fonts-noto-color-emoji`, FreeType, fontconfig, libcurl and ffmpeg (the mock encodes its FLAC with it, as it uses `afconvert` on a Mac), and Odin's vendored stb and miniaudio libraries built once with their own `make`.
+
+Footprint here is `RssAnon` plus `VmSwap` from `/proc/self/status`: what the app dirtied, the simulated GPU memory included, as on Apple silicon. The shell sets glibc's mmap threshold to 128 KB, the threshold macOS's malloc uses, so freed big blocks go back as they do there. The numbers compare builds on Linux with each other. They don't predict the Mac's: the fonts differ, there's no AppKit, and Metal's own allocations are missing.
+
+`docs/measure-baseline-linux.json` is from `build/linux/measure all` on a cloud x86_64 machine (Xeon at 2.1 GHz, 16 GB), 1100x700 at 2x, after the blob compaction. Before it, with the same harness and machine:
+
+| stage | fake before | fake after | mock before | mock after |
+|---|---|---|---|---|
+| startup_idle | 65.3 | 45.1 | 66.5 | 46.2 |
+| list_open | 65.3 | 45.1 | 68.6 | 48.3 |
+| scrolled | 69.3 | 49.0 | 74.6 | 54.3 |
+| playing | 71.8 | 51.5 | 80.0 | 59.7 |
+| idle_after | 70.4 | 50.1 | 75.7 | 55.5 |
+| peak | 81.0 | 60.8 | 86.4 | 66.1 |
+
+Footprint in MB. `tracks` came at 53.7 and 51.1 ms with the fake data and 273.6 and 277.4 ms on the mock, medians of 9 launches, which is within run to run noise.
