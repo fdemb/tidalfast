@@ -88,7 +88,7 @@ Done when: you can search in Japanese with the system IME, and VoiceOver reads t
 
 ### 8. Linux
 
-A Wayland shell in C (`shell/shell_wayland.c`), a Vulkan backend for the renderer, FreeType and fontconfig for fonts, miniaudio for output and the Secret Service for the login. The README's Linux section has the details.
+A Wayland shell in C (`shell/shell_wayland.c`), a Vulkan backend for the renderer, FreeType and fontconfig for fonts, miniaudio for output and the Secret Service for the login. `docs/linux.md` has the details.
 Done when: it builds with `./build.sh` on Linux and the library, text screen and playback work under a Wayland compositor. Still to do: bit-perfect output (ALSA `hw:` devices), MPRIS for media keys, AT-SPI for screen readers, and client-side decorations for compositors without xdg-decoration.
 
 Windows comes later (DirectWrite, D3D11, WASAPI exclusive). Keep platform code behind shell procedures and the renderer interface.

@@ -1,0 +1,13 @@
+# Redraw policy
+
+The shell draws only when something asks for a frame: input, a resize, a reload, or `request_redraw` from any thread. `request_redraw` sets a flag and calls `CFRunLoopWakeUp`. A run loop observer draws just before the main thread sleeps, so a burst of events becomes one frame.
+
+A frame can also ask for a frame later without animating: `Frame_Result.wake_after` is how many seconds from now, and the shell arms a one-shot run loop timer that calls `request_redraw`. The caret's blink and the search's debounce use it, through `ui.wake_at`, so a focused text field draws twice a second instead of every vsync.
+
+If the app returns `animating = true`, the view's `CADisplayLink` adds a frame every vsync until the app returns false. The shell pauses the link while the window is minimized or fully covered, so a hidden animation costs no CPU. An idle window uses no CPU.
+
+While the link runs, a pending redraw waits for the next tick instead of drawing straight away. Drawing between ticks would present more than once per refresh, and with sustained input that runs out of drawables and blocks the main thread in `nextDrawable`. The wait has a limit: if no tick arrives within two refresh intervals of the last one, as when the display sleeps, a timer wakes the run loop and the observer draws directly. The same happens at once when the link is paused. So explicit redraws still happen while the window is hidden or the display is off. Resizes are the exception and always draw synchronously, so the window never shows a stretched frame.
+
+The layer keeps three drawables while the link runs and two while it's paused. Each is the window's size in pixels, about 12 MB at 1100x700 points on a 2x display. Frames drawn on demand need only two, one on screen and one being drawn. The layer lets go of the third in its next `nextDrawable`, so when the count drops the shell asks for one more frame, and an idle window holds 12 MB less. Frames on every tick need three. With two drawables all the time, one library bench run in five locked into waiting most of a refresh in `nextDrawable` on every frame: frame times averaged 16.5 ms instead of 1.5 to 2.1 ms, though the UI took the same 1 to 2 ms to build them. With three while the link runs, none of six runs did.
+
+The shell merges mouse moves, and scroll events in the same phase, into one event with the summed delta. Phase changes such as a gesture beginning or ending keep their own event. The queue grows as needed and never drops an event, so the app never misses a button or key release.

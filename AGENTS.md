@@ -1,6 +1,6 @@
 # Working on TIDALfast
 
-TIDALfast is a native TIDAL client in Odin for macOS and Linux, with a small shell that owns the window and loads the app as a hot-reloaded dylib (`src/app`): Obj-C on macOS (`shell/shell.m`), C on Wayland (`shell/shell_wayland.c`). `docs/plan.md` has the plan and layout, and `README.md` has the details of every part. This file covers what an agent needs to check its own work, since you can't see the window or hear the audio.
+TIDALfast is a native TIDAL client in Odin for macOS and Linux, with a small shell that owns the window and loads the app as a hot-reloaded dylib (`src/app`): Obj-C on macOS (`shell/shell.m`), C on Wayland (`shell/shell_wayland.c`). `docs/plan.md` has the plan and layout, and the other files in `docs/` have the details of every part. This file covers what an agent needs to check its own work, since you can't see the window or hear the audio.
 
 ## Build and test
 
@@ -31,7 +31,7 @@ The window is often covered or the screen locked, and real input may not reach i
 - **Frame time.** `TIDALFAST_BENCH=1` (library), `=text` or `=covers` (live data) auto-scrolls and logs CPU time per frame. `TIDALFAST_OVERLAY=1` or the backtick key shows the overlay: frame and UI time, draw calls, instances, memory.
 - **Profiling.** `TIDALFAST_SPALL=path` writes a spall trace. `sample <pid>` has hung in this environment before; timers inside the code worked when it did.
 - **Metal.** `MTL_DEBUG_LAYER=1 METAL_DEVICE_WRAPPER_TYPE=1` turns on validation.
-- **Linux without a display.** Run `weston --backend=headless` with its own `XDG_RUNTIME_DIR` and socket, and point the app at it with `WAYLAND_DISPLAY`. Mesa's lavapipe is a software Vulkan device. `size=w,h` in `TIDALFAST_SHELL_TEST` resizes the window, since nobody else will. The README's Linux section has the commands, including running the keychain tests against a throwaway keyring in a private D-Bus session.
+- **Linux without a display.** Run `weston --backend=headless` with its own `XDG_RUNTIME_DIR` and socket, and point the app at it with `WAYLAND_DISPLAY`. Mesa's lavapipe is a software Vulkan device. `size=w,h` in `TIDALFAST_SHELL_TEST` resizes the window, since nobody else will. `docs/linux.md` has the commands, including running the keychain tests against a throwaway keyring in a private D-Bus session.
 
 ## Measuring RAM and startup
 
@@ -43,7 +43,7 @@ Run this before and after any change that could affect memory or startup:
 ./build/measure/measure compare docs/measure-baseline.json build/measure/<time>.json
 ```
 
-It does 10 cold launches and a memory scenario (idle, a large list open, scrolled with covers, playing, idle again), with fake data and against its own mock. It prints medians and writes JSON. `compare` marks changes of 10% and at least 1 ms or MB. Footprint is what Activity Monitor shows, and on Apple silicon it includes GPU memory, so don't add the `ram` and `gpu` numbers together. The first launch after a build is slow because macOS checks the new binary's signature; the tool reports it separately. Update `docs/measure-baseline.json` and the README numbers when a change moves them on purpose. `-real` uses the user's account and is only for the user to run.
+It does 10 cold launches and a memory scenario (idle, a large list open, scrolled with covers, playing, idle again), with fake data and against its own mock. It prints medians and writes JSON. `compare` marks changes of 10% and at least 1 ms or MB. Footprint is what Activity Monitor shows, and on Apple silicon it includes GPU memory, so don't add the `ram` and `gpu` numbers together. The first launch after a build is slow because macOS checks the new binary's signature; the tool reports it separately. Update `docs/measure-baseline.json` and the numbers in `docs/measuring.md` when a change moves them on purpose. `-real` uses the user's account and is only for the user to run.
 
 ## Idle CPU
 
