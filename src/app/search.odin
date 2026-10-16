@@ -266,7 +266,7 @@ search_from_memory :: proc(s: ^State, q: string) -> bool {
 		return false
 	}
 	e := &d.lists.entries[i].view
-	if list_stale(.Search, {}, e.fetched, {}, unix_now()) {
+	if list_stale(.Search, {}, e.fetched, nil, unix_now()) {
 		lru_drop(d, i)
 		return false
 	}

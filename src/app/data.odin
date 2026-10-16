@@ -1001,7 +1001,7 @@ view_fetch :: proc(d: ^Data, source: Source, id, name, image: string, hint: int)
 	v.id, v.name, v.image = sid, sname, simage
 	v.hint = hint
 	v.count = hint
-	v.version = list_version_now(d, source, id)
+	v.version = list_version_now(d, source, id).? or_else {}
 	v.has_arena = vmem.arena_init_growing(&v.arena) == nil
 	view_reserve(v, max(hint, PAGE_FIRST))
 	view_request_pages(d)

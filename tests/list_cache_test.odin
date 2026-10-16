@@ -294,32 +294,34 @@ list_stale_rules :: proc(t: ^testing.T) {
 		source:  app.Source,
 		version: app.List_Version,
 		age:     i64,
-		current: app.List_Version,
+		current: Maybe(app.List_Version),
 		stale:   bool,
 	}
 	cases := []Case {
 		{.Playlist, v, 100 * DAY, v, false}, // unchanged, however old
-		{.Playlist, v, 0, {updated = 6, count = 10}, true},
-		{.Playlist, v, 0, {updated = 5, count = 11}, true},
-		{.Playlist, v, DAY - 1, {}, false}, // not in the sidebar: by age
-		{.Playlist, v, DAY + 1, {}, true},
-		{.Liked, {count = 3, newest = 9}, 0, {count = 3, newest = 9}, false},
-		{.Liked, {count = 3, newest = 9}, 0, {count = 4, newest = 9}, true},
-		{.Liked, {count = 3, newest = 9}, 0, {count = 3, newest = 8}, true},
-		{.Liked, {count = 3, newest = 9}, 3 * DAY + 1, {count = 3, newest = 9}, true},
-		{.Album, {}, 29 * DAY, {}, false},
-		{.Album, {}, 31 * DAY, {}, true},
-		{.Artist, {}, DAY - 1, {}, false},
-		{.Artist, {}, DAY + 1, {}, true},
-		{.Search, {}, 299, {}, false},
-		{.Search, {}, 301, {}, true},
-		{.Album, {}, -120, {}, true}, // the clock went back
+		{.Playlist, v, 0, app.List_Version{updated = 6, count = 10}, true},
+		{.Playlist, v, 0, app.List_Version{updated = 5, count = 11}, true},
+		{.Playlist, v, DAY - 1, nil, false}, // not in the sidebar: by age
+		{.Playlist, v, DAY + 1, nil, true},
+		{.Liked, {count = 3, newest = 9}, 0, app.List_Version{count = 3, newest = 9}, false},
+		{.Liked, {count = 3, newest = 9}, 0, app.List_Version{count = 4, newest = 9}, true},
+		{.Liked, {count = 3, newest = 9}, 0, app.List_Version{count = 3, newest = 8}, true},
+		{.Liked, {count = 3, newest = 9}, 0, app.List_Version{}, true}, // emptied
+		{.Liked, {count = 3, newest = 9}, 0, nil, false},
+		{.Liked, {count = 3, newest = 9}, 3 * DAY + 1, app.List_Version{count = 3, newest = 9}, true},
+		{.Album, {}, 29 * DAY, nil, false},
+		{.Album, {}, 31 * DAY, nil, true},
+		{.Artist, {}, DAY - 1, nil, false},
+		{.Artist, {}, DAY + 1, nil, true},
+		{.Search, {}, 299, nil, false},
+		{.Search, {}, 301, nil, true},
+		{.Album, {}, -120, nil, true}, // the clock went back
 	}
 	for c in cases {
 		got := app.list_stale(c.source, c.version, NOW - c.age, c.current, NOW)
 		testing.expectf(t, got == c.stale, "%v at %v, %d s old, now %v: stale %v", c.source, c.version, c.age, c.current, got)
 	}
-	testing.expect(t, app.list_stale(.Album, {}, 0, {}, NOW), "a list never fetched is stale")
+	testing.expect(t, app.list_stale(.Album, {}, 0, nil, NOW), "a list never fetched is stale")
 }
 
 // Going back to a list that hasn't changed shows it without a request.
@@ -614,4 +616,110 @@ covers_on_disk :: proc(t: ^testing.T) {
 	testing.expect(t, !os.exists(cdir))
 	_, none := app.cover_file(d, "0f1e2d3c-0000-4000-8000-000000000001", 80)
 	testing.expect_value(t, none, "")
+}
+
+// An empty Liked Songs or a sidebar without playlists is a header and its
+// id only. Encoding them used to index past the buffer.
+@(test)
+empty_lists_go_to_disk :: proc(t: ^testing.T) {
+	d := new(app.Data)
+	defer free(d)
+	app.view_open(d, .Liked, "", "Liked Songs", "", 0)
+	defer app.view_close(d)
+	d.view.fetched = 1760000000
+	file := app.list_encode(&d.view, context.temp_allocator)
+	data, _ := mem.alloc_bytes_non_zeroed(len(file), 16, context.temp_allocator)
+	copy(data, file)
+	h, rows, err := app.list_decode(data, .Liked, "", context.temp_allocator)
+	testing.expect_value(t, err, app.File_Error.None)
+	testing.expect_value(t, len(rows), 0)
+	testing.expect_value(t, h.fetched, i64(1760000000))
+
+	sb := app.Sidebar{}
+	sfile := app.sidebar_encode(&sb, 5, context.temp_allocator)
+	sdata, _ := mem.alloc_bytes_non_zeroed(len(sfile), 16, context.temp_allocator)
+	copy(sdata, sfile)
+	_, items, serr := app.sidebar_decode(sdata, context.temp_allocator)
+	testing.expect_value(t, serr, app.File_Error.None)
+	testing.expect_value(t, len(items), 0)
+}
+
+// A sidebar from disk whose fetch from TIDAL failed at launch is fetched
+// again when the window becomes key or a sidebar entry opens.
+@(test)
+sidebar_from_disk_is_fetched_again_after_a_failure :: proc(t: ^testing.T) {
+	dir := cache_dir("sidebar-retry")
+	defer delete(dir, runtime.heap_allocator())
+	defer os.remove_all(dir)
+	playlists :: proc(s: ^app.State) -> int {
+		return jobs.remove_if(&s.data.queue, proc(job: ^app.Job, _: rawptr) -> bool {return job.kind == .Playlists}, nil)
+	}
+	{
+		s := cache_state(dir)
+		defer cache_state_free(s)
+		sidebar(s, updated = 1, count = 3)
+		run_disk(s)
+	}
+	s := cache_state(dir)
+	defer cache_state_free(s)
+	d := &s.data
+	app.lists_signed_in(d, 7)
+	app.request_playlists(d)
+	testing.expect_value(t, playlists(s), 1)
+	run_disk(s)
+	testing.expect(t, d.sidebar.loaded && !d.sidebar.fresh)
+	failed := app.Result {
+		job = {kind = .Playlists},
+		err = .Network,
+	}
+	app.handle_result(s, &failed, 0)
+	testing.expect(t, !d.sidebar.loading)
+
+	app.lists_window_key(s, true)
+	testing.expect_value(t, playlists(s), 1)
+	d.sidebar.loading = false
+	app.select_playlist(s, 2)
+	testing.expect_value(t, playlists(s), 1)
+}
+
+// Liked Songs emptied on TIDAL is at count 0 and no newest track, which
+// used to read as not knowing, so the old rows stayed for three days.
+@(test)
+emptied_liked_songs_are_fetched_again :: proc(t: ^testing.T) {
+	s := cache_state()
+	defer cache_state_free(s)
+	d := &s.data
+	sidebar(s, updated = 1, count = 3)
+	serve(s, rows_of(LIKED_IDS))
+	app.select_playlist(s, 2)
+	serve(s, rows_of({1, 2, 3}))
+	sidebar(s, updated = 1, count = 3, liked = 0, newest = 0)
+	app.select_playlist(s, 0)
+	testing.expect_value(t, d.refresh.source, app.Source.Liked)
+	serve(s, nil)
+	testing.expect_value(t, d.view.count, 0)
+}
+
+// Search results past their five minutes aren't fetched again in the
+// background: that brought back the songs without the albums, artists and
+// playlists.
+@(test)
+old_search_results_are_not_refreshed :: proc(t: ^testing.T) {
+	s := cache_state()
+	defer cache_state_free(s)
+	d := &s.data
+	sidebar(s, updated = 1, count = 3)
+	serve(s, rows_of(LIKED_IDS))
+	res := app.Result {
+		job   = {kind = .Search, view = s.search.gen, id = app.small("abc")},
+		rows  = rows_of({1, 2}),
+		found = {albums = []app.Found{{id = 5, name = "An album"}}},
+	}
+	app.search_result(s, &res)
+	testing.expect_value(t, d.view.source, app.Source.Search)
+	testing.expect(t, d.view.fetched != 0)
+	d.view.fetched -= app.SEARCH_MAX_AGE + 1
+	sidebar(s, updated = 2, count = 3)
+	testing.expect_value(t, d.refresh.source, app.Source.None)
+	testing.expect_value(t, len(d.view.found.albums), 1)
 }

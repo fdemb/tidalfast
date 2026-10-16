@@ -115,7 +115,7 @@ list_encode :: proc(v: ^Track_View, allocator: runtime.Allocator) -> []u8 {
 	h.fetched = v.fetched
 	h.version = v.version
 	h.hint = i64(v.hint)
-	rows := ([^]File_Row)(&w.buf[size_of(File_Header)])[:n]
+	rows := ([^]File_Row)(raw_data(w.buf[size_of(File_Header):]))[:n]
 	for &r, i in v.rows[:n] {
 		rows[i] = {
 			text      = {put(&w, r.title), put(&w, r.artist), put(&w, r.album), put(&w, r.added), put(&w, r.added_by), put(&w, r.duration), put(&w, r.cover)},
@@ -138,7 +138,7 @@ sidebar_encode :: proc(sb: ^Sidebar, fetched: i64, allocator: runtime.Allocator)
 	w, h := writer_make(.None, "", len(sb.items), text, allocator)
 	h.fetched = fetched
 	h.version = {count = i64(sb.liked_count), newest = sb.liked_newest}
-	items := ([^]File_Item)(&w.buf[size_of(File_Header)])[:len(sb.items)]
+	items := ([^]File_Item)(raw_data(w.buf[size_of(File_Header):]))[:len(sb.items)]
 	for it, i in sb.items {
 		items[i] = {
 			text    = {put(&w, it.id), put(&w, it.name), put(&w, it.image)},
@@ -182,7 +182,7 @@ file_check :: proc(data: []u8, source: Source, id: string) -> (h: ^File_Header, 
 	if file_id != id {
 		return nil, nil, nil, .Other
 	}
-	return h, &data[size_of(File_Header)], text, .None
+	return h, raw_data(data[size_of(File_Header):]), text, .None
 }
 
 @(private = "file")

@@ -63,7 +63,9 @@ SEARCH_MAX_AGE :: 5 * 60
 SIDEBAR_MAX_AGE :: 5 * time.Minute
 
 // List_Version is what a list was fetched at: a playlist's lastUpdated (unix
-// ms) and track count, Liked Songs' count and newest track. Zero is unknown.
+// ms) and track count, Liked Songs' count and newest track. Zero is unknown
+// in a list's own version; what TIDAL is at now is a Maybe, since an empty
+// Liked Songs is all zeros too.
 List_Version :: struct {
 	updated: i64,
 	count:   i64,
@@ -116,8 +118,8 @@ unix_now :: proc() -> i64 {
 }
 
 // list_stale says whether a list fetched at version and time fetched should
-// be fetched again, now that TIDAL is at current ({} if unknown).
-list_stale :: proc(source: Source, version: List_Version, fetched: i64, current: List_Version, now: i64) -> bool {
+// be fetched again, now that TIDAL is at current (nil if unknown).
+list_stale :: proc(source: Source, version: List_Version, fetched: i64, current: Maybe(List_Version), now: i64) -> bool {
 	age := now - fetched
 	if fetched <= 0 || age < 0 {
 		return true
@@ -125,12 +127,14 @@ list_stale :: proc(source: Source, version: List_Version, fetched: i64, current:
 	switch source {
 	case .None:
 	case .Playlist:
-		if current == {} {
+		now_at, known := current.?
+		if !known {
 			return age > PLAYLIST_MAX_AGE
 		}
-		return version != current
+		return version != now_at
 	case .Liked:
-		return (current != {} && version != current) || age > LIKED_MAX_AGE
+		now_at, known := current.?
+		return (known && version != now_at) || age > LIKED_MAX_AGE
 	case .Album:
 		return age > ALBUM_MAX_AGE
 	case .Artist:
@@ -141,23 +145,24 @@ list_stale :: proc(source: Source, version: List_Version, fetched: i64, current:
 	return true
 }
 
-// list_version_now is what the sidebar says a list is at.
-list_version_now :: proc(d: ^Data, source: Source, id: string) -> List_Version {
+// list_version_now is what the sidebar says a list is at, or nil if it
+// doesn't say.
+list_version_now :: proc(d: ^Data, source: Source, id: string) -> Maybe(List_Version) {
 	sb := &d.sidebar
 	if !sb.loaded {
-		return {}
+		return nil
 	}
 	#partial switch source {
 	case .Liked:
-		return {count = i64(sb.liked_count), newest = sb.liked_newest}
+		return List_Version{count = i64(sb.liked_count), newest = sb.liked_newest}
 	case .Playlist:
 		for &it in sb.items {
 			if it.id == id {
-				return {updated = it.updated, count = i64(it.tracks)}
+				return List_Version{updated = it.updated, count = i64(it.tracks)}
 			}
 		}
 	}
-	return {}
+	return nil
 }
 
 // arena_bytes is about what an arena holds in memory.
@@ -301,9 +306,11 @@ list_open :: proc(d: ^Data, source: Source, id, name, image: string, hint: int) 
 }
 
 // list_check fetches the open list again in the background if it's stale.
+// Search results aren't: a refresh would bring back the songs only, and
+// search_from_memory searches again for old ones.
 list_check :: proc(d: ^Data) {
 	v := &d.view
-	if v.fetched == 0 || d.refresh.source != .None {
+	if v.fetched == 0 || v.source == .Search || d.refresh.source != .None {
 		return
 	}
 	id := small_str(&v.id)
@@ -350,7 +357,7 @@ refresh_start :: proc(d: ^Data) {
 		id      = v.id,
 		name    = v.name,
 		image   = v.image,
-		version = list_version_now(d, v.source, small_str(&v.id)),
+		version = list_version_now(d, v.source, small_str(&v.id)).? or_else {},
 	}
 	r.hint = int(r.version.count) if r.version.count > 0 else v.hint
 	r.count = r.hint
@@ -600,9 +607,10 @@ sidebar_adopt :: proc(s: ^State, res: ^Result, from_disk: bool) {
 }
 
 // sidebar_check fetches the sidebar again if it's older than
-// SIDEBAR_MAX_AGE. It runs on things the user does, never on a timer.
+// SIDEBAR_MAX_AGE, or came from disk and TIDAL's never did. It runs on
+// things the user does, never on a timer.
 sidebar_check :: proc(d: ^Data) {
-	if d.account == .Signed_In && d.sidebar.fresh && time.tick_since(d.sidebar.fetched) > SIDEBAR_MAX_AGE {
+	if d.account == .Signed_In && time.tick_since(d.sidebar.fetched) > SIDEBAR_MAX_AGE {
 		request_playlists(d)
 	}
 }
@@ -636,12 +644,13 @@ lists_forget :: proc(d: ^Data) {
 	lists_clear(d)
 	refresh_drop(d)
 	jobs.remove_if(&d.lists.queue, drop_disk_job, nil)
-	if disk_on(d) {
-		dir := disk_dir(d.lists.root, d.lists.user, context.temp_allocator)
-		sync.guard(&d.lists.mutex)
+	dir := disk_dir(d.lists.root, d.lists.user, context.temp_allocator) if disk_on(d) else ""
+	// The delete and the user going are one step under the mutex, so a
+	// cover write waiting on it sees the user gone.
+	sync.guard(&d.lists.mutex)
+	if dir != "" {
 		os.remove_all(dir)
 	}
-	// After the delete, under the mutex: a cover write checks it there.
 	sync.atomic_store(&d.lists.user, 0)
 }
 
