@@ -2,6 +2,7 @@ package tidal_tests
 
 import "core:mem"
 import "core:testing"
+import "core:unicode/utf8"
 import "core:time"
 
 import "../src/kbts"
@@ -537,4 +538,27 @@ test_coverage_skips_default_ignorables :: proc(t: ^testing.T) {
 	kbts.FontCoverageTestCodepoint(&test, 'a')
 	kbts.FontCoverageTestCodepoint(&test, 0x180b)
 	testing.expect(t, bool(kbts.FontCoverageTestEnd(&test)), "a + U+180B is covered")
+}
+
+// An emoji next to Hebrew comes from the colour face even when the face
+// found for the Hebrew has a black and white one, as DejaVu Sans does.
+@(test)
+test_emoji_next_to_hebrew_is_colour :: proc(t: ^testing.T) {
+	sh: Shaper
+	context.allocator = shaper_init(&sh)
+	defer shaper_destroy(&sh)
+
+	hebrew := shape_loaded(&sh, .Regular, 13, "שלום")
+	testing.expect(t, !hebrew.pending)
+	for str in ([]string{"😀", "😀 שלום", "שלום ✌ 😀"}) {
+		run := shape_loaded(&sh, .Regular, 13, str)
+		testing.expectf(t, !run.pending, "%q still pending", str)
+		runes := utf8.string_to_runes(str, context.temp_allocator)
+		for g in run.glyphs {
+			r := runes[g.cluster]
+			if r == '😀' || r == '✌' {
+				testing.expectf(t, sh.state.faces[g.face].color, "%q: %c drawn from a face without colour", str, r)
+			}
+		}
+	}
 }

@@ -397,6 +397,7 @@ shape_uncached :: proc(t: ^State, font: Font, size: f32, s: string) -> Run {
 	primary := &t.faces[font]
 	needed: bit_set[0 ..< MAX_FACES]
 	pending := false
+	color_emoji := false
 	for r in runes {
 		if has_codepoint(t, font, r) || ignorable(r) {
 			continue
@@ -407,6 +408,7 @@ shape_uncached :: proc(t: ^State, font: Font, size: f32, s: string) -> Run {
 		}
 		if face >= 0 {
 			needed += {face}
+			color_emoji ||= t.faces[face].color && emoji_presentation(r)
 		} else if face == PENDING {
 			pending = true
 		}
@@ -424,13 +426,20 @@ shape_uncached :: proc(t: ^State, font: Font, size: f32, s: string) -> Run {
 		clear(&pieces)
 		clear(&glyphs)
 		clear(&cps)
-		// The top of the stack wins: fallbacks first, earliest found
-		// highest, then the primary font.
+		// The top of the stack wins: the primary font, then the fallbacks,
+		// earliest found highest. kb_text_shape takes the first font that
+		// has a character, so with an emoji in colour the colour faces go
+		// above the rest, or a symbol font found for Hebrew or Arabic would
+		// draw it in black and white.
 		pushed := 1
-		for i := t.fallback_counts[font] - 1; i >= 0; i -= 1 {
-			if int(t.fallbacks[font][i]) in needed {
-				_ = kbts.ShapePushFont(ctx, &t.faces[t.fallbacks[font][i]].kb)
-				pushed += 1
+		for pass in 0 ..< 2 {
+			for i := t.fallback_counts[font] - 1; i >= 0; i -= 1 {
+				face := int(t.fallbacks[font][i])
+				on_top := color_emoji && t.faces[face].color
+				if face in needed && on_top == (pass == 1) {
+					_ = kbts.ShapePushFont(ctx, &t.faces[face].kb)
+					pushed += 1
+				}
 			}
 		}
 		_ = kbts.ShapePushFont(ctx, &primary.kb)
@@ -1060,8 +1069,10 @@ has_codepoint :: proc(t: ^State, font: Font, r: rune) -> bool {
 }
 
 // in_fallbacks returns the first of font's fallback faces that has r, or
-// -1. A character usually drawn as an emoji goes to a colour face first:
-// symbol fonts such as DejaVu Sans have black and white 😀 and ❤ too.
+// -1. A character usually drawn as an emoji only takes a colour face:
+// symbol fonts such as DejaVu Sans have black and white 😀 and ❤ too, so
+// without a colour face that has it, it goes to fallback_face, which asks
+// the loader once and remembers the answer.
 @(private)
 in_fallbacks :: proc(t: ^State, font: Font, r: rune) -> int {
 	if emoji_presentation(r) {
@@ -1070,6 +1081,7 @@ in_fallbacks :: proc(t: ^State, font: Font, r: rune) -> int {
 				return int(face)
 			}
 		}
+		return -1
 	}
 	for face in t.fallbacks[font][:t.fallback_counts[font]] {
 		if kbts.CodepointToGlyphId(&t.faces[face].kb, r) != 0 {
