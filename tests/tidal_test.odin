@@ -440,6 +440,12 @@ url_for_log_drops_query :: proc(t: ^testing.T) {
 error_summary_names_the_parse_step :: proc(t: ^testing.T) {
 	err: tidal.Error = tidal.Api_Error{kind = .Manifest_Decode, message = "Manifest has no URLs"}
 	testing.expect_value(t, tidal.error_summary(err, context.temp_allocator), "Manifest_Decode: Manifest has no URLs")
+	stream := tidal.Stream {
+		manifest_mime_type = "application/dash+xml",
+		manifest           = base64.encode(transmute([]u8)string("<foo/>"), allocator = context.temp_allocator),
+	}
+	_, merr := tidal.stream_get_manifest(stream, context.temp_allocator)
+	testing.expect_value(t, tidal.error_summary(merr, context.temp_allocator), "Manifest_Decode: MPD: missing MPD element")
 	err2: tidal.Error = tidal.Api_Error{kind = .Network, message = "HTTP request failed"}
 	testing.expect_value(t, tidal.error_summary(err2, context.temp_allocator), "Network, no HTTP response")
 }

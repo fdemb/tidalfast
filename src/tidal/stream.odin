@@ -145,17 +145,18 @@ MAX_DASH_SEGMENTS :: 200_000
 // dash_info_from_mpd parses the MPD XML that TIDAL sends for DASH streams:
 // one period, adaptation set and representation with a SegmentTemplate.
 dash_info_from_mpd :: proc(mpd_xml: string, allocator := context.allocator) -> (info: Dash_Info, err: Error) {
+	// what is static text, so error_summary can log which check failed.
 	decode_error :: proc(what: string) -> Error {
-		return make_error(.Manifest_Decode, "Invalid MPD manifest", detail = what)
+		return make_error(.Manifest_Decode, what, detail = what)
 	}
 
 	doc, xerr := xml.parse_string(mpd_xml, allocator = context.temp_allocator)
 	if xerr != nil || doc == nil || doc.element_count == 0 {
-		return {}, decode_error("not XML")
+		return {}, decode_error("MPD: not XML")
 	}
 	root: xml.Element_ID = 0
 	if doc.elements[0].ident != "MPD" {
-		return {}, decode_error("missing MPD element")
+		return {}, decode_error("MPD: missing MPD element")
 	}
 
 	child :: proc(doc: ^xml.Document, parent: xml.Element_ID, ident: string) -> (xml.Element_ID, bool) {
@@ -183,7 +184,7 @@ dash_info_from_mpd :: proc(mpd_xml: string, allocator := context.allocator) -> (
 	adaptation, ok2 := child(doc, period, "AdaptationSet")
 	representation, ok3 := child(doc, adaptation, "Representation")
 	if !(ok1 && ok2 && ok3) {
-		return {}, decode_error("missing Period/AdaptationSet/Representation")
+		return {}, decode_error("MPD: missing Period/AdaptationSet/Representation")
 	}
 	levels := []xml.Element_ID{representation, adaptation}
 	template, has_template := child(doc, representation, "SegmentTemplate")
@@ -191,13 +192,13 @@ dash_info_from_mpd :: proc(mpd_xml: string, allocator := context.allocator) -> (
 		template, has_template = child(doc, adaptation, "SegmentTemplate")
 	}
 	if !has_template {
-		return {}, decode_error("missing SegmentTemplate")
+		return {}, decode_error("MPD: missing SegmentTemplate")
 	}
 
 	duration_attr, _ := attr(doc, root, "mediaPresentationDuration")
 	duration, dok := parse_iso_duration(duration_attr)
 	if !dok {
-		return {}, decode_error("bad mediaPresentationDuration")
+		return {}, decode_error("MPD: bad mediaPresentationDuration")
 	}
 
 	info.duration = duration
@@ -213,7 +214,7 @@ dash_info_from_mpd :: proc(mpd_xml: string, allocator := context.allocator) -> (
 	media_template, _ := attr(doc, template, "media")
 	info.media_url = strings.clone(media_template, allocator)
 	if media_template == "" {
-		return {}, decode_error("SegmentTemplate has no media attribute")
+		return {}, decode_error("MPD: SegmentTemplate has no media attribute")
 	}
 
 	vars := Template_Vars {
@@ -237,7 +238,7 @@ dash_info_from_mpd :: proc(mpd_xml: string, allocator := context.allocator) -> (
 			}
 		}
 		if len(entries) == 0 {
-			return {}, decode_error("empty SegmentTimeline")
+			return {}, decode_error("MPD: empty SegmentTimeline")
 		}
 
 		t: i64 = 0
@@ -249,7 +250,7 @@ dash_info_from_mpd :: proc(mpd_xml: string, allocator := context.allocator) -> (
 			ds, _ := attr(doc, id, "d")
 			d := i64(to_int(ds, 0))
 			if d <= 0 {
-				return {}, decode_error("segment without a positive duration")
+				return {}, decode_error("MPD: segment without a positive duration")
 			}
 			rs, _ := attr(doc, id, "r")
 			r := to_int(rs, 0)
@@ -267,7 +268,7 @@ dash_info_from_mpd :: proc(mpd_xml: string, allocator := context.allocator) -> (
 				count = max((end - t + d - 1) / d, 1)
 			}
 			if i64(len(segments)) + count > MAX_DASH_SEGMENTS {
-				return {}, decode_error("too many segments")
+				return {}, decode_error("MPD: too many segments")
 			}
 			for _ in 0 ..< count {
 				vars.number = number
@@ -282,11 +283,11 @@ dash_info_from_mpd :: proc(mpd_xml: string, allocator := context.allocator) -> (
 		ds, _ := attr(doc, template, "duration")
 		d := i64(to_int(ds, 0))
 		if d <= 0 {
-			return {}, decode_error("missing SegmentTimeline and segment duration")
+			return {}, decode_error("MPD: missing SegmentTimeline and segment duration")
 		}
 		count := max((period_end + d - 1) / d, 1)
 		if count > MAX_DASH_SEGMENTS {
-			return {}, decode_error("too many segments")
+			return {}, decode_error("MPD: too many segments")
 		}
 		for k in 0 ..< count {
 			vars.number = info.start_number + int(k)
