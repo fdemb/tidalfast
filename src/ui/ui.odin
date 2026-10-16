@@ -83,6 +83,7 @@ Box_Flag :: enum u32 {
 	Draw_Active_Effects, // active_color fades in while pressed
 	Draw_Hot_Underline, // the label is underlined while hot
 	Text_Input, // a text field: with the focus it takes Return, Space, the arrows and Escape
+	Click_On_Release, // clicked on a release over it rather than on the press, for drag sources
 }
 Box_Flags :: bit_set[Box_Flag; u32]
 
@@ -154,7 +155,7 @@ Signal :: struct {
 	held:           bool, // left button went down on the box and is still down
 	pressed:        bool, // left button went down on the box this frame
 	released:       bool, // left button came up after being pressed on the box
-	clicked:        bool, // released over the box, or Enter or Space while focused
+	clicked:        bool, // pressed on the box, or released over it with Click_On_Release, or Enter or Space while focused
 	keyboard:       bool, // clicked came from a key
 	double_clicked: bool,
 	right_clicked:  bool, // right or control-click went down on the box
@@ -245,6 +246,7 @@ State :: struct {
 	pressed:        [platform.Mouse_Button]Key, // this frame
 	released:       [platform.Mouse_Button]Key,
 	clicked:        [platform.Mouse_Button]Key,
+	release_click:  [platform.Mouse_Button]bool, // the active box clicks on the release
 	double_clicked: Key,
 	drag_start:     [2]f32,
 	drag_moved:     bool, // past DRAG_THRESHOLD since the press
@@ -550,7 +552,7 @@ process_events :: proc(u: ^State, events: []platform.Event, text_bytes: []u8) {
 			hover := hit_at(u, u.input.mouse)
 			if k := u.active[e.button]; k != 0 {
 				u.released[e.button] = k
-				if hover == k {
+				if hover == k && u.release_click[e.button] {
 					u.clicked[e.button] = k
 				}
 				if e.button == .Left && u.drag_moved && !u.drag_active && !u.drag_cancelled {
@@ -644,14 +646,19 @@ mouse_pressed :: proc(u: ^State, e: platform.Event) {
 		}
 		u.click_count = e.click_count
 	}
-	// The press moves the focus to what was clicked, or its nearest
-	// focusable ancestor, or nowhere.
+	// The press clicks the box unless it waits for the release, and moves
+	// the focus to it, or its nearest focusable ancestor, or nowhere.
+	u.release_click[e.button] = false
 	focus := Key(0)
 	for h in u.hits[:u.hit_count] {
 		if h.key == hover {
+			u.release_click[e.button] = .Click_On_Release in h.flags
 			focus = h.key if .Focusable in h.flags else h.focus_parent
 			break
 		}
+	}
+	if hover != 0 && !u.release_click[e.button] {
+		u.clicked[e.button] = hover
 	}
 	move_focus(u, focus, false)
 }

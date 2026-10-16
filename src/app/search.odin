@@ -558,7 +558,7 @@ draw_found_list :: proc(s: ^State) {
 			prefix := ui.label("Album ·", ui.text_size(), ui.fill())
 			prefix.text_pad = 4
 			// The fake data's album id is the row it's found at.
-			if k, sig := artist_links(s, f.artist, f.artists, 0); sig.clicked && !sig.dragging {
+			if k, sig := artist_links(s, f.artist, f.artists, 0); sig.clicked {
 				open_artist_of(s, f.artist, f.artists, k, int(f.id))
 			}
 		} else {

@@ -417,7 +417,7 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 		title.text_color = ACCENT if current else TEXT
 		ui.accessible(title, .Static_Text, track.title)
 		ui.text_style(.Regular, 13, SECONDARY)
-		if k, link := artist_links(s, track.artist, track.artists, 4, ui.px(18)); row_link(s, i, link) {
+		if k, link := artist_links(s, track.artist, track.artists, 4, ui.px(18), {.Click_On_Release}); row_link(s, i, link) {
 			go_to_artist(s, i, k)
 		}
 	}
@@ -425,7 +425,7 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 	if cols.album > 0 {
 		ui.row("", {}, ui.px(cols.album), ui.fill())
 		ui.spacer(ui.px(CELL_PAD - 4))
-		if row_link(s, i, text_link(s, track.album, "###album", track.album_id != 0, ui.fill(), 4)) {
+		if row_link(s, i, text_link(s, track.album, "###album", track.album_id != 0, ui.fill(), 4, {.Click_On_Release})) {
 			go_to_album(s, i)
 		}
 	}
@@ -452,7 +452,7 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 
 // row_link takes the signal of a link in row i of the track table, and
 // returns true when it was clicked. A press, a right click or a drag on it
-// does what it does on the row.
+// does what it does on the row, so the link must have Click_On_Release.
 row_link :: proc(s: ^State, i: int, sig: ui.Signal) -> bool {
 	if sig.pressed || sig.right_clicked {
 		s.library.selected = i
@@ -469,14 +469,14 @@ row_link :: proc(s: ^State, i: int, sig: ui.Signal) -> bool {
 // text_link is a link to an album or an artist when it has an id to open
 // (the fake data goes by name), and plain text when it hasn't. It goes
 // inside a row of its own, since it's only as wide as its text.
-text_link :: proc(s: ^State, label, id: string, has_id: bool, height: ui.Size, pad: f32) -> ui.Signal {
+text_link :: proc(s: ^State, label, id: string, has_id: bool, height: ui.Size, pad: f32, flags: ui.Box_Flags = {}) -> ui.Signal {
 	if !has_id && !s.data.fake {
 		b := ui.label(label, ui.fill(), height)
 		b.text_pad = pad
 		ui.accessible(b, .Static_Text, label)
 		return {}
 	}
-	return ui.link(fmt.tprintf("%s%s", label, id), TEXT, height, pad)
+	return ui.link(fmt.tprintf("%s%s", label, id), TEXT, height, pad, flags)
 }
 
 // artist_links shows the artists in joined, each a link to its top tracks,
@@ -487,7 +487,7 @@ text_link :: proc(s: ^State, label, id: string, has_id: bool, height: ui.Size, p
 // clips, so in the frame after a resize nothing is drawn past it. sig is
 // the signal of the link that was clicked, pressed or dragged, and k says
 // which artist it is.
-artist_links :: proc(s: ^State, joined: string, refs: []Artist_Ref, pad: f32, height := ui.Size{}) -> (k: int, sig: ui.Signal) {
+artist_links :: proc(s: ^State, joined: string, refs: []Artist_Ref, pad: f32, height := ui.Size{}, flags: ui.Box_Flags = {}) -> (k: int, sig: ui.Signal) {
 	box := ui.row("###artists", {.Clip}, ui.fill(), height if height.kind != .Null else ui.fill())
 	ui.spacer(ui.px(pad))
 	room := box.rect.w - 2 * pad if box.rect.w > 0 else max(f32)
@@ -503,7 +503,7 @@ artist_links :: proc(s: ^State, joined: string, refs: []Artist_Ref, pad: f32, he
 		}
 		b: ^ui.Box
 		if linked {
-			link := ui.link(fmt.tprintf("%s###artist%d", name, j), TEXT, ui.fill())
+			link := ui.link(fmt.tprintf("%s###artist%d", name, j), TEXT, ui.fill(), flags = flags)
 			b = link.box
 			if link.clicked || link.pressed || link.right_clicked || link.dragging {
 				k, sig = j, link

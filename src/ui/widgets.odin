@@ -72,8 +72,8 @@ button :: proc(id: string, width: Size = {}, height: Size = {}) -> Signal {
 // mouse is over it. It's as wide as its text and gives way to an ellipsis
 // when there's less room, so only the text takes the click. The text goes
 // from the text style's colour to hot_color as it lights.
-link :: proc(id: string, hot_color: render.Color, height: Size = {}, pad: f32 = 0) -> Signal {
-	b := box_make(id, {.Clickable, .Draw_Text, .Draw_Hot_Underline}, text_size(0, 0), height)
+link :: proc(id: string, hot_color: render.Color, height: Size = {}, pad: f32 = 0, flags: Box_Flags = {}) -> Signal {
+	b := box_make(id, {.Clickable, .Draw_Text, .Draw_Hot_Underline} + flags, text_size(0, 0), height)
 	b.text_pad = pad
 	b.text_color += (hot_color - b.text_color) * b.hot_t
 	accessible(b, .Button, b.label)

@@ -258,11 +258,11 @@ test_ui_interaction :: proc(t: ^testing.T) {
 	sig, _ = frame(&u, &now, {kind = .Mouse_Down, x = 20, y = 20, click_count = 2}, {kind = .Mouse_Up, x = 20, y = 20, click_count = 2})
 	testing.expect(t, sig.double_clicked)
 
-	// Pressed inside, released outside: no click.
+	// The press clicks, and the release doesn't click again.
 	sig, _ = frame(&u, &now, {kind = .Mouse_Down, x = 20, y = 20, click_count = 1})
-	testing.expect(t, sig.held && !sig.dragging)
+	testing.expect(t, sig.held && sig.clicked && !sig.dragging)
 	sig, _ = frame(&u, &now, {kind = .Mouse_Move, x = 200, y = 150})
-	testing.expect(t, sig.dragging)
+	testing.expect(t, sig.dragging && !sig.clicked)
 	testing.expect_value(t, sig.drag_delta, [2]f32{180, 130})
 	testing.expect(t, !sig.hovering, "only hovering while over it")
 	sig, _ = frame(&u, &now, {kind = .Mouse_Up, x = 200, y = 150})
@@ -787,6 +787,36 @@ test_ui_tab_from_nothing :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_ui_click_on_release :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	now := 0.0
+	link :: proc(u: ^ui.State, now: ^f64, events: ..platform.Event) -> ui.Signal {
+		now^ += 1.0 / 120
+		ui.begin_frame(u, events, nil, nil, 300, 200, now^)
+		sig := ui.signal(ui.box_make("link", {.Clickable, .Click_On_Release}, ui.px(100), ui.px(40)))
+		ui.end_frame()
+		return sig
+	}
+	link(&u, &now)
+	link(&u, &now)
+
+	// A drag source clicks on the release over it.
+	sig := link(&u, &now, {kind = .Mouse_Down, x = 20, y = 20, click_count = 1})
+	testing.expect(t, sig.pressed && !sig.clicked)
+	sig = link(&u, &now, {kind = .Mouse_Up, x = 20, y = 20, click_count = 1})
+	testing.expect(t, sig.released && sig.clicked)
+
+	// Dragged off it and let go elsewhere: no click.
+	link(&u, &now, {kind = .Mouse_Down, x = 20, y = 20, click_count = 1})
+	sig = link(&u, &now, {kind = .Mouse_Move, x = 200, y = 150})
+	testing.expect(t, sig.dragging)
+	sig = link(&u, &now, {kind = .Mouse_Up, x = 200, y = 150})
+	testing.expect(t, sig.released && !sig.clicked)
+}
+
+@(test)
 test_ui_click_in_one_frame :: proc(t: ^testing.T) {
 	u: ui.State
 	ui.init(&u)
@@ -943,7 +973,7 @@ test_ui_missed_release_cancels :: proc(t: ^testing.T) {
 	sig = tap(&v, &now)
 	testing.expect(t, sig.held, "held for one frame up in hardware")
 	sig = tap(&v, &now, {kind = .Mouse_Up, x = 20, y = 20, click_count = 1})
-	testing.expect(t, sig.clicked, "the late release clicks")
+	testing.expect(t, sig.released, "the late release releases")
 
 	// A hot reload lets go of everything.
 	drag_frame_held(&u, &now, down, {kind = .Mouse_Down, x = 50, y = 50, click_count = 1})
