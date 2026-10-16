@@ -366,7 +366,7 @@ pkce_login_against_mock :: proc(t: ^testing.T) {
 
 @(test)
 settings_persistence :: proc(t: ^testing.T) {
-	dir := fmt.tprintf("%s/tidalfast-settings-%d", os.get_env("TMPDIR", context.temp_allocator), time.now()._nsec)
+	dir := fmt.tprintf("%s/tidalfast-settings-%d", temp_base(), time.now()._nsec)
 	path := fmt.tprintf("%s/nested/settings.json", dir)
 	defer os.remove_all(dir)
 
@@ -477,7 +477,7 @@ dash_player_bit_exact :: proc(t: ^testing.T) {
 		want[i] = as_float(v, 24)
 	}
 
-	capture := fmt.tprintf("%s/tidalfast-dash-%d.wav", os.get_env("TMPDIR", context.temp_allocator), time.now()._nsec)
+	capture := fmt.tprintf("%s/tidalfast-dash-%d.wav", temp_base(), time.now()._nsec)
 	defer os.remove(capture)
 	p := audio.create(no_wake_hires, 0.3, capture, null_output = true, output = {bit_perfect = true})
 	audio.play(p, src)
@@ -869,7 +869,7 @@ dash_explicit_base_plays :: proc(t: ^testing.T) {
 		gain      = 1,
 		seconds   = 1.6,
 	}
-	capture := fmt.tprintf("%s/tidalfast-explicit-%d.wav", os.get_env("TMPDIR", context.temp_allocator), time.now()._nsec)
+	capture := fmt.tprintf("%s/tidalfast-explicit-%d.wav", temp_base(), time.now()._nsec)
 	defer os.remove(capture)
 	p := audio.create(no_wake_hires, 0.3, capture, null_output = true, output = {bit_perfect = true})
 	audio.play(p, src)
@@ -1101,7 +1101,7 @@ device_loss_reopens :: proc(t: ^testing.T) {
 // and no temp file is left.
 @(test)
 settings_saves_in_order :: proc(t: ^testing.T) {
-	dir := fmt.tprintf("%s/tidalfast-settings-race-%d", os.get_env("TMPDIR", context.temp_allocator), time.now()._nsec)
+	dir := fmt.tprintf("%s/tidalfast-settings-race-%d", temp_base(), time.now()._nsec)
 	defer os.remove_all(dir)
 	s := new(app.State)
 	defer free(s)
@@ -1171,7 +1171,7 @@ settings_saves_in_order :: proc(t: ^testing.T) {
 // playback_shutdown, which runs before data_shutdown stops the workers.
 @(test)
 settings_path_outlives_playback :: proc(t: ^testing.T) {
-	dir := fmt.tprintf("%s/tidalfast-settings-order-%d", os.get_env("TMPDIR", context.temp_allocator), time.now()._nsec)
+	dir := fmt.tprintf("%s/tidalfast-settings-order-%d", temp_base(), time.now()._nsec)
 	defer os.remove_all(dir)
 	path := fmt.tprintf("%s/settings.json", dir)
 	s := new(app.State)

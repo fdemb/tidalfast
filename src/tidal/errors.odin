@@ -121,8 +121,12 @@ error_summary :: proc(err: Error, allocator := context.allocator) -> string {
 	switch {
 	case e.kind == .Lossy_Stream:
 		return fmt.aprintf("%v, codec %s", e.kind, codec_name(error_detail(&e)), allocator = allocator)
-	case e.status == 0:
+	case e.status == 0 && (e.kind == .Network || e.kind == .Timeout || e.kind == .Cancelled):
 		return fmt.aprintf("%v, no HTTP response", e.kind, allocator = allocator)
+	case e.status == 0:
+		// A response that arrived but didn't parse. The message is static
+		// text, so it can say which part failed.
+		return fmt.aprintf("%v: %s", e.kind, e.message, allocator = allocator)
 	case e.sub_status != 0:
 		return fmt.aprintf("%v, HTTP %d, subStatus %d", e.kind, e.status, e.sub_status, allocator = allocator)
 	}

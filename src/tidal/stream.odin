@@ -4,6 +4,7 @@ import "core:encoding/base64"
 import "core:encoding/json"
 import "core:encoding/xml"
 import "core:fmt"
+import "core:log"
 import "core:math"
 import "core:mem"
 import "core:strconv"
@@ -145,17 +146,22 @@ MAX_DASH_SEGMENTS :: 200_000
 // dash_info_from_mpd parses the MPD XML that TIDAL sends for DASH streams:
 // one period, adaptation set and representation with a SegmentTemplate.
 dash_info_from_mpd :: proc(mpd_xml: string, allocator := context.allocator) -> (info: Dash_Info, err: Error) {
+	// what is static text, so error_summary can log which check failed.
 	decode_error :: proc(what: string) -> Error {
-		return make_error(.Manifest_Decode, "Invalid MPD manifest", detail = what)
+		return make_error(.Manifest_Decode, what, detail = what)
 	}
 
 	doc, xerr := xml.parse_string(mpd_xml, allocator = context.temp_allocator)
 	if xerr != nil || doc == nil || doc.element_count == 0 {
-		return {}, decode_error("not XML")
+		log.debugf("MPD is not XML: %v, %d bytes, first byte 0x%02x", xerr, len(mpd_xml), mpd_xml[0] if len(mpd_xml) > 0 else 0)
+		return {}, decode_error("MPD: not XML")
+	}
+	if context.logger.lowest_level <= .Debug {
+		log.debugf("MPD outline, %d bytes: %s", len(mpd_xml), mpd_outline(doc, context.temp_allocator))
 	}
 	root: xml.Element_ID = 0
 	if doc.elements[0].ident != "MPD" {
-		return {}, decode_error("missing MPD element")
+		return {}, decode_error("MPD: missing MPD element")
 	}
 
 	child :: proc(doc: ^xml.Document, parent: xml.Element_ID, ident: string) -> (xml.Element_ID, bool) {
@@ -183,7 +189,7 @@ dash_info_from_mpd :: proc(mpd_xml: string, allocator := context.allocator) -> (
 	adaptation, ok2 := child(doc, period, "AdaptationSet")
 	representation, ok3 := child(doc, adaptation, "Representation")
 	if !(ok1 && ok2 && ok3) {
-		return {}, decode_error("missing Period/AdaptationSet/Representation")
+		return {}, decode_error("MPD: missing Period/AdaptationSet/Representation")
 	}
 	levels := []xml.Element_ID{representation, adaptation}
 	template, has_template := child(doc, representation, "SegmentTemplate")
@@ -191,16 +197,24 @@ dash_info_from_mpd :: proc(mpd_xml: string, allocator := context.allocator) -> (
 		template, has_template = child(doc, adaptation, "SegmentTemplate")
 	}
 	if !has_template {
-		return {}, decode_error("missing SegmentTemplate")
+		return {}, decode_error("MPD: missing SegmentTemplate")
 	}
 
-	duration_attr, _ := attr(doc, root, "mediaPresentationDuration")
-	duration, dok := parse_iso_duration(duration_attr)
-	if !dok {
-		return {}, decode_error("bad mediaPresentationDuration")
+	// mediaPresentationDuration is optional for static MPDs. Without it the
+	// Period duration or the timeline itself gives the length.
+	duration: time.Duration
+	has_duration := false
+	for source in ([]struct {
+			id:  xml.Element_ID,
+			key: string,
+		}{{root, "mediaPresentationDuration"}, {period, "duration"}}) {
+		if v, has := attr(doc, source.id, source.key); has {
+			if duration, has_duration = parse_iso_duration(v); has_duration {
+				break
+			}
+		}
 	}
 
-	info.duration = duration
 	info.content_type = strings.clone(inherited(doc, levels, "contentType"), allocator)
 	info.mime_type = strings.clone(inherited(doc, levels, "mimeType"), allocator)
 	info.codecs = strings.clone(inherited(doc, levels, "codecs"), allocator)
@@ -213,7 +227,7 @@ dash_info_from_mpd :: proc(mpd_xml: string, allocator := context.allocator) -> (
 	media_template, _ := attr(doc, template, "media")
 	info.media_url = strings.clone(media_template, allocator)
 	if media_template == "" {
-		return {}, decode_error("SegmentTemplate has no media attribute")
+		return {}, decode_error("MPD: SegmentTemplate has no media attribute")
 	}
 
 	vars := Template_Vars {
@@ -225,7 +239,7 @@ dash_info_from_mpd :: proc(mpd_xml: string, allocator := context.allocator) -> (
 	}
 
 	timescale := f64(info.timescale)
-	period_end := i64(time.duration_seconds(duration) * timescale + 0.5)
+	period_end := i64(time.duration_seconds(duration) * timescale + 0.5) if has_duration else -1
 	segments := make([dynamic]Dash_Segment, 0, 64, allocator)
 
 	if timeline, has_timeline := child(doc, template, "SegmentTimeline"); has_timeline {
@@ -237,7 +251,7 @@ dash_info_from_mpd :: proc(mpd_xml: string, allocator := context.allocator) -> (
 			}
 		}
 		if len(entries) == 0 {
-			return {}, decode_error("empty SegmentTimeline")
+			return {}, decode_error("MPD: empty SegmentTimeline")
 		}
 
 		t: i64 = 0
@@ -249,7 +263,7 @@ dash_info_from_mpd :: proc(mpd_xml: string, allocator := context.allocator) -> (
 			ds, _ := attr(doc, id, "d")
 			d := i64(to_int(ds, 0))
 			if d <= 0 {
-				return {}, decode_error("segment without a positive duration")
+				return {}, decode_error("MPD: segment without a positive duration")
 			}
 			rs, _ := attr(doc, id, "r")
 			r := to_int(rs, 0)
@@ -264,10 +278,13 @@ dash_info_from_mpd :: proc(mpd_xml: string, allocator := context.allocator) -> (
 						end = i64(to_int(next_t, int(end)))
 					}
 				}
+				if end < 0 {
+					return {}, decode_error("MPD: open-ended segment without a duration")
+				}
 				count = max((end - t + d - 1) / d, 1)
 			}
 			if i64(len(segments)) + count > MAX_DASH_SEGMENTS {
-				return {}, decode_error("too many segments")
+				return {}, decode_error("MPD: too many segments")
 			}
 			for _ in 0 ..< count {
 				vars.number = number
@@ -282,11 +299,14 @@ dash_info_from_mpd :: proc(mpd_xml: string, allocator := context.allocator) -> (
 		ds, _ := attr(doc, template, "duration")
 		d := i64(to_int(ds, 0))
 		if d <= 0 {
-			return {}, decode_error("missing SegmentTimeline and segment duration")
+			return {}, decode_error("MPD: missing SegmentTimeline and segment duration")
+		}
+		if !has_duration {
+			return {}, decode_error("MPD: fixed segments without a duration")
 		}
 		count := max((period_end + d - 1) / d, 1)
 		if count > MAX_DASH_SEGMENTS {
-			return {}, decode_error("too many segments")
+			return {}, decode_error("MPD: too many segments")
 		}
 		for k in 0 ..< count {
 			vars.number = info.start_number + int(k)
@@ -296,6 +316,12 @@ dash_info_from_mpd :: proc(mpd_xml: string, allocator := context.allocator) -> (
 		}
 	}
 	info.segments = segments[:]
+	if has_duration {
+		info.duration = duration
+	} else if len(segments) > 0 {
+		last := segments[len(segments) - 1]
+		info.duration = time.Duration(f64(last.start + last.length) / timescale * f64(time.Second))
+	}
 
 	urls := make([dynamic]string, 0, len(segments) + 1, allocator)
 	if info.init_url != "" {
@@ -402,8 +428,89 @@ dash_hls :: proc(d: Dash_Info, allocator := context.allocator) -> string {
 	return strings.to_string(b)
 }
 
+// mpd_outline describes an MPD for the debug log without its text: element
+// and attribute names, and each value's shape with digits as 9. URLs and
+// long values show only their length, and runs of S elements are counted.
+mpd_outline :: proc(doc: ^xml.Document, allocator := context.allocator) -> string {
+	b := strings.builder_make(allocator)
+	outline_element(&b, doc, 0)
+	return strings.to_string(b)
+
+	outline_element :: proc(b: ^strings.Builder, doc: ^xml.Document, id: xml.Element_ID) {
+		e := doc.elements[id]
+		strings.write_string(b, e.ident)
+		for a in e.attribs {
+			strings.write_byte(b, ' ')
+			strings.write_string(b, a.key)
+			strings.write_byte(b, '=')
+			outline_value(b, a.val)
+		}
+		children := 0
+		for v in e.value {
+			if _, is_child := v.(xml.Element_ID); is_child {
+				children += 1
+			}
+		}
+		if children == 0 {
+			return
+		}
+		strings.write_string(b, " {")
+		// A run of S elements prints its first one and its length.
+		run_first: xml.Element_ID
+		run := 0
+		for v in e.value {
+			child := v.(xml.Element_ID) or_continue
+			if doc.elements[child].ident == "S" {
+				if run == 0 {
+					run_first = child
+				}
+				run += 1
+				continue
+			}
+			outline_run(b, doc, run_first, run)
+			run = 0
+			strings.write_byte(b, ' ')
+			outline_element(b, doc, child)
+		}
+		outline_run(b, doc, run_first, run)
+		strings.write_string(b, " }")
+	}
+
+	outline_run :: proc(b: ^strings.Builder, doc: ^xml.Document, first: xml.Element_ID, count: int) {
+		if count == 0 {
+			return
+		}
+		if count > 1 {
+			fmt.sbprintf(b, " %d S elements, first:", count)
+		}
+		strings.write_byte(b, ' ')
+		outline_element(b, doc, first)
+	}
+
+	outline_value :: proc(b: ^strings.Builder, v: string) {
+		if len(v) > 40 || strings.contains(v, "://") {
+			fmt.sbprintf(b, "<%d bytes>", len(v))
+			return
+		}
+		strings.write_byte(b, '"')
+		for i in 0 ..< len(v) {
+			c := v[i]
+			switch {
+			case c >= '0' && c <= '9':
+				strings.write_byte(b, '9')
+			case c > ' ' && c < 0x7f && c != '"' && c != '\\':
+				strings.write_byte(b, c)
+			case:
+				fmt.sbprintf(b, "\\x%02x", c)
+			}
+		}
+		strings.write_byte(b, '"')
+	}
+}
+
 // parse_iso_duration parses ISO 8601 durations like "PT3M25.123S".
-parse_iso_duration :: proc(s: string) -> (d: time.Duration, ok: bool) {
+parse_iso_duration :: proc(str: string) -> (d: time.Duration, ok: bool) {
+	s := strings.trim_space(str)
 	if len(s) < 2 || s[0] != 'P' {
 		return 0, false
 	}

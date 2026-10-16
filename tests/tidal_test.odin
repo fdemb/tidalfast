@@ -2,6 +2,8 @@ package tidal_tests
 
 import "core:encoding/base64"
 import "core:encoding/json"
+import "core:encoding/xml"
+import "core:fmt"
 import "core:mem"
 import vmem "core:mem/virtual"
 import "core:strings"
@@ -370,6 +372,71 @@ dash_segment_numbering :: proc(t: ^testing.T) {
 }
 
 @(test)
+dash_duration_fallbacks :: proc(t: ^testing.T) {
+	a: Test_Arena
+	allocator := arena_begin(&a)
+	defer vmem.arena_destroy(&a.arena)
+
+	body :: `<Period%s><AdaptationSet><Representation codecs="flac"><SegmentTemplate timescale="10" media="$Number$.mp4" initialization="i.mp4"><SegmentTimeline><S d="40" r="1"/><S d="25"/></SegmentTimeline></SegmentTemplate></Representation></AdaptationSet></Period></MPD>`
+
+	// No mediaPresentationDuration: the timeline gives 10.5 s.
+	missing := fmt.tprintf(`<MPD type="static">`+body, "")
+	d, err := tidal.dash_info_from_mpd(missing, allocator)
+	testing.expect_value(t, err, nil)
+	testing.expect_value(t, d.duration, 10500 * time.Millisecond)
+	testing.expect_value(t, len(d.segments), 3)
+
+	// One the parser can't read falls back the same way.
+	bad := fmt.tprintf(`<MPD mediaPresentationDuration="10.5">`+body, "")
+	d2, err2 := tidal.dash_info_from_mpd(bad, allocator)
+	testing.expect_value(t, err2, nil)
+	testing.expect_value(t, d2.duration, 10500 * time.Millisecond)
+
+	// Period@duration comes before the timeline.
+	period := fmt.tprintf(`<MPD>`+body, ` duration="PT11S"`)
+	d3, err3 := tidal.dash_info_from_mpd(period, allocator)
+	testing.expect_value(t, err3, nil)
+	testing.expect_value(t, d3.duration, 11 * time.Second)
+
+	// Surrounding spaces are fine.
+	padded, pok := tidal.parse_iso_duration(" PT4S ")
+	testing.expect(t, pok)
+	testing.expect_value(t, padded, 4 * time.Second)
+
+	// An open-ended timeline needs a duration from somewhere.
+	open_ended := `<MPD><Period><AdaptationSet><Representation><SegmentTemplate timescale="1" media="$Number$.mp4"><SegmentTimeline><S d="4" r="-1"/></SegmentTimeline></SegmentTemplate></Representation></AdaptationSet></Period></MPD>`
+	_, err4 := tidal.dash_info_from_mpd(open_ended, allocator)
+	testing.expect(t, err4 != nil)
+}
+
+@(test)
+mpd_keeps_ninth_attribute :: proc(t: ^testing.T) {
+	a: Test_Arena
+	allocator := arena_begin(&a)
+	defer vmem.arena_destroy(&a.arena)
+
+	// TIDAL's root element: the duration is its ninth attribute. Odin's
+	// core:encoding/xml from 2026-10-09 to at least 2026-10-16 drops it.
+	mpd := `<?xml version='1.0' encoding='UTF-8'?><MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:cenc="urn:mpeg:cenc:2013" xsi:schemaLocation="urn:mpeg:dash:schema:mpd:2011 DASH-MPD.xsd" profiles="urn:mpeg:dash:profile:isoff-main:2011" type="static" minBufferTime="PT3.993S" mediaPresentationDuration="PT10S"><Period id="0"><AdaptationSet><Representation codecs="flac"><SegmentTemplate timescale="1" media="$Number$.mp4" initialization="i.mp4"><SegmentTimeline><S d="4" r="-1"/></SegmentTimeline></SegmentTemplate></Representation></AdaptationSet></Period></MPD>`
+	d, err := tidal.dash_info_from_mpd(mpd, allocator)
+	testing.expect_value(t, err, nil)
+	testing.expect_value(t, d.duration, 10 * time.Second)
+	testing.expect_value(t, len(d.segments), 3)
+}
+
+@(test)
+mpd_outline_hides_text :: proc(t: ^testing.T) {
+	doc, err := xml.parse_string(MPD, allocator = context.temp_allocator)
+	testing.expect_value(t, err, nil)
+	outline := tidal.mpd_outline(doc, context.temp_allocator)
+	testing.expect(t, strings.contains(outline, `mediaPresentationDuration="PT9M9.999S"`))
+	testing.expect(t, strings.contains(outline, `initialization=<32 bytes>`))
+	testing.expect(t, strings.contains(outline, `2 S elements, first: S d="999999" r="9"`))
+	testing.expect(t, !strings.contains(outline, "sp.example"))
+	testing.expect(t, !strings.contains(outline, "176128"))
+}
+
+@(test)
 bts_manifest :: proc(t: ^testing.T) {
 	a: Test_Arena
 	allocator := arena_begin(&a)
@@ -432,4 +499,20 @@ url_for_log_drops_query :: proc(t: ^testing.T) {
 	testing.expect_value(t, tidal.url_for_log("https://login.tidal.com/android/login/auth?code=secret&state=x"), "https://login.tidal.com/android/login/auth")
 	testing.expect_value(t, tidal.url_for_log("https://api.tidal.com/v1/tracks/1#t=secret"), "https://api.tidal.com/v1/tracks/1")
 	testing.expect_value(t, tidal.url_for_log("https://resources.tidal.com/images/a/b/320x320.jpg"), "https://resources.tidal.com/images/a/b/320x320.jpg")
+}
+
+// A manifest that fails to parse says which check failed, not "no HTTP
+// response": the response came, it just didn't decode.
+@(test)
+error_summary_names_the_parse_step :: proc(t: ^testing.T) {
+	err: tidal.Error = tidal.Api_Error{kind = .Manifest_Decode, message = "Manifest has no URLs"}
+	testing.expect_value(t, tidal.error_summary(err, context.temp_allocator), "Manifest_Decode: Manifest has no URLs")
+	stream := tidal.Stream {
+		manifest_mime_type = "application/dash+xml",
+		manifest           = base64.encode(transmute([]u8)string("<foo/>"), allocator = context.temp_allocator),
+	}
+	_, merr := tidal.stream_get_manifest(stream, context.temp_allocator)
+	testing.expect_value(t, tidal.error_summary(merr, context.temp_allocator), "Manifest_Decode: MPD: missing MPD element")
+	err2: tidal.Error = tidal.Api_Error{kind = .Network, message = "HTTP request failed"}
+	testing.expect_value(t, tidal.error_summary(err2, context.temp_allocator), "Network, no HTTP response")
 }

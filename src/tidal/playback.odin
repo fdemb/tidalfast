@@ -3,6 +3,7 @@ package tidal
 import "core:encoding/base64"
 import "core:encoding/json"
 import "core:fmt"
+import "core:log"
 import "core:strings"
 
 // Stream_Info is what the player needs to play a track: one URL to a FLAC
@@ -99,6 +100,7 @@ parse_playback_info :: proc(obj: json.Object, allocator := context.allocator) ->
 	}
 
 	mime := jstr(obj, "manifestMimeType")
+	log.debugf("playback info: %s, %d-bit %d Hz, %s manifest", jstr(obj, "audioQuality"), info.bit_depth, info.sample_rate, "DASH" if strings.contains(mime, MANIFEST_MIME_MPD) else "BTS" if strings.contains(mime, MANIFEST_MIME_BTS) else "unknown")
 	if strings.contains(mime, MANIFEST_MIME_MPD) {
 		return parse_dash_playback(info, jstr(obj, "manifest"), allocator)
 	}

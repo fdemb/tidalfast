@@ -1,6 +1,6 @@
 # Working on TIDALfast
 
-TIDALfast is a native macOS TIDAL client in Odin, with a small Obj-C shell (`shell/shell.m`) that owns the window and loads the app as a hot-reloaded dylib (`src/app`). `docs/plan.md` has the plan and layout, and the other files in `docs/` have the details of every part. This file covers what an agent needs to check its own work, since you can't see the window or hear the audio.
+TIDALfast is a native TIDAL client in Odin for macOS and Linux, with a small shell that owns the window and loads the app as a hot-reloaded dylib (`src/app`): Obj-C on macOS (`shell/shell.m`), C on Wayland (`shell/shell_wayland.c`). `docs/plan.md` has the plan and layout, and the other files in `docs/` have the details of every part. This file covers what an agent needs to check its own work, since you can't see the window or hear the audio.
 
 ## Build and test
 
@@ -13,6 +13,8 @@ odin test tests         # run ./build.sh once first: it builds build/kbts/kb_tex
 ```
 
 Keep `./build.sh` clean with `-vet -strict-style`. `odin test tests` runs without `-strict-style`.
+
+Per-OS code lives in `_darwin.odin` and `_linux.odin` files. `odin check src/app -no-entry-point -vet -strict-style -target:darwin_arm64` (and `-target:linux_amd64`) type-checks the other OS's files without its SDK, so check both after touching shared code.
 
 Odin dev-2026-10 crashes the compiler on any Obj-C method call (`missing procedure 'objc_lookUpClass'`). Call Obj-C through `objc_msgSend` casts as `src/render` does, call C frameworks (CoreText, CoreAudio, Security) through hand-written foreign declarations, or put Obj-C-only code in `shell.m`.
 
@@ -29,6 +31,7 @@ The window is often covered or the screen locked, and real input may not reach i
 - **Frame time.** `TIDALFAST_BENCH=1` (library), `=text` or `=covers` (live data) auto-scrolls and logs CPU time per frame. `TIDALFAST_OVERLAY=1` or the backtick key shows the overlay: frame and UI time, draw calls, instances, memory.
 - **Profiling.** `TIDALFAST_SPALL=path` writes a spall trace. `sample <pid>` has hung in this environment before; timers inside the code worked when it did.
 - **Metal.** `MTL_DEBUG_LAYER=1 METAL_DEVICE_WRAPPER_TYPE=1` turns on validation.
+- **Linux without a display.** Run `weston --backend=headless` with its own `XDG_RUNTIME_DIR` and socket, and point the app at it with `WAYLAND_DISPLAY`. Mesa's lavapipe is a software Vulkan device. `size=w,h` in `TIDALFAST_SHELL_TEST` resizes the window, since nobody else will. `docs/linux.md` has the commands, including running the keychain tests against a throwaway keyring in a private D-Bus session.
 
 ## Measuring RAM and startup
 

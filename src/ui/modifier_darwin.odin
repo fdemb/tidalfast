@@ -10,3 +10,8 @@ PRIMARY :: platform.Modifier.Super
 // ends with LINE.
 WORD :: platform.Modifier.Alt
 LINE :: platform.Modifier.Super
+
+// Control-A and Control-E go to the line's ends, and Control-click is a
+// right click, as everywhere on macOS.
+CONTROL_LINE_KEYS :: true
+CONTROL_CLICK_IS_RIGHT :: true

@@ -1,14 +1,14 @@
 # TIDALfast
 
-A native macOS TIDAL client in Odin. A small Obj-C shell owns the window and talks to macOS. Everything else is an Odin dylib that the shell reloads while it runs. `docs/plan.md` has the plan and the phases, and the other files in `docs/` describe each part in detail.
+A native TIDAL client in Odin, for macOS and Linux (Wayland). A small shell owns the window and talks to the OS: Obj-C on macOS, C on Linux. Everything else is an Odin dylib that the shell reloads while it runs. `docs/plan.md` has the plan and the phases, and the other files in `docs/` describe each part in detail.
 
 ```
-shell/          Obj-C executable: window, CAMetalLayer, event queue, dylib loader, media keys and Now Playing,
-                input methods, clipboard and accessibility
+shell/          the executable: window, event queue, dylib loader, input methods and clipboard. shell.m is
+                the macOS one (CAMetalLayer, media keys, Now Playing, accessibility), shell_wayland.c the Linux one
 src/platform/   the ABI between shell and app (shell/platform.h mirrors it)
 src/app/        the hot-reloaded app dylib
-src/render/     renderer, with Metal as its backend (metal_darwin.odin)
-src/text/       fonts, shaping (kb_text_shape), rasterizing (CoreText), glyph atlas
+src/render/     renderer, with Metal (metal_darwin.odin) or Vulkan (vulkan_linux.odin) as its backend
+src/text/       fonts, shaping (kb_text_shape), rasterizing (CoreText or FreeType), glyph atlas
 src/ui/         box tree, layout, input, animation, menus, tooltips and the text field
 src/kbts/       kb_text_shape 2.21: C source and Odin bindings
 assets/fonts/   Inter 4.1, static Regular/Medium/SemiBold/Bold, with its OFL licence
@@ -34,11 +34,12 @@ examples/cli/   CLI on top of src/tidal
 ./build/tidalfast
 ```
 
-It needs macOS 14 or later, Odin and the Xcode command line tools. Run `./build.sh` once before `odin test tests`. `TIDALFAST_FAKE=1` runs the app on fake data without an account. The environment variables, keys and the patches to kb_text_shape are in [docs/building.md](docs/building.md).
+It needs macOS 14 or later, Odin and the Xcode command line tools. Run `./build.sh` once before `odin test tests`. `TIDALFAST_FAKE=1` runs the app on fake data without an account. The environment variables, keys and the patches to kb_text_shape are in [docs/building.md](docs/building.md). Linux needs a few packages first; see [docs/linux.md](docs/linux.md).
 
 ## Docs
 
 - [Building and running](docs/building.md): build details, the kb_text_shape patches, environment variables and debug keys
+- [Linux](docs/linux.md): dependencies, the Wayland shell, Vulkan, fonts, what isn't done yet and checking it without a display
 - [Renderer](docs/renderer.md): the instanced quad renderer, colour, textures and batching
 - [Text](docs/text.md): fonts, shaping, fallback, right-to-left text and the glyph atlas
 - [UI](docs/ui.md): the box tree, layout, input, scrolling, animation and the library screen

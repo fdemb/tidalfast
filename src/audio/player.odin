@@ -31,7 +31,8 @@ package audio
 //
 // Output goes through miniaudio, which plays at whatever rate the device
 // runs at and converts. In bit-perfect mode it goes to the CoreAudio HAL
-// instead (coreaudio.odin): the device is switched to the track's rate,
+// instead (coreaudio_darwin.odin; Linux doesn't have it yet, see
+// bitperfect_linux.odin): the device is switched to the track's rate,
 // ReplayGain and the volume are skipped, and the samples reach the device
 // as they were decoded. A rate change between tracks lets the ring play
 // out, re-clocks the device and starts again: a short gap. Tracks at the
@@ -1718,8 +1719,9 @@ device_open :: proc(p: ^Player, rate, channels, bits: int) -> bool {
 			log.errorf("audio: device_init failed: %v", r)
 			return false
 		}
-		if !p.null_output {
-			info.rate = int(device_nominal_rate(default_output_device()))
+		// Linux has no device rate to read here and keeps the track's.
+		if rate := device_nominal_rate(default_output_device()); !p.null_output && rate > 0 {
+			info.rate = int(rate)
 		}
 		log.infof("audio: %s device open at %d Hz, %d channels", "null" if p.null_output else "output", rate, channels)
 	}

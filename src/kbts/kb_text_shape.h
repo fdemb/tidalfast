@@ -13237,7 +13237,9 @@ KBTS_EXPORT void kbts_FontCoverageTestBegin(kbts_font_coverage_test *Test, kbts_
 
 KBTS_EXPORT void kbts_FontCoverageTestCodepoint(kbts_font_coverage_test *Test, int Codepoint)
 {
-  if(!Test->Error)
+  // Default ignorables (variation selectors, ZWJ) are hidden by the shaper, so a font
+  // without them, like Noto Color Emoji without U+FE0F, still covers the cluster.
+  if(!Test->Error && !(kbts__GetUnicodeFlags((kbts_u32)Codepoint) & KBTS_UNICODE_FLAG_DEFAULT_IGNORABLE))
   {
     kbts_u32 UCodepoint = (kbts_u32)Codepoint;
     int RecomposeBase = 0;

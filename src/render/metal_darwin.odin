@@ -178,7 +178,7 @@ destroy :: proc(r: ^Renderer) {
 		release(buf)
 	}
 	for slot in r.textures {
-		gpu_texture_free(slot.gpu)
+		gpu_texture_free(r, slot.gpu)
 	}
 	release(g.pipeline)
 	release(g.queue)
@@ -261,7 +261,7 @@ new_texture_slot :: proc(r: ^Renderer, width, height: int, format: Texture_Forma
 // Metal keeps a released texture alive until the command buffers that use
 // it finish, so this is safe mid-flight.
 @(private)
-gpu_texture_free :: proc(t: Gpu_Texture) {
+gpu_texture_free :: proc(r: ^Renderer, t: Gpu_Texture) {
 	release(t.texture)
 	release(t.mip_cmd)
 }

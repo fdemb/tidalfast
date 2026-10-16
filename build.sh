@@ -40,6 +40,59 @@ if [ ! -f build/kbts/kb_text_shape.a ] || [ src/kbts/kb_text_shape.h -nt build/k
 	rm build/kbts/kb_text_shape.o
 fi
 
+# Linux: a Wayland shell in C and a Vulkan renderer. The protocol glue comes
+# from wayland-scanner and the shaders from glslangValidator; the app #loads
+# the SPIR-V, so shaders are compiled before it.
+if [ "$(uname -s)" = Linux ]; then
+	protocols=$(pkg-config --variable=pkgdatadir wayland-protocols)
+	mkdir -p build/wayland build/shaders
+	for xml in stable/xdg-shell/xdg-shell.xml stable/viewporter/viewporter.xml \
+		staging/fractional-scale/fractional-scale-v1.xml \
+		unstable/xdg-decoration/xdg-decoration-unstable-v1.xml \
+		unstable/text-input/text-input-unstable-v3.xml; do
+		name=$(basename "$xml" .xml)
+		if [ ! -f "build/wayland/$name-protocol.c" ]; then
+			wayland-scanner client-header "$protocols/$xml" "build/wayland/$name-client-protocol.h"
+			wayland-scanner private-code "$protocols/$xml" "build/wayland/$name-protocol.c"
+		fi
+	done
+	for stage in vert frag; do
+		if [ ! -f "build/shaders/rect.$stage.spv" ] || [ "src/render/shaders/rect.$stage" -nt "build/shaders/rect.$stage.spv" ]; then
+			glslangValidator -V --quiet "src/render/shaders/rect.$stage" -o "build/shaders/rect.$stage.spv"
+		fi
+	done
+
+	shell_build() { # out, extra cc flags
+		out=$1
+		shift
+		cc -std=gnu11 shell/shell_wayland.c build/wayland/*-protocol.c -o "$out" \
+			-Ishell -Ibuild/wayland -Wall -Wno-unused-parameter "$@" \
+			$(pkg-config --cflags --libs wayland-client wayland-cursor xkbcommon) -lm -ldl
+	}
+
+	if [ "$target" = measure ]; then
+		mkdir -p build/measure/app
+		odin build src/app -build-mode:dll -out:build/measure/app/app.so -vet -strict-style -o:speed -define:TIDALFAST_MOCK_API=true
+		if [ ! -f build/measure/app/tidalfast ] || [ shell/shell_wayland.c -nt build/measure/app/tidalfast ] || [ shell/platform.h -nt build/measure/app/tidalfast ]; then
+			shell_build build/measure/app/tidalfast -O2 -DHOT_RELOAD=0
+		fi
+		odin build tests/mock_tidal -out:build/measure/mock_tidal -o:speed
+		odin build tools/measure -out:build/measure/measure -vet -strict-style
+		exit 0
+	fi
+
+	odin build src/app -build-mode:dll -out:build/app.tmp.so -vet -strict-style $odin_flags
+	mv -f build/app.tmp.so build/app.so
+	if [ "$target" = all ] && { [ ! -f build/tidalfast ] || [ shell/shell_wayland.c -nt build/tidalfast ] || [ shell/platform.h -nt build/tidalfast ] || [ "$(cat build/shell-mode 2>/dev/null)" != "$mode" ]; }; then
+		echo "$mode" > build/shell-mode
+		shell_build build/tidalfast $clang_flags
+	fi
+	if [ "$target" = all ]; then
+		odin build tools/measure -out:build/measure/measure -vet -strict-style
+	fi
+	exit 0
+fi
+
 if [ "$target" = measure ]; then
 	mkdir -p build/measure/app
 	odin build src/app -build-mode:dll -out:build/measure/app/app.dylib -vet -strict-style -o:speed -define:TIDALFAST_MOCK_API=true

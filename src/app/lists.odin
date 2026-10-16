@@ -611,7 +611,8 @@ sidebar_adopt :: proc(s: ^State, res: ^Result, from_disk: bool) {
 // SIDEBAR_MAX_AGE, or came from disk and TIDAL's never did. It runs on
 // things the user does, never on a timer.
 sidebar_check :: proc(d: ^Data) {
-	if d.account == .Signed_In && time.tick_since(d.sidebar.fetched) > SIDEBAR_MAX_AGE {
+	// A zero tick is when the machine booted, not long ago after a reboot.
+	if d.account == .Signed_In && (d.sidebar.fetched == {} || time.tick_since(d.sidebar.fetched) > SIDEBAR_MAX_AGE) {
 		request_playlists(d)
 	}
 }

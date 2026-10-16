@@ -151,13 +151,18 @@ path_query_is_merged :: proc(t: ^testing.T) {
 	testing.expect_value(t, mock_count(&m, "GET /echo?limit=5?"), 0)
 }
 
-@(private = "file")
-temp_dir :: proc(t: ^testing.T) -> string {
+// temp_base is TMPDIR, which Linux usually leaves unset, or /tmp.
+temp_base :: proc() -> string {
 	base := os.get_env("TMPDIR", context.temp_allocator)
 	if base == "" {
 		base = "/tmp"
 	}
-	dir := fmt.tprintf("%s/tidalfast-test-%d", strings.trim_suffix(base, "/"), time.time_to_unix_nano(time.now()))
+	return strings.trim_suffix(base, "/")
+}
+
+@(private = "file")
+temp_dir :: proc(t: ^testing.T) -> string {
+	dir := fmt.tprintf("%s/tidalfast-test-%d", temp_base(), time.time_to_unix_nano(time.now()))
 	testing.expect_value(t, os.make_directory(dir), nil)
 	return dir
 }
