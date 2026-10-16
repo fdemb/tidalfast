@@ -46,10 +46,6 @@ So with the search field at 115 of 119 bytes, marking "a‍👩" (8 bytes) chang
 
 The clipboard goes through `Shell.set_clipboard` and `Shell.get_clipboard`, which use `NSPasteboard`. `ui.copy_to_clipboard` puts a string on it from anywhere in the UI.
 
-## Platform ABI version 7
-
-`Shell.surface` is a `Wayland_Surface` (16 bytes) on Linux: the `wl_display` and the `wl_surface`, which the Vulkan backend makes its `VkSurfaceKHR` from. Nothing else changed; macOS still passes the `CAMetalLayer`.
-
 ## Platform ABI version 3
 
 - `Event` grew to 88 bytes: text offset and length, a replacement range, the input method's selection inside marked text, and a `target` node id. New kinds: `Text`, `Marked_Text`, `Unmark_Text`, `Access_Press` and `Access_Focus`.
@@ -65,4 +61,4 @@ Version 6 takes the macOS-only parts out of the ABI, so a shell for another OS c
 - `Event.key` is a `Key`: keys by their place on a US keyboard, which the shell maps its own key codes to. It took the place of `key_code`, which held macOS virtual key codes. Keys outside the enum arrive as `None`. `Event.media` holds the `Media_Command` in what was a padding byte, so `Event` stays 88 bytes. `platform.h` and `platform.odin` both check that `Key` has 65 values.
 - The modifiers are `Shift`, `Control`, `Alt` and `Super`, with the same bits as before. Alt is Option and Super is Command on macOS.
 - `Frame_Input` (56 bytes) adds `mouse_buttons`, the buttons held down in any app, which the UI used to ask CoreGraphics for itself.
-- `Shell` (56 bytes) has one `surface` in place of `metal_device` and `metal_layer`. On macOS it is the `CAMetalLayer`, set up by the shell, and the Metal backend takes the device from it.
+- `Shell` (56 bytes) has one `surface` in place of `metal_device` and `metal_layer`. On macOS it is the `CAMetalLayer`, set up by the shell, and the Metal backend takes the device from it. On Linux it points to a `Wayland_Surface` (16 bytes): the `wl_display` and the `wl_surface`, which the Vulkan backend makes its `VkSurfaceKHR` from. `Wayland_Surface` isn't part of `Shell`, so adding it didn't change the version.

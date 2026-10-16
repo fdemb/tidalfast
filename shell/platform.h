@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#define PLATFORM_ABI_VERSION 7
+#define PLATFORM_ABI_VERSION 6
 
 typedef enum {
   EVENT_NONE,

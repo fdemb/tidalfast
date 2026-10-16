@@ -2,7 +2,7 @@
 // this file field for field. Change both together and bump ABI_VERSION.
 package platform
 
-ABI_VERSION :: 7
+ABI_VERSION :: 6
 
 Event_Kind :: enum u32 {
 	None,
