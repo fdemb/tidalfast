@@ -195,13 +195,21 @@ dash_info_from_mpd :: proc(mpd_xml: string, allocator := context.allocator) -> (
 		return {}, decode_error("MPD: missing SegmentTemplate")
 	}
 
-	duration_attr, _ := attr(doc, root, "mediaPresentationDuration")
-	duration, dok := parse_iso_duration(duration_attr)
-	if !dok {
-		return {}, decode_error("MPD: bad mediaPresentationDuration")
+	// mediaPresentationDuration is optional for static MPDs. Without it the
+	// Period duration or the timeline itself gives the length.
+	duration: time.Duration
+	has_duration := false
+	for source in ([]struct {
+			id:  xml.Element_ID,
+			key: string,
+		}{{root, "mediaPresentationDuration"}, {period, "duration"}}) {
+		if v, has := attr(doc, source.id, source.key); has {
+			if duration, has_duration = parse_iso_duration(v); has_duration {
+				break
+			}
+		}
 	}
 
-	info.duration = duration
 	info.content_type = strings.clone(inherited(doc, levels, "contentType"), allocator)
 	info.mime_type = strings.clone(inherited(doc, levels, "mimeType"), allocator)
 	info.codecs = strings.clone(inherited(doc, levels, "codecs"), allocator)
@@ -226,7 +234,7 @@ dash_info_from_mpd :: proc(mpd_xml: string, allocator := context.allocator) -> (
 	}
 
 	timescale := f64(info.timescale)
-	period_end := i64(time.duration_seconds(duration) * timescale + 0.5)
+	period_end := i64(time.duration_seconds(duration) * timescale + 0.5) if has_duration else -1
 	segments := make([dynamic]Dash_Segment, 0, 64, allocator)
 
 	if timeline, has_timeline := child(doc, template, "SegmentTimeline"); has_timeline {
@@ -265,6 +273,9 @@ dash_info_from_mpd :: proc(mpd_xml: string, allocator := context.allocator) -> (
 						end = i64(to_int(next_t, int(end)))
 					}
 				}
+				if end < 0 {
+					return {}, decode_error("MPD: open-ended segment without a duration")
+				}
 				count = max((end - t + d - 1) / d, 1)
 			}
 			if i64(len(segments)) + count > MAX_DASH_SEGMENTS {
@@ -285,6 +296,9 @@ dash_info_from_mpd :: proc(mpd_xml: string, allocator := context.allocator) -> (
 		if d <= 0 {
 			return {}, decode_error("MPD: missing SegmentTimeline and segment duration")
 		}
+		if !has_duration {
+			return {}, decode_error("MPD: fixed segments without a duration")
+		}
 		count := max((period_end + d - 1) / d, 1)
 		if count > MAX_DASH_SEGMENTS {
 			return {}, decode_error("MPD: too many segments")
@@ -297,6 +311,12 @@ dash_info_from_mpd :: proc(mpd_xml: string, allocator := context.allocator) -> (
 		}
 	}
 	info.segments = segments[:]
+	if has_duration {
+		info.duration = duration
+	} else if len(segments) > 0 {
+		last := segments[len(segments) - 1]
+		info.duration = time.Duration(f64(last.start + last.length) / timescale * f64(time.Second))
+	}
 
 	urls := make([dynamic]string, 0, len(segments) + 1, allocator)
 	if info.init_url != "" {
@@ -404,7 +424,8 @@ dash_hls :: proc(d: Dash_Info, allocator := context.allocator) -> string {
 }
 
 // parse_iso_duration parses ISO 8601 durations like "PT3M25.123S".
-parse_iso_duration :: proc(s: string) -> (d: time.Duration, ok: bool) {
+parse_iso_duration :: proc(str: string) -> (d: time.Duration, ok: bool) {
+	s := strings.trim_space(str)
 	if len(s) < 2 || s[0] != 'P' {
 		return 0, false
 	}

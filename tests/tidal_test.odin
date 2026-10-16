@@ -2,6 +2,7 @@ package tidal_tests
 
 import "core:encoding/base64"
 import "core:encoding/json"
+import "core:fmt"
 import "core:mem"
 import vmem "core:mem/virtual"
 import "core:strings"
@@ -367,6 +368,44 @@ dash_segment_numbering :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(d3.segments), 3)
 	testing.expect_value(t, d3.segments[2].url, "s2.m4s")
 	testing.expect_value(t, d3.segments[2].duration, 1.0)
+}
+
+@(test)
+dash_duration_fallbacks :: proc(t: ^testing.T) {
+	a: Test_Arena
+	allocator := arena_begin(&a)
+	defer vmem.arena_destroy(&a.arena)
+
+	body :: `<Period%s><AdaptationSet><Representation codecs="flac"><SegmentTemplate timescale="10" media="$Number$.mp4" initialization="i.mp4"><SegmentTimeline><S d="40" r="1"/><S d="25"/></SegmentTimeline></SegmentTemplate></Representation></AdaptationSet></Period></MPD>`
+
+	// No mediaPresentationDuration: the timeline gives 10.5 s.
+	missing := fmt.tprintf(`<MPD type="static">`+body, "")
+	d, err := tidal.dash_info_from_mpd(missing, allocator)
+	testing.expect_value(t, err, nil)
+	testing.expect_value(t, d.duration, 10500 * time.Millisecond)
+	testing.expect_value(t, len(d.segments), 3)
+
+	// One the parser can't read falls back the same way.
+	bad := fmt.tprintf(`<MPD mediaPresentationDuration="10.5">`+body, "")
+	d2, err2 := tidal.dash_info_from_mpd(bad, allocator)
+	testing.expect_value(t, err2, nil)
+	testing.expect_value(t, d2.duration, 10500 * time.Millisecond)
+
+	// Period@duration comes before the timeline.
+	period := fmt.tprintf(`<MPD>`+body, ` duration="PT11S"`)
+	d3, err3 := tidal.dash_info_from_mpd(period, allocator)
+	testing.expect_value(t, err3, nil)
+	testing.expect_value(t, d3.duration, 11 * time.Second)
+
+	// Surrounding spaces are fine.
+	padded, pok := tidal.parse_iso_duration(" PT4S ")
+	testing.expect(t, pok)
+	testing.expect_value(t, padded, 4 * time.Second)
+
+	// An open-ended timeline needs a duration from somewhere.
+	open_ended := `<MPD><Period><AdaptationSet><Representation><SegmentTemplate timescale="1" media="$Number$.mp4"><SegmentTimeline><S d="4" r="-1"/></SegmentTimeline></SegmentTemplate></Representation></AdaptationSet></Period></MPD>`
+	_, err4 := tidal.dash_info_from_mpd(open_ended, allocator)
+	testing.expect(t, err4 != nil)
 }
 
 @(test)
