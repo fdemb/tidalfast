@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#define PLATFORM_ABI_VERSION 5
+#define PLATFORM_ABI_VERSION 6
 
 typedef enum {
   EVENT_NONE,
@@ -236,8 +236,7 @@ typedef struct {
 _Static_assert(sizeof(Access_Node) == 56, "Access_Node size must match platform.odin");
 
 typedef struct {
-  void *metal_device;
-  void *metal_layer;
+  void *surface; // what the renderer draws to: a CAMetalLayer with its device
   void (*request_redraw)(void);
   // The rest are main thread only.
   void (*set_now_playing)(const Now_Playing *info);
@@ -247,7 +246,7 @@ typedef struct {
   size_t (*get_clipboard)(uint8_t *buffer, size_t capacity);
   void (*set_accessibility)(const Access_Node *nodes, uint32_t count); // copied
 } Shell;
-_Static_assert(sizeof(Shell) == 64, "Shell size must match platform.odin");
+_Static_assert(sizeof(Shell) == 56, "Shell size must match platform.odin");
 
 typedef struct {
   Event *events;

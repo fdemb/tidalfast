@@ -2,7 +2,7 @@
 // this file field for field. Change both together and bump ABI_VERSION.
 package platform
 
-ABI_VERSION :: 5
+ABI_VERSION :: 6
 
 Event_Kind :: enum u32 {
 	None,
@@ -207,11 +207,12 @@ Access_Node :: struct {
 }
 #assert(size_of(Access_Node) == 56)
 
-// What the shell gives the app. The Metal objects and the procedures belong
-// to the shell, so they stay valid across reloads and the app may keep them.
+// What the shell gives the app. The surface and the procedures belong to
+// the shell, so they stay valid across reloads and the app may keep them.
 Shell :: struct {
-	metal_device:    rawptr, // id<MTLDevice>
-	metal_layer:     rawptr, // CAMetalLayer*
+	// What the renderer draws to, set up by the shell: a CAMetalLayer with its
+	// device on macOS.
+	surface:           rawptr,
 	// Safe from any thread. Wakes the main run loop and draws one frame.
 	request_redraw:  proc "c" (),
 	// The rest are main thread only.
@@ -226,7 +227,7 @@ Shell :: struct {
 	// The shell copies the nodes and their strings.
 	set_accessibility: proc "c" (nodes: [^]Access_Node, count: u32),
 }
-#assert(size_of(Shell) == 64)
+#assert(size_of(Shell) == 56)
 
 Frame_Input :: struct {
 	events:        [^]Event,

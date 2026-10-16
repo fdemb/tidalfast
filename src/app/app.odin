@@ -271,7 +271,7 @@ start :: proc(s: ^State, shell: ^platform.Shell) {
 		s.renderer.capture_path = path
 	}
 
-	if !render.init(&s.renderer, shell.metal_device, shell.metal_layer) {
+	if !render.init(&s.renderer, shell.surface) {
 		log.error("app: renderer init failed")
 	}
 	if !text.init(&s.text, shell.request_redraw) {

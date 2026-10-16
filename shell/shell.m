@@ -1424,8 +1424,7 @@ static void setup_shell_test(void) {
   }
 
   g_shell = (Shell){
-      .metal_device = (__bridge void *)g_layer.device,
-      .metal_layer = (__bridge void *)g_layer,
+      .surface = (__bridge void *)g_layer,
       .request_redraw = request_redraw,
       .set_now_playing = set_now_playing,
       .set_text_input = set_text_input,
