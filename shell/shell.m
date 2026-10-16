@@ -1353,6 +1353,14 @@ static void test_step(NSString *command, NSString *arg) {
       fprintf(stderr, "shell: test: couldn't copy the capture to %s\n", arg.UTF8String);
     else
       fprintf(stderr, "shell: test: captured %s\n", arg.UTF8String);
+  } else if ([command isEqualToString:@"size"]) {
+    NSArray *wh = [arg componentsSeparatedByString:@","];
+    double w = [wh.firstObject doubleValue], h = wh.count > 1 ? [wh[1] doubleValue] : 0;
+    if (w < 1 || h < 1) {
+      fprintf(stderr, "shell: test: size wants w,h\n");
+      return;
+    }
+    [g_window setContentSize:NSMakeSize(w, h)];
   } else if ([command isEqualToString:@"quit"]) {
     [NSApp terminate:nil];
   } else {
