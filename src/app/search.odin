@@ -126,6 +126,7 @@ draw_search_field :: proc(s: ^State) {
 		switch {
 		case sig.submitted && submitted != "" && sig.submitted_text != ui.field_text(&sr.field):
 			search_stop(s)
+			history_visit(s, {kind = .Search, id = small(submitted)})
 			search_send(s, submitted)
 			search_edited(s)
 		case sig.submitted && submitted != "":
@@ -140,6 +141,7 @@ draw_search_field :: proc(s: ^State) {
 	// Nothing goes while the input method is still composing.
 	if sr.due > 0 && !sr.field.marked {
 		if s.ui.time >= sr.due {
+			history_visit(s, {kind = .Search, id = small(search_query(s))})
 			search_send(s, search_query(s))
 		} else {
 			ui.wake_at(sr.due)
@@ -197,6 +199,13 @@ search_send :: proc(s: ^State, q: string) {
 		// The queue is full: try again shortly.
 		sr.due = s.ui.time + 0.1
 	}
+}
+
+// search_again puts q in the field and searches for it, for Back and
+// Forward.
+search_again :: proc(s: ^State, q: string) {
+	ui.field_set_text(&s.search.field, q)
+	search_send(s, q)
 }
 
 // search_close leaves the results for the sidebar's playlist.

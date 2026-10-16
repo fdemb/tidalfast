@@ -182,12 +182,43 @@ draw_library :: proc(s: ^State, w, h: f32) {
 	draw_drag_ghost(s)
 }
 
+// draw_history_buttons is Back and Forward through the places visited
+// (History), at the top of the sidebar.
+draw_history_buttons :: proc(s: ^State) {
+	ui.row("", {}, ui.fill(), ui.px(32))
+	ui.spacer(ui.px(10))
+	if history_button("‹###back", "Back", history_can_back(s)).clicked {
+		pending_set(s, {kind = .Back})
+	}
+	ui.spacer(ui.px(2))
+	if history_button("›###forward", "Forward", history_can_forward(s)).clicked {
+		pending_set(s, {kind = .Forward})
+	}
+}
+
+history_button :: proc(id, name: string, enabled: bool) -> ui.Signal {
+	ui.column("", {}, ui.children_sum(), ui.fill())
+	ui.spacer(ui.fill())
+	flags := ui.Box_Flags{.Clickable, .Focusable, .Draw_Text, .Draw_Hot_Effects, .Draw_Active_Effects}
+	if !enabled {
+		flags += {.Disabled}
+	}
+	ui.text_style(.Medium, 20, TEXT if enabled else DIM)
+	b := ui.box_make(id, flags, ui.px(24), ui.px(24))
+	b.text_align = .Center
+	b.radius = 12
+	ui.accessible(b, .Button, name)
+	ui.spacer(ui.fill())
+	return ui.signal(b)
+}
+
 draw_sidebar :: proc(s: ^State) {
 	lib := &s.library
 	side := ui.column("sidebar", {.Draw_Background, .Clip}, ui.px(lib.sidebar_w), ui.fill())
 	side.background = PANEL
+	draw_history_buttons(s)
 	{
-		ui.row("", {}, ui.fill(), ui.px(48))
+		ui.row("", {}, ui.fill(), ui.px(40))
 		ui.spacer(ui.px(16))
 		ui.text_style(.Semibold, 15, TEXT)
 		heading := ui.label("Your Library", ui.fill(), ui.fill())
@@ -973,8 +1004,11 @@ Pending_Kind :: enum u8 {
 	None,
 	Playlist, // open a sidebar entry
 	List, // open an album, an artist or a playlist that isn't in the sidebar
+	Search, // search for id again
 	Close_Search,
 	Play,
+	Back,
+	Forward,
 }
 
 pending_set :: proc(s: ^State, p: Pending) {
@@ -989,19 +1023,88 @@ pending_apply :: proc(s: ^State) -> bool {
 	switch p.kind {
 	case .None:
 		return false
-	case .Playlist:
-		search_stop(s)
-		select_playlist(s, p.index)
-	case .List:
-		search_stop(s)
-		open_list(s, &p)
+	case .Playlist, .List, .Search:
+		history_visit(s, p)
+		place_go(s, &p)
 	case .Close_Search:
+		if search_showing(s) {
+			history_visit(s, {kind = .Playlist, index = s.library.playlist})
+		}
 		search_close(s)
 	case .Play:
 		play(s, p.index)
+	case .Back, .Forward:
+		h := &s.history
+		to := h.at - 1 if p.kind == .Back else h.at + 1
+		if to < 0 || to >= h.count {
+			return false
+		}
+		h.at = to
+		place := h.places[to]
+		place_go(s, &place)
 	}
 	ui.data_changed()
 	return true
+}
+
+// place_go shows a place, a Pending of kind .Playlist, .List or .Search,
+// without recording it in the history.
+place_go :: proc(s: ^State, p: ^Pending) {
+	search_stop(s)
+	#partial switch p.kind {
+	case .Playlist:
+		select_playlist(s, p.index)
+	case .List:
+		open_list(s, p)
+	case .Search:
+		search_again(s, small_str(&p.id))
+	}
+}
+
+HISTORY_MAX :: 50
+
+// History is the places visited, oldest first; at is the one showing.
+History :: struct {
+	places: [HISTORY_MAX]Pending,
+	count:  int,
+	at:     int,
+}
+
+// history_visit records p as the place showing next, dropping the places
+// Forward would have gone to. Searches in a row are one place, so typing a
+// query leaves one entry however many times the debounce ran out.
+history_visit :: proc(s: ^State, p: Pending) {
+	h := &s.history
+	if h.count == 0 {
+		h.places[0] = {kind = .Playlist, index = s.library.playlist}
+		h.count, h.at = 1, 0
+	}
+	p := p
+	if p.kind == .Playlist {
+		// A playlist found by the fake search carries a source and name.
+		p = {kind = .Playlist, index = p.index}
+	}
+	now := &h.places[h.at]
+	if now.kind == p.kind && now.source == p.source && now.index == p.index && now.id == p.id {
+		return
+	}
+	if now.kind != .Search || p.kind != .Search {
+		if h.at == HISTORY_MAX - 1 {
+			copy(h.places[:], h.places[1:])
+			h.at -= 1
+		}
+		h.at += 1
+	}
+	h.places[h.at] = p
+	h.count = h.at + 1
+}
+
+history_can_back :: proc(s: ^State) -> bool {
+	return s.history.at > 0
+}
+
+history_can_forward :: proc(s: ^State) -> bool {
+	return s.history.at + 1 < s.history.count
 }
 
 mix :: proc(a, b: render.Color, t: f32) -> render.Color {

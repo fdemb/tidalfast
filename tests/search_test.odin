@@ -603,3 +603,181 @@ search_results_come_back_from_memory :: proc(t: ^testing.T) {
 	testing.expect(t, app.lru_find(&s.data, .Search, "abc") < 0)
 }
 
+// enabled says whether the last frame's button labelled label takes input.
+@(private = "file")
+enabled :: proc(s: ^app.State, label: string) -> bool {
+	n, ok := node(s, label)
+	assert(ok, label)
+	return .Disabled not_in n.flags
+}
+
+// go_to_first_album opens the album of the open list's first row from its
+// track menu, and returns the album's name.
+@(private = "file")
+go_to_first_album :: proc(t: ^testing.T, s: ^app.State, f: ^Frame) -> string {
+	row := app.view_row(s, 0)
+	down, up := right_click(s, row.title)
+	library_frame(t, s, f, down, up)
+	library_frame(t, s, f)
+	album := app.view_row(s, s.library.menu_row).album
+	library_frame(t, s, f, press(s, "Go to album"))
+	library_frame(t, s, f)
+	return album
+}
+
+// Back and Forward go through the places visited, from the playlist the
+// app started on. Going somewhere new drops the places Forward would have
+// gone to.
+@(test)
+back_and_forward_go_through_the_places_visited :: proc(t: ^testing.T) {
+	arena: vmem.Arena
+	_ = vmem.arena_init_growing(&arena)
+	defer vmem.arena_destroy(&arena)
+	context.allocator = vmem.arena_allocator(&arena)
+	s := library_state(true)
+	defer library_state_free(s)
+	f: Frame
+	library_frame(t, s, &f)
+	library_frame(t, s, &f)
+	testing.expect(t, !enabled(s, "Back"))
+	testing.expect(t, !enabled(s, "Forward"))
+	library_frame(t, s, &f, press(s, "Back"))
+	library_frame(t, s, &f)
+	testing.expect_value(t, app.view_title(s), "Liked Songs")
+
+	library_frame(t, s, &f, press(s, "Daily Mix 1,"))
+	library_frame(t, s, &f)
+	testing.expect_value(t, app.view_title(s), "Daily Mix 1")
+	album := go_to_first_album(t, s, &f)
+	testing.expect_value(t, app.view_title(s), album)
+	testing.expect(t, enabled(s, "Back"))
+	testing.expect(t, !enabled(s, "Forward"))
+
+	library_frame(t, s, &f, press(s, "Back"))
+	library_frame(t, s, &f)
+	testing.expect_value(t, app.view_title(s), "Daily Mix 1")
+	library_frame(t, s, &f, press(s, "Back"))
+	library_frame(t, s, &f)
+	testing.expect_value(t, app.view_title(s), "Liked Songs")
+	testing.expect_value(t, s.search.fake_source, app.Source.None)
+	testing.expect(t, !enabled(s, "Back"))
+	testing.expect(t, enabled(s, "Forward"))
+
+	library_frame(t, s, &f, press(s, "Forward"))
+	library_frame(t, s, &f)
+	testing.expect_value(t, app.view_title(s), "Daily Mix 1")
+	testing.expect(t, enabled(s, "Forward"))
+
+	library_frame(t, s, &f, press(s, "Back"))
+	library_frame(t, s, &f, press(s, "Release Radar,"))
+	library_frame(t, s, &f)
+	testing.expect(t, !enabled(s, "Forward"))
+	library_frame(t, s, &f, press(s, "Forward"))
+	library_frame(t, s, &f)
+	testing.expect_value(t, app.view_title(s), "Release Radar")
+	library_frame(t, s, &f, press(s, "Back"))
+	library_frame(t, s, &f)
+	testing.expect_value(t, app.view_title(s), "Liked Songs")
+}
+
+// The history keeps the last HISTORY_MAX places and forgets older ones.
+@(test)
+history_forgets_the_oldest_places :: proc(t: ^testing.T) {
+	arena: vmem.Arena
+	_ = vmem.arena_init_growing(&arena)
+	defer vmem.arena_destroy(&arena)
+	context.allocator = vmem.arena_allocator(&arena)
+	s := library_state(true)
+	defer library_state_free(s)
+	f: Frame
+	library_frame(t, s, &f)
+	visits := app.HISTORY_MAX + 10
+	for i in 1 ..= visits {
+		library_frame(t, s, &f, press(s, fmt.tprintf("%s,", app.PLAYLISTS[i % 3 + 1])))
+	}
+	library_frame(t, s, &f)
+	for _ in 1 ..< app.HISTORY_MAX {
+		testing.expect(t, enabled(s, "Back"))
+		library_frame(t, s, &f, press(s, "Back"))
+		library_frame(t, s, &f)
+	}
+	testing.expect(t, !enabled(s, "Back"))
+	oldest := visits - app.HISTORY_MAX + 1
+	testing.expect_value(t, app.view_title(s), app.PLAYLISTS[oldest % 3 + 1])
+}
+
+// A search typed a letter at a time is one place in the history, for the
+// query as it ended. Back to it puts the query back in the field.
+@(test)
+back_returns_to_the_last_search :: proc(t: ^testing.T) {
+	arena: vmem.Arena
+	_ = vmem.arena_init_growing(&arena)
+	defer vmem.arena_destroy(&arena)
+	context.allocator = vmem.arena_allocator(&arena)
+	s := library_state(true)
+	defer library_state_free(s)
+	sr := &s.search
+	f: Frame
+	library_frame(t, s, &f)
+	library_frame(t, s, &f, key(.F, {ui.PRIMARY}))
+	for letter in ([]string{"J", "ó", "g", "a"}) {
+		library_frame(t, s, &f, type_text(&f, letter))
+		library_frame(t, s, &f, dt = 1)
+	}
+	testing.expect_value(t, app.small_str(&sr.query), "Jóga")
+	album := go_to_first_album(t, s, &f)
+	testing.expect_value(t, app.view_title(s), album)
+
+	library_frame(t, s, &f, press(s, "Back"))
+	library_frame(t, s, &f)
+	testing.expect(t, app.search_showing(s))
+	testing.expect_value(t, app.view_title(s), "Results for “Jóga”")
+	testing.expect_value(t, ui.field_text(&sr.field), "Jóga")
+	library_frame(t, s, &f, press(s, "Back"))
+	library_frame(t, s, &f)
+	testing.expect_value(t, app.view_title(s), "Liked Songs")
+	testing.expect(t, !enabled(s, "Back"))
+
+	// Emptying the field goes back to the playlist, which is a place too.
+	library_frame(t, s, &f, press(s, "Forward"))
+	library_frame(t, s, &f, key(.F, {ui.PRIMARY}))
+	library_frame(t, s, &f, key(.Escape))
+	library_frame(t, s, &f)
+	testing.expect(t, !app.search_showing(s))
+	testing.expect_value(t, app.view_title(s), "Liked Songs")
+	library_frame(t, s, &f, press(s, "Back"))
+	library_frame(t, s, &f)
+	testing.expect_value(t, app.view_title(s), "Results for “Jóga”")
+}
+
+// With TIDAL's data a place is an album's or artist's id, opened again
+// from TIDAL when Back or Forward comes to it.
+@(test)
+back_and_forward_reopen_tidal_lists :: proc(t: ^testing.T) {
+	arena: vmem.Arena
+	_ = vmem.arena_init_growing(&arena)
+	defer vmem.arena_destroy(&arena)
+	context.allocator = vmem.arena_allocator(&arena)
+	s := library_state(false)
+	defer library_state_free(s)
+	open_test_list(s)
+	f: Frame
+	library_frame(t, s, &f)
+	library_frame(t, s, &f)
+	down, up := right_click(s, "Second song")
+	library_frame(t, s, &f, down, up)
+	library_frame(t, s, &f)
+	library_frame(t, s, &f, press(s, "Go to album"))
+	testing.expect_value(t, s.data.view.source, app.Source.Album)
+
+	library_frame(t, s, &f)
+	library_frame(t, s, &f, press(s, "Back"))
+	testing.expect_value(t, s.data.view.source, app.Source.Liked)
+	library_frame(t, s, &f)
+	library_frame(t, s, &f, press(s, "Forward"))
+	testing.expect_value(t, s.data.view.source, app.Source.Album)
+	testing.expect_value(t, app.small_str(&s.data.view.id), "10")
+	testing.expect_value(t, app.small_str(&s.data.view.name), "Some Album")
+	library_frame(t, s, &f)
+}
+

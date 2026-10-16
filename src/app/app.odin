@@ -75,6 +75,7 @@ State :: struct {
 	playback:     Playback,
 	search:       Search,
 	pending:      Pending, // what the frame being built asked for, done after it
+	history:      History,
 	access_sent:  u64, // hash of the accessibility tree the shell has
 	scroll:       [2]f32, // the test screens' scroll offset
 	bench:        Bench,
