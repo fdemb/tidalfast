@@ -176,7 +176,7 @@ Hit :: struct {
 }
 
 Key_Press :: struct {
-	code:      u32,
+	code:      platform.Key,
 	modifiers: platform.Modifiers,
 }
 
@@ -683,9 +683,9 @@ queue_edit :: proc(u: ^State, e: Edit_Event) {
 @(private)
 key_down :: proc(u: ^State, e: platform.Event) {
 	mods := e.modifiers & {.Shift, .Control, .Option, .Command}
-	code := e.key_code
+	code := e.key
 	switch {
-	case !e.repeat && (code == KEY_F1 || (code == KEY_D && mods == {PRIMARY, .Shift})):
+	case !e.repeat && (code == .F1 || (code == .D && mods == {PRIMARY, .Shift})):
 		u.debug = !u.debug
 		return
 	case shortcut_for(u, {code, mods}) != 0:
@@ -696,12 +696,12 @@ key_down :: proc(u: ^State, e: platform.Event) {
 		move_focus(u, target, false, select_all = true)
 		u.animating = true
 		return
-	case code == KEY_TAB && mods - {.Shift} == {}:
+	case code == .Tab && mods - {.Shift} == {}:
 		focus_step(u, -1 if .Shift in mods else 1)
 		return
-	case focus_takes_text(u) && (code == KEY_ESCAPE || code == KEY_RETURN || code == KEY_SPACE || code == KEY_UP || code == KEY_DOWN):
+	case focus_takes_text(u) && (code == .Escape || code == .Return || code == .Space || code == .Up || code == .Down):
 		// The text field has these.
-	case code == KEY_ESCAPE && mods == {}:
+	case code == .Escape && mods == {}:
 		if u.drag_active {
 			u.drag_active = false
 			u.drag_cancelled = true
@@ -715,14 +715,14 @@ key_down :: proc(u: ^State, e: platform.Event) {
 			move_focus(u, 0, false)
 			return
 		}
-	case (code == KEY_RETURN || code == KEY_SPACE) && mods == {} && u.focus != 0:
+	case (code == .Return || code == .Space) && mods == {} && u.focus != 0:
 		// With a menu open, only its items take keys.
 		if !menu_blocks(u, u.focus) {
 			u.key_click = u.focus
 		}
 		return
-	case (code == KEY_UP || code == KEY_DOWN) && mods == {}:
-		if focus_arrow(u, -1 if code == KEY_UP else 1) {
+	case (code == .Up || code == .Down) && mods == {}:
+		if focus_arrow(u, -1 if code == .Up else 1) {
 			return
 		}
 	}
@@ -1259,7 +1259,7 @@ text_style :: proc(font: text.Font, size: f32, color: render.Color) -> Text_Styl
 // Queries for the app
 
 // key_pressed reports and uses up a key press the UI didn't take.
-key_pressed :: proc(code: u32, modifiers: platform.Modifiers = {}) -> bool {
+key_pressed :: proc(code: platform.Key, modifiers: platform.Modifiers = {}) -> bool {
 	u := ctx
 	for i in 0 ..< u.key_count {
 		k := u.keys[i]

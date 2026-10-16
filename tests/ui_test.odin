@@ -279,11 +279,11 @@ test_ui_interaction :: proc(t: ^testing.T) {
 
 	// Tab focuses it, Enter clicks it, Escape drops the focus.
 	frame(&u, &now, {kind = .Mouse_Down, x = 250, y = 150}, {kind = .Mouse_Up, x = 250, y = 150})
-	sig, _ = frame(&u, &now, {kind = .Key_Down, key_code = ui.KEY_TAB})
+	sig, _ = frame(&u, &now, {kind = .Key_Down, key = .Tab})
 	testing.expect(t, ui.has_focus(sig.box))
-	sig, _ = frame(&u, &now, {kind = .Key_Down, key_code = ui.KEY_RETURN})
+	sig, _ = frame(&u, &now, {kind = .Key_Down, key = .Return})
 	testing.expect(t, sig.clicked && sig.keyboard)
-	sig, _ = frame(&u, &now, {kind = .Key_Down, key_code = ui.KEY_ESCAPE})
+	sig, _ = frame(&u, &now, {kind = .Key_Down, key = .Escape})
 	testing.expect(t, !ui.has_focus(sig.box))
 
 	// A box not built for a frame is freed.
@@ -520,7 +520,7 @@ test_ui_scrollbar_floating :: proc(t: ^testing.T) {
 	testing.expect_value(t, view.bar_t, f32(0))
 
 	// So does the focus moving into it.
-	bar_frame(&u, &now, .Floating, {kind = .Key_Down, key_code = ui.KEY_TAB})
+	bar_frame(&u, &now, .Floating, {kind = .Key_Down, key = .Tab})
 	view, _, _ = bar_settle(&u, &now, .Floating)
 	testing.expect_value(t, view.bar_t, f32(1))
 	now += ui.SCROLLBAR_LINGER
@@ -639,7 +639,7 @@ test_ui_menu_keyboard :: proc(t: ^testing.T) {
 	now := 0.0
 	menu_frame(&u, &now)
 	menu_frame(&u, &now)
-	f := menu_frame(&u, &now, {kind = .Key_Down, key_code = ui.KEY_TAB}, {kind = .Key_Down, key_code = ui.KEY_TAB})
+	f := menu_frame(&u, &now, {kind = .Key_Down, key = .Tab}, {kind = .Key_Down, key = .Tab})
 	testing.expect(t, ui.has_focus(f.area.box))
 
 	// Opening the menu moves the focus to its first item.
@@ -647,16 +647,16 @@ test_ui_menu_keyboard :: proc(t: ^testing.T) {
 	testing.expect(t, f.a.box != nil && ui.has_focus(f.a.box), "the first item has the focus")
 
 	// Tab and the arrows stay inside the menu.
-	f = menu_frame(&u, &now, {kind = .Key_Down, key_code = ui.KEY_TAB})
+	f = menu_frame(&u, &now, {kind = .Key_Down, key = .Tab})
 	testing.expect(t, ui.has_focus(f.b.box))
-	f = menu_frame(&u, &now, {kind = .Key_Down, key_code = ui.KEY_TAB})
+	f = menu_frame(&u, &now, {kind = .Key_Down, key = .Tab})
 	testing.expect(t, ui.has_focus(f.a.box), "Tab wraps within the menu")
-	f = menu_frame(&u, &now, {kind = .Key_Down, key_code = ui.KEY_DOWN})
+	f = menu_frame(&u, &now, {kind = .Key_Down, key = .Down})
 	testing.expect(t, ui.has_focus(f.b.box))
 
 	// Enter clicks the item, not the box focused behind the menu, then the
 	// focus goes back to it.
-	f = menu_frame(&u, &now, {kind = .Key_Down, key_code = ui.KEY_RETURN})
+	f = menu_frame(&u, &now, {kind = .Key_Down, key = .Return})
 	testing.expect(t, f.b.clicked && f.b.keyboard)
 	testing.expect(t, !f.area.clicked, "the background box isn't clicked")
 	testing.expect(t, ui.has_focus(f.area.box), "the focus is back on the area")
@@ -666,9 +666,9 @@ test_ui_menu_keyboard :: proc(t: ^testing.T) {
 	f = menu_frame(&u, &now)
 	f = menu_frame(&u, &now, {kind = .Mouse_Down, x = 50, y = 60, button = .Right}, {kind = .Mouse_Up, x = 50, y = 60, button = .Right})
 	ui.set_focus(f.area.box)
-	f = menu_frame(&u, &now, {kind = .Key_Down, key_code = ui.KEY_RETURN})
+	f = menu_frame(&u, &now, {kind = .Key_Down, key = .Return})
 	testing.expect(t, !f.area.clicked && !f.a.clicked && !f.b.clicked)
-	f = menu_frame(&u, &now, {kind = .Key_Down, key_code = ui.KEY_ESCAPE})
+	f = menu_frame(&u, &now, {kind = .Key_Down, key = .Escape})
 	testing.expect(t, ui.has_focus(f.area.box))
 	for _ in 0 ..< 100 {
 		if f = menu_frame(&u, &now); !f.animating {
@@ -746,7 +746,7 @@ test_ui_drag_outlives_source :: proc(t: ^testing.T) {
 	drag_frame(&u, &now, {kind = .Mouse_Move, x = 50, y = 120})
 	_, dragging = ui.drag_payload()
 	testing.expect(t, dragging)
-	drag_frame(&u, &now, {kind = .Key_Down, key_code = ui.KEY_ESCAPE})
+	drag_frame(&u, &now, {kind = .Key_Down, key = .Escape})
 	drag_frame(&u, &now, {kind = .Mouse_Move, x = 50, y = 30})
 	_, dragging = ui.drag_payload()
 	testing.expect(t, !dragging, "Escape cancels")
@@ -774,11 +774,11 @@ test_ui_tab_from_nothing :: proc(t: ^testing.T) {
 	defer ui_destroy(&u)
 	now := 0.0
 	three_frame(&u, &now)
-	boxes := three_frame(&u, &now, {kind = .Key_Down, key_code = ui.KEY_TAB})
+	boxes := three_frame(&u, &now, {kind = .Key_Down, key = .Tab})
 	testing.expect(t, ui.has_focus(boxes[0]), "Tab starts at the first box")
-	boxes = three_frame(&u, &now, {kind = .Key_Down, key_code = ui.KEY_ESCAPE})
+	boxes = three_frame(&u, &now, {kind = .Key_Down, key = .Escape})
 	testing.expect(t, !ui.has_focus(boxes[0]))
-	boxes = three_frame(&u, &now, {kind = .Key_Down, key_code = ui.KEY_TAB, modifiers = {.Shift}})
+	boxes = three_frame(&u, &now, {kind = .Key_Down, key = .Tab, modifiers = {.Shift}})
 	testing.expect(t, ui.has_focus(boxes[2]), "Shift-Tab starts at the last box")
 }
 
@@ -838,14 +838,14 @@ test_ui_focus_scrolls_into_view :: proc(t: ^testing.T) {
 	list(&u, &now)
 	list(&u, &now)
 	for _ in 0 ..< 4 {
-		list(&u, &now, {kind = .Key_Down, key_code = ui.KEY_TAB})
+		list(&u, &now, {kind = .Key_Down, key = .Tab})
 	}
 	// Item 3 is 120 to 160, so the view scrolls to 60.
 	view, _ := list(&u, &now)
 	testing.expect_value(t, view.view_off_target.y, f32(60))
-	list(&u, &now, {kind = .Key_Down, key_code = ui.KEY_TAB, modifiers = {.Shift}})
-	list(&u, &now, {kind = .Key_Down, key_code = ui.KEY_TAB, modifiers = {.Shift}})
-	list(&u, &now, {kind = .Key_Down, key_code = ui.KEY_TAB, modifiers = {.Shift}})
+	list(&u, &now, {kind = .Key_Down, key = .Tab, modifiers = {.Shift}})
+	list(&u, &now, {kind = .Key_Down, key = .Tab, modifiers = {.Shift}})
+	list(&u, &now, {kind = .Key_Down, key = .Tab, modifiers = {.Shift}})
 	view, _ = list(&u, &now)
 	testing.expect_value(t, view.view_off_target.y, f32(0))
 
@@ -858,7 +858,7 @@ test_ui_focus_scrolls_into_view :: proc(t: ^testing.T) {
 	settle(&v, &now, 100, 1000)
 	rows_frame(&v, &now, 100, 1000, {kind = .Mouse_Down, x = 50, y = 5, click_count = 1}, {kind = .Mouse_Up, x = 50, y = 5, click_count = 1})
 	for _ in 0 ..< 25 {
-		rows_frame(&v, &now, 100, 1000, {kind = .Key_Down, key_code = ui.KEY_DOWN})
+		rows_frame(&v, &now, 100, 1000, {kind = .Key_Down, key = .Down})
 		settle(&v, &now, 100, 1000)
 	}
 	view, _, _ = settle(&v, &now, 100, 1000)

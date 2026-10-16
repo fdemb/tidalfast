@@ -166,7 +166,7 @@ sidebar_pick_ends_the_search :: proc(t: ^testing.T) {
 	f: Frame
 	library_frame(t, s, &f)
 	library_frame(t, s, &f)
-	library_frame(t, s, &f, {kind = .Key_Down, key_code = ui.KEY_F, modifiers = {ui.PRIMARY}})
+	library_frame(t, s, &f, {kind = .Key_Down, key = .F, modifiers = {ui.PRIMARY}})
 	library_frame(t, s, &f, type_text(&f, "abc"))
 	testing.expect(t, sr.due > 0)
 
@@ -179,7 +179,7 @@ sidebar_pick_ends_the_search :: proc(t: ^testing.T) {
 	testing.expect_value(t, s.data.view.source, app.Source.Liked)
 
 	// The request is out.
-	library_frame(t, s, &f, {kind = .Key_Down, key_code = ui.KEY_RETURN})
+	library_frame(t, s, &f, {kind = .Key_Down, key = .Return})
 	testing.expect(t, sr.loading)
 	sent := sr.gen
 	library_frame(t, s, &f, press(s, "Liked Songs"))
@@ -210,7 +210,7 @@ fake_search_lists_albums_and_artists :: proc(t: ^testing.T) {
 	sr := &s.search
 	f: Frame
 	library_frame(t, s, &f)
-	library_frame(t, s, &f, {kind = .Key_Down, key_code = ui.KEY_F, modifiers = {ui.PRIMARY}})
+	library_frame(t, s, &f, {kind = .Key_Down, key = .F, modifiers = {ui.PRIMARY}})
 	library_frame(t, s, &f, type_text(&f, "Jóga"))
 	library_frame(t, s, &f, dt = 1)
 	testing.expect(t, app.search_showing(s))
@@ -236,8 +236,8 @@ fake_search_lists_albums_and_artists :: proc(t: ^testing.T) {
 }
 
 @(private = "file")
-key :: proc(code: u32, modifiers: platform.Modifiers = {}) -> platform.Event {
-	return {kind = .Key_Down, key_code = code, modifiers = modifiers}
+key :: proc(code: platform.Key, modifiers: platform.Modifiers = {}) -> platform.Event {
+	return {kind = .Key_Down, key = code, modifiers = modifiers}
 }
 
 // text_at is a Text event for s, copied into the frame's bytes at offset.
@@ -252,7 +252,7 @@ text_at :: proc(f: ^Frame, at: int, s: string) -> platform.Event {
 searched_state :: proc(t: ^testing.T, f: ^Frame) -> ^app.State {
 	s := library_state(true)
 	library_frame(t, s, f)
-	library_frame(t, s, f, key(ui.KEY_F, {ui.PRIMARY}))
+	library_frame(t, s, f, key(.F, {ui.PRIMARY}))
 	library_frame(t, s, f, type_text(f, "Jóga"))
 	library_frame(t, s, f, dt = 1)
 	assert(app.small_str(&s.search.query) == "Jóga")
@@ -274,20 +274,20 @@ field_shortcuts_keep_their_order :: proc(t: ^testing.T) {
 	field := &sr.field
 
 	// Cmd-F selects what's there, so typing after it replaces it.
-	library_frame(t, s, &f, key(ui.KEY_F, {ui.PRIMARY}), text_at(&f, 0, "Kino"))
+	library_frame(t, s, &f, key(.F, {ui.PRIMARY}), text_at(&f, 0, "Kino"))
 	testing.expect_value(t, ui.field_text(field), "Kino")
 	testing.expect_value(t, field.anchor, field.cursor)
 	// And Cmd-L from another focus, here the next box after a Tab.
-	library_frame(t, s, &f, key(ui.KEY_TAB))
+	library_frame(t, s, &f, key(.Tab))
 	testing.expect(t, !ui.has_focus(node_box(s, "Search")))
-	library_frame(t, s, &f, key(ui.KEY_L, {ui.PRIMARY}), text_at(&f, 0, "Jóga"))
+	library_frame(t, s, &f, key(.L, {ui.PRIMARY}), text_at(&f, 0, "Jóga"))
 	testing.expect_value(t, ui.field_text(field), "Jóga")
 	testing.expect(t, ui.has_focus(node_box(s, "Search")))
 	library_frame(t, s, &f, dt = 1)
 
 	// Return searches for the text it was pressed on. The X after it
 	// starts the debounce over.
-	library_frame(t, s, &f, key(ui.KEY_RETURN), text_at(&f, 0, "X"))
+	library_frame(t, s, &f, key(.Return), text_at(&f, 0, "X"))
 	testing.expect_value(t, ui.field_text(field), "JógaX")
 	testing.expect_value(t, app.small_str(&sr.query), "Jóga")
 	testing.expect(t, sr.due > 0)
@@ -295,31 +295,31 @@ field_shortcuts_keep_their_order :: proc(t: ^testing.T) {
 	testing.expect_value(t, app.small_str(&sr.query), "JógaX")
 
 	// Typing, then Return, searches at once for all of it.
-	library_frame(t, s, &f, text_at(&f, 0, "Y"), key(ui.KEY_RETURN))
+	library_frame(t, s, &f, text_at(&f, 0, "Y"), key(.Return))
 	testing.expect_value(t, app.small_str(&sr.query), "JógaXY")
 	testing.expect_value(t, sr.due, 0.0)
 
 	// Escape clears the field before the text after it.
-	library_frame(t, s, &f, key(ui.KEY_ESCAPE), text_at(&f, 0, "Kino"))
+	library_frame(t, s, &f, key(.Escape), text_at(&f, 0, "Kino"))
 	testing.expect_value(t, ui.field_text(field), "Kino")
 	testing.expect(t, sr.due > 0)
 	// Cmd-A, then typing.
-	library_frame(t, s, &f, key(ui.KEY_A, {ui.PRIMARY}), text_at(&f, 0, "Jóga"))
+	library_frame(t, s, &f, key(.A, {ui.PRIMARY}), text_at(&f, 0, "Jóga"))
 	testing.expect_value(t, ui.field_text(field), "Jóga")
 
 	// Text typed before a Tab goes in, though the field lost the focus.
-	library_frame(t, s, &f, text_at(&f, 0, "!"), key(ui.KEY_TAB))
+	library_frame(t, s, &f, text_at(&f, 0, "!"), key(.Tab))
 	testing.expect_value(t, ui.field_text(field), "Jóga!")
 	testing.expect(t, !ui.has_focus(node_box(s, "Search")))
 
 	// Once Escape in an empty field gives up the focus, text after it goes
 	// nowhere, until Cmd-F gives the focus back.
-	library_frame(t, s, &f, key(ui.KEY_F, {ui.PRIMARY}))
-	library_frame(t, s, &f, key(ui.KEY_ESCAPE), key(ui.KEY_ESCAPE), text_at(&f, 0, "a"))
+	library_frame(t, s, &f, key(.F, {ui.PRIMARY}))
+	library_frame(t, s, &f, key(.Escape), key(.Escape), text_at(&f, 0, "a"))
 	testing.expect_value(t, ui.field_text(field), "")
 	testing.expect(t, !ui.has_focus(node_box(s, "Search")))
-	library_frame(t, s, &f, key(ui.KEY_F, {ui.PRIMARY}))
-	library_frame(t, s, &f, text_at(&f, 0, "b"), key(ui.KEY_ESCAPE), key(ui.KEY_ESCAPE), key(ui.KEY_F, {ui.PRIMARY}), text_at(&f, 1, "c"))
+	library_frame(t, s, &f, key(.F, {ui.PRIMARY}))
+	library_frame(t, s, &f, text_at(&f, 0, "b"), key(.Escape), key(.Escape), key(.F, {ui.PRIMARY}), text_at(&f, 1, "c"))
 	testing.expect_value(t, ui.field_text(field), "c")
 	testing.expect(t, ui.has_focus(node_box(s, "Search")))
 }
@@ -373,13 +373,13 @@ track_menu_closes_with_its_list :: proc(t: ^testing.T) {
 	fs := library_state(true)
 	defer library_state_free(fs)
 	library_frame(t, fs, &f)
-	library_frame(t, fs, &f, key(ui.KEY_F, {ui.PRIMARY}))
+	library_frame(t, fs, &f, key(.F, {ui.PRIMARY}))
 	library_frame(t, fs, &f, type_text(&f, "Jóga"))
 	library_frame(t, fs, &f, dt = 1)
 	// A new search waits for its debounce while the menu opens on the old
 	// results. It ends in the frame of the click, and the search replaces
 	// the list before the menu is built.
-	library_frame(t, fs, &f, key(ui.KEY_A, {ui.PRIMARY}), text_at(&f, 0, "Kino"))
+	library_frame(t, fs, &f, key(.A, {ui.PRIMARY}), text_at(&f, 0, "Kino"))
 	down, up = right_click(fs, "Jóga")
 	library_frame(t, fs, &f, down, up)
 	library_frame(t, fs, &f)
@@ -405,9 +405,9 @@ search_results_come_back_from_memory :: proc(t: ^testing.T) {
 	sr := &s.search
 	f: Frame
 	library_frame(t, s, &f)
-	library_frame(t, s, &f, {kind = .Key_Down, key_code = ui.KEY_F, modifiers = {ui.PRIMARY}})
+	library_frame(t, s, &f, {kind = .Key_Down, key = .F, modifiers = {ui.PRIMARY}})
 	library_frame(t, s, &f, type_text(&f, "abc"))
-	library_frame(t, s, &f, {kind = .Key_Down, key_code = ui.KEY_RETURN})
+	library_frame(t, s, &f, {kind = .Key_Down, key = .Return})
 	testing.expect_value(t, search_jobs(s), 1)
 	albums := []app.Found{{id = 5, name = "An album", subtitle = "Album · Someone"}}
 	res := app.Result {
@@ -421,8 +421,8 @@ search_results_come_back_from_memory :: proc(t: ^testing.T) {
 
 	library_frame(t, s, &f, press(s, "Liked Songs"))
 	testing.expect_value(t, s.data.view.source, app.Source.Liked)
-	library_frame(t, s, &f, {kind = .Key_Down, key_code = ui.KEY_F, modifiers = {ui.PRIMARY}})
-	library_frame(t, s, &f, {kind = .Key_Down, key_code = ui.KEY_RETURN})
+	library_frame(t, s, &f, {kind = .Key_Down, key = .F, modifiers = {ui.PRIMARY}})
+	library_frame(t, s, &f, {kind = .Key_Down, key = .Return})
 	testing.expect_value(t, search_jobs(s), 0)
 	testing.expect(t, app.search_showing(s))
 	testing.expect_value(t, app.view_count(s), 2)
@@ -436,8 +436,8 @@ search_results_come_back_from_memory :: proc(t: ^testing.T) {
 	i := app.lru_find(&s.data, .Search, "abc")
 	testing.expect(t, i >= 0)
 	s.data.lists.entries[i].view.fetched -= app.SEARCH_MAX_AGE + 1
-	library_frame(t, s, &f, {kind = .Key_Down, key_code = ui.KEY_F, modifiers = {ui.PRIMARY}})
-	library_frame(t, s, &f, {kind = .Key_Down, key_code = ui.KEY_RETURN})
+	library_frame(t, s, &f, {kind = .Key_Down, key = .F, modifiers = {ui.PRIMARY}})
+	library_frame(t, s, &f, {kind = .Key_Down, key = .Return})
 	testing.expect_value(t, search_jobs(s), 1)
 	testing.expect(t, app.lru_find(&s.data, .Search, "abc") < 0)
 }

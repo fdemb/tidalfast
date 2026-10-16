@@ -44,7 +44,7 @@ no_redraw :: proc "c" () {}
 media :: proc(s: ^app.State, cmd: platform.Media_Command, position: f32 = 0) {
 	e := platform.Event {
 		kind     = .Media,
-		key_code = u32(cmd),
+		media    = cmd,
 		dx       = position,
 	}
 	app.playback_update(s, {e})

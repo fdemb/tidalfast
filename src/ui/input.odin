@@ -35,37 +35,6 @@ Input :: struct {
 // Wheel scrolls without precise deltas count in lines.
 SCROLL_LINE :: 16
 
-// macOS virtual key codes (kVK_*) the UI and the app use.
-KEY_A :: 0
-KEY_D :: 2
-KEY_F :: 3
-KEY_Z :: 6
-KEY_X :: 7
-KEY_C :: 8
-KEY_V :: 9
-KEY_E :: 14
-KEY_L :: 37
-KEY_BACKSPACE :: 51
-KEY_KEYPAD_ENTER :: 76
-KEY_FORWARD_DELETE :: 117
-KEY_1 :: 18
-KEY_2 :: 19
-KEY_3 :: 20
-KEY_RETURN :: 36
-KEY_TAB :: 48
-KEY_SPACE :: 49
-KEY_GRAVE :: 50
-KEY_ESCAPE :: 53
-KEY_F1 :: 122
-KEY_HOME :: 115
-KEY_PAGE_UP :: 116
-KEY_END :: 119
-KEY_PAGE_DOWN :: 121
-KEY_LEFT :: 123
-KEY_RIGHT :: 124
-KEY_DOWN :: 125
-KEY_UP :: 126
-
 input_begin_frame :: proc(input: ^Input) {
 	input.pressed = {}
 	input.released = {}

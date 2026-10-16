@@ -2,7 +2,7 @@
 // this file field for field. Change both together and bump ABI_VERSION.
 package platform
 
-ABI_VERSION :: 3
+ABI_VERSION :: 4
 
 Event_Kind :: enum u32 {
 	None,
@@ -15,7 +15,7 @@ Event_Kind :: enum u32 {
 	Key_Up,
 	Modifiers_Changed,
 	Resize,
-	Media, // key_code is a Media_Command, dx the position for .Seek
+	Media, // media is the command, dx the position for .Seek
 	// Text from the keyboard or an input method, for the focused text field.
 	// It replaces the marked text if there is any, else the selection, or
 	// the replace range when replace is set.
@@ -30,7 +30,7 @@ Event_Kind :: enum u32 {
 }
 
 // Media keys, Control Center and headphones, from MPRemoteCommandCenter.
-Media_Command :: enum u32 {
+Media_Command :: enum u8 {
 	None,
 	Play,
 	Pause,
@@ -59,6 +59,35 @@ Scroll_Phase :: enum u32 {
 	Cancelled,
 }
 
+// Keys by their place on a US keyboard, whatever the layout says they type.
+// Text comes in Text events; these are for shortcuts and editing. The shell
+// maps its own key codes to these, and keys not listed here to None.
+Key :: enum u32 {
+	None,
+	A, B, C, D, E, F, G, H, I, J, K, L, M,
+	N, O, P, Q, R, S, T, U, V, W, X, Y, Z,
+	Digit_0, Digit_1, Digit_2, Digit_3, Digit_4,
+	Digit_5, Digit_6, Digit_7, Digit_8, Digit_9,
+	Return,
+	Tab,
+	Space,
+	Backspace,
+	Delete, // forward delete
+	Escape,
+	Home,
+	End,
+	Page_Up,
+	Page_Down,
+	Left,
+	Right,
+	Up,
+	Down,
+	Grave,
+	Keypad_Enter,
+	F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12,
+}
+#assert(len(Key) == 65)
+
 Modifier :: enum u32 {
 	Shift,
 	Control,
@@ -78,13 +107,13 @@ Event :: struct {
 	dx, dy:         f32,
 	button:         Mouse_Button,
 	click_count:    u32,
-	key_code:       u32, // macOS virtual key code
+	key:            Key,
 	phase:          Scroll_Phase,
 	momentum_phase: Scroll_Phase,
 	precise:        b8,
 	repeat:         b8,
 	replace:        b8, // Text, Marked_Text: replace_start and replace_end are set
-	_:              u8,
+	media:          Media_Command,
 	text_offset:    u32, // Text, Marked_Text: the text is Frame_Input.text[text_offset:][:text_length], UTF-8
 	text_length:    u32,
 	replace_start:  i32, // bytes of the field's text

@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#define PLATFORM_ABI_VERSION 3
+#define PLATFORM_ABI_VERSION 4
 
 typedef enum {
   EVENT_NONE,
@@ -18,7 +18,7 @@ typedef enum {
   EVENT_KEY_UP,
   EVENT_MODIFIERS_CHANGED,
   EVENT_RESIZE,
-  EVENT_MEDIA, // key_code is a Media_Command, dx the position for MEDIA_SEEK
+  EVENT_MEDIA, // media is a Media_Command, dx the position for MEDIA_SEEK
   EVENT_TEXT, // text for the focused text field; see platform.odin
   EVENT_MARKED_TEXT, // the input method's composition
   EVENT_UNMARK_TEXT,
@@ -53,6 +53,77 @@ typedef enum {
   SCROLL_PHASE_CANCELLED,
 } Scroll_Phase;
 
+// Keys by their place on a US keyboard. See Key in platform.odin.
+typedef enum {
+  KEY_NONE,
+  KEY_A,
+  KEY_B,
+  KEY_C,
+  KEY_D,
+  KEY_E,
+  KEY_F,
+  KEY_G,
+  KEY_H,
+  KEY_I,
+  KEY_J,
+  KEY_K,
+  KEY_L,
+  KEY_M,
+  KEY_N,
+  KEY_O,
+  KEY_P,
+  KEY_Q,
+  KEY_R,
+  KEY_S,
+  KEY_T,
+  KEY_U,
+  KEY_V,
+  KEY_W,
+  KEY_X,
+  KEY_Y,
+  KEY_Z,
+  KEY_DIGIT_0,
+  KEY_DIGIT_1,
+  KEY_DIGIT_2,
+  KEY_DIGIT_3,
+  KEY_DIGIT_4,
+  KEY_DIGIT_5,
+  KEY_DIGIT_6,
+  KEY_DIGIT_7,
+  KEY_DIGIT_8,
+  KEY_DIGIT_9,
+  KEY_RETURN,
+  KEY_TAB,
+  KEY_SPACE,
+  KEY_BACKSPACE,
+  KEY_DELETE,
+  KEY_ESCAPE,
+  KEY_HOME,
+  KEY_END,
+  KEY_PAGE_UP,
+  KEY_PAGE_DOWN,
+  KEY_LEFT,
+  KEY_RIGHT,
+  KEY_UP,
+  KEY_DOWN,
+  KEY_GRAVE,
+  KEY_KEYPAD_ENTER,
+  KEY_F1,
+  KEY_F2,
+  KEY_F3,
+  KEY_F4,
+  KEY_F5,
+  KEY_F6,
+  KEY_F7,
+  KEY_F8,
+  KEY_F9,
+  KEY_F10,
+  KEY_F11,
+  KEY_F12,
+  KEY_COUNT,
+} Key;
+_Static_assert(KEY_COUNT == 65, "Key must match platform.odin");
+
 enum {
   MODIFIER_SHIFT = 1 << 0,
   MODIFIER_CONTROL = 1 << 1,
@@ -69,13 +140,13 @@ typedef struct {
   float dx, dy;
   uint32_t button;
   uint32_t click_count;
-  uint32_t key_code;
+  uint32_t key; // Key
   uint32_t phase;
   uint32_t momentum_phase;
   uint8_t precise;
   uint8_t repeat;
   uint8_t replace; // replace_start and replace_end are set
-  uint8_t _pad;
+  uint8_t media; // Media_Command
   uint32_t text_offset; // EVENT_TEXT, EVENT_MARKED_TEXT: bytes into Frame_Input.text
   uint32_t text_length;
   int32_t replace_start; // bytes of the field's text
