@@ -259,13 +259,15 @@ static void frame_done(void *data, struct wl_callback *callback, uint32_t time) 
   double now = now_seconds();
   double interval = now - g_frame_requested;
   if (interval > 0.002 && interval < 0.1) g_frame_interval = g_frame_interval * 0.9 + interval * 0.1;
-  if (g_animating) draw_frame();
+  if (g_animating || atomic_load(&g_needs_redraw)) draw_frame();
 }
 
-// When the next frame callback is due while animating, the deadline by
-// which it should have come; 0 when a redraw shouldn't wait for one.
+// When a frame callback is pending, the deadline by which it should have
+// come; 0 when a redraw shouldn't wait for one. Input waits for it too:
+// Wayland doesn't merge pointer motion, and with MAILBOX a fast mouse
+// would otherwise draw a frame per event.
 static double frame_deadline(void) {
-  if (!g_animating || !g_frame_callback) return 0;
+  if (!g_frame_callback) return 0;
   double deadline = g_frame_requested + 2 * g_frame_interval;
   return now_seconds() < deadline ? deadline : 0;
 }
@@ -747,6 +749,24 @@ static const struct zwp_text_input_v3_listener g_ti_listener = {
     .done = ti_done,
 };
 
+// surrounding_text is the field's text for the input method, which must
+// leave out the composition: with marked text, the text around it, with
+// the cursor and anchor where it was. Bytes; out holds g_ti.length + 1.
+static void surrounding_text(char *out, int32_t *cursor, int32_t *anchor) {
+  if (g_ti.marked_start >= 0) {
+    uint32_t lo = (uint32_t)g_ti.marked_start, hi = (uint32_t)g_ti.marked_end;
+    memcpy(out, g_ti.bytes, lo);
+    memcpy(out + lo, g_ti.bytes + hi, g_ti.length - hi);
+    out[lo + g_ti.length - hi] = 0;
+    *cursor = *anchor = (int32_t)lo;
+    return;
+  }
+  memcpy(out, g_ti.bytes, g_ti.length);
+  out[g_ti.length] = 0;
+  *cursor = (int32_t)g_ti.sel_end;
+  *anchor = (int32_t)g_ti.sel_start;
+}
+
 // set_text_input_state tells the compositor about the field: enabled while
 // one has the focus, with its text around the caret and where the caret is.
 static void set_text_input_state(void) {
@@ -769,9 +789,9 @@ static void set_text_input_state(void) {
   // size; a search field never gets near it.
   if (g_ti.length < 4000) {
     char *s = malloc(g_ti.length + 1);
-    memcpy(s, g_ti.bytes, g_ti.length);
-    s[g_ti.length] = 0;
-    zwp_text_input_v3_set_surrounding_text(ti, s, (int32_t)g_ti.sel_end, (int32_t)g_ti.sel_start);
+    int32_t cursor, anchor;
+    surrounding_text(s, &cursor, &anchor);
+    zwp_text_input_v3_set_surrounding_text(ti, s, cursor, anchor);
     free(s);
   }
   float *c = g_ti.caret;
@@ -1520,7 +1540,7 @@ static const struct wl_registry_listener g_registry_listener = {.global = regist
 //   commit-marked=text  text replacing the composition
 //   unmark              end the composition as it is
 //   clean=hex           print what field_sanitize makes of the bytes, in hex
-//   ime                 print the shell's mirror of the text field
+//   ime                 print the shell's mirror of the text field and the surrounding text an input method gets
 //   ax-dump             print the accessibility tree
 //   ax-press=label      press the first pressable node whose label or value starts with label
 //   capture=path        copy the last TIDALFAST_CAPTURE frame to path
@@ -1590,8 +1610,12 @@ static void test_ime_state(void) {
     snprintf(marked, sizeof marked, "{%u, %u}", lo, hi - lo);
   }
   uint32_t lo = utf16_of_byte(g_ti.bytes, g_ti.length, g_ti.sel_start), hi = utf16_of_byte(g_ti.bytes, g_ti.length, g_ti.sel_end);
-  fprintf(stderr, "shell: ime: active %d, text \"%s\", marked %s, selected {%u, %u}, caret {%.0f, %.0f, %.0f, %.0f}\n", g_ti.active, text,
-          marked, lo, hi - lo, g_ti.caret[0], g_ti.caret[1], g_ti.caret[2], g_ti.caret[3]);
+  char *around = malloc(g_ti.length + 1);
+  int32_t cursor, anchor;
+  surrounding_text(around, &cursor, &anchor);
+  fprintf(stderr, "shell: ime: active %d, text \"%s\", marked %s, selected {%u, %u}, caret {%.0f, %.0f, %.0f, %.0f}, surrounding \"%s\" bytes %d to %d\n",
+          g_ti.active, text, marked, lo, hi - lo, g_ti.caret[0], g_ti.caret[1], g_ti.caret[2], g_ti.caret[3], around, anchor, cursor);
+  free(around);
   free(text);
 }
 
@@ -1934,8 +1958,8 @@ static void main_loop(void) {
       }
       reload_if_changed();
     }
-    // A burst of events becomes one frame. While animating, a redraw waits
-    // for the next frame callback, or its deadline.
+    // A burst of events becomes one frame. A redraw waits for the pending
+    // frame callback, or its deadline.
     if (atomic_load(&g_needs_redraw) && g_configured && frame_deadline() == 0) draw_frame();
   }
 }
