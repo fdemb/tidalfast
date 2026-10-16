@@ -16,7 +16,8 @@
 // tracks of the long playlist by title or artist, with their albums and
 // artists and the playlists by name; a query that matches nothing gets
 // made-up tracks named after it, so any query has results. /albums/<id>/tracks
-// and /artists/<id>/toptracks list a dozen made-up tracks.
+// and /artists/<id>/toptracks list a dozen made-up tracks. Every fifth
+// made-up track has a second artist.
 //
 // The PKCE login: GET /authorize redirects to /android/login/auth with a
 // code, and POST /oauth2/token trades it, with the Android client's id,
@@ -679,12 +680,17 @@ write_track :: proc(b: ^strings.Builder, playlist, i: int) {
 }
 
 // write_track_as writes a track with the given id, title, album and artist
-// (an index into ARTISTS, whose id is one more).
+// (an index into ARTISTS, whose id is one more). Every fifth track has the
+// next artist on it too.
 write_track_as :: proc(b: ^strings.Builder, id: int, title: string, album, artist, i: int, h: u32) {
-	fmt.sbprintf(b, `{{"id":%d,"title":%q,"duration":%d,"trackNumber":%d,"version":null,"dateAdded":"%s","artist":{{"id":%d,"name":%q}},"artists":[{{"id":%d,"name":%q}}],"album":{{"id":%d,"title":%q,"cover":"%s"}}}}`,
+	fmt.sbprintf(b, `{{"id":%d,"title":%q,"duration":%d,"trackNumber":%d,"version":null,"dateAdded":"%s","artist":{{"id":%d,"name":%q}},"artists":[{{"id":%d,"name":%q}}`,
 		id, title, 95 + int(h >> 12) % 400, 1 + i % 12, date(i),
-		artist + 1, ARTISTS[artist], artist + 1, ARTISTS[artist],
-		album, album_title(album), image_id(album))
+		artist + 1, ARTISTS[artist], artist + 1, ARTISTS[artist])
+	if i % 5 == 4 {
+		other := (artist + 1) % len(ARTISTS)
+		fmt.sbprintf(b, `,{{"id":%d,"name":%q}}`, other + 1, ARTISTS[other])
+	}
+	fmt.sbprintf(b, `],"album":{{"id":%d,"title":%q,"cover":"%s"}}}}`, album, album_title(album), image_id(album))
 }
 
 album_title :: proc(album: int) -> string {

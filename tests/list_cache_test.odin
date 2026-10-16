@@ -51,6 +51,7 @@ cache_state_free :: proc(s: ^app.State) {
 @(private = "file")
 rows_of :: proc(ids: []i64) -> []app.Row {
 	rows := make([]app.Row, len(ids), context.temp_allocator)
+	artists := slice.clone([]app.Artist_Ref{{id = 42, start = 0, end = len("Björk")}, {id = 43, start = len("Björk, "), end = len("Björk, فيروز")}}, context.temp_allocator)
 	for &r, i in rows {
 		r = {
 			title     = fmt.tprintf("Song %d 夜に駆ける", ids[i]),
@@ -62,7 +63,7 @@ rows_of :: proc(ids: []i64) -> []app.Row {
 			seconds   = 185 + int(ids[i] % 3),
 			id        = ids[i],
 			album_id  = ids[i] % 7 + 1,
-			artist_id = 42,
+			artists   = artists,
 			track     = int(ids[i] % 12) + 1,
 		}
 	}
@@ -180,7 +181,12 @@ list_file_round_trip :: proc(t: ^testing.T) {
 	testing.expect_value(t, h.hint, i64(3))
 	testing.expect_value(t, len(back), 3)
 	for r, i in back {
-		testing.expect_value(t, r, rows[i])
+		want := rows[i]
+		testing.expect(t, slice.equal(r.artists, want.artists), "the artists differ")
+		got_text := [7]string{r.title, r.artist, r.album, r.added, r.added_by, r.duration, r.cover}
+		want_text := [7]string{want.title, want.artist, want.album, want.added, want.added_by, want.duration, want.cover}
+		testing.expect_value(t, got_text, want_text)
+		testing.expect_value(t, [4]i64{r.id, r.album_id, i64(r.seconds), i64(r.track)}, [4]i64{want.id, want.album_id, i64(want.seconds), i64(want.track)})
 		lo := uintptr(raw_data(data))
 		if len(r.artist) > 0 {
 			p := uintptr(raw_data(r.artist))
@@ -194,6 +200,19 @@ list_file_round_trip :: proc(t: ^testing.T) {
 	_, _, err = app.list_decode(data, .Album, "uuid-1", context.temp_allocator)
 	testing.expect_value(t, err, app.File_Error.Other)
 	data[len(data) - 1] ~= 1
+	_, _, err = app.list_decode(data, .Playlist, "uuid-1", context.temp_allocator)
+	testing.expect_value(t, err, app.File_Error.Damaged)
+
+	// An artist whose name runs past the row's artist string isn't taken,
+	// even with the sum right.
+	long := rows_of({5})
+	long[0].artists = slice.clone([]app.Artist_Ref{{id = 42, start = 0, end = i32(len(long[0].artist) + 1)}}, context.temp_allocator)
+	app.view_close(d)
+	app.view_open(d, .Playlist, "uuid-1", "Name", "", 1)
+	app.view_add_rows(&d.view, 0, 1, long, 1)
+	file = app.list_encode(&d.view, context.temp_allocator)
+	data, _ = mem.alloc_bytes_non_zeroed(len(file), 16, context.temp_allocator)
+	copy(data, file)
 	_, _, err = app.list_decode(data, .Playlist, "uuid-1", context.temp_allocator)
 	testing.expect_value(t, err, app.File_Error.Damaged)
 	_, _, err = app.list_decode(data[:len(data) - 1], .Playlist, "uuid-1", context.temp_allocator)

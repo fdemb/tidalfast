@@ -214,7 +214,6 @@ progress_uses_the_tracks_own_rate :: proc(t: ^testing.T) {
 	testing.expect_value(t, app.progress_fraction(5, 0), f32(0))
 }
 
-@(private = "file")
 Fonts :: struct {
 	backing: []byte,
 	arena:   mem.Arena,
@@ -223,7 +222,6 @@ Fonts :: struct {
 }
 
 // fonts_init loads Inter for measuring. Nothing is drawn.
-@(private = "file")
 fonts_init :: proc(f: ^Fonts) -> bool {
 	f.backing = make([]byte, 64 << 20)
 	mem.arena_init(&f.arena, f.backing)
@@ -236,7 +234,6 @@ fonts_init :: proc(f: ^Fonts) -> bool {
 	return true
 }
 
-@(private = "file")
 fonts_destroy :: proc(f: ^Fonts) {
 	text.destroy(f.state, &f.r)
 	delete(f.backing)

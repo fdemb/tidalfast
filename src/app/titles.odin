@@ -21,8 +21,24 @@ Row :: struct {
 	seconds:  int,
 	id:       i64, // TIDAL track id, 0 in the fake data
 	album_id: i64,
-	artist_id: i64, // the first artist's
+	artists:  []Artist_Ref, // each artist in artist; nil in the fake data
 	track:    int, // number on its album
+}
+
+// Artist_Ref is one of a track's or an album's artists: its TIDAL id and
+// where its name is in the artist string that joins them all.
+Artist_Ref :: struct {
+	id:         i64,
+	start, end: i32,
+}
+
+artist_name :: proc(joined: string, a: Artist_Ref) -> string {
+	return joined[a.start:a.end]
+}
+
+// first_artist is the id of the first artist, or 0.
+first_artist :: proc(artists: []Artist_Ref) -> i64 {
+	return artists[0].id if len(artists) > 0 else 0
 }
 
 @(private = "file")

@@ -27,6 +27,7 @@ import "core:log"
 import "core:math"
 import vmem "core:mem/virtual"
 import "core:os"
+import "core:slice"
 import "core:strconv"
 import "core:strings"
 
@@ -41,6 +42,9 @@ FAKE_TONE_SECONDS :: 30
 Queue_Item :: struct {
 	title, artist, album, cover: string,
 	seconds:                     int,
+	album_id:                    i64,
+	artists:                     []Artist_Ref,
+	row:                         int, // with the fake data, its row in State.rows
 }
 
 // Track_Source is a queue entry the player knows or is about to.
@@ -273,11 +277,14 @@ queue_snapshot :: proc(s: ^State) {
 			continue
 		}
 		pb.items[i] = {
-			title   = strings.clone(row.title, a),
-			artist  = strings.clone(row.artist, a),
-			album   = strings.clone(row.album, a),
-			cover   = strings.clone(row.cover, a),
-			seconds = row.seconds,
+			title     = strings.clone(row.title, a),
+			artist    = strings.clone(row.artist, a),
+			album     = strings.clone(row.album, a),
+			cover     = strings.clone(row.cover, a),
+			seconds   = row.seconds,
+			album_id  = row.album_id,
+			artists   = slice.clone(row.artists, a),
+			row       = fake_row_index(s, i),
 		}
 		pb.entries[i] = {id = row.id, album_id = row.album_id, track_num = row.track}
 		if pb.fake {

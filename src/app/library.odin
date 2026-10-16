@@ -416,14 +416,18 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 		title.font_size = 14
 		title.text_color = ACCENT if current else TEXT
 		ui.accessible(title, .Static_Text, track.title)
-		artist := ui.label(track.artist, ui.fill(), ui.px(18))
-		artist.text_pad = 4
-		artist.text_color = SECONDARY
-		ui.accessible(artist, .Static_Text, track.artist)
+		ui.text_style(.Regular, 13, SECONDARY)
+		if k, link := artist_links(s, track.artist, track.artists, 4, ui.px(18)); row_link(s, i, link) {
+			go_to_artist(s, i, k)
+		}
 	}
 	ui.text_style(.Regular, 13, SECONDARY)
-	if album := cell(track.album, cols.album, .Left); album != nil {
-		ui.accessible(album, .Static_Text, track.album)
+	if cols.album > 0 {
+		ui.row("", {}, ui.px(cols.album), ui.fill())
+		ui.spacer(ui.px(CELL_PAD - 4))
+		if row_link(s, i, text_link(s, track.album, "###album", track.album_id != 0, ui.fill(), 4)) {
+			go_to_album(s, i)
+		}
 	}
 	cell(track.added_by, cols.added_by, .Left)
 	cell(track.added, cols.added, .Left)
@@ -444,6 +448,78 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 	}
 	ui.tooltip(more_sig, "More")
 	ui.spacer(ui.px(8))
+}
+
+// row_link takes the signal of a link in row i of the track table, and
+// returns true when it was clicked. A press, a right click or a drag on it
+// does what it does on the row.
+row_link :: proc(s: ^State, i: int, sig: ui.Signal) -> bool {
+	if sig.pressed || sig.right_clicked {
+		s.library.selected = i
+	}
+	if sig.right_clicked {
+		open_track_menu(s, i, ui.mouse())
+	}
+	if sig.dragging {
+		ui.drag_begin(u64(i))
+	}
+	return sig.clicked && !sig.dragging
+}
+
+// text_link is a link to an album or an artist when it has an id to open
+// (the fake data goes by name), and plain text when it hasn't. It goes
+// inside a row of its own, since it's only as wide as its text.
+text_link :: proc(s: ^State, label, id: string, has_id: bool, height: ui.Size, pad: f32) -> ui.Signal {
+	if !has_id && !s.data.fake {
+		b := ui.label(label, ui.fill(), height)
+		b.text_pad = pad
+		ui.accessible(b, .Static_Text, label)
+		return {}
+	}
+	return ui.link(fmt.tprintf("%s%s", label, id), TEXT, height, pad)
+}
+
+// artist_links shows the artists in joined, each a link to its top tracks,
+// with the commas between them as plain text. Without refs the whole
+// string is one link for the fake data and text otherwise. When they don't
+// fit, the one that crosses the edge ends in an ellipsis and the rest are
+// left out. That goes by the box's width from the last layout, and the box
+// clips, so in the frame after a resize nothing is drawn past it. sig is
+// the signal of the link that was clicked, pressed or dragged, and k says
+// which artist it is.
+artist_links :: proc(s: ^State, joined: string, refs: []Artist_Ref, pad: f32, height := ui.Size{}) -> (k: int, sig: ui.Signal) {
+	box := ui.row("###artists", {.Clip}, ui.fill(), height if height.kind != .Null else ui.fill())
+	ui.spacer(ui.px(pad))
+	room := box.rect.w - 2 * pad if box.rect.w > 0 else max(f32)
+	x: f32
+	for j in 0 ..< max(len(refs), 1) {
+		name, linked := joined, s.data.fake
+		if len(refs) > 0 {
+			name, linked = artist_name(joined, refs[j]), refs[j].id != 0
+		}
+		if j > 0 {
+			sep := ui.label(joined[refs[j - 1].end:refs[j].start], ui.text_size(0, 0), ui.fill())
+			x += ui.text_width(sep.font, sep.font_size, sep.label)
+		}
+		b: ^ui.Box
+		if linked {
+			link := ui.link(fmt.tprintf("%s###artist%d", name, j), TEXT, ui.fill())
+			b = link.box
+			if link.clicked || link.pressed || link.right_clicked || link.dragging {
+				k, sig = j, link
+			}
+		} else {
+			b = ui.label(name, ui.text_size(0, 0), ui.fill())
+			ui.accessible(b, .Static_Text, name)
+		}
+		w := ui.text_width(b.font, b.font_size, name)
+		if x + w > room {
+			b.pref_size[.X] = ui.px(max(room - x, 0))
+			break
+		}
+		x += w
+	}
+	return
 }
 
 // loading_row stands in for a row whose page hasn't arrived: its number
@@ -531,14 +607,22 @@ draw_track_menu :: proc(s: ^State) {
 			pending_set(s, {kind = .Play, index = i})
 		}
 		fake := s.data.fake
-		if row != nil && (fake || row.album_id != 0 || row.artist_id != 0) {
+		if row != nil && (fake || row.album_id != 0 || first_artist(row.artists) != 0) {
 			ui.menu_separator()
 		}
 		if row != nil && (fake || row.album_id != 0) && ui.menu_item("Go to album").clicked {
 			go_to_album(s, i)
 		}
-		if row != nil && (fake || row.artist_id != 0) && ui.menu_item("Go to artist").clicked {
+		if row != nil && (fake || len(row.artists) == 1) && ui.menu_item("Go to artist").clicked {
 			go_to_artist(s, i)
+		}
+		// A song by several artists offers each of them.
+		if row != nil && len(row.artists) > 1 {
+			for a, k in row.artists {
+				if a.id != 0 && ui.menu_item(fmt.tprintf("Go to %s###artist%d", artist_name(row.artist, a), k)).clicked {
+					go_to_artist(s, i, k)
+				}
+			}
 		}
 		if row != nil && row.id > 0 {
 			ui.menu_separator()
@@ -584,22 +668,33 @@ draw_player_bar :: proc(s: ^State, w: f32) {
 	item := playback_item(s)
 	{
 		ui.row("now_playing", {}, ui.px(title_side), ui.fill())
-		title, artist := "Nothing playing", ""
+		title := "Nothing playing"
 		if item != nil {
-			title, artist = item.title, item.artist
+			title = item.title
 			cover_art(s, .Album, item.cover, u32(s.playback.index) * 2654435761 >> 7, 56, ui.px(56))
 			ui.spacer(ui.px(12))
 		}
 		ui.column("", {}, ui.fill(), ui.fill())
 		ui.spacer(ui.fill())
 		ui.text_style(.Medium, 14, TEXT)
-		ui.accessible(ui.label(title, ui.fill(), ui.px(20)), .Static_Text, title)
+		if item == nil {
+			ui.accessible(ui.label(title, ui.fill(), ui.px(20)), .Static_Text, title)
+		} else {
+			ui.row("", {}, ui.fill(), ui.px(20))
+			if text_link(s, title, "###album", item.album_id != 0, ui.fill(), 0).clicked {
+				open_album(s, item.album_id, item.album, item.cover, item.row)
+			}
+		}
 		// A track that couldn't play says why in place of the artist, on
 		// two lines when it's two sentences.
 		msg := small_str(&s.playback.message)
 		if msg == "" {
 			ui.text_style(.Regular, 12, SECONDARY)
-			ui.accessible(ui.label(artist, ui.fill(), ui.px(18)), .Static_Text, artist)
+			if item == nil {
+				ui.spacer(ui.px(18))
+			} else if k, sig := artist_links(s, item.artist, item.artists, 0, ui.px(18)); sig.clicked {
+				open_artist_of(s, item.artist, item.artists, k, item.row)
+			}
 		} else {
 			ui.text_style(.Regular, 12, PLAYBACK_ERROR)
 			first, rest := msg, ""

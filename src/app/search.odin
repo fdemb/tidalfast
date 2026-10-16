@@ -20,6 +20,7 @@ import "base:runtime"
 import "core:fmt"
 import vmem "core:mem/virtual"
 import "core:log"
+import "core:slice"
 import "core:strconv"
 import "core:strings"
 import "core:unicode"
@@ -50,6 +51,8 @@ Found :: struct {
 	subtitle: string,
 	image:    string,
 	tracks:   int,
+	artist:   string, // an album's artists, also in subtitle
+	artists:  []Artist_Ref,
 }
 
 Found_Lists :: struct {
@@ -302,6 +305,8 @@ found_clone :: proc(f: Found_Lists, a: runtime.Allocator) -> Found_Lists {
 			out[i].name = strings.clone(x.name, a)
 			out[i].subtitle = strings.clone(x.subtitle, a)
 			out[i].image = strings.clone(x.image, a)
+			out[i].artist = strings.clone(x.artist, a)
+			out[i].artists = slice.clone(x.artists, a)
 		}
 		return out
 	}
@@ -334,26 +339,46 @@ open_list :: proc(s: ^State, p: ^Pending) {
 
 // go_to_album opens the album of row i once the frame is done.
 go_to_album :: proc(s: ^State, i: int) {
-	row := view_row(s, i)
-	if row == nil {
-		return
-	}
-	if s.data.fake {
-		pending_set(s, {kind = .List, source = .Album, index = fake_row_index(s, i)})
-	} else if row.album_id != 0 {
-		pending_set(s, {kind = .List, source = .Album, id = small(fmt.tprint(row.album_id)), name = small(row.album), image = small(row.cover)})
+	if row := view_row(s, i); row != nil {
+		open_album(s, row.album_id, row.album, row.cover, fake_row_index(s, i))
 	}
 }
 
-go_to_artist :: proc(s: ^State, i: int) {
+// go_to_artist opens artist k of row i once the frame is done. The fake
+// data has one artist a row.
+go_to_artist :: proc(s: ^State, i: int, k := 0) {
 	row := view_row(s, i)
 	if row == nil {
 		return
 	}
+	open_artist_of(s, row.artist, row.artists, k, fake_row_index(s, i))
+}
+
+// open_album opens an album once the frame is done. The fake data goes by
+// the album of row at in State.rows.
+open_album :: proc(s: ^State, id: i64, name, image: string, at: int) {
 	if s.data.fake {
-		pending_set(s, {kind = .List, source = .Artist, index = fake_row_index(s, i)})
-	} else if row.artist_id != 0 {
-		pending_set(s, {kind = .List, source = .Artist, id = small(fmt.tprint(row.artist_id)), name = small(row.artist)})
+		pending_set(s, {kind = .List, source = .Album, index = at})
+	} else if id != 0 {
+		pending_set(s, {kind = .List, source = .Album, id = small(fmt.tprint(id)), name = small(name), image = small(image)})
+	}
+}
+
+open_artist :: proc(s: ^State, id: i64, name: string, at: int) {
+	if s.data.fake {
+		pending_set(s, {kind = .List, source = .Artist, index = at})
+	} else if id != 0 {
+		pending_set(s, {kind = .List, source = .Artist, id = small(fmt.tprint(id)), name = small(name)})
+	}
+}
+
+// open_artist_of opens artist k of artists, or with the fake data the
+// artist of row at in State.rows.
+open_artist_of :: proc(s: ^State, joined: string, artists: []Artist_Ref, k: int, at: int) {
+	if k < len(artists) {
+		open_artist(s, artists[k].id, artist_name(joined, artists[k]), at)
+	} else {
+		open_artist(s, 0, joined, at)
 	}
 }
 
@@ -491,7 +516,7 @@ found_at :: proc(s: ^State, tab: Search_Tab, i: int) -> Found {
 	#partial switch tab {
 	case .Albums:
 		row := &s.rows[at]
-		return {id = i64(at), name = row.album, subtitle = fmt.tprintf("Album · %s", row.artist)}
+		return {id = i64(at), name = row.album, subtitle = fmt.tprintf("Album · %s", row.artist), artist = row.artist}
 	case .Artists:
 		return {id = i64(at), name = s.rows[at].artist, subtitle = "Artist"}
 	case .Playlists:
@@ -528,8 +553,18 @@ draw_found_list :: proc(s: ^State) {
 		title := ui.label(f.name, ui.fill(), ui.px(20))
 		title.text_pad = 4
 		ui.text_style(.Regular, 13, SECONDARY)
-		sub := ui.label(f.subtitle, ui.fill(), ui.px(18))
-		sub.text_pad = 4
+		if tab == .Albums && f.artist != "" {
+			ui.row("", {}, ui.fill(), ui.px(18))
+			prefix := ui.label("Album ·", ui.text_size(), ui.fill())
+			prefix.text_pad = 4
+			// The fake data's album id is the row it's found at.
+			if k, sig := artist_links(s, f.artist, f.artists, 0); sig.clicked && !sig.dragging {
+				open_artist_of(s, f.artist, f.artists, k, int(f.id))
+			}
+		} else {
+			sub := ui.label(f.subtitle, ui.fill(), ui.px(18))
+			sub.text_pad = 4
+		}
 	}
 }
 
@@ -587,9 +622,9 @@ found_lists :: proc(r: tidal.Search_Results, a: runtime.Allocator) -> (out: Foun
 	albums := make([]Found, min(len(r.albums), FOUND_MAX), a)
 	for &f, i in albums {
 		al := r.albums[i]
-		artist := al.artist.name if al.artist != nil else (al.artists[0].name if len(al.artists) > 0 else "")
 		f = {id = al.id, name = al.name, image = al.cover, tracks = al.num_tracks}
-		f.subtitle = fmt.aprintf("Album · %s", artist, allocator = a) if artist != "" else "Album"
+		f.artist, f.artists = join_artists(al.artists, al.artist, a)
+		f.subtitle = fmt.aprintf("Album · %s", f.artist, allocator = a) if f.artist != "" else "Album"
 	}
 	artists := make([]Found, min(len(r.artists), FOUND_MAX), a)
 	for &f, i in artists {

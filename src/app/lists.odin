@@ -555,6 +555,7 @@ row_clone :: proc(r: Row, a: runtime.Allocator) -> Row {
 	out := r
 	out.title = strings.clone(r.title, a)
 	out.artist = strings.clone(r.artist, a)
+	out.artists = slice.clone(r.artists, a)
 	out.album = strings.clone(r.album, a)
 	out.added = strings.clone(r.added, a)
 	out.added_by = strings.clone(r.added_by, a)

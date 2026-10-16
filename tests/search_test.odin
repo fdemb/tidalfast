@@ -1,5 +1,7 @@
 package tidal_tests
 
+import "core:fmt"
+import "core:mem"
 import vmem "core:mem/virtual"
 import "core:strings"
 import "core:testing"
@@ -8,6 +10,8 @@ import app "../src/app"
 import "../src/cover"
 import "../src/jobs"
 import "../src/platform"
+import "../src/text"
+import "../src/tidal"
 import "../src/ui"
 
 // A State for drawing the library screen without a window: no renderer,
@@ -41,6 +45,7 @@ library_state_free :: proc(s: ^app.State) {
 Frame :: struct {
 	now:   f64,
 	bytes: [256]u8,
+	fonts: ^Fonts, // nil measures every label as empty
 }
 
 // library_frame builds and lays out one frame of the library screen with
@@ -51,7 +56,12 @@ Frame :: struct {
 library_frame :: proc(t: ^testing.T, s: ^app.State, f: ^Frame, events: ..platform.Event, dt := 0.016, loc := #caller_location) {
 	f.now += dt
 	free_all(context.temp_allocator)
-	ui.begin_frame(&s.ui, events, nil, nil, 1000, 700, f.now, nil, f.bytes[:])
+	texts: ^text.State
+	if f.fonts != nil {
+		texts = f.fonts.state
+		text.begin_frame(texts, &f.fonts.r)
+	}
+	ui.begin_frame(&s.ui, events, nil, texts, 1000, 700, f.now, nil, f.bytes[:])
 	app.draw_library(s, 1000, 700)
 	ui.end_frame()
 	nodes, _ := ui.access_tree(&s.ui)
@@ -92,6 +102,14 @@ right_click :: proc(s: ^app.State, label: string) -> (down, up: platform.Event) 
 }
 
 @(private = "file")
+left_click :: proc(s: ^app.State, label: string) -> (down, up: platform.Event) {
+	n, ok := node(s, label)
+	assert(ok, label)
+	x, y := n.frame[0] + n.frame[2] / 2, n.frame[1] + n.frame[3] / 2
+	return {kind = .Mouse_Down, x = x, y = y, button = .Left, click_count = 1}, {kind = .Mouse_Up, x = x, y = y, button = .Left}
+}
+
+@(private = "file")
 type_text :: proc(f: ^Frame, s: string) -> platform.Event {
 	copy(f.bytes[:], s)
 	return {kind = .Text, text_length = u32(len(s))}
@@ -102,13 +120,21 @@ search_jobs :: proc(s: ^app.State) -> int {
 	return jobs.remove_if(&s.data.queue, proc(job: ^app.Job, _: rawptr) -> bool {return job.kind == .Search}, nil)
 }
 
+// two_artists is a song's two artists, the first with a comma in its name.
+@(private = "file")
+two_artists :: proc() -> (string, []app.Artist_Ref) {
+	return app.join_artists([]tidal.Artist{{id = 40, name = "Tyler, The Creator"}, {id = 41, name = "Kali Uchis"}}, nil, context.allocator)
+}
+
 @(private = "file")
 open_test_list :: proc(s: ^app.State) {
 	rows := make([]app.Row, 3, context.temp_allocator)
 	titles := [3]string{"First song", "Second song", "Third song"}
+	some := []app.Artist_Ref{{id = 20, start = 0, end = len("Some Artist")}}
 	for &r, i in rows {
-		r = {title = titles[i], artist = "Some Artist", album = "Some Album", duration = "3:00", id = i64(100 + i), album_id = 10, artist_id = 20, seconds = 180}
+		r = {title = titles[i], artist = "Some Artist", album = "Some Album", duration = "3:00", id = i64(100 + i), album_id = 10, artists = some, seconds = 180}
 	}
+	rows[1].artist, rows[1].artists = two_artists()
 	app.view_open(&s.data, .Playlist, "uuid", "A playlist", "", len(rows))
 	app.view_add_rows(&s.data.view, 0, len(rows), rows, len(rows))
 }
@@ -149,6 +175,141 @@ go_to_album_waits_for_the_frame :: proc(t: ^testing.T) {
 	library_frame(t, s, &f, press(s, "Go to artist"))
 	testing.expect_value(t, s.data.view.source, app.Source.Artist)
 	testing.expect_value(t, app.small_str(&s.data.view.id), "20")
+}
+
+// A row's artists and album are links, each artist its own, and so are
+// the title and the artists in the player bar and an album's artists in
+// the search results. The track menu offers each of a song's artists.
+@(test)
+artist_and_album_links :: proc(t: ^testing.T) {
+	fonts: Fonts
+	if !testing.expect(t, fonts_init(&fonts)) {
+		return
+	}
+	defer fonts_destroy(&fonts)
+	context.allocator = mem.arena_allocator(&fonts.arena)
+	s := library_state(false)
+	defer library_state_free(s)
+	open_test_list(s)
+	f := Frame{fonts = &fonts}
+	library_frame(t, s, &f)
+	library_frame(t, s, &f)
+
+	down, up := left_click(s, "Some Artist")
+	library_frame(t, s, &f, down, up)
+	testing.expect_value(t, s.data.view.source, app.Source.Artist)
+	testing.expect_value(t, app.small_str(&s.data.view.id), "20")
+
+	for name, k in ([]string{"Tyler, The Creator", "Kali Uchis"}) {
+		open_test_list(s)
+		library_frame(t, s, &f)
+		library_frame(t, s, &f)
+		down, up = left_click(s, name)
+		library_frame(t, s, &f, down, up)
+		testing.expect_value(t, s.data.view.source, app.Source.Artist)
+		testing.expect_value(t, app.small_str(&s.data.view.id), fmt.tprint(40 + k))
+		testing.expect_value(t, app.small_str(&s.data.view.name), name)
+	}
+
+	open_test_list(s)
+	library_frame(t, s, &f)
+	library_frame(t, s, &f)
+	down, up = right_click(s, "Second song")
+	library_frame(t, s, &f, down, up)
+	library_frame(t, s, &f)
+	_, single := node(s, "Go to artist")
+	testing.expect(t, !single)
+	library_frame(t, s, &f, press(s, "Go to Kali Uchis"))
+	testing.expect_value(t, app.small_str(&s.data.view.id), "41")
+
+	open_test_list(s)
+	library_frame(t, s, &f)
+	library_frame(t, s, &f)
+	down, up = left_click(s, "Some Album")
+	library_frame(t, s, &f, down, up)
+	testing.expect_value(t, s.data.view.source, app.Source.Album)
+	testing.expect_value(t, app.small_str(&s.data.view.id), "10")
+
+	items := []app.Queue_Item{{title = "Playing song", album_id = 11}}
+	items[0].artist, items[0].artists = two_artists()
+	s.playback.items = items
+	s.playback.index = 0
+	defer s.playback.items = nil
+	library_frame(t, s, &f)
+	down, up = left_click(s, "Playing song")
+	library_frame(t, s, &f, down, up)
+	testing.expect_value(t, s.data.view.source, app.Source.Album)
+	testing.expect_value(t, app.small_str(&s.data.view.id), "11")
+	library_frame(t, s, &f)
+	down, up = left_click(s, "Kali Uchis")
+	library_frame(t, s, &f, down, up)
+	testing.expect_value(t, s.data.view.source, app.Source.Artist)
+	testing.expect_value(t, app.small_str(&s.data.view.id), "41")
+
+	// An album in the search results links to its artists.
+	library_frame(t, s, &f, {kind = .Key_Down, key = .F, modifiers = {ui.PRIMARY}})
+	library_frame(t, s, &f, type_text(&f, "abc"))
+	library_frame(t, s, &f, {kind = .Key_Down, key = .Return})
+	sr := &s.search
+	albums := []app.Found{{id = 5, name = "An album", subtitle = "Album · Tyler, The Creator, Kali Uchis"}}
+	albums[0].artist, albums[0].artists = two_artists()
+	res := app.Result {
+		job   = {kind = .Search, view = sr.gen, id = app.small("abc")},
+		rows  = []app.Row{{title = "Found song", artist = "Someone", id = 1}},
+		found = {albums = albums},
+	}
+	app.search_result(s, &res)
+	library_frame(t, s, &f)
+	library_frame(t, s, &f, press(s, "Albums"))
+	library_frame(t, s, &f)
+	down, up = left_click(s, "Tyler, The Creator")
+	library_frame(t, s, &f, down, up)
+	testing.expect_value(t, s.data.view.source, app.Source.Artist)
+	testing.expect_value(t, app.small_str(&s.data.view.id), "40")
+}
+
+// A song with more artists than fit lists them up to the edge of its
+// column: the one that crosses it is cut, and the rest are left out.
+@(test)
+artist_links_stop_at_the_edge :: proc(t: ^testing.T) {
+	fonts: Fonts
+	if !testing.expect(t, fonts_init(&fonts)) {
+		return
+	}
+	defer fonts_destroy(&fonts)
+	context.allocator = mem.arena_allocator(&fonts.arena)
+	s := library_state(false)
+	defer library_state_free(s)
+	artists := make([]tidal.Artist, 12)
+	for &a, i in artists {
+		a = {id = i64(500 + i), name = fmt.aprintf("Artist number %d", i)}
+	}
+	rows := make([]app.Row, 1)
+	rows[0] = {title = "Crowded song", album = "Some Album", id = 1, album_id = 10}
+	rows[0].artist, rows[0].artists = app.join_artists(artists, nil, context.allocator)
+	app.view_open(&s.data, .Playlist, "uuid", "A playlist", "", 1)
+	app.view_add_rows(&s.data.view, 0, 1, rows, 1)
+	f := Frame{fonts = &fonts}
+	for _ in 0 ..< 3 {
+		library_frame(t, s, &f)
+	}
+
+	first, ok := node(s, "Artist number 0")
+	testing.expect(t, ok)
+	_, last := node(s, "Artist number 11")
+	testing.expect(t, !last)
+	title, _ := node(s, "Crowded song")
+	right := title.frame[0] + title.frame[2]
+	shown := 0
+	nodes, _ := ui.access_tree(&s.ui)
+	for n in nodes {
+		if strings.has_prefix(string(n.label), "Artist number") {
+			shown += 1
+			testing.expectf(t, n.frame[0] + n.frame[2] <= right + 0.5, "%s ends at %v, past %v", n.label, n.frame[0] + n.frame[2], right)
+		}
+	}
+	testing.expect(t, shown > 1 && shown < 12)
+	testing.expect(t, first.frame[2] > 0)
 }
 
 // Picking a sidebar entry while a search waits for its debounce, or while
@@ -356,7 +517,7 @@ track_menu_closes_with_its_list :: proc(t: ^testing.T) {
 	// The same ids, other albums: only the list tells them apart.
 	rows := make([]app.Row, 3, context.temp_allocator)
 	for &r, i in rows {
-		r = {title = "Found song", artist = "Other Artist", album = "Other Album", id = i64(100 + i), album_id = 22, artist_id = 33}
+		r = {title = "Found song", artist = "Other Artist", album = "Other Album", id = i64(100 + i), album_id = 22}
 	}
 	res := app.Result {
 		job  = {kind = .Search, view = s.search.gen, id = app.small("found")},
@@ -441,3 +602,4 @@ search_results_come_back_from_memory :: proc(t: ^testing.T) {
 	testing.expect_value(t, search_jobs(s), 1)
 	testing.expect(t, app.lru_find(&s.data, .Search, "abc") < 0)
 }
+
