@@ -191,7 +191,7 @@ The scripts phase adds Thai, Devanagari, Georgian, Armenian, Ethiopic, Tamil, Kh
 `src/ui` is an immediate-mode UI after Ryan Fleury's box UI in raddebugger. Each frame the app builds a tree of boxes. `end_frame` lays it out, draws it with `render` and `text`, and records where every box landed. The next frame tests input against those rects, so a click goes to what was on screen.
 
 ```odin
-ui.begin_frame(&s.ui, events, r, &s.text, w, h, time, ui.hardware_buttons())
+ui.begin_frame(&s.ui, events, r, &s.text, w, h, time, input.mouse_buttons)
 {
 	ui.row("body", {}, ui.fill(), ui.fill())          // parent until the end of the scope
 	ui.label("Your Library", ui.text_size(), ui.px(52))
@@ -214,7 +214,7 @@ Each box has a size per axis: `px(n)`, `text_size(pad)` (the label's width or li
 
 `process_events` folds the frame's events into `Input` and walks them in order. The hit list from the last layout holds every keyed box that is clickable, focusable or scrolls, with its clipped rect, in drawing order. The hot box is the last clickable one under the mouse, so children beat parents and the floating layer beats everything. A press makes the hot box active for that button. A release over the active box is a click. While the left button is held only the active box can be hot. `ui.signal(box)` reports hovering, held, pressed, released, clicked, double-clicked (from the shell's click count), right-clicked (on mouse down, as macOS menus do, control-click included), dragging (past 4 pt, until the release) with the drag delta, and scroll. `Signal.mouse` is the current mouse while held and where the button came up when released, and the drag delta runs to the release too. A press and release in one frame, which happens when the events arrive between two frames, still reports both, so sliders and handles act on `held || released` with `Signal.mouse` rather than on `held` alone. `Input` keeps where each button last went down and came up.
 
-A release can go missing, as when the mouse comes up in another app after the window lost focus. So the app passes `ui.hardware_buttons()`, which asks CoreGraphics (`CGEventSourceButtonState`) which buttons are down in the whole session, to `begin_frame`. A button held since an earlier frame that is up in hardware, with no event for it this frame, gets one more frame for its release to arrive, and then the UI lets go of it: no release, no click, and a drag it held ends without a drop. A hot reload lets go of every button the same way (`ui.cancel_pointer`). Without the hardware state, as in the tests, the UI goes by the events alone.
+A release can go missing, as when the mouse comes up in another app after the window lost focus. So the app passes `Frame_Input.mouse_buttons` to `begin_frame`. The shell fills it every frame with the buttons down in the whole session, which on macOS it asks CoreGraphics for (`CGEventSourceButtonState`). A button held since an earlier frame that is up in hardware, with no event for it this frame, gets one more frame for its release to arrive, and then the UI lets go of it: no release, no click, and a drag it held ends without a drop. A hot reload lets go of every button the same way (`ui.cancel_pointer`). Without the hardware state, as in the tests, the UI goes by the events alone.
 
 A clickable box also counts as hovering while its clickable child is hot, so a row stays lit under its own "more" button.
 
@@ -489,7 +489,7 @@ The slowest in both is a seek to 18.7 s in a 20 s track, which needed a second p
 
 ### Media keys and Now Playing
 
-`MPRemoteCommandCenter` and `MPNowPlayingInfoCenter` are Obj-C classes, and Odin dev-2026-10 crashes compiling Obj-C method calls, so both live in `shell/shell.m`. The shell enables play, pause, toggle, next, previous and `changePlaybackPosition`, and turns each command into an `EVENT_MEDIA` event: `key_code` is the `Media_Command`, `dx` the position for a seek. The app handles them in `playback_update`, the same way as the player bar's buttons.
+`MPRemoteCommandCenter` and `MPNowPlayingInfoCenter` are Obj-C classes, and Odin dev-2026-10 crashes compiling Obj-C method calls, so both live in `shell/shell.m`. The shell enables play, pause, toggle, next, previous and `changePlaybackPosition`, and turns each command into an `EVENT_MEDIA` event: `media` is the `Media_Command`, `dx` the position for a seek. The app handles them in `playback_update`, the same way as the player bar's buttons.
 
 The app calls `Shell.set_now_playing` with the title, artist, album, duration, elapsed time, state and the cover as RGBA pixels, which an `Artwork` job fetches at 640x640. It calls it only when one of those changes, since macOS moves the elapsed time along by itself from the playback rate. The shell copies everything before it returns and rebuilds the artwork only when `artwork_key` changes. Now Playing came with platform ABI version 2; text input and accessibility made it version 3 (see Text input). Every struct the two sides share has a size check on both sides.
 
@@ -616,7 +616,7 @@ Every offset is a byte offset on a grapheme cluster boundary. The boundaries com
 
 With the focus, the field takes:
 
-- Left and Right by cluster, Option by word, Command to either end, and Up, Down, Home and End to either end. Shift extends the selection. Word movement skips separators, then goes over letters and digits.
+- Left and Right by cluster, Option by word, Command to either end (`ui.WORD` and `ui.LINE`, per OS like `ui.PRIMARY`), and Up, Down, Home and End to either end. Shift extends the selection. Word movement skips separators, then goes over letters and digits.
 - Backspace and Delete by cluster, Option by word, Command to the end of the line.
 - Cmd-A, Cmd-C, Cmd-X, Cmd-V, Cmd-Z and Shift-Cmd-Z, Control-A and Control-E.
 - Clicks: one places the cursor (Shift extends), two select a word, three select everything, and dragging selects by cluster, or by word after a double-click.
@@ -661,6 +661,15 @@ The clipboard goes through `Shell.set_clipboard` and `Shell.get_clipboard`, whic
 - `Frame_Result` (8 bytes) has `wake_after`.
 - `Shell` (64 bytes) adds `set_text_input`, `set_clipboard`, `get_clipboard` and `set_accessibility`.
 - New structs: `Text_Input` (48 bytes) and `Access_Node` (56 bytes). `Text_Input.limit` took the place of a padding field, so a shell or app that leaves it 0 means no limit, and the version stays 3.
+
+### Platform ABI version 6
+
+Version 6 takes the macOS-only parts out of the ABI, so a shell for another OS can fill the same structs.
+
+- `Event.key` is a `Key`: keys by their place on a US keyboard, which the shell maps its own key codes to. It took the place of `key_code`, which held macOS virtual key codes. Keys outside the enum arrive as `None`. `Event.media` holds the `Media_Command` in what was a padding byte, so `Event` stays 88 bytes. `platform.h` and `platform.odin` both check that `Key` has 65 values.
+- The modifiers are `Shift`, `Control`, `Alt` and `Super`, with the same bits as before. Alt is Option and Super is Command on macOS.
+- `Frame_Input` (56 bytes) adds `mouse_buttons`, the buttons held down in any app, which the UI used to ask CoreGraphics for itself.
+- `Shell` (56 bytes) has one `surface` in place of `metal_device` and `metal_layer`. On macOS it is the `CAMetalLayer`, set up by the shell, and the Metal backend takes the device from it.
 
 ## Search
 

@@ -271,7 +271,7 @@ start :: proc(s: ^State, shell: ^platform.Shell) {
 		s.renderer.capture_path = path
 	}
 
-	if !render.init(&s.renderer, shell.metal_device, shell.metal_layer) {
+	if !render.init(&s.renderer, shell.surface) {
 		log.error("app: renderer init failed")
 	}
 	if !text.init(&s.text, shell.request_redraw) {
@@ -339,7 +339,7 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input, shell: ^platfor
 	ui_begin := time.tick_now()
 	measure_frame_begin(s)
 	text.begin_frame(&s.text, r)
-	ui.begin_frame(&s.ui, events, r, &s.text, w, h, input.time, ui.hardware_buttons(), input.text[:input.text_length])
+	ui.begin_frame(&s.ui, events, r, &s.text, w, h, input.time, input.mouse_buttons, input.text[:input.text_length])
 	ui.set_window_key(&s.ui, bool(input.key_window))
 	ui.set_clipboard(&s.ui, shell.get_clipboard, shell.set_clipboard)
 	data_update(s, input.time)
@@ -349,10 +349,10 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input, shell: ^platfor
 
 	// Backtick toggles the frame-time overlay. Cmd-1, 2 and 3 switch between
 	// the library and the phase 2 and phase 1 test screens.
-	if ui.key_pressed(ui.KEY_GRAVE) {
+	if ui.key_pressed(.Grave) {
 		s.show_overlay = !s.show_overlay
 	}
-	for key, screen in ([Screen]u32{.Library = ui.KEY_1, .Text = ui.KEY_2, .Shapes = ui.KEY_3}) {
+	for key, screen in ([Screen]platform.Key{.Library = .Digit_1, .Text = .Digit_2, .Shapes = .Digit_3}) {
 		if ui.key_pressed(key, {ui.PRIMARY}) {
 			s.screen = screen
 		}

@@ -10,6 +10,7 @@
 // fields, and it hands assistive apps an accessibility tree the app builds
 // from its boxes.
 
+#import <Carbon/Carbon.h> // kVK_* only
 #import <Cocoa/Cocoa.h>
 #import <CoreServices/CoreServices.h>
 #import <MediaPlayer/MediaPlayer.h>
@@ -101,6 +102,16 @@ static void request_redraw(void) {
   CFRunLoopWakeUp(g_main_run_loop);
 }
 
+// From the whole login session, so it sees releases that went to other apps.
+static uint32_t held_mouse_buttons(void) {
+  uint32_t held = 0;
+  // Mouse_Button's values are CGMouseButton's: left, right, center.
+  for (uint32_t b = MOUSE_BUTTON_LEFT; b <= MOUSE_BUTTON_MIDDLE; b++) {
+    if (CGEventSourceButtonState(kCGEventSourceStateCombinedSessionState, b)) held |= 1u << b;
+  }
+  return held;
+}
+
 static void draw_frame(void) {
   if (!g_app.api.frame) return;
   atomic_store(&g_needs_redraw, false);
@@ -116,6 +127,7 @@ static void draw_frame(void) {
       .text = g_text,
       .text_length = g_text_len,
       .key_window = g_window.isKeyWindow,
+      .mouse_buttons = held_mouse_buttons(),
   };
   Frame_Result result;
   @autoreleasepool {
@@ -322,7 +334,7 @@ static uint64_t g_artwork_key;
 static bool g_now_playing_log;
 
 static void remote_command(uint32_t command, double position) {
-  push_event((Event){.kind = EVENT_MEDIA, .key_code = command, .dx = (float)position, .time = CACurrentMediaTime()});
+  push_event((Event){.kind = EVENT_MEDIA, .media = (uint8_t)command, .dx = (float)position, .time = CACurrentMediaTime()});
   if (g_now_playing_log) fprintf(stderr, "shell: remote command %u (%.3f)\n", command, position);
   request_redraw();
 }
@@ -899,8 +911,8 @@ static uint32_t modifiers(NSEventModifierFlags flags) {
   uint32_t m = 0;
   if (flags & NSEventModifierFlagShift) m |= MODIFIER_SHIFT;
   if (flags & NSEventModifierFlagControl) m |= MODIFIER_CONTROL;
-  if (flags & NSEventModifierFlagOption) m |= MODIFIER_OPTION;
-  if (flags & NSEventModifierFlagCommand) m |= MODIFIER_COMMAND;
+  if (flags & NSEventModifierFlagOption) m |= MODIFIER_ALT;
+  if (flags & NSEventModifierFlagCommand) m |= MODIFIER_SUPER;
   if (flags & NSEventModifierFlagCapsLock) m |= MODIFIER_CAPS_LOCK;
   return m;
 }
@@ -1019,12 +1031,34 @@ static Event mouse_event(NSView *view, NSEvent *e, uint32_t kind, uint32_t butto
   push_event(ev);
 }
 
+// Unlisted key codes are KEY_NONE.
+static const uint8_t g_keys[128] = {
+    [kVK_ANSI_A] = KEY_A, [kVK_ANSI_B] = KEY_B, [kVK_ANSI_C] = KEY_C, [kVK_ANSI_D] = KEY_D,
+    [kVK_ANSI_E] = KEY_E, [kVK_ANSI_F] = KEY_F, [kVK_ANSI_G] = KEY_G, [kVK_ANSI_H] = KEY_H,
+    [kVK_ANSI_I] = KEY_I, [kVK_ANSI_J] = KEY_J, [kVK_ANSI_K] = KEY_K, [kVK_ANSI_L] = KEY_L,
+    [kVK_ANSI_M] = KEY_M, [kVK_ANSI_N] = KEY_N, [kVK_ANSI_O] = KEY_O, [kVK_ANSI_P] = KEY_P,
+    [kVK_ANSI_Q] = KEY_Q, [kVK_ANSI_R] = KEY_R, [kVK_ANSI_S] = KEY_S, [kVK_ANSI_T] = KEY_T,
+    [kVK_ANSI_U] = KEY_U, [kVK_ANSI_V] = KEY_V, [kVK_ANSI_W] = KEY_W, [kVK_ANSI_X] = KEY_X,
+    [kVK_ANSI_Y] = KEY_Y, [kVK_ANSI_Z] = KEY_Z,
+    [kVK_ANSI_0] = KEY_DIGIT_0, [kVK_ANSI_1] = KEY_DIGIT_1, [kVK_ANSI_2] = KEY_DIGIT_2, [kVK_ANSI_3] = KEY_DIGIT_3,
+    [kVK_ANSI_4] = KEY_DIGIT_4, [kVK_ANSI_5] = KEY_DIGIT_5, [kVK_ANSI_6] = KEY_DIGIT_6, [kVK_ANSI_7] = KEY_DIGIT_7,
+    [kVK_ANSI_8] = KEY_DIGIT_8, [kVK_ANSI_9] = KEY_DIGIT_9,
+    [kVK_Return] = KEY_RETURN, [kVK_Tab] = KEY_TAB, [kVK_Space] = KEY_SPACE, [kVK_Delete] = KEY_BACKSPACE,
+    [kVK_ForwardDelete] = KEY_DELETE, [kVK_Escape] = KEY_ESCAPE, [kVK_Home] = KEY_HOME, [kVK_End] = KEY_END,
+    [kVK_PageUp] = KEY_PAGE_UP, [kVK_PageDown] = KEY_PAGE_DOWN, [kVK_LeftArrow] = KEY_LEFT,
+    [kVK_RightArrow] = KEY_RIGHT, [kVK_UpArrow] = KEY_UP, [kVK_DownArrow] = KEY_DOWN, [kVK_ANSI_Grave] = KEY_GRAVE,
+    [kVK_ANSI_KeypadEnter] = KEY_KEYPAD_ENTER,
+    [kVK_F1] = KEY_F1, [kVK_F2] = KEY_F2, [kVK_F3] = KEY_F3, [kVK_F4] = KEY_F4,
+    [kVK_F5] = KEY_F5, [kVK_F6] = KEY_F6, [kVK_F7] = KEY_F7, [kVK_F8] = KEY_F8,
+    [kVK_F9] = KEY_F9, [kVK_F10] = KEY_F10, [kVK_F11] = KEY_F11, [kVK_F12] = KEY_F12,
+};
+
 static Event key_event(NSEvent *e, uint32_t kind) {
   return (Event){
       .kind = kind,
       .modifiers = modifiers(e.modifierFlags),
       .time = e.timestamp,
-      .key_code = e.keyCode,
+      .key = e.keyCode < 128 ? g_keys[e.keyCode] : KEY_NONE,
       .repeat = e.type == NSEventTypeKeyDown && e.isARepeat,
   };
 }
@@ -1182,47 +1216,38 @@ static void update_display_link(void) {
 //   capture=path        copy the last TIDALFAST_CAPTURE frame to path
 //   quit
 
-static uint32_t key_code_named(NSString *name) {
+static Key key_named(NSString *name) {
   NSDictionary *named = @{
-    @"return" : @36, @"tab" : @48, @"space" : @49, @"backspace" : @51, @"escape" : @53, @"delete" : @117,
-    @"home" : @115, @"end" : @119, @"left" : @123, @"right" : @124, @"down" : @125, @"up" : @126,
+    @"return" : @(KEY_RETURN), @"tab" : @(KEY_TAB), @"space" : @(KEY_SPACE), @"backspace" : @(KEY_BACKSPACE),
+    @"escape" : @(KEY_ESCAPE), @"delete" : @(KEY_DELETE), @"home" : @(KEY_HOME), @"end" : @(KEY_END),
+    @"left" : @(KEY_LEFT), @"right" : @(KEY_RIGHT), @"down" : @(KEY_DOWN), @"up" : @(KEY_UP),
   };
   if (named[name]) return [named[name] unsignedIntValue];
-  // kVK_ANSI_A and on, in the order of the US layout's key codes.
-  const char *letters = "asdfhgzxcv?bqweryt";
   if (name.length == 1) {
-    const char *at = strchr(letters, [name characterAtIndex:0]);
-    if (at) return (uint32_t)(at - letters);
-    if ([name isEqualToString:@"o"]) return 31;
-    if ([name isEqualToString:@"u"]) return 32;
-    if ([name isEqualToString:@"i"]) return 34;
-    if ([name isEqualToString:@"p"]) return 35;
-    if ([name isEqualToString:@"l"]) return 37;
-    if ([name isEqualToString:@"j"]) return 38;
-    if ([name isEqualToString:@"k"]) return 40;
-    if ([name isEqualToString:@"n"]) return 45;
-    if ([name isEqualToString:@"m"]) return 46;
+    unichar c = [name characterAtIndex:0];
+    if (c >= 'a' && c <= 'z') return KEY_A + (c - 'a');
+    if (c >= '0' && c <= '9') return KEY_DIGIT_0 + (c - '0');
   }
-  return UINT32_MAX;
+  return KEY_NONE;
 }
 
 static void test_key(NSString *spec) {
   uint32_t mods = 0;
   NSArray *parts = [spec componentsSeparatedByString:@"+"];
   for (NSString *p in parts) {
-    if ([p isEqualToString:@"cmd"]) mods |= MODIFIER_COMMAND;
+    if ([p isEqualToString:@"cmd"]) mods |= MODIFIER_SUPER;
     else if ([p isEqualToString:@"shift"]) mods |= MODIFIER_SHIFT;
-    else if ([p isEqualToString:@"opt"]) mods |= MODIFIER_OPTION;
+    else if ([p isEqualToString:@"opt"]) mods |= MODIFIER_ALT;
     else if ([p isEqualToString:@"ctrl"]) mods |= MODIFIER_CONTROL;
   }
-  uint32_t code = key_code_named(parts.lastObject);
-  if (code == UINT32_MAX) {
+  Key key = key_named(parts.lastObject);
+  if (key == KEY_NONE) {
     fprintf(stderr, "shell: test: no key named %s\n", [parts.lastObject UTF8String]);
     return;
   }
   double now = CACurrentMediaTime();
-  push_event((Event){.kind = EVENT_KEY_DOWN, .modifiers = mods, .key_code = code, .time = now});
-  push_event((Event){.kind = EVENT_KEY_UP, .modifiers = mods, .key_code = code, .time = now});
+  push_event((Event){.kind = EVENT_KEY_DOWN, .modifiers = mods, .key = key, .time = now});
+  push_event((Event){.kind = EVENT_KEY_UP, .modifiers = mods, .key = key, .time = now});
   request_redraw();
 }
 
@@ -1399,8 +1424,7 @@ static void setup_shell_test(void) {
   }
 
   g_shell = (Shell){
-      .metal_device = (__bridge void *)g_layer.device,
-      .metal_layer = (__bridge void *)g_layer,
+      .surface = (__bridge void *)g_layer,
       .request_redraw = request_redraw,
       .set_now_playing = set_now_playing,
       .set_text_input = set_text_input,

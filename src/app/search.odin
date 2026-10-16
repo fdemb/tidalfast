@@ -114,8 +114,8 @@ draw_search_field :: proc(s: ^State) {
 		sig := ui.text_field("search", &sr.field, "Search", ui.fill(), ui.px(32))
 		sig.box.background = SURFACE
 		sig.box.border_color = ACCENT if sig.focused else OUTLINE
-		ui.focus_shortcut(sig.box, ui.KEY_F, {ui.PRIMARY})
-		ui.focus_shortcut(sig.box, ui.KEY_L, {ui.PRIMARY})
+		ui.focus_shortcut(sig.box, .F, {ui.PRIMARY})
+		ui.focus_shortcut(sig.box, .L, {ui.PRIMARY})
 		ui.spacer(ui.px(12))
 		// Return searches for the text it was pressed on. Edits after it in
 		// the same frame start the debounce over, as they would in the next.

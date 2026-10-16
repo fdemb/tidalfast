@@ -379,7 +379,7 @@ test_text_field_events :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(input.text[:input.length]), "にほんご")
 
 	// The commit, then a key and more text in the same frame, in order.
-	sig = frame(&u, f, &now, bytes[:], text(bytes[:], 0, .Text, "日本語"), {kind = .Key_Down, key_code = ui.KEY_LEFT}, text(bytes[:], 16, .Text, "の"))
+	sig = frame(&u, f, &now, bytes[:], text(bytes[:], 0, .Text, "日本語"), {kind = .Key_Down, key = .Left}, text(bytes[:], 16, .Text, "の"))
 	testing.expect(t, sig.changed)
 	testing.expect_value(t, ui.field_text(f), "日本の語")
 	input, changed = ui.text_input(&u)
@@ -391,13 +391,13 @@ test_text_field_events :: proc(t: ^testing.T) {
 
 	// Space and the arrows stay in the field rather than clicking or moving
 	// the focus, and Escape clears it, then gives up the focus.
-	sig = frame(&u, f, &now, bytes[:], {kind = .Key_Down, key_code = ui.KEY_UP}, {kind = .Key_Down, key_code = ui.KEY_RETURN})
+	sig = frame(&u, f, &now, bytes[:], {kind = .Key_Down, key = .Up}, {kind = .Key_Down, key = .Return})
 	testing.expect(t, sig.submitted)
 	testing.expect(t, sig.focused)
 	testing.expect_value(t, f.cursor, 0)
-	sig = frame(&u, f, &now, bytes[:], {kind = .Key_Down, key_code = ui.KEY_ESCAPE})
+	sig = frame(&u, f, &now, bytes[:], {kind = .Key_Down, key = .Escape})
 	testing.expect_value(t, ui.field_text(f), "")
-	sig = frame(&u, f, &now, bytes[:], {kind = .Key_Down, key_code = ui.KEY_ESCAPE})
+	sig = frame(&u, f, &now, bytes[:], {kind = .Key_Down, key = .Escape})
 	testing.expect(t, sig.cancelled)
 	sig = frame(&u, f, &now, bytes[:])
 	testing.expect(t, !sig.focused)

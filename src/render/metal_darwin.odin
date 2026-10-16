@@ -137,10 +137,11 @@ fragment float4 rect_fragment(Fragment_In in [[stage_in]],
 }
 `
 
-init :: proc(r: ^Renderer, device, layer: rawptr) -> bool {
+// init draws to surface, a CAMetalLayer, on the layer's device.
+init :: proc(r: ^Renderer, surface: rawptr) -> bool {
 	g := &r.gpu
-	g.device = device
-	g.layer = layer
+	g.layer = surface
+	g.device = msg(g.layer, "device")
 	g.queue = msg(g.device, "newCommandQueue")
 	if r.capture_path != "" {
 		msg_bool(g.layer, "setFramebufferOnly:", false)

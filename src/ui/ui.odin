@@ -176,7 +176,7 @@ Hit :: struct {
 }
 
 Key_Press :: struct {
-	code:      u32,
+	code:      platform.Key,
 	modifiers: platform.Modifiers,
 }
 
@@ -248,7 +248,7 @@ State :: struct {
 	drag_start:     [2]f32,
 	drag_moved:     bool, // past DRAG_THRESHOLD since the press
 	control_click:  bool, // the left button is down as a control-click
-	buttons_stale:  Mouse_Buttons, // held here but up in hardware last frame
+	buttons_stale:  platform.Mouse_Buttons, // held here but up in hardware last frame
 	scroll_latch:   Key, // the scroll view a trackpad gesture started over
 	scroll_key:     Key, // this frame's scroll goes to this box
 	scroll:         [2]f32, // points, this frame
@@ -392,10 +392,10 @@ box_lookup :: proc(u: ^State, key: Key) -> ^Box {
 
 // begin_frame prunes boxes that weren't built last frame, takes this frame's
 // events and sets up the roots. Strings given to boxes must live until
-// end_frame. hardware is the buttons down right now, from hardware_buttons;
+// end_frame. hardware is the buttons down right now, from Frame_Input.mouse_buttons;
 // without it the UI goes by the events alone.
 // text is the bytes Text and Marked_Text events point into.
-begin_frame :: proc(u: ^State, events: []platform.Event, r: ^render.Renderer, t: ^text.State, width, height: f32, time: f64, hardware: Maybe(Mouse_Buttons) = nil, text_bytes: []u8 = nil) {
+begin_frame :: proc(u: ^State, events: []platform.Event, r: ^render.Renderer, t: ^text.State, width, height: f32, time: f64, hardware: Maybe(platform.Mouse_Buttons) = nil, text_bytes: []u8 = nil) {
 	ctx = u
 	u.frame += 1
 	if width != u.width || height != u.height || len(events) > 0 {
@@ -469,7 +469,7 @@ prune :: proc(u: ^State) {
 // its way. Cancelled buttons don't release or click anything, and a drag
 // they held ends without a drop.
 @(private)
-release_stale :: proc(u: ^State, events: []platform.Event, hardware: Mouse_Buttons) {
+release_stale :: proc(u: ^State, events: []platform.Event, hardware: platform.Mouse_Buttons) {
 	held := hardware
 	// A control-click goes down as the left button and counts as the right.
 	if u.control_click && .Left in held {
@@ -497,7 +497,7 @@ cancel_pointer :: proc(u: ^State) {
 }
 
 @(private)
-cancel_buttons :: proc(u: ^State, buttons: Mouse_Buttons) {
+cancel_buttons :: proc(u: ^State, buttons: platform.Mouse_Buttons) {
 	u.input.buttons -= buttons
 	for b in buttons {
 		u.active[b] = 0
@@ -682,10 +682,10 @@ queue_edit :: proc(u: ^State, e: Edit_Event) {
 
 @(private)
 key_down :: proc(u: ^State, e: platform.Event) {
-	mods := e.modifiers & {.Shift, .Control, .Option, .Command}
-	code := e.key_code
+	mods := e.modifiers & {.Shift, .Control, .Alt, .Super}
+	code := e.key
 	switch {
-	case !e.repeat && (code == KEY_F1 || (code == KEY_D && mods == {PRIMARY, .Shift})):
+	case !e.repeat && (code == .F1 || (code == .D && mods == {PRIMARY, .Shift})):
 		u.debug = !u.debug
 		return
 	case shortcut_for(u, {code, mods}) != 0:
@@ -696,12 +696,12 @@ key_down :: proc(u: ^State, e: platform.Event) {
 		move_focus(u, target, false, select_all = true)
 		u.animating = true
 		return
-	case code == KEY_TAB && mods - {.Shift} == {}:
+	case code == .Tab && mods - {.Shift} == {}:
 		focus_step(u, -1 if .Shift in mods else 1)
 		return
-	case focus_takes_text(u) && (code == KEY_ESCAPE || code == KEY_RETURN || code == KEY_SPACE || code == KEY_UP || code == KEY_DOWN):
+	case focus_takes_text(u) && (code == .Escape || code == .Return || code == .Space || code == .Up || code == .Down):
 		// The text field has these.
-	case code == KEY_ESCAPE && mods == {}:
+	case code == .Escape && mods == {}:
 		if u.drag_active {
 			u.drag_active = false
 			u.drag_cancelled = true
@@ -715,14 +715,14 @@ key_down :: proc(u: ^State, e: platform.Event) {
 			move_focus(u, 0, false)
 			return
 		}
-	case (code == KEY_RETURN || code == KEY_SPACE) && mods == {} && u.focus != 0:
+	case (code == .Return || code == .Space) && mods == {} && u.focus != 0:
 		// With a menu open, only its items take keys.
 		if !menu_blocks(u, u.focus) {
 			u.key_click = u.focus
 		}
 		return
-	case (code == KEY_UP || code == KEY_DOWN) && mods == {}:
-		if focus_arrow(u, -1 if code == KEY_UP else 1) {
+	case (code == .Up || code == .Down) && mods == {}:
+		if focus_arrow(u, -1 if code == .Up else 1) {
 			return
 		}
 	}
@@ -1259,7 +1259,7 @@ text_style :: proc(font: text.Font, size: f32, color: render.Color) -> Text_Styl
 // Queries for the app
 
 // key_pressed reports and uses up a key press the UI didn't take.
-key_pressed :: proc(code: u32, modifiers: platform.Modifiers = {}) -> bool {
+key_pressed :: proc(code: platform.Key, modifiers: platform.Modifiers = {}) -> bool {
 	u := ctx
 	for i in 0 ..< u.key_count {
 		k := u.keys[i]
