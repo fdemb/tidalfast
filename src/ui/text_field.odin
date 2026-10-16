@@ -200,7 +200,7 @@ text_field :: proc(id: string, f: ^Text_Field, placeholder: string, width, heigh
 // the focus with its text selected, as Cmd-F does. It takes effect at its
 // place among the next frame's events, so keys and text after it go to the
 // field. Call it every frame, after text_field.
-focus_shortcut :: proc(b: ^Box, code: u32, modifiers: platform.Modifiers) {
+focus_shortcut :: proc(b: ^Box, code: platform.Key, modifiers: platform.Modifiers) {
 	u := ctx
 	if b.key != 0 && u.shortcut_count < MAX_SHORTCUTS {
 		u.shortcuts[u.shortcut_count] = {{code, modifiers}, b.key}
@@ -224,65 +224,66 @@ focus_text_field :: proc(b: ^Box, f: ^Text_Field) {
 }
 
 // field_key applies one key press, reporting whether the field used it and
-// whether it gave up the focus.
+// whether it gave up the focus. Control-A and Control-E also go to the
+// line's ends, as everywhere on macOS.
 @(private)
 field_key :: proc(u: ^State, f: ^Text_Field, key: Key, k: Key_Press, sig: ^Field_Signal) -> (used, gave_up: bool) {
 	shift := .Shift in k.modifiers
 	base := k.modifiers - {.Shift}
-	switch k.code {
-	case KEY_LEFT, KEY_RIGHT:
-		dir := -1 if k.code == KEY_LEFT else 1
+	#partial switch k.code {
+	case .Left, .Right:
+		dir := -1 if k.code == .Left else 1
 		switch base {
 		case {}:
 			field_move(f, dir, .Cluster, shift)
-		case {.Option}:
+		case {WORD}:
 			field_move(f, dir, .Word, shift)
-		case {.Command}:
+		case {LINE}:
 			field_move(f, dir, .Line, shift)
 		case:
 			return
 		}
-	case KEY_UP, KEY_HOME, KEY_DOWN, KEY_END:
-		if base != {} && base != {.Command} {
+	case .Up, .Home, .Down, .End:
+		if base != {} && base != {LINE} {
 			return
 		}
-		field_move(f, -1 if k.code == KEY_UP || k.code == KEY_HOME else 1, .Line, shift)
-	case KEY_BACKSPACE, KEY_FORWARD_DELETE:
-		dir := -1 if k.code == KEY_BACKSPACE else 1
+		field_move(f, -1 if k.code == .Up || k.code == .Home else 1, .Line, shift)
+	case .Backspace, .Delete:
+		dir := -1 if k.code == .Backspace else 1
 		switch k.modifiers {
 		case {}, {.Shift}:
 			field_delete(f, dir, .Cluster)
-		case {.Option}:
+		case {WORD}:
 			field_delete(f, dir, .Word)
-		case {.Command}:
+		case {LINE}:
 			field_delete(f, dir, .Line)
 		case:
 			return
 		}
-	case KEY_A:
-		switch k.modifiers {
-		case {.Command}:
+	case .A:
+		switch {
+		case k.modifiers == {PRIMARY}:
 			field_select_all(f)
-		case {.Control}, {.Control, .Shift}:
+		case base == {.Control}:
 			field_move(f, -1, .Line, shift)
 		case:
 			return
 		}
-	case KEY_E:
+	case .E:
 		if base != {.Control} {
 			return
 		}
 		field_move(f, 1, .Line, shift)
-	case KEY_C, KEY_X:
-		if k.modifiers != {.Command} {
+	case .C, .X:
+		if k.modifiers != {PRIMARY} {
 			return
 		}
-		sel := field_selected(f) if k.code == KEY_C else field_cut(f)
+		sel := field_selected(f) if k.code == .C else field_cut(f)
 		if sel != "" && u.clipboard_set != nil && !f.marked {
 			u.clipboard_set(raw_data(sel), uint(len(sel)))
 		}
-	case KEY_V:
-		if k.modifiers != {.Command} {
+	case .V:
+		if k.modifiers != {PRIMARY} {
 			return
 		}
 		if u.clipboard_get != nil {
@@ -293,22 +294,22 @@ field_key :: proc(u: ^State, f: ^Text_Field, key: Key, k: Key_Press, sig: ^Field
 				field_paste(f, string(buf[:n]))
 			}
 		}
-	case KEY_Z:
+	case .Z:
 		switch k.modifiers {
-		case {.Command}:
+		case {PRIMARY}:
 			field_undo(f)
-		case {.Command, .Shift}:
+		case {PRIMARY, .Shift}:
 			field_redo(f)
 		case:
 			return
 		}
-	case KEY_RETURN, KEY_KEYPAD_ENTER:
+	case .Return, .Keypad_Enter:
 		if k.modifiers != {} {
 			return
 		}
 		sig.submitted = true
 		sig.submitted_text = clone_temp(field_text(f))
-	case KEY_ESCAPE:
+	case .Escape:
 		if k.modifiers != {} {
 			return
 		}

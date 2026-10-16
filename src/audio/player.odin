@@ -60,20 +60,6 @@ WANT_NEXT_SECONDS :: 30 // ask for the next track this long before the end at th
 NEAR_SECONDS :: 0.3 // a seek decodes and drops at most about this much
 LOW_WATER :: RING_FRAMES / 4 // the decode thread checks the ring before this much has played
 
-foreign import libsystem "system:System"
-
-@(private = "file")
-Timebase :: struct {
-	numer, denom: u32,
-}
-
-@(private = "file", default_calling_convention = "c")
-foreign libsystem {
-	// Reads the commpage, so the audio callback can call it: no system call.
-	mach_absolute_time :: proc() -> u64 ---
-	mach_timebase_info :: proc(info: ^Timebase) -> c.int ---
-}
-
 Source_Kind :: enum u8 {
 	None,
 	Flac, // a FLAC file over HTTP
@@ -228,7 +214,7 @@ Commands :: struct {
 	paused:       Maybe(bool),
 	output:       Maybe(Output),
 	quit:         bool,
-	seek_tick:    u64, // mach_absolute_time
+	seek_tick:    u64, // clock_ticks
 }
 
 Player :: struct {
@@ -263,13 +249,13 @@ Player :: struct {
 	device_channels: int,
 	device_bits:     int,
 	draining:        bool, // a format change waits for the ring to play out
-	reclock_from:    u64, // mach_absolute_time of the old device's last frames, at a re-clock
+	reclock_from:    u64, // clock_ticks of the old device's last frames, at a re-clock
 	reclock_rates:   [2]int,
 	end_pushed:      bool,
 	scratch:         []f32,
 	ui_tick:         i64,
 	ui_mark:         u64,
-	seek_tick:       u64, // mach_absolute_time of the last seek command
+	seek_tick:       u64, // clock_ticks of the last seek command
 	seek_logged:     u32,
 	capture_fd:      posix.FD,
 	capture_frames:  i64,
@@ -288,7 +274,7 @@ Player :: struct {
 	// mark's fields and pub_sample change; see published.
 	cb_gain:         f32,
 	bypass:          bool, // bit-perfect: the callback leaves the volume out
-	first_tick:      u64, // mach_absolute_time of the first callback with frames since the device opened
+	first_tick:      u64, // clock_ticks of the first callback with frames since the device opened
 	last_tick:       u64, // and of the latest
 	pub_seq:         u64,
 	pub_mark:        u64, // marks adopted so far; the current one is pub_mark-1
@@ -296,7 +282,7 @@ Player :: struct {
 	pub_mark_seek:   u32,
 	pub_end:         bool,
 	pub_sample:      i64,
-	pub_seek_tick:   u64, // mach_absolute_time of the first frame after the last seek mark
+	pub_seek_tick:   u64, // clock_ticks of the first frame after the last seek mark
 	pub_seek_id:     u32,
 	underruns:       u64,
 
@@ -410,7 +396,7 @@ seek :: proc(p: ^Player, serial: u64, sample: i64) -> u32 {
 	p.cmd.seek = sample
 	p.cmd.seek_serial = serial
 	p.cmd.seek_id = p.next_seek_id
-	p.cmd.seek_tick = mach_absolute_time()
+	p.cmd.seek_tick = clock_ticks()
 	sync.unlock(&p.cmd_mutex)
 	post(p)
 	return p.next_seek_id
@@ -525,9 +511,7 @@ seek_latency :: proc(p: ^Player) -> (id: u32, d: time.Duration, ok: bool) {
 	if id == 0 || t == 0 || t < p.seek_tick {
 		return
 	}
-	tb: Timebase
-	mach_timebase_info(&tb)
-	return id, time.Duration((t - p.seek_tick) * u64(tb.numer) / u64(tb.denom)), true
+	return id, ticks_duration(t - p.seek_tick), true
 }
 
 @(private = "file")
@@ -1093,7 +1077,7 @@ after_step :: proc(p: ^Player) {
 	if p.reclock_from != 0 {
 		if first := sync.atomic_load(&p.first_tick); first != 0 && first > p.reclock_from {
 			p.wake_ui()
-			log.infof("audio: re-clocked %d -> %d Hz: %.1f ms from the last callback at the old rate to the first at the new; the rate change took %.1f ms", p.reclock_rates[0], p.reclock_rates[1], ticks_ms(first - p.reclock_from), p.hal.settle_ms)
+			log.infof("audio: re-clocked %d -> %d Hz: %.1f ms from the last callback at the old rate to the first at the new; the rate change took %.1f ms", p.reclock_rates[0], p.reclock_rates[1], time.duration_milliseconds(ticks_duration(first - p.reclock_from)), p.hal.settle_ms)
 			p.reclock_from = 0
 		}
 	}
@@ -1879,7 +1863,7 @@ after_render :: proc "contextless" (p: ^Player, out: [^]f32, frame_count, n: u64
 		sync.atomic_store(&p.pub_seek_tick, 0)
 	}
 	if n > 0 {
-		t := mach_absolute_time()
+		t := clock_ticks()
 		if m.seek_id != 0 && sync.atomic_load(&p.pub_seek_tick) == 0 {
 			sync.atomic_store(&p.pub_seek_tick, t)
 			sync.atomic_store(&p.pub_seek_id, m.seek_id)
@@ -1892,13 +1876,6 @@ after_render :: proc "contextless" (p: ^Player, out: [^]f32, frame_count, n: u64
 	if p.capture.capacity > 0 && p.capture.channels == int(ch) {
 		ring_write(&p.capture, out[:frame_count * ch])
 	}
-}
-
-@(private = "file")
-ticks_ms :: proc(ticks: u64) -> f64 {
-	tb: Timebase
-	mach_timebase_info(&tb)
-	return f64(ticks) * f64(tb.numer) / f64(tb.denom) / 1e6
 }
 
 // The capture file: a WAV of 32-bit floats, with sizes filled in when it

@@ -26,15 +26,15 @@ test_premultiplied_lut :: proc(t: ^testing.T) {
 
 // Covers and the text next to them share a draw call: colour and coverage
 // textures have a slot each in a batch, so only another texture of a kind
-// already bound starts a new one. Plain data, no Metal: the slots only need
-// a non-nil texture.
+// already bound starts a new one. Plain data, no GPU: a slot only needs a
+// size to count as live.
 @(test)
 batches_bind_a_colour_and_a_coverage_texture :: proc(t: ^testing.T) {
 	r := new(render.Renderer, context.temp_allocator)
 	cover_page, other_page, glyphs := render.Texture(1), render.Texture(2), render.Texture(3)
-	r.textures[1] = {texture = rawptr(uintptr(1)), width = 640, height = 640, format = .RGBA8}
-	r.textures[2] = {texture = rawptr(uintptr(2)), width = 640, height = 640, format = .RGBA8}
-	r.textures[3] = {texture = rawptr(uintptr(3)), width = 2048, height = 2048, format = .R8}
+	r.textures[1] = {width = 640, height = 640, format = .RGBA8}
+	r.textures[2] = {width = 640, height = 640, format = .RGBA8}
+	r.textures[3] = {width = 2048, height = 2048, format = .R8}
 	instances := make([]render.Instance, 64, context.temp_allocator)
 	r.instances = raw_data(instances)
 	r.capacity[0] = len(instances)

@@ -15,7 +15,7 @@ import "core:time"
 import app "../src/app"
 import "../src/audio"
 import "../src/jobs"
-import "../src/mac"
+import "../src/os_services"
 import tidal "../src/tidal"
 import "../src/ui"
 
@@ -45,7 +45,7 @@ login_state :: proc() -> ^app.State {
 
 @(private = "file")
 login_state_free :: proc(s: ^app.State) {
-	mac.keychain_delete(app.keychain_service(&s.data), app.KEYCHAIN_ACCOUNT)
+	os_services.secret_delete(app.keychain_service(&s.data), app.KEYCHAIN_ACCOUNT)
 	if s.playback.player != nil {
 		app.playback_shutdown(s)
 	}
@@ -195,8 +195,8 @@ device_login_notice :: proc(t: ^testing.T) {
 	app.auth_changed(d.session, d)
 
 	// The Keychain item names the device client, which restores as not PKCE.
-	item, status := mac.keychain_get(app.keychain_service(d), app.KEYCHAIN_ACCOUNT, context.temp_allocator)
-	testing.expect_value(t, status, mac.ERR_SEC_SUCCESS)
+	item, status := os_services.secret_get(app.keychain_service(d), app.KEYCHAIN_ACCOUNT, context.temp_allocator)
+	testing.expect_value(t, status, os_services.SECRET_OK)
 	testing.expect(t, strings.contains(string(item), fmt.tprintf(`"client_id":"%s"`, d.session.config.client_id)))
 	restored := tidal.session_create()
 	defer tidal.session_destroy(restored)
@@ -223,8 +223,8 @@ device_login_notice :: proc(t: ^testing.T) {
 	testing.expect(t, !d.device_login)
 	testing.expect_value(t, d.auth_gen, 1)
 	testing.expect_value(t, tidal.session_auth(d.session, context.temp_allocator).access_token, "")
-	_, status = mac.keychain_get(app.keychain_service(d), app.KEYCHAIN_ACCOUNT, context.temp_allocator)
-	testing.expect_value(t, status, mac.ERR_SEC_SUCCESS)
+	_, status = os_services.secret_get(app.keychain_service(d), app.KEYCHAIN_ACCOUNT, context.temp_allocator)
+	testing.expect_value(t, status, os_services.SECRET_OK)
 	kinds, queued := queued_kinds(d)
 	testing.expect_value(t, kinds, bit_set[app.Job_Kind; u16]{.Login_Pkce})
 	testing.expect_value(t, queued[0].auth, 1)

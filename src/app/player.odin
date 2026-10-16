@@ -641,7 +641,7 @@ playback_update :: proc(s: ^State, events: []platform.Event) {
 		if e.kind != .Media {
 			continue
 		}
-		switch platform.Media_Command(e.key_code) {
+		switch e.media {
 		case .None:
 		case .Play:
 			playback_set_paused(s, false)

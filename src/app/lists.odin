@@ -46,6 +46,7 @@ import "core:sys/posix"
 import "core:time"
 
 import "../jobs"
+import "../os_services"
 
 LIST_MEMORY_BUDGET :: 16 << 20
 LIST_MEMORY_MAX :: 64
@@ -106,11 +107,11 @@ lists_root :: proc(mock: bool) -> string {
 	if dir := os.get_env("TIDALFAST_CACHE", context.temp_allocator); dir != "" {
 		return strings.clone(dir, runtime.heap_allocator())
 	}
-	home := os.get_env("HOME", context.temp_allocator)
-	if home == "" {
+	dir := os_services.cache_dir(context.temp_allocator)
+	if dir == "" {
 		return ""
 	}
-	return strings.concatenate({home, "/Library/Caches/tidalfast-mock" if mock else "/Library/Caches/tidalfast"}, runtime.heap_allocator())
+	return strings.concatenate({dir, "/tidalfast-mock" if mock else "/tidalfast"}, runtime.heap_allocator())
 }
 
 unix_now :: proc() -> i64 {

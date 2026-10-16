@@ -7,7 +7,7 @@ shell/          Obj-C executable: window, CAMetalLayer, event queue, dylib loade
                 input methods, clipboard and accessibility
 src/platform/   the ABI between shell and app (shell/platform.h mirrors it)
 src/app/        the hot-reloaded app dylib
-src/render/     Metal renderer
+src/render/     renderer, with Metal as its backend (metal_darwin.odin)
 src/text/       fonts, shaping (kb_text_shape), rasterizing (CoreText), glyph atlas
 src/ui/         box tree, layout, input, animation, menus, tooltips and the text field
 src/kbts/       kb_text_shape 2.21: C source and Odin bindings
@@ -16,7 +16,7 @@ src/tidal/      TIDAL API library, see src/tidal/README.md
 src/audio/      FLAC and DASH streaming, fMP4, decoding, miniaudio and CoreAudio HAL output, the play queue's rules, ReplayGain
 src/jobs/       a thread-safe priority queue for jobs and results
 src/cover/      cover sizes, decoding and the texture cache
-src/mac/        Keychain and opening URLs, called straight from Odin
+src/os_services/  secret store (the Keychain), opening URLs, settings and cache folders, one file per OS
 tests/          `odin test tests`
 tests/mock_tidal/  a stand-in TIDAL server for running the app without an account
 tests/audio_check/ compares a capture of the audio output with the source it came from
@@ -191,7 +191,7 @@ The scripts phase adds Thai, Devanagari, Georgian, Armenian, Ethiopic, Tamil, Kh
 `src/ui` is an immediate-mode UI after Ryan Fleury's box UI in raddebugger. Each frame the app builds a tree of boxes. `end_frame` lays it out, draws it with `render` and `text`, and records where every box landed. The next frame tests input against those rects, so a click goes to what was on screen.
 
 ```odin
-ui.begin_frame(&s.ui, events, r, &s.text, w, h, time, ui.hardware_buttons())
+ui.begin_frame(&s.ui, events, r, &s.text, w, h, time, input.mouse_buttons)
 {
 	ui.row("body", {}, ui.fill(), ui.fill())          // parent until the end of the scope
 	ui.label("Your Library", ui.text_size(), ui.px(52))
@@ -214,7 +214,7 @@ Each box has a size per axis: `px(n)`, `text_size(pad)` (the label's width or li
 
 `process_events` folds the frame's events into `Input` and walks them in order. The hit list from the last layout holds every keyed box that is clickable, focusable or scrolls, with its clipped rect, in drawing order. The hot box is the last clickable one under the mouse, so children beat parents and the floating layer beats everything. A press makes the hot box active for that button. A release over the active box is a click. While the left button is held only the active box can be hot. `ui.signal(box)` reports hovering, held, pressed, released, clicked, double-clicked (from the shell's click count), right-clicked (on mouse down, as macOS menus do, control-click included), dragging (past 4 pt, until the release) with the drag delta, and scroll. `Signal.mouse` is the current mouse while held and where the button came up when released, and the drag delta runs to the release too. A press and release in one frame, which happens when the events arrive between two frames, still reports both, so sliders and handles act on `held || released` with `Signal.mouse` rather than on `held` alone. `Input` keeps where each button last went down and came up.
 
-A release can go missing, as when the mouse comes up in another app after the window lost focus. So the app passes `ui.hardware_buttons()`, which asks CoreGraphics (`CGEventSourceButtonState`) which buttons are down in the whole session, to `begin_frame`. A button held since an earlier frame that is up in hardware, with no event for it this frame, gets one more frame for its release to arrive, and then the UI lets go of it: no release, no click, and a drag it held ends without a drop. A hot reload lets go of every button the same way (`ui.cancel_pointer`). Without the hardware state, as in the tests, the UI goes by the events alone.
+A release can go missing, as when the mouse comes up in another app after the window lost focus. So the app passes `Frame_Input.mouse_buttons` to `begin_frame`. The shell fills it every frame with the buttons down in the whole session, which on macOS it asks CoreGraphics for (`CGEventSourceButtonState`). A button held since an earlier frame that is up in hardware, with no event for it this frame, gets one more frame for its release to arrive, and then the UI lets go of it: no release, no click, and a drag it held ends without a drop. A hot reload lets go of every button the same way (`ui.cancel_pointer`). Without the hardware state, as in the tests, the UI goes by the events alone.
 
 A clickable box also counts as hovering while its clickable child is hot, so a row stays lit under its own "more" button.
 
@@ -301,7 +301,7 @@ The PKCE scope is `r_usr+w_usr+w_sub`, as tidalapi sends it. mare-player found T
 
 The tokens go in the login Keychain as one generic password item: service `tidalfast`, account `auth`, label `TIDALfast`. Its data is JSON: token type, access and refresh tokens, expiry, session id, country code and user id. Nothing goes in a file.
 
-`src/mac` calls Security's `SecItemAdd`, `SecItemUpdate`, `SecItemCopyMatching` and `SecItemDelete` directly from Odin with hand-written foreign declarations, along with the CoreFoundation calls to build their dictionaries. These are plain C functions, so they don't hit the compiler's Obj-C bug, and going through the shell would have meant a new ABI version for no gain. They're thread safe, which matters because the tokens are saved from workers.
+`src/os_services/os_services_darwin.odin` calls Security's `SecItemAdd`, `SecItemUpdate`, `SecItemCopyMatching` and `SecItemDelete` directly from Odin with hand-written foreign declarations, along with the CoreFoundation calls to build their dictionaries. These are plain C functions, so they don't hit the compiler's Obj-C bug, and going through the shell would have meant a new ABI version for no gain. They're thread safe, which matters because the tokens are saved from workers.
 
 `src/tidal` refreshes the access token one request at a time: concurrent requests that find it expired wait on one refresh (`refresh_access_token` holds `refresh_mutex`). TIDAL may send a new refresh token with each refresh and the old one stops working, so the session now calls `Session.on_auth_change` after every refresh and login, on the thread that did it, while still holding that mutex. The app's handler writes the item. So the Keychain always has the latest refresh token, and writes never overlap.
 
@@ -459,7 +459,7 @@ fetch thread per track slot --bytes--> Stream window --> decode thread --float f
 - **Fetch.** Each of the two track slots, current and next, has a thread that downloads the file with curl into a 3 MB window: about 17 s of 16/44.1 FLAC and 5 s of 24/192, with the ring's 3 s after it. A DASH track is the initialization segment and then each media segment, fetched one after another into the same window as one run of bytes; see DASH below. The window slides forward as the decoder reads and keeps 256 KB behind the read position for short seeks back. Each request is an HTTP `Range` from where the window ends. When the window is full the thread blocks on a condition variable, so a paused track holds a connection and uses no CPU. If the server closes the connection, the thread resumes from where it got to. After 5 failures in a row, or a 4xx, the track fails. The window is a mapping of its own. When the slot's stream is cleared, by a stop, another track or none, its pages go back to the system with `MADV_FREE_REUSABLE` and stop counting against the app until bytes arrive again. It was 8 MB of heap that stayed dirty after playback stopped: after the mock's hi-res album played out, 5.9 MB of it was still counted, and none is now.
 - **Decode.** One thread owns the slots and the device. It feeds dr_flac (`ma.decoder` with our own read and seek callbacks) the header bytes and then the file from whatever frame a seek started at, applies the track's ReplayGain and writes float frames into the ring. Commands and arriving bytes wake it through a semaphore. Nothing wakes it when the ring has room: while the device runs it also wakes on a timer, every 250 ms or sooner if a quarter of the ring (`LOW_WATER`) would play in less, and tops the ring up. While nothing plays (paused, stopped, or the queue ended) the device is stopped and it waits on the semaphore with no timeout.
 - **Ring.** `Pcm_Ring` is a single-producer, single-consumer ring of 131,072 frames (3 s at 44.1 kHz) with atomic read and write positions. The decode thread drops everything not yet played by storing a flush position, which the callback skips to on its next call, so the writer never touches the reader's position. A queue of marks next to it says which track or seek starts at which ring position. The callback adopts each mark once it has read past it, so the status describes the frame being played.
-- **Callback.** It copies frames out, ramps the volume over one buffer, adopts marks and publishes the current mark and position. It never locks, allocates, logs, waits or makes a system call, and it doesn't use the Odin context. For the seek latency log it reads `mach_absolute_time`, which reads the commpage. The mark's serial, seek id and end flag and the position go out in their own atomics under a sequence count that is odd while they change, and `status` reads them again if the count was odd or moved, so it never pairs one track's or seek's mark with another's position.
+- **Callback.** It copies frames out, ramps the volume over one buffer, adopts marks and publishes the current mark and position. It never locks, allocates, logs, waits or makes a system call, and it doesn't use the Odin context. For the seek latency log it reads `clock_ticks` (`src/audio/clock_darwin.odin`), which is `mach_absolute_time` and reads the commpage. The mark's serial, seek id and end flag and the position go out in their own atomics under a sequence count that is odd while they change, and `status` reads them again if the count was odd or moved, so it never pairs one track's or seek's mark with another's position.
 - **Main thread.** The app sends commands (`play`, `stop`, `seek`, `set_next`, `set_paused`) under a mutex that the decode thread holds only to copy them, and reads a `Status` snapshot each frame. Neither waits on the network or the device. The decode thread wakes the UI when the status changes, and four times a second while playing for the progress bar.
 
 ### Queue and gapless
@@ -489,7 +489,7 @@ The slowest in both is a seek to 18.7 s in a 20 s track, which needed a second p
 
 ### Media keys and Now Playing
 
-`MPRemoteCommandCenter` and `MPNowPlayingInfoCenter` are Obj-C classes, and Odin dev-2026-10 crashes compiling Obj-C method calls, so both live in `shell/shell.m`. The shell enables play, pause, toggle, next, previous and `changePlaybackPosition`, and turns each command into an `EVENT_MEDIA` event: `key_code` is the `Media_Command`, `dx` the position for a seek. The app handles them in `playback_update`, the same way as the player bar's buttons.
+`MPRemoteCommandCenter` and `MPNowPlayingInfoCenter` are Obj-C classes, and Odin dev-2026-10 crashes compiling Obj-C method calls, so both live in `shell/shell.m`. The shell enables play, pause, toggle, next, previous and `changePlaybackPosition`, and turns each command into an `EVENT_MEDIA` event: `media` is the `Media_Command`, `dx` the position for a seek. The app handles them in `playback_update`, the same way as the player bar's buttons.
 
 The app calls `Shell.set_now_playing` with the title, artist, album, duration, elapsed time, state and the cover as RGBA pixels, which an `Artwork` job fetches at 640x640. It calls it only when one of those changes, since macOS moves the elapsed time along by itself from the playback rate. The shell copies everything before it returns and rebuilds the artwork only when `artwork_key` changes. Now Playing came with platform ABI version 2; text input and accessibility made it version 3 (see Text input). Every struct the two sides share has a size check on both sides.
 
@@ -616,7 +616,7 @@ Every offset is a byte offset on a grapheme cluster boundary. The boundaries com
 
 With the focus, the field takes:
 
-- Left and Right by cluster, Option by word, Command to either end, and Up, Down, Home and End to either end. Shift extends the selection. Word movement skips separators, then goes over letters and digits.
+- Left and Right by cluster, Option by word, Command to either end (`ui.WORD` and `ui.LINE`, per OS like `ui.PRIMARY`), and Up, Down, Home and End to either end. Shift extends the selection. Word movement skips separators, then goes over letters and digits.
 - Backspace and Delete by cluster, Option by word, Command to the end of the line.
 - Cmd-A, Cmd-C, Cmd-X, Cmd-V, Cmd-Z and Shift-Cmd-Z, Control-A and Control-E.
 - Clicks: one places the cursor (Shift extends), two select a word, three select everything, and dragging selects by cluster, or by word after a double-click.
@@ -661,6 +661,15 @@ The clipboard goes through `Shell.set_clipboard` and `Shell.get_clipboard`, whic
 - `Frame_Result` (8 bytes) has `wake_after`.
 - `Shell` (64 bytes) adds `set_text_input`, `set_clipboard`, `get_clipboard` and `set_accessibility`.
 - New structs: `Text_Input` (48 bytes) and `Access_Node` (56 bytes). `Text_Input.limit` took the place of a padding field, so a shell or app that leaves it 0 means no limit, and the version stays 3.
+
+### Platform ABI version 6
+
+Version 6 takes the macOS-only parts out of the ABI, so a shell for another OS can fill the same structs.
+
+- `Event.key` is a `Key`: keys by their place on a US keyboard, which the shell maps its own key codes to. It took the place of `key_code`, which held macOS virtual key codes. Keys outside the enum arrive as `None`. `Event.media` holds the `Media_Command` in what was a padding byte, so `Event` stays 88 bytes. `platform.h` and `platform.odin` both check that `Key` has 65 values.
+- The modifiers are `Shift`, `Control`, `Alt` and `Super`, with the same bits as before. Alt is Option and Super is Command on macOS.
+- `Frame_Input` (56 bytes) adds `mouse_buttons`, the buttons held down in any app, which the UI used to ask CoreGraphics for itself.
+- `Shell` (56 bytes) has one `surface` in place of `metal_device` and `metal_layer`. On macOS it is the `CAMetalLayer`, set up by the shell, and the Metal backend takes the device from it.
 
 ## Search
 

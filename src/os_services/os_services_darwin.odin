@@ -1,9 +1,13 @@
-// The few macOS services the app needs that aren't windows or drawing: the
-// Keychain and opening a URL in the default browser. All of them are C APIs
-// (Security, CoreFoundation, LaunchServices), so they are called straight
-// from Odin without going through the shell, and they're safe on any thread.
-package mac
+// The few OS services the app needs that aren't windows, drawing or audio:
+// a secret store, opening a URL in the default browser and where settings
+// and caches go. Each OS has its own file. On macOS the secret store is the
+// login Keychain, and all of it is C APIs (Security, CoreFoundation,
+// LaunchServices), so it's called straight from Odin without going through
+// the shell, and it's safe on any thread.
+package os_services
 
+import "base:runtime"
+import "core:os"
 import "core:strings"
 import "core:sys/posix"
 
@@ -11,16 +15,23 @@ foreign import CoreFoundation "system:CoreFoundation.framework"
 foreign import Security "system:Security.framework"
 foreign import CoreServices "system:CoreServices.framework"
 
+@(private)
 CFTypeRef :: rawptr
+@(private)
 CFStringRef :: rawptr
+@(private)
 CFDataRef :: rawptr
+@(private)
 CFDictionaryRef :: rawptr
+@(private)
 CFURLRef :: rawptr
+@(private)
 CFIndex :: int
-OSStatus :: i32
 
-ERR_SEC_SUCCESS :: 0
-ERR_SEC_ITEM_NOT_FOUND :: -25300
+Status :: i32 // OSStatus
+
+SECRET_OK :: 0 // errSecSuccess
+SECRET_NOT_FOUND :: -25300 // errSecItemNotFound
 
 @(private)
 CF_STRING_ENCODING_UTF8 :: 0x08000100
@@ -60,15 +71,15 @@ foreign Security {
 	kSecMatchLimit:           CFStringRef
 	kSecMatchLimitOne:        CFStringRef
 
-	SecItemAdd :: proc(attributes: CFDictionaryRef, result: ^CFTypeRef) -> OSStatus ---
-	SecItemCopyMatching :: proc(query: CFDictionaryRef, result: ^CFTypeRef) -> OSStatus ---
-	SecItemUpdate :: proc(query: CFDictionaryRef, attributes: CFDictionaryRef) -> OSStatus ---
-	SecItemDelete :: proc(query: CFDictionaryRef) -> OSStatus ---
+	SecItemAdd :: proc(attributes: CFDictionaryRef, result: ^CFTypeRef) -> Status ---
+	SecItemCopyMatching :: proc(query: CFDictionaryRef, result: ^CFTypeRef) -> Status ---
+	SecItemUpdate :: proc(query: CFDictionaryRef, attributes: CFDictionaryRef) -> Status ---
+	SecItemDelete :: proc(query: CFDictionaryRef) -> Status ---
 }
 
 @(private, default_calling_convention = "c")
 foreign CoreServices {
-	LSOpenCFURLRef :: proc(url: CFURLRef, launched: ^CFURLRef) -> OSStatus ---
+	LSOpenCFURLRef :: proc(url: CFURLRef, launched: ^CFURLRef) -> Status ---
 }
 
 @(private)
@@ -90,10 +101,10 @@ cf_dictionary :: proc(keys, values: []CFTypeRef) -> CFDictionaryRef {
 	return CFDictionaryCreate(nil, raw_data(keys), raw_data(values), len(keys), key_callbacks, value_callbacks)
 }
 
-// keychain_set stores data as the generic password item (service, account),
+// secret_set stores data as the generic password item (service, account),
 // replacing the item's data if it exists. Returns the Security status,
-// ERR_SEC_SUCCESS on success.
-keychain_set :: proc(service, account: string, data: []u8) -> OSStatus {
+// SECRET_OK on success.
+secret_set :: proc(service, account: string, data: []u8) -> Status {
 	svc := cf_string(service)
 	defer CFRelease(svc)
 	acct := cf_string(account)
@@ -106,7 +117,7 @@ keychain_set :: proc(service, account: string, data: []u8) -> OSStatus {
 	update := cf_dictionary({kSecValueData}, {value})
 	defer CFRelease(update)
 	status := SecItemUpdate(query, update)
-	if status != ERR_SEC_ITEM_NOT_FOUND {
+	if status != SECRET_NOT_FOUND {
 		return status
 	}
 	label := cf_string("TIDALfast")
@@ -119,10 +130,10 @@ keychain_set :: proc(service, account: string, data: []u8) -> OSStatus {
 	return SecItemAdd(item, nil)
 }
 
-// keychain_get reads the data of the generic password item (service,
-// account) into allocator. Status is ERR_SEC_ITEM_NOT_FOUND when there is
+// secret_get reads the data of the generic password item (service,
+// account) into allocator. Status is SECRET_NOT_FOUND when there is
 // no such item.
-keychain_get :: proc(service, account: string, allocator := context.allocator) -> (data: []u8, status: OSStatus) {
+secret_get :: proc(service, account: string, allocator := context.allocator) -> (data: []u8, status: Status) {
 	svc := cf_string(service)
 	defer CFRelease(svc)
 	acct := cf_string(account)
@@ -134,7 +145,7 @@ keychain_get :: proc(service, account: string, allocator := context.allocator) -
 	defer CFRelease(query)
 	result: CFTypeRef
 	status = SecItemCopyMatching(query, &result)
-	if status != ERR_SEC_SUCCESS || result == nil {
+	if status != SECRET_OK || result == nil {
 		return nil, status
 	}
 	defer CFRelease(result)
@@ -144,9 +155,9 @@ keychain_get :: proc(service, account: string, allocator := context.allocator) -
 	return data, status
 }
 
-// keychain_delete removes the generic password item (service, account).
-// Deleting an item that doesn't exist returns ERR_SEC_ITEM_NOT_FOUND.
-keychain_delete :: proc(service, account: string) -> OSStatus {
+// secret_delete removes the generic password item (service, account).
+// Deleting an item that doesn't exist returns SECRET_NOT_FOUND.
+secret_delete :: proc(service, account: string) -> Status {
 	svc := cf_string(service)
 	defer CFRelease(svc)
 	acct := cf_string(account)
@@ -166,4 +177,24 @@ open_url :: proc(url: string) -> bool {
 	}
 	defer CFRelease(u)
 	return LSOpenCFURLRef(u, nil) == 0
+}
+
+// config_dir is where settings go: ~/Library/Application Support. Empty
+// without HOME.
+config_dir :: proc(allocator: runtime.Allocator) -> string {
+	return home_path("/Library/Application Support", allocator)
+}
+
+// cache_dir is where caches go: ~/Library/Caches. Empty without HOME.
+cache_dir :: proc(allocator: runtime.Allocator) -> string {
+	return home_path("/Library/Caches", allocator)
+}
+
+@(private)
+home_path :: proc(path: string, allocator: runtime.Allocator) -> string {
+	home := os.get_env("HOME", context.temp_allocator)
+	if home == "" {
+		return ""
+	}
+	return strings.concatenate({home, path}, allocator)
 }
