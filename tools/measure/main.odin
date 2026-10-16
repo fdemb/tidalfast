@@ -1,6 +1,6 @@
 // Launches the app again and again with TIDALFAST_MEASURE set, reads its
 // `measure:` lines and prints what it found. See "Measuring RAM and
-// startup" in the README.
+// startup" in docs/measuring.md.
 //
 //     ./build.sh measure
 //     ./build/measure/measure startup            fake and mock, 10 runs each

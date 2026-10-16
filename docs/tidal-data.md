@@ -1,0 +1,167 @@
+# TIDAL data
+
+`src/app/data.odin`, `workers.odin`, `covers.odin` and `login.odin` connect the library screen to TIDAL through `src/tidal`.
+
+## Login
+
+The login screen's main path is the PKCE login of TIDAL's Android phone client (`6BDSRdpK9hqEBTgU`). TIDAL decides the best stream a token gets by the OAuth client it was issued to, not by the subscription alone, and this is the only client of the ones below that TIDAL gives FLAC. A test with a real account showed what the device-code client gets instead: `playbackinfopostpaywall` answers with HTTP 200, but the manifest's codec is `MP4A`, AAC, for every track. The player doesn't decode AAC, so with that client nothing plays.
+
+How the paste works:
+
+1. With no saved login the screen shows a "Log in with TIDAL" button, two lines saying that TIDAL ends on a page that doesn't load and to paste that page's address here, a text field and "Continue". The app asks TIDAL for nothing until the user acts, and never opens the browser by itself: a window that launches a browser every time it starts without a login is rude, and scripts run it that way too.
+2. The button opens `login.tidal.com/authorize` in the browser through LaunchServices (`LSOpenCFURLRef`), with the client id, the S256 challenge of a PKCE verifier, a client key, `appMode=android` and the redirect `https://tidal.com/android/login/auth`. The verifier and key live in `Data`, so a hot reload doesn't lose them.
+3. After the login TIDAL redirects to that address, which shows an "Oops" page. Its address has `?code=...`. The user copies it from the address bar and pastes it in the field (Cmd-V, the phase 7 text field). The field holds up to 2,048 bytes; `FIELD_CAPACITY` went from 256 to 2,048 for it, since nobody documents how long TIDAL's codes get.
+4. Return or "Continue" checks the address (`pkce_check`). Spaces and quotes around it go. It must start with the redirect, followed by `?` or `/`. An `error=` in it means TIDAL ended the login, and the screen says so with TIDAL's reason. Without a `code=` the screen asks for the whole address. Anything else gets "That isn't the address TIDAL ends on." Nothing goes to TIDAL until the address passes.
+5. A `Login_Pkce` job trades the code and verifier for tokens. If the queue is full, the kind goes in `Data.retry` and the next frame pushes it again, so the login can't get lost. If TIDAL refuses the code, the field empties and the screen says to log in with TIDAL again, which makes a new verifier.
+
+`TIDALFAST_PKCE_REDIRECT` (debug builds) finishes the login with the address it holds at start, so a script can log in to `tests/mock_tidal` without a browser.
+
+The code in the address works once. If the exchange gets the tokens and loading the session then fails, the card says so and offers "Try again", which loads the session with the tokens the exchange got. A hot reload in between keeps them too, and the `Login_Pkce` job that was put back finishes with them. Only when there are no such tokens does it trade a code again.
+
+The device-code login is still there, under "Log in with a code instead (AAC only, no lossless)". It shows a code and `link.tidal.com`, and "Open in your browser" opens the link with the code already in it. A worker polls TIDAL (`login_device_wait`) until the user approves, then the library loads. It waits the `interval` TIDAL gave between polls, 5 s longer after each `slow_down`. If the code expires a new one is fetched. If TIDAL can't be reached while the code is still good, the screen says so and the app checks once after 2 s, then 4, 8, 16 and 30 s between tries, never sooner than the interval, and goes back to normal polling as soon as TIDAL answers. A poll that goes back in the queue, after a 429 or a reload, keeps the interval it had reached, `slow_down` included, and waits that long from when it went back. Once a poll has the tokens the code is spent, so if loading the session then fails or waits out a backoff, the next try loads it with those tokens, however long ago the code expired. A 5xx or a 408 counts as not reaching TIDAL, while polling and while loading the session, so it gets the same retries. Anything else stops the login: the screen shows the error and a "Try again" button instead of the code. "Try again" loads the session with the tokens if the login has them, and asks for a new code if it doesn't. If TIDAL refuses the tokens, they go, and "Try again" starts over with a new code. "Log in with TIDAL instead" goes back to the PKCE login.
+
+A login made with the device client, from the Keychain or just now, is recognised by its stored `client_id` (or `is_pkce` false in older items). The library then shows "This login can only stream AAC. Log in again for lossless." along the top, with "Log in with TIDAL" and "Not now". The user can browse meanwhile. "Log in with TIDAL" opens the login page and shows the login screen over the library, with "Back to your library". Pasting an address there ends the old account (its jobs go, as on a sign-out) but leaves its Keychain item until the new login overwrites it, so a PKCE login that fails doesn't lose the old one.
+
+Each login attempt has a number (`Data.login_attempt`). It goes up when the user switches between the two logins, and when a sign-out starts a new login. `Login_Start`, `Login_Wait` and `Login_Pkce` jobs carry the number they were queued with, and the session knows the current one (`tidal.session_set_login_attempt`). A device-code poll that TIDAL approves after the user moved on to the PKCE login has its tokens dropped before they reach the session, so it can't replace a PKCE login that finished first, possibly of another account. Its result is ignored. A poll that was still queued doesn't poll at all. A device code that arrives after the user switched to the PKCE login is dropped too, so the PKCE screen stays. If the user is back on the code login by then, it asks for a code of its own.
+
+The Keychain item stores `client_id`, the client the tokens were issued to. A refresh has to use it: the mock refuses a PKCE refresh token sent with another client id, and TIDAL rotates refresh tokens per client. Items saved before this go by their `is_pkce` flag.
+
+What the reference clients say about client ids, checked October 2026:
+
+| client id | flow | what it streams | who uses it |
+|---|---|---|---|
+| `fX2JxdmntZWK0ixT` | device code | `LOSSLESS` at best, 16/44.1 BTS | tidalapi's default `client_id`, and this app's device login; lumitide on Linux and macOS (which says it gets `HIGH` AAC with it) |
+| `4N3n6Q1x95LL5K7p` | device code | `LOSSLESS` 16/44.1 | riptide and tiddl. riptide's notes say asking it for `HI_RES_LOSSLESS` on a `HIRES_LOSSLESS` track with a `HI_RES` subscription returns `LOSSLESS`, 16-bit 44.1 kHz |
+| `6BDSRdpK9hqEBTgU` | PKCE, Android phone | `HI_RES_LOSSLESS`, as DASH | tidalapi's `client_id_pkce`, high-tide (PKCE only, it drops older non-PKCE logins), mare-player. mare-player measured that this client gets the hi-res FLAC tier and issues refresh tokens, and that it serves DASH for both FLAC tiers, `LOSSLESS` included. Its token response names it `TIDAL_Android_2.87.0` |
+| `mhPVJJEBNRzVjr2p` | PKCE, Windows desktop, no secret | lossless FLAC | lumitide on Windows, with the `tidal://login/auth` redirect that only the desktop app can receive |
+
+The PKCE scope is `r_usr+w_usr+w_sub`, as tidalapi sends it. mare-player found TIDAL accepts two redirects for the Android client, `https://tidal.com/android/login/auth` (the browser lands on it, so the user copies it) and `tidal://login/auth` (needs a URL scheme handler). Every other redirect it tried, `http://127.0.0.1` included, gets error 11102, so a local web server can't catch the code. A `tidal://` handler would remove the copy and paste, but needs the shell to register the scheme. Developer-portal credentials don't work at all: the device flow refuses them ("not a Limited Input Device client") and their tokens get 401 from `playbackinfopostpaywall`, per riptide. None of this has been tried against the real TIDAL from here; it's what the reference clients document.
+
+## Keychain
+
+The tokens go in the login Keychain as one generic password item: service `tidalfast`, account `auth`, label `TIDALfast`. Its data is JSON: token type, access and refresh tokens, expiry, session id, country code and user id. Nothing goes in a file.
+
+`src/os_services/os_services_darwin.odin` calls Security's `SecItemAdd`, `SecItemUpdate`, `SecItemCopyMatching` and `SecItemDelete` directly from Odin with hand-written foreign declarations, along with the CoreFoundation calls to build their dictionaries. These are plain C functions, so they don't hit the compiler's Obj-C bug, and going through the shell would have meant a new ABI version for no gain. They're thread safe, which matters because the tokens are saved from workers.
+
+`src/tidal` refreshes the access token one request at a time: concurrent requests that find it expired wait on one refresh (`refresh_access_token` holds `refresh_mutex`). TIDAL may send a new refresh token with each refresh and the old one stops working, so the session now calls `Session.on_auth_change` after every refresh and login, on the thread that did it, while still holding that mutex. The app's handler writes the item. So the Keychain always has the latest refresh token, and writes never overlap.
+
+At start a worker reads the item and puts it in the session with `tidal.session_restore`, without asking TIDAL anything. An expired access token is refreshed by the first request. The app signs out (`sign_out` in `data.odin`), deleting the item and showing the login screen, in two cases. One is TIDAL turning the refresh token down: a 400 or 401 with the OAuth error `invalid_grant`. The other is a 401 to an API request that sent the tokens. A cover or a login job never signs out, since covers carry no token and a login job's 401 means the user denied it. Any other refresh failure, such as a 408, a 5xx, a 400 with another code or no answer at all, keeps the tokens. A rate-limited refresh waits out the backoff like any 429. For the rest the job goes back in the queue after 2 s, then 4, 8, 16 and 30 s, until a refresh works.
+
+Several requests usually fail together when a login ends. Each job carries the auth generation it was queued in (`Data.auth_gen`), and `sign_out` raises it, so the first failure signs out and every later result from the old generation is dropped before anything looks at its error. `sign_out` also takes the old login's jobs out of the queue and calls `tidal.session_clear_auth`, which empties the session and cancels requests sent with the old tokens, in flight or not. A refresh that finishes after that doesn't store its tokens. Then exactly one new login starts. Saving and deleting the item happen under one mutex, and a save checks that the tokens it read still belong to the session's current login, so a late refresh of the old login can't bring the item back or overwrite the new one.
+
+Reading happens on a worker for a reason. The login Keychain ties an item to the code signature of the program that made it. Our builds are ad-hoc signed and clang's output differs from build to build, so a rebuilt `build/tidalfast` counts as a different program, and macOS asks the user whether it may read the item. That dialog blocks the calling thread until it's answered. Meanwhile the library says it's reading the Keychain. To keep the dialog rare, `build.sh` relinks the shell only when `shell/` changes or the build mode does, so `./build.sh` and `./build.sh app` leave the binary, and its signature, alone. The data protection Keychain would avoid this, but it needs an entitlement, which needs a real signing identity (`-34018` without one). The `security` command line tool isn't on the item's access list either, so `security find-generic-password -w` prompts too; without `-w` it shows the item without reading it.
+
+## API version
+
+Everything goes through TIDAL's v1 API at `api.tidal.com/v1` using what `src/tidal` already has:
+
+- `users/{id}/playlistsAndFavoritePlaylists` for the sidebar: playlists the user made and the ones they follow, 50 at a time.
+- `users/{id}/favorites/tracks` for Liked Songs, newest first. The sidebar asks it for one track too, which gives the count and the newest liked track.
+- `playlists/{id}/tracks` for a playlist.
+
+The plan said v2 (`openapi.tidal.com`). The reference clients show v1 still works with a device-code token: lumitide logs in the same way and reads `users/{id}/favorites/tracks`, `users/{id}/playlists` and `playlists/{id}/items` from v1, and tidalapi (behind high-tide) has all three endpoints above. riptide moved to v2 and says it works, but riptide still needs v1 for playback, so v1 isn't going away for us either. v2 is JSON:API, where a playlist's tracks come back as references that need `include` and a second lookup per page, and `src/tidal` has none of that yet. v1 returns whole tracks with their album covers in one response. If TIDAL turns these endpoints off, `user_playlist_and_favorite_playlists`, `favorites_tracks` and `playlist_tracks` are the three calls to replace.
+
+## Jobs and threads
+
+Four worker threads (`WORKERS`) share two queues in `State`, both from `src/jobs`. The jobs queue goes from the UI thread to the workers. The results queue goes back. Each is a fixed array of 256 plain-data items behind a mutex and condition variable. Jobs come out by priority, then oldest first: data (sign-in, playlists, track pages) before visible covers, visible covers before the ones just outside the view. A job a worker has taken keeps its slot until it's done or put back, so a job cut short always has room to go back, however full the UI made the queue meanwhile. Covers leave 16 slots free for data jobs. If the queue refuses a data job anyway, its kind goes in `Data.retry` and the next frame pushes it again; a worker finishing a job frees a slot and asks for that frame. A refused cover stays wanted and is pushed again the same way. A job holds only fixed-size text (a playlist id, an image id, a device code) and numbers, so it never points into memory a view switch or a reload could free. A worker runs a job, pushes the result and calls the shell's `request_redraw`. The next frame takes results right after `ui.begin_frame`.
+
+Kinds of job: `Restore` (read the Keychain), `Login_Start`, `Login_Wait`, `Login_Pkce` (finish the PKCE login with the pasted address), `Playlists`, `Tracks` (one page), `Cover`, `Stream` (resolve a track's stream, see [Playback](playback.md)), `Artwork` (a cover for Now Playing, kept as pixels), `Search` (see [Search](search.md)), `Save_Settings` (write the output settings, so a click never waits on the disk; see [Output settings](playback.md#output-settings)) and `Disk` (read or write a list cache file). `Tracks` also pages through search results, an album's tracks and an artist's top tracks. `Disk` jobs go to a queue of their own with one thread, so reading a cached list never waits behind the network, and writes happen in the order they were asked for. Its results come back through the same results queue.
+
+Hot reload: `unload` sets the session's abort flag, which makes curl stop any transfer in flight (an `XFERINFOFUNCTION` that checks it) and `login_device_wait` return. Then it stops both queues and joins the workers. A worker whose job was cut short puts it back in the queue where it was. `unload` then copies the session's login state to a heap buffer, keeps the backoff's end and reason in `State`, and destroys the session, since a `tidal.Session` holds allocators and a curl handle pool made by this dylib. `reload` makes a new session, restores the login and the backoff, and starts new workers, which pick up the jobs that were put back. So a reload during a 30 minute anti-abuse hold doesn't end it. A device login that got its tokens but hadn't loaded the session when the reload came keeps them too: `reload` restores tokens without a user only then, and the `Login_Wait` that was put back finishes the login with them. Results that were waiting stay in their queue. A `Login_Wait` job holds the code's expiry as a time, not a duration, so a reload doesn't stretch it.
+
+## Memory
+
+Each job that returns data gets its own virtual-memory arena (`core:mem/virtual`), and `src/tidal` parses into it. Scratch memory is the worker's thread-local temp allocator, reset after each job, never the result allocator. The UI thread then:
+
+- adopts the Playlists result's arena as the sidebar's, and destroys the previous one;
+- copies a track page's rows into the open list's arena and destroys the page's;
+- adopts a cache file's arena as the list's or the sidebar's, since the rows' strings point into the file read into it;
+- uploads a cover's pixels and frees them.
+
+The open list's arena lives in `State`. When another list opens, a list that loaded whole goes to the list cache in memory with its arena (see The list cache), and anything else is destroyed, which gives its pages back. A worker's temp allocator is one 4 MB block, and parsing a page of tracks dirties about 750 KB of it; rolling it back keeps those pages. So a worker that finds the queue empty after a job gives back all but 64 KB of the block with `MADV_FREE_REUSABLE`, and takes it back with `MADV_FREE_REUSE` before its next job. On the mock that's about 2.3 MB after a list has loaded. Pages carry the list's generation number, so a page for a list that's been closed is dropped when it arrives.
+
+The frame's boxes and its accessibility tree borrow strings from the open list, the search results and the play queue until `end_frame`. So nothing a frame does while it's being built may free them. A click that opens another list, closes the search or plays from the track menu goes in `State.pending`, and `pending_apply` does it once the frame is drawn, then asks for the next one. Results from the workers are handled at the start of a frame, before anything borrows from them. Debug builds keep the last list arena that was freed, filled with `0xdb`, until the next one is freed, so a string still borrowed from it shows up as garbage instead of passing for the next list's data. That covers a list that closed without loading whole, one the cache dropped and the old rows a refresh replaced. A list that goes to the cache isn't freed, so its strings stay good. The tests turn the same thing on.
+
+## Pages
+
+A list opens with the track count TIDAL gave for it, so the table has its full height straight away and rows not yet loaded show as placeholders. The first page is 50 tracks so it shows sooner. The rest come 100 at a time, two pages in flight. Each page of Liked Songs or a playlist carries TIDAL's `totalNumberOfItems`, and the page that reaches it ends the list. TIDAL leaves tracks that can't be played out of their page but still counts them, so a page can come back short in the middle of a list. That's a gap: the rows after it move up, and later pages land where TIDAL's offset minus the gaps before it puts them. A list of 1,433 liked tracks with three unavailable shows 1,430 rows. Before this, a short page ended the list, which cut Liked Songs off at 149. Lists without a total (search, albums, artists) still end at a short page. Pages can arrive out of order, so the earliest end found stands: an empty page asked for past the end can't raise the count again, and rows past the end are dropped. If a list without a total turns out longer than TIDAL said, full pages keep raising the count and one more page is asked for at a time until a short one.
+
+## The list cache
+
+`src/app/lists.odin` keeps track lists so that opening one again doesn't ask TIDAL for it, unless there's a sign it changed. It keeps them in two places:
+
+- In memory: a list that loaded whole keeps its arena when another list opens. Up to 64 lists stay, within 16 MB of arena pages; past that the list used longest ago goes. They live in `State`, so they survive a hot reload.
+- On disk: every list but search results, and the sidebar, as one file each under `~/Library/Caches/tidalfast/<user id>/`. The directory stays under 50 MB: after each write, the files opened longest ago (by modification time, which a read or a reopen from memory moves on) go first. The sidebar's file stays. Sign-out deletes the directory, and the memory copies go with any account change. With `TIDALFAST_FAKE` nothing is kept, against `TIDALFAST_API` the files go to `~/Library/Caches/tidalfast-mock`, and the tests use a folder under `/tmp`.
+
+Each kept list has the version TIDAL said it was at and when it was fetched. Opening it shows the kept rows at once. Then the version is checked against what the sidebar says now, and the list is fetched again in the background only if:
+
+| list | fetched again when |
+|---|---|
+| playlist in the sidebar | its `lastUpdated` or track count differs from the one it was fetched at |
+| playlist from a search | it's a day old (the sidebar doesn't list it, so there's no version to check) |
+| Liked Songs | the favorites count or the newest liked track differs, or it's three days old |
+| album | it's 30 days old |
+| artist's top tracks | it's a day old |
+| search results | kept in memory only, for five minutes, then searched for again |
+
+So a playlist that didn't change opens with no request at all. The sidebar's request gives both versions: `lastUpdated` and the count for each playlist, and a one-track page of Liked Songs for its count and newest track. Whether TIDAL answers `If-None-Match` with 304 isn't known, so nothing relies on it.
+
+At sign-in the sidebar is read from disk while it's fetched from TIDAL as before. Whichever comes first shows; a file that arrives after TIDAL's answer is ignored. Liked Songs opens from disk too, so a second launch shows the sidebar and the list without waiting on the network. When TIDAL's sidebar arrives, the open list is checked against it. The sidebar is fetched again when the window becomes key or a sidebar entry opens, once it's more than five minutes old. Both are things the user does, so an idle window never wakes for it.
+
+A refresh fetches the list into a second `Track_View` (`Data.refresh`) while the old rows stay on screen. When its last page arrives it replaces the open list's rows before the frame is built. The selection, the track menu, the status line and the scroll position follow their tracks by id, not their row numbers: the row that was first in view stays first. The playing row follows by itself, as after reopening a list. The play queue is a copy, so playback goes on as it was. A refresh that fails leaves the kept rows.
+
+`list_edited` puts the app's own edits into the kept copies and their files with the version TIDAL answers, so the next launch doesn't fetch the list again: a track added to a playlist goes at the end, a liked track on top of Liked Songs, a removed one goes. Nothing calls it yet, because the app makes no edits on TIDAL: dropping a row on a playlist only says it was added.
+
+Covers go to disk too, as the JPEGs TIDAL sent, in `covers/` in the same folder, named by image id and size. An image id always shows the same picture, so a cover file is never stale. The workers read and write them themselves, around the download. A cover file that doesn't decode is deleted. The folder has a 50 MB budget of its own, checked at the first cover written each session and every 256 after; the files used longest ago go first. Sign-out deletes them with the lists, and a download that finishes after it isn't written.
+
+A file is a header (magic, format version, the list's kind and id, its version, when it was fetched and TIDAL's count), then fixed-size records, then the text their strings point into, with an FNV-1a sum of everything after the header. Loading reads the whole file into the list's arena and points the rows' strings into it, with no copy. A file of another format version, with a wrong sum or sizes, or for another list is deleted when it's read, and the list comes from TIDAL. Writes go to a temp file that's renamed into place. Files hold names, ids, image ids and counts only: never tokens, headers or URLs. The log names lists by kind and TIDAL id, at debug level.
+
+## Rate limits
+
+`src/tidal` already backs off after a 429 (for `Retry-After`, or 60 s) or an anti-abuse 403 (for `Retry-After`, or 30 minutes), and refuses requests locally until then. All workers share one session, so they share that state. The OAuth endpoints go through it too: asking for a device code, polling for approval and refreshing the token. Covers go through it as well: `tidal.resource_get` downloads from `resources.tidal.com` with the session's backoff check and curl pool, without the API's token and parameters. A worker checks `backoff_remaining` before each job. While it's above zero, the worker puts the job back and sleeps until the backoff ends or the queue stops. A job refused with `Backing_Off`, or the one that got the 429 or 403, goes back in the queue too, instead of failing. The library's status line says how long TIDAL asked us to wait.
+
+## Covers
+
+1. Drawing a cover asks the cache (`src/cover`) for it at the size it's drawn at on this display, in pixels: the box's points times the backing scale. Track rows are 40 pt, so 80x80 at 2x; the 92 pt header is 184x184 and the 56 pt Now Playing cover 112x112. `pick_size` picks what to download: the smallest size TIDAL serves that's at least that many pixels, so 80x80 for rows, 320x320 for the header, and 160x160 for the sidebar's playlist images, the smallest TIDAL has for playlists. Rows within 4 of the view ask for theirs too, at a lower priority.
+2. After the frame is built, `covers_schedule` queues a job for each cover asked for this frame with no job yet. Queued covers that weren't asked for this frame, because their rows scrolled away, come out of the queue. A worker that already has one finishes it, and the cover stays in the cache.
+3. The worker reads the JPEG from disk if it has it (see The list cache), or downloads it and keeps it there. It decodes it with `stb_image`, scales it to the drawn size with `stb_image_resize` (filtering in linear light) when the two differ, and runs `render.convert_premultiplied` on the pixels, so the upload can pass `converted = true`.
+4. The UI thread copies it into a slot of a shared page. Uploads stop for the frame after 2 ms; what's left waits for the next frame.
+5. A page is one RGBA8 texture holding a grid of covers of one pixel size, up to 8x8 and at most 640 texels across (one cover per page if it's wider): 64 row covers in 1.6 MB, 9 header covers in 1.2 MB. Every cover is drawn at exactly its pixel size, so no page needs mipmaps. A new cover takes a free slot of its size, or opens a page while the pages stay within 8 MB, or else takes the slot of the least recently drawn cover of its size. That cover can't have been drawn in the last three frames, which the GPU may still be drawing, so overwriting its slot never shows in a frame. If every cover of that size was drawn lately, a page opens over the budget, and after the frame the cache gives back whole pages until it's within budget again: the page whose newest cover was drawn longest ago first, never one with a cover drawn this frame. The cache keeps up to 2,048 entries.
+
+One texture per cover cost far more than its pixels. With 571 covers loaded, Metal's allocations grew about 96 KB a cover for 25 KB of 80x80 pixels and a third more of mips. Pages also let a batch of covers share a draw call; see [Renderer](renderer.md).
+
+A cover shows a flat placeholder until its texture arrives, then fades in over 0.25 s. The fade asks for frames only until it finishes. A cover that failed is tried again once it has left the screen and comes back, or after 30 s. That includes a 401: cover downloads send no token, so their answer says nothing about the login.
+
+Texture uploads don't wait on the GPU. Pages have no mips, and a mip generation is the only thing `texture_update` waits on.
+
+## The mock server
+
+`tests/mock_tidal` serves the device login (approved a few seconds after the first poll), token refresh that rotates the refresh token, the session and user, 1,433 liked tracks (at most 100 a page, with three unavailable ones left out of their pages but counted in `totalNumberOfItems`, as TIDAL does), 12 playlists (one with 3,000 tracks), their tracks, and covers drawn on request as JPEGs at any size. Flags set the long playlist's length, the login delay, the access token's lifetime, delays for pages and covers, a request to answer with 429, 429s for the first device code requests, `slow_down` answers to the first polls, a 429 to one poll of each code, a point after which it refuses the login with 401 until the next device login, and 401s to the first covers after each device login, held back for as long as you ask. It prints the time between polls. The comment at the top of `main.odin` lists them. It never prints tokens or Authorization headers, and neither does the app.
+
+It answers `/search` too. Tracks of the long playlist match by title or artist, ignoring ASCII case, up to TIDAL's 300, with their albums and artists and the playlists whose names match. A query that matches nothing, such as 日本語, gets 120 made-up tracks named after it, so every query has results. `/albums/<id>/tracks` and `/artists/<id>/toptracks` return 12 and 20 made-up tracks. It logs each search with its query.
+
+Each playlist has a `lastUpdated`. `GET /mock/change?playlist=N` adds a track to playlist N and moves its `lastUpdated` on, and `/mock/change?liked=1` likes a new track, which goes on top. They need no token, so a script can change things while the app runs, for checking the list cache.
+
+It also serves playback (see [Playback](playback.md)). Flags add a delay before every audio response (`-audio-delay=ms`), cap each audio connection's bandwidth (`-audio-rate=KB/s`), leave the SEEKTABLE out of the files (`-seektable=0`) and pick where the generated audio goes (`-audio-dir`).
+
+For hi-res it serves the PKCE login (`/authorize` redirects straight to `/android/login/auth?code=...`, and the token endpoint takes an `authorization_code` grant only with the Android client's id, a verifier and that redirect) and a hi-res test album as liked tracks 4 to 6 (`hires.odin`): "Quiet Noise 16/44.1" as a BTS FLAC, then two 24/96 tracks of 10 and 6 seconds. Those come as DASH (`HI_RES_LOSSLESS`, an MPD with a `SegmentTemplate` and a `SegmentTimeline`, 4 second fMP4 segments under `/dash/`) when a PKCE login asks for `HI_RES_LOSSLESS`, and as the 16/44.1 file otherwise. All three are xorshift noise at about -60 dBFS, made as WAV, encoded with `afconvert` and cut by `tests/dashgen`. `-hires-only` makes them the only liked tracks, so playing through the list never reaches the loud test tones.
+
+Like TIDAL, the mock gives the device-code login AAC: every `playbackinfopostpaywall` answer to it is HTTP 200 with a BTS manifest for `mp4a.40.2`. `-device-flac` gives it FLAC as before. The PKCE login gets FLAC: BTS for `LOSSLESS`, DASH for the 24/96 tracks at `HI_RES_LOSSLESS`. `-refuse-hires` answers `HI_RES_LOSSLESS` with a 403, and `-lossless-dash` sends the 16/44.1 track as DASH to a PKCE login, at `LOSSLESS` too, for the fallback.
+
+```
+odin build tests/mock_tidal -out:build/mock_tidal
+./build/mock_tidal -port=8787
+TIDALFAST_API=http://127.0.0.1:8787 ./build/tidalfast
+```
+
+## Performance
+
+`TIDALFAST_BENCH=covers` against the mock (40 ms per cover), release build, Apple M1, 120 Hz, 1100x700 window. Once the sidebar loads it opens the longest playlist and waits for 300 rows. Then it scrolls one row a frame for 600 frames, so a new cover is wanted about every frame, then four rows a frame for 300 frames, so most covers are dropped before a worker gets to them, then holds still for 120 frames. Two runs:
+
+| phase | ui avg | ui max | frame avg | frame max | covers uploaded | most uploads in a frame | longest results step |
+|---|---|---|---|---|---|---|---|
+| scroll | 0.74 to 0.78 ms | 2.9 to 3.8 ms | 8.27 ms | 9.8 to 10.5 ms | 410 | 4 (0.43 to 0.48 ms) | 1.2 to 1.3 ms |
+| fast | 0.89 to 0.90 ms | 2.8 to 3.9 ms | 8.30 ms | 9.4 ms | 163 to 167 | 3 to 4 (0.70 to 0.93 ms) | 0.8 to 0.9 ms |
+| settle | 0.61 to 0.64 ms | 0.9 to 1.0 ms | 8.30 ms | 9.4 to 9.5 ms | 0 to 1 | 1 | 0.4 ms |
+
+Frame time includes waiting for the next drawable, so its average is the 120 Hz interval. The fake-data bench in the same build has frame maxima of 9.3 to 11.9 ms, so covers add no hitches. An upload of an 80x80 cover costs about 0.1 to 0.4 ms. The longest results step includes copying a page of 100 rows. The ui maximum comes from shaping text in rows seen for the first time, as in the fake-data bench. Afterwards the cache held about 590 covers in 21 MB, and the window went back to 0% CPU.
