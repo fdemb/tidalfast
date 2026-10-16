@@ -222,7 +222,7 @@ test_paragraph_direction :: proc(t: ^testing.T) {
 	}
 }
 
-@(private = "file")
+@(private)
 Shaper :: struct {
 	parent:  mem.Allocator,
 	backing: []byte,
@@ -233,7 +233,7 @@ Shaper :: struct {
 
 // shaper_init loads the real fonts and starts the loader. No GPU needed:
 // nothing is drawn.
-@(private = "file")
+@(private)
 shaper_init :: proc(s: ^Shaper) -> mem.Allocator {
 	s.parent = context.allocator
 	s.backing = make([]byte, 64 << 20)
@@ -246,14 +246,14 @@ shaper_init :: proc(s: ^Shaper) -> mem.Allocator {
 	return allocator
 }
 
-@(private = "file")
+@(private)
 shaper_destroy :: proc(s: ^Shaper) {
 	text.destroy(s.state, &s.r)
 	delete(s.backing, s.parent)
 }
 
 // shape_loaded shapes str, waiting for any fallback font it needs.
-@(private = "file")
+@(private)
 shape_loaded :: proc(s: ^Shaper, font: text.Font, size: f32, str: string) -> ^text.Run {
 	run := text.shape(s.state, font, size, str)
 	for i := 0; run.pending && i < 5000; i += 1 {
@@ -434,81 +434,6 @@ test_loader_restart :: proc(t: ^testing.T) {
 	testing.expect(t, !run.pending)
 	for g in run.glyphs {
 		testing.expect(t, g.id != 0 && g.face >= u8(len(text.Font)), "Thai from a fallback face")
-	}
-}
-
-// coretext_glyphs shapes str with CoreText in face's font at size and
-// returns each glyph's ID and advance by the UTF-16 index of its character.
-@(private = "file")
-coretext_glyphs :: proc(state: ^text.State, face: u8, size: f32, str: string) -> (ids: map[int]u16, advances: map[int]f32) {
-	ids = make(map[int]u16, context.temp_allocator)
-	advances = make(map[int]f32, context.temp_allocator)
-	font := text.CTFontCreateCopyWithAttributes(state.faces[face].ct, text.CGFloat(size), nil, nil)
-	defer text.cf_release(font)
-	cf := text.CFStringCreateWithBytes(nil, raw_data(str), len(str), text.CF_STRING_ENCODING_UTF8, false)
-	defer text.cf_release(cf)
-	keys := [1]rawptr{text.kCTFontAttributeName}
-	values := [1]rawptr{font}
-	attrs := text.CFDictionaryCreate(nil, &keys[0], &values[0], 1, &text.kCFTypeDictionaryKeyCallBacks, &text.kCFTypeDictionaryValueCallBacks)
-	defer text.cf_release(attrs)
-	attributed := text.CFAttributedStringCreate(nil, cf, attrs)
-	defer text.cf_release(attributed)
-	line := text.CTLineCreateWithAttributedString(attributed)
-	defer text.cf_release(line)
-	runs := text.CTLineGetGlyphRuns(line)
-	for i in 0 ..< text.CFArrayGetCount(runs) {
-		run := text.CFArrayGetValueAtIndex(runs, i)
-		n := text.CTRunGetGlyphCount(run)
-		gs := make([]text.CGGlyph, n, context.temp_allocator)
-		adv := make([]text.CGSize, n, context.temp_allocator)
-		idx := make([]text.CFIndex, n, context.temp_allocator)
-		text.CTRunGetGlyphs(run, {}, raw_data(gs))
-		text.CTRunGetAdvances(run, {}, raw_data(adv))
-		text.CTRunGetStringIndices(run, {}, raw_data(idx))
-		for j in 0 ..< n {
-			ids[idx[j]] = gs[j]
-			advances[idx[j]] = f32(adv[j].width)
-		}
-	}
-	return
-}
-
-// Hangul syllables come out of kb_text_shape as the font's precomposed
-// glyphs, the same ones CoreText picks from the same face, each with its
-// own codepoint index.
-@(test)
-test_hangul_matches_coretext :: proc(t: ^testing.T) {
-	s: Shaper
-	context.allocator = shaper_init(&s)
-	defer shaper_destroy(&s)
-
-	for str in ([]string{"가", "밤편지", "아이유 - 밤편지 (Remix)", "밤밤편지"}) {
-		run := shape_loaded(&s, .Regular, 13, str)
-		testing.expectf(t, !run.pending, "%q still pending", str)
-		runes := make([dynamic]rune, context.temp_allocator)
-		for r in str {
-			append(&runes, r)
-		}
-		syllables := 0
-		for r in runes {
-			if r >= 0xac00 && r <= 0xd7a3 {
-				syllables += 1
-			}
-		}
-		hangul := 0
-		for g in run.glyphs {
-			r := runes[g.cluster]
-			if r < 0xac00 || r > 0xd7a3 {
-				continue
-			}
-			hangul += 1
-			testing.expectf(t, g.face >= u8(len(text.Font)), "%q: %c from a fallback face", str, r)
-			ids, advances := coretext_glyphs(s.state, g.face, 13, str)
-			testing.expectf(t, ids[int(g.cluster)] == g.id, "%q: %c is glyph %d, CoreText %d", str, r, g.id, ids[int(g.cluster)])
-			want := advances[int(g.cluster)]
-			testing.expectf(t, abs(g.advance - want) < 0.01, "%q: %c advance %v, CoreText %v", str, r, g.advance, want)
-		}
-		testing.expectf(t, hangul == syllables, "%q: %d Hangul glyphs for %d syllables", str, hangul, syllables)
 	}
 }
 

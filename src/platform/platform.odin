@@ -2,7 +2,7 @@
 // this file field for field. Change both together and bump ABI_VERSION.
 package platform
 
-ABI_VERSION :: 6
+ABI_VERSION :: 7
 
 Event_Kind :: enum u32 {
 	None,
@@ -207,11 +207,20 @@ Access_Node :: struct {
 }
 #assert(size_of(Access_Node) == 56)
 
+// What Shell.surface points to on Linux: the Wayland connection and the
+// window's surface, for the renderer to make a Vulkan surface from. The
+// shell owns both.
+Wayland_Surface :: struct {
+	display: rawptr, // wl_display
+	surface: rawptr, // wl_surface
+}
+#assert(size_of(Wayland_Surface) == 16)
+
 // What the shell gives the app. The surface and the procedures belong to
 // the shell, so they stay valid across reloads and the app may keep them.
 Shell :: struct {
 	// What the renderer draws to, set up by the shell: a CAMetalLayer with its
-	// device on macOS.
+	// device on macOS, a Wayland_Surface on Linux.
 	surface:           rawptr,
 	// Safe from any thread. Wakes the main run loop and draws one frame.
 	request_redraw:  proc "c" (),

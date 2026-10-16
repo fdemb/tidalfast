@@ -532,7 +532,7 @@ process_events :: proc(u: ^State, events: []platform.Event, text_bytes: []u8) {
 		e := event
 		// A control-click is a right click on macOS. Its mouse up still says
 		// left, so remember it for the release.
-		if e.kind == .Mouse_Down && e.button == .Left && .Control in e.modifiers {
+		if CONTROL_CLICK_IS_RIGHT && e.kind == .Mouse_Down && e.button == .Left && .Control in e.modifiers {
 			u.control_click = true
 		}
 		if u.control_click && e.button == .Left && (e.kind == .Mouse_Down || e.kind == .Mouse_Up) {

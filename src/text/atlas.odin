@@ -7,7 +7,8 @@ import stbrp "vendor:stb/rect_pack"
 
 import "../render"
 
-// Glyph bitmaps, rasterized by CoreText at physical pixel sizes. Coverage
+// Glyph bitmaps, rasterized by the OS (glyph_box and rasterize in
+// fonts_darwin.odin and fonts_linux.odin) at physical pixel sizes. Coverage
 // goes into R8 pages, colour glyphs (emoji) into BGRA pages. A page starts
 // at a quarter of its full side and doubles when it fills, keeping what it
 // holds; a full-size page that fills gets a sibling; when every page is
@@ -19,7 +20,6 @@ PAGE_START_SHIFT :: 2 // a page starts at its full side >> this
 MAX_PAGES :: 8
 ATLAS_CAPACITY :: 16384 // glyph slots, kept under three quarters full
 SUBPIXEL_STEPS :: 4
-SCRATCH_SIZE :: 256 // glyphs bigger than this get their own bitmap context
 // Rasterizing stops for the frame after this long; the rest of the new
 // glyphs show up over the next frames instead of one frame stalling. A page
 // of new CJK text can be a few hundred glyphs.
@@ -51,9 +51,7 @@ Atlas :: struct {
 	outgrown:       [MAX_PAGES]render.Texture,
 	outgrown_count: int,
 	raster_time:    time.Duration, // spent rasterizing this frame
-	srgb:           CGColorSpaceRef,
-	scratch:        CGContextRef, // SCRATCH_SIZE square, alpha only
-	color_scratch:  CGContextRef, // SCRATCH_SIZE square, BGRA
+	raster:         Raster, // the rasterizer's own state
 }
 
 @(private)
@@ -62,17 +60,13 @@ atlas_init :: proc(a: ^Atlas) {
 	for &page in a.pages {
 		page.nodes = make([]stbrp.Node, PAGE_SIZE)
 	}
-	a.srgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB)
-	a.scratch = bitmap_context(a, false, SCRATCH_SIZE, SCRATCH_SIZE)
-	a.color_scratch = bitmap_context(a, true, SCRATCH_SIZE, SCRATCH_SIZE)
+	raster_init(&a.raster)
 }
 
 @(private)
 atlas_destroy :: proc(a: ^Atlas, r: ^render.Renderer) {
 	atlas_clear(a, r)
-	CGContextRelease(a.scratch)
-	CGContextRelease(a.color_scratch)
-	CGColorSpaceRelease(a.srgb)
+	raster_destroy(&a.raster)
 }
 
 @(private)
@@ -103,31 +97,6 @@ atlas_clear :: proc(a: ^Atlas, r: ^render.Renderer) {
 	mem.zero_slice(a.entries)
 	a.entry_count = 0
 	a.full = false
-}
-
-// bitmap_context makes a CGBitmapContext for glyphs: grayscale
-// antialiasing, font smoothing off (it only works on opaque contexts and
-// thickens stems; the renderer blending coverage in linear light adds some
-// weight back instead), and glyph origins kept at the exact subpixel offset
-// asked for rather than quantized by CoreGraphics.
-@(private)
-bitmap_context :: proc(a: ^Atlas, color: bool, w, h: int) -> CGContextRef {
-	ctx: CGContextRef
-	if color {
-		ctx = CGBitmapContextCreate(nil, uint(w), uint(h), 8, uint(w * 4), a.srgb, CG_BITMAP_BGRA_PREMULTIPLIED)
-	} else {
-		ctx = CGBitmapContextCreate(nil, uint(w), uint(h), 8, uint(w), nil, CG_IMAGE_ALPHA_ONLY)
-	}
-	CGContextSetAllowsAntialiasing(ctx, true)
-	CGContextSetShouldAntialias(ctx, true)
-	CGContextSetAllowsFontSmoothing(ctx, false)
-	CGContextSetShouldSmoothFonts(ctx, false)
-	CGContextSetAllowsFontSubpixelPositioning(ctx, true)
-	CGContextSetShouldSubpixelPositionFonts(ctx, true)
-	CGContextSetAllowsFontSubpixelQuantization(ctx, false)
-	CGContextSetShouldSubpixelQuantizeFonts(ctx, false)
-	CGContextSetGrayFillColor(ctx, 1, 1)
-	return ctx
 }
 
 // subpixel splits a pixel x into a whole pixel and one of SUBPIXEL_STEPS
@@ -231,17 +200,14 @@ glyph_entry :: proc(t: ^State, r: ^render.Renderer, face_index: u8, id: u16, px_
 	defer a.raster_time += time.tick_since(start)
 
 	face := &t.faces[face_index]
-	font := sized_font(face, px_size)
-	glyph := id
-	bounds: CGRect
-	CTFontGetBoundingRectsForGlyphs(font, 0, &glyph, &bounds, 1)
+	box := glyph_box(a, face, px_size, id)
 	e := Atlas_Entry{key = key}
-	if bounds.size.width > 0 && bounds.size.height > 0 {
+	if box[2] > box[0] && box[3] > box[1] {
 		// One pixel of padding on each side, and room for the subpixel shift.
-		left := math.floor(bounds.origin.x) - 1
-		bottom := math.floor(bounds.origin.y) - 1
-		right := math.ceil(bounds.origin.x + bounds.size.width + f64(SUBPIXEL_STEPS - 1) / SUBPIXEL_STEPS) + 1
-		top := math.ceil(bounds.origin.y + bounds.size.height) + 1
+		left := math.floor(box[0]) - 1
+		bottom := math.floor(box[1]) - 1
+		right := math.ceil(box[2] + f64(SUBPIXEL_STEPS - 1) / SUBPIXEL_STEPS) + 1
+		top := math.ceil(box[3]) + 1
 		w, h := int(right - left), int(top - bottom)
 		page, x, y, ok := atlas_pack(a, r, face.color, w, h)
 		if !ok {
@@ -249,7 +215,7 @@ glyph_entry :: proc(t: ^State, r: ^render.Renderer, face_index: u8, id: u16, px_
 			t.needs_redraw = true
 			return nil
 		}
-		pixels := rasterize(a, font, glyph, face.color, w, h, {-left + f64(bucket) / SUBPIXEL_STEPS, -bottom})
+		pixels := rasterize(a, face, px_size, id, w, h, {-left + f64(bucket) / SUBPIXEL_STEPS, -bottom})
 		render.texture_update(r, a.pages[page].texture, pixels, x, y, w, h)
 		e.x, e.y, e.w, e.h = u16(x), u16(y), u16(w), u16(h)
 		e.left, e.top = i16(left), i16(top)
@@ -259,38 +225,6 @@ glyph_entry :: proc(t: ^State, r: ^render.Renderer, face_index: u8, id: u16, px_
 	a.entries[slot] = e
 	a.entry_count += 1
 	return &a.entries[slot]
-}
-
-// rasterize draws one glyph with its origin at origin (pixels from the
-// bitmap's bottom left) and returns the w by h bitmap, top row first, in
-// context.temp_allocator: coverage bytes, or premultiplied BGRA for colour.
-@(private)
-rasterize :: proc(a: ^Atlas, font: CTFontRef, glyph: u16, color: bool, w, h: int, origin: CGPoint) -> []byte {
-	ctx := a.color_scratch if color else a.scratch
-	ctx_h := SCRATCH_SIZE
-	own := w > SCRATCH_SIZE || h > SCRATCH_SIZE
-	if own {
-		ctx = bitmap_context(a, color, w, h)
-		ctx_h = h
-	}
-	defer if own {
-		CGContextRelease(ctx)
-	}
-	bpp := 4 if color else 1
-	stride := (w if own else SCRATCH_SIZE) * bpp
-
-	CGContextClearRect(ctx, {{0, 0}, {CGFloat(w), CGFloat(h)}})
-	glyph, origin := glyph, origin
-	CTFontDrawGlyphs(font, &glyph, &origin, 1, ctx)
-
-	// The bitmap's first row is its top, so the w by h corner CoreGraphics
-	// drew into (origin bottom left) is its last h rows.
-	data := CGBitmapContextGetData(ctx)
-	out := make([]byte, w * h * bpp, context.temp_allocator)
-	for row in 0 ..< h {
-		copy(out[row * w * bpp:][:w * bpp], data[(ctx_h - h + row) * stride:][:w * bpp])
-	}
-	return out
 }
 
 // atlas_pack finds room for a w by h bitmap plus a one texel gap, growing

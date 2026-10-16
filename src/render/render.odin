@@ -22,12 +22,12 @@
 // linear out; texture_update converts to that from ordinary premultiplied
 // sRGB.
 //
-// The backend is picked by file: metal_darwin.odin is the only one. It
-// defines Gpu and Gpu_Texture, the backend's part of Renderer and of a
-// texture slot, and the procs this file leaves out: init, reload, destroy,
-// end_frame and gpu_allocated, and privately new_texture_slot,
-// gpu_texture_free, gpu_texture_write, gpu_texture_copy, gpu_frame_begin and
-// grow_instances.
+// The backend is picked by file: metal_darwin.odin on macOS and
+// vulkan_linux.odin on Linux. Each defines Gpu and Gpu_Texture, the
+// backend's part of Renderer and of a texture slot, and the procs this file
+// leaves out: init, reload, destroy, end_frame and gpu_allocated, and
+// privately new_texture_slot, gpu_texture_free, gpu_texture_write,
+// gpu_texture_copy, gpu_frame_begin and grow_instances.
 package render
 
 import "base:runtime"
@@ -268,7 +268,7 @@ texture_destroy :: proc(r: ^Renderer, t: Texture) {
 	if slot == nil || t == 0 {
 		return
 	}
-	gpu_texture_free(slot.gpu)
+	gpu_texture_free(r, slot.gpu)
 	slot^ = {generation = slot.generation + 1}
 }
 

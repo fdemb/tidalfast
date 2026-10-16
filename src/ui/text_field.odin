@@ -224,8 +224,8 @@ focus_text_field :: proc(b: ^Box, f: ^Text_Field) {
 }
 
 // field_key applies one key press, reporting whether the field used it and
-// whether it gave up the focus. Control-A and Control-E also go to the
-// line's ends, as everywhere on macOS.
+// whether it gave up the focus. On macOS Control-A and Control-E also go
+// to the line's ends (CONTROL_LINE_KEYS).
 @(private)
 field_key :: proc(u: ^State, f: ^Text_Field, key: Key, k: Key_Press, sig: ^Field_Signal) -> (used, gave_up: bool) {
 	shift := .Shift in k.modifiers
@@ -264,13 +264,13 @@ field_key :: proc(u: ^State, f: ^Text_Field, key: Key, k: Key_Press, sig: ^Field
 		switch {
 		case k.modifiers == {PRIMARY}:
 			field_select_all(f)
-		case base == {.Control}:
+		case CONTROL_LINE_KEYS && base == {.Control}:
 			field_move(f, -1, .Line, shift)
 		case:
 			return
 		}
 	case .E:
-		if base != {.Control} {
+		if !CONTROL_LINE_KEYS || base != {.Control} {
 			return
 		}
 		field_move(f, 1, .Line, shift)

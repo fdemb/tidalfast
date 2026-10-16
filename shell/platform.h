@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#define PLATFORM_ABI_VERSION 6
+#define PLATFORM_ABI_VERSION 7
 
 typedef enum {
   EVENT_NONE,
@@ -235,8 +235,15 @@ typedef struct {
 } Access_Node;
 _Static_assert(sizeof(Access_Node) == 56, "Access_Node size must match platform.odin");
 
+// What Shell.surface points to on Linux. The shell owns both.
 typedef struct {
-  void *surface; // what the renderer draws to: a CAMetalLayer with its device
+  void *display; // struct wl_display *
+  void *surface; // struct wl_surface *
+} Wayland_Surface;
+_Static_assert(sizeof(Wayland_Surface) == 16, "Wayland_Surface size must match platform.odin");
+
+typedef struct {
+  void *surface; // what the renderer draws to: a CAMetalLayer with its device, or a Wayland_Surface
   void (*request_redraw)(void);
   // The rest are main thread only.
   void (*set_now_playing)(const Now_Playing *info);

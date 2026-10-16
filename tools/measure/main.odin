@@ -19,7 +19,6 @@ import "core:os"
 import "core:path/filepath"
 import "core:strconv"
 import "core:strings"
-import "core:sys/unix"
 import "core:time"
 
 Config :: struct {
@@ -301,19 +300,6 @@ start_mock :: proc(cfg: ^Config) -> (p: os.Process, url: string, ok: bool) {
 	return
 }
 
-// delete_keychain_item deletes the mock login the runs saved, made for
-// this run alone. SecItemDelete from this program gets -25244, since the
-// item's access list names the app; the security tool may delete it.
-delete_keychain_item :: proc(service: string) {
-	p, err := os.process_start({command = {"/usr/bin/security", "delete-generic-password", "-s", service, "-a", "auth"}})
-	if err == nil {
-		if state, werr := os.process_wait(p, 10 * time.Second); werr == nil && state.exit_code == 0 {
-			return
-		}
-	}
-	fmt.eprintfln("measure: couldn't delete the Keychain item; security delete-generic-password -s %s", service)
-}
-
 join :: proc(elems: ..string) -> string {
 	p, _ := filepath.join(elems)
 	return p
@@ -322,25 +308,6 @@ join :: proc(elems: ..string) -> string {
 clean :: proc(p: string) -> string {
 	c, _ := filepath.clean(p)
 	return c
-}
-
-machine :: proc() -> Machine {
-	str :: proc(name: cstring) -> string {
-		buf: [256]u8
-		if !unix.sysctlbyname(name, &buf) {
-			return ""
-		}
-		return strings.clone(string(cstring(&buf[0])))
-	}
-	mem: u64
-	unix.sysctlbyname("hw.memsize", &mem)
-	return {
-		model = str("hw.model"),
-		cpu = str("machdep.cpu.brand_string"),
-		memory_gb = f64(mem) / (1 << 30),
-		os = str("kern.osproductversion"),
-		os_build = str("kern.osversion"),
-	}
 }
 
 timestamp :: proc() -> string {
@@ -363,8 +330,8 @@ compare_files :: proc(a_path, b_path: string) -> int {
 		fmt.eprintln("measure: not a results file:", a_path if !aok else b_path)
 		return 1
 	}
-	fmt.printfln("a: %s, %s, macOS %s", a_path, a.machine.model, a.machine.os)
-	fmt.printfln("b: %s, %s, macOS %s", b_path, b.machine.model, b.machine.os)
+	fmt.printfln("a: %s, %s, %s%s", a_path, a.machine.model, OS_LABEL, a.machine.os)
+	fmt.printfln("b: %s, %s, %s%s", b_path, b.machine.model, OS_LABEL, b.machine.os)
 	if a.machine.model != b.machine.model {
 		fmt.println("different machines, so the times aren't comparable")
 	}

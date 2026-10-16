@@ -268,12 +268,16 @@ test_ui_interaction :: proc(t: ^testing.T) {
 	sig, _ = frame(&u, &now, {kind = .Mouse_Up, x = 200, y = 150})
 	testing.expect(t, sig.released && !sig.clicked)
 
-	// Right and control clicks.
+	// Right and control clicks. Control-click is a right click on macOS only.
 	sig, _ = frame(&u, &now, {kind = .Mouse_Down, x = 20, y = 20, button = .Right})
 	testing.expect(t, sig.right_clicked)
 	frame(&u, &now, {kind = .Mouse_Up, x = 20, y = 20, button = .Right})
 	sig, _ = frame(&u, &now, {kind = .Mouse_Down, x = 20, y = 20, modifiers = {.Control}})
-	testing.expect(t, sig.right_clicked && !sig.pressed)
+	if ui.CONTROL_CLICK_IS_RIGHT {
+		testing.expect(t, sig.right_clicked && !sig.pressed)
+	} else {
+		testing.expect(t, sig.pressed && !sig.right_clicked)
+	}
 	frame(&u, &now, {kind = .Mouse_Up, x = 20, y = 20})
 	testing.expect_value(t, u.input.buttons, platform.Mouse_Buttons{})
 

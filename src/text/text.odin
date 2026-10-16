@@ -1,6 +1,7 @@
-// Text: Inter loaded from memory into kb_text_shape and CoreText, shaping
-// with kb_text_shape, rasterizing with CoreText into glyph atlases, and
-// drawing through the rect renderer.
+// Text: Inter loaded from memory into kb_text_shape and the OS's font
+// rasterizer (CoreText on macOS, FreeType on Linux), shaping with
+// kb_text_shape, rasterizing into glyph atlases, and drawing through the
+// rect renderer.
 //
 // A string goes through shape (cached by string, font and size), then
 // draw_run turns each shaped glyph into a textured rect, rasterizing glyphs
@@ -9,8 +10,9 @@
 // four bitmaps per glyph for the fractional x position.
 //
 // Characters Inter lacks go to a fallback font that CTFontCreateForString
-// picks. Its file is loaded into kb_text_shape too, so both sides see the
-// same glyph IDs. Fallbacks load on a worker thread (loader.odin). Some macOS fonts (Geeza Pro for Arabic, Apple Color Emoji)
+// picks on macOS and fontconfig on Linux (fonts_darwin.odin,
+// fonts_linux.odin). Its file is loaded into kb_text_shape too, so both
+// sides see the same glyph IDs. Fallbacks load on a worker thread (loader.odin). Some macOS fonts (Geeza Pro for Arabic, Apple Color Emoji)
 // carry only Apple's morx shaping tables, which kb_text_shape can't read.
 // Runs in those fonts are shaped by CoreText instead, which still gets them
 // the right glyphs from the same file.
@@ -20,7 +22,8 @@
 // paragraph direction, fixes up neutrals, numbers and brackets a run at a
 // time and orders the runs itself.
 //
-// State is plain data plus CF object pointers, so it survives a hot reload.
+// State is plain data plus CF object or FreeType face pointers, so it
+// survives a hot reload.
 // The kb_text_shape context keeps a pointer to the library's allocator
 // function, so reload places it afresh. The font loader thread runs dylib
 // code, so unload stops it and reload starts it.
@@ -52,7 +55,6 @@ FONT_FILES := [Font][]byte {
 }
 
 MAX_FACES :: 32 // also kb_text_shape's font stack limit
-SIZED_FONTS :: 8
 FALLBACK_CAPACITY :: 4096 // to start with; it doubles when three quarters full
 RUN_CAPACITY :: 8192 // slots; the cache holds at most half that
 GLYPH_POOL :: 1 << 18
@@ -104,8 +106,8 @@ Metrics :: struct {
 
 Face :: struct {
 	kb:               kbts.font,
-	ct:               CTFontRef, // at BASE_SIZE
-	name:             u64, // hash of the PostScript name
+	using native:     Face_Native, // the OS's handle for rasterizing, see face_native_init
+	name:             u64, // hash of the PostScript name, or of the file and index
 	units_per_em:     f32,
 	ascent, descent:  f32, // in em
 	color:            bool, // colour bitmaps (emoji): drawn from the BGRA atlas
@@ -113,13 +115,6 @@ Face :: struct {
 	file:             []byte,
 	mapped:           bool,
 	blob:             rawptr, // kb_text_shape's parsed tables, malloc'd
-	sized:            [SIZED_FONTS]Sized_Font,
-	sized_next:       int,
-}
-
-Sized_Font :: struct {
-	size: f32,
-	font: CTFontRef,
 }
 
 // What fallback_cache knows about a character for a font, or about a font
@@ -199,31 +194,11 @@ init :: proc(t: ^State, wake: proc "c" () = nil) -> bool {
 	atlas_init(&t.atlas)
 
 	for font in Font {
-		// The #load data lives in this dylib's image. A debug build, which
-		// hot reload may replace, takes a copy. A release build never
-		// reloads, and the shell never closes a dylib, so CoreText and
-		// kb_text_shape read the image's bytes in place.
-		data := FONT_FILES[font]
-		cf_data: CFDataRef
-		when ODIN_DEBUG {
-			data = slice.clone(data)
-			cf_data = CFDataCreate(nil, raw_data(data), len(data))
-		} else {
-			cf_data = CFDataCreateWithBytesNoCopy(nil, raw_data(data), len(data), kCFAllocatorNull)
-		}
-		desc := CTFontManagerCreateFontDescriptorFromData(cf_data)
-		ct := CTFontCreateWithFontDescriptor(desc, BASE_SIZE, nil)
-		cf_release(desc)
-		cf_release(cf_data)
-		face := &t.faces[font]
-		ok := ct != nil && load_face(face, ct, data, 0, false)
-		cf_release(ct)
-		if !ok {
+		if !load_primary(t, font, FONT_FILES[font]) {
 			return false
 		}
 		t.face_count += 1
-		t.loader.known[font] = {face.name, face.kb}
-		t.loader.primary[font] = face.ct
+		t.loader.known[font] = {t.faces[font].name, t.faces[font].kb}
 	}
 	t.loader.known_count = len(Font)
 	t.loader.wake = wake
@@ -254,10 +229,10 @@ destroy :: proc(t: ^State, r: ^render.Renderer) {
 	l := &t.loader
 	loader_stop(l)
 	for i in 0 ..< l.request_count {
-		cf_release(l.requests[(l.request_head + i) % LOAD_QUEUE].ct)
+		font_ref_release(l.requests[(l.request_head + i) % LOAD_QUEUE].ct)
 	}
 	for &res in l.results[:l.result_count] {
-		cf_release(res.ct)
+		font_ref_release(res.ct)
 		free_face(&res.face)
 	}
 	for &face in t.faces[:t.face_count] {
@@ -1039,18 +1014,6 @@ face_named :: proc(t: ^State, name: u64) -> int {
 	return NO_FACE
 }
 
-// collection_index returns the index of the face in a .ttc whose name
-// table is byte for byte the one CoreText reports for ct, or 0.
-collection_index :: proc(data: []byte, ct: CTFontRef) -> int {
-	name := CTFontCopyTable(ct, table_tag("name"), 0)
-	defer cf_release(name)
-	if name == nil {
-		return 0
-	}
-	want := CFDataGetBytePtr(name)[:CFDataGetLength(name)]
-	return collection_index_of_table(data, table_tag("name"), want)
-}
-
 // collection_index_of_table returns the index of the first face in a font
 // collection whose table `tag` equals want, or 0.
 collection_index_of_table :: proc(data: []byte, tag: u32, want: []byte) -> int {
@@ -1082,14 +1045,6 @@ collection_index_of_table :: proc(data: []byte, tag: u32, want: []byte) -> int {
 }
 
 @(private)
-font_name_hash :: proc(ct: CTFontRef) -> u64 {
-	name := CTFontCopyPostScriptName(ct)
-	defer cf_release(name)
-	buf: [256]u8
-	return hash.fnv64a(transmute([]byte)cf_string(name, buf[:]))
-}
-
-@(private)
 has_codepoint :: proc(t: ^State, font: Font, r: rune) -> bool {
 	if r >= 0x10000 {
 		return kbts.CodepointToGlyphId(&t.faces[font].kb, r) != 0
@@ -1105,15 +1060,35 @@ has_codepoint :: proc(t: ^State, font: Font, r: rune) -> bool {
 }
 
 // in_fallbacks returns the first of font's fallback faces that has r, or
-// -1.
+// -1. A character usually drawn as an emoji goes to a colour face first:
+// symbol fonts such as DejaVu Sans have black and white 😀 and ❤ too.
 @(private)
 in_fallbacks :: proc(t: ^State, font: Font, r: rune) -> int {
+	if emoji_presentation(r) {
+		for face in t.fallbacks[font][:t.fallback_counts[font]] {
+			if t.faces[face].color && kbts.CodepointToGlyphId(&t.faces[face].kb, r) != 0 {
+				return int(face)
+			}
+		}
+	}
 	for face in t.fallbacks[font][:t.fallback_counts[font]] {
 		if kbts.CodepointToGlyphId(&t.faces[face].kb, r) != 0 {
 			return int(face)
 		}
 	}
 	return -1
+}
+
+// emoji_presentation approximates Emoji_Presentation=Yes: the
+// pictographic planes, regional indicators, and the older symbol and
+// dingbat blocks, where most characters have an emoji in Noto Color Emoji.
+@(private)
+emoji_presentation :: proc(r: rune) -> bool {
+	switch r {
+	case 0x1f000 ..= 0x1faff, 0x2600 ..= 0x27bf:
+		return true
+	}
+	return false
 }
 
 // fallback_face returns the fallback face for r under font: a face index,
@@ -1133,29 +1108,6 @@ fallback_face :: proc(t: ^State, font: Font, r: rune) -> int {
 	if load_request(&t.loader, {font = font, codepoint = r}) {
 		cache_face(t, key, PENDING)
 	}
-	return PENDING
-}
-
-// run_font_face returns the face for a font CoreText picked for part of a
-// run, by its name hash, asking the loader for it the first time.
-@(private)
-run_font_face :: proc(t: ^State, ct: CTFontRef, name: u64) -> int {
-	if face := face_named(t, name); face >= 0 {
-		return face
-	}
-	key := font_key(name)
-	if face, ok := cached_face(t, key); ok {
-		return face
-	}
-	if !fallback_room(t) {
-		return NO_FACE
-	}
-	CFRetain(ct)
-	if !load_request(&t.loader, {ct = ct, name = name}) {
-		cf_release(ct)
-		return PENDING
-	}
-	cache_face(t, key, PENDING)
 	return PENDING
 }
 
@@ -1181,7 +1133,7 @@ take_loaded :: proc(t: ^State) {
 		}
 		if res.ct != nil {
 			cache_face(t, font_key(res.name), face)
-			cf_release(res.ct)
+			font_ref_release(res.ct)
 			continue
 		}
 		// CoreText hands back the font itself (or another Inter) when
@@ -1281,91 +1233,4 @@ ignorable :: proc(r: rune) -> bool {
 		return true
 	}
 	return false
-}
-
-// sized_font returns face's CTFont at size, keeping the last few sizes.
-@(private)
-sized_font :: proc(face: ^Face, size: f32) -> CTFontRef {
-	for s in face.sized {
-		if s.font != nil && s.size == size {
-			return s.font
-		}
-	}
-	slot := &face.sized[face.sized_next]
-	face.sized_next = (face.sized_next + 1) % SIZED_FONTS
-	cf_release(slot.font)
-	slot^ = {size, CTFontCreateCopyWithAttributes(face.ct, CGFloat(size), nil, nil)}
-	return slot.font
-}
-
-// coretext_shape shapes runes[start:end], all one direction and one
-// script, with CoreText in face at size, and appends the glyphs in visual
-// order with their codepoint indices. Glyphs CoreText takes from a font
-// still loading are left blank (ID 0) and set pending. Returns the width in
-// points.
-@(private)
-coretext_shape :: proc(t: ^State, face: int, runes: []rune, start, end: int, size: f32, out: ^[dynamic]Glyph, cps: ^[dynamic]int, pending: ^bool) -> f32 {
-	font := sized_font(&t.faces[face], size)
-	str := CFStringCreateWithBytes(nil, ([^]u8)(raw_data(runes[start:])), (end - start) * 4, CF_STRING_ENCODING_UTF32LE, false)
-	defer cf_release(str)
-	keys := [1]rawptr{kCTFontAttributeName}
-	values := [1]rawptr{font}
-	attrs := CFDictionaryCreate(nil, &keys[0], &values[0], 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks)
-	defer cf_release(attrs)
-	attributed := CFAttributedStringCreate(nil, str, attrs)
-	defer cf_release(attributed)
-	line := CTLineCreateWithAttributedString(attributed)
-	defer cf_release(line)
-
-	// CoreText reports UTF-16 indices into str.
-	rune_at := make([dynamic]int, 0, 2 * (end - start), context.temp_allocator)
-	for r, i in runes[start:end] {
-		append(&rune_at, start + i)
-		if r >= 0x10000 {
-			append(&rune_at, start + i)
-		}
-	}
-
-	Placed :: struct {
-		glyph: Glyph,
-		cp:    int,
-	}
-	placed := make([dynamic]Placed, context.temp_allocator)
-	width: f32
-	runs := CTLineGetGlyphRuns(line)
-	for i in 0 ..< CFArrayGetCount(runs) {
-		run := CFArrayGetValueAtIndex(runs, i)
-		n := CTRunGetGlyphCount(run)
-		ids := make([]CGGlyph, n, context.temp_allocator)
-		positions := make([]CGPoint, n, context.temp_allocator)
-		advances := make([]CGSize, n, context.temp_allocator)
-		indices := make([]CFIndex, n, context.temp_allocator)
-		CTRunGetGlyphs(run, {}, raw_data(ids))
-		CTRunGetPositions(run, {}, raw_data(positions))
-		CTRunGetAdvances(run, {}, raw_data(advances))
-		CTRunGetStringIndices(run, {}, raw_data(indices))
-		run_face := face
-		if run_font := CFDictionaryGetValue(CTRunGetAttributes(run), kCTFontAttributeName); run_font != nil && !CFEqual(run_font, font) {
-			run_face = run_font_face(t, run_font, font_name_hash(run_font))
-			if run_face == PENDING {
-				pending^ = true
-			}
-		}
-		for j in 0 ..< n {
-			g := Glyph{pen = f32(positions[j].x), advance = f32(advances[j].width), offset = {0, -f32(positions[j].y)}, id = ids[j], face = u8(face)}
-			if run_face >= 0 {
-				g.face = u8(run_face)
-			} else {
-				g.id = 0
-			}
-			append(&placed, Placed{g, rune_at[clamp(indices[j], 0, len(rune_at) - 1)]})
-			width = max(width, f32(positions[j].x + advances[j].width))
-		}
-	}
-	slice.stable_sort_by(placed[:], proc(a, b: Placed) -> bool {return a.glyph.pen < b.glyph.pen})
-	for p in placed {
-		append(out, p.glyph)
-		append(cps, p.cp)
-	}
-	return width
 }

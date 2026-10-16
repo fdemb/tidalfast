@@ -1,4 +1,4 @@
-# TIDALfast plan: Odin, handmade UI, macOS first
+# TIDALfast plan: Odin, handmade UI, macOS first, then Linux
 
 A native TIDAL client. Odin for the app, a small Obj-C shell for the parts of macOS that need it, a handmade immediate-mode UI in the style of Ryan Fleury's box UI, Metal for drawing.
 
@@ -85,6 +85,11 @@ Done when: a 24/96 track reaches the DAC at 96 kHz unchanged, and a 44.1 → 96 
 
 Single-line text field with cursor, selection, clipboard, undo and IME marked text. Search. Context menus. Basic accessibility through `NSAccessibility` or AccessKit's C API.
 Done when: you can search in Japanese with the system IME, and VoiceOver reads the track list.
+
+### 8. Linux
+
+A Wayland shell in C (`shell/shell_wayland.c`), a Vulkan backend for the renderer, FreeType and fontconfig for fonts, miniaudio for output and the Secret Service for the login. The README's Linux section has the details.
+Done when: it builds with `./build.sh` on Linux and the library, text screen and playback work under a Wayland compositor. Still to do: bit-perfect output (ALSA `hw:` devices), MPRIS for media keys, AT-SPI for screen readers, and client-side decorations for compositors without xdg-decoration.
 
 Windows comes later (DirectWrite, D3D11, WASAPI exclusive). Keep platform code behind shell procedures and the renderer interface.
 
