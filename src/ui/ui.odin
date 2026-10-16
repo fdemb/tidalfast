@@ -248,7 +248,7 @@ State :: struct {
 	drag_start:     [2]f32,
 	drag_moved:     bool, // past DRAG_THRESHOLD since the press
 	control_click:  bool, // the left button is down as a control-click
-	buttons_stale:  Mouse_Buttons, // held here but up in hardware last frame
+	buttons_stale:  platform.Mouse_Buttons, // held here but up in hardware last frame
 	scroll_latch:   Key, // the scroll view a trackpad gesture started over
 	scroll_key:     Key, // this frame's scroll goes to this box
 	scroll:         [2]f32, // points, this frame
@@ -392,10 +392,10 @@ box_lookup :: proc(u: ^State, key: Key) -> ^Box {
 
 // begin_frame prunes boxes that weren't built last frame, takes this frame's
 // events and sets up the roots. Strings given to boxes must live until
-// end_frame. hardware is the buttons down right now, from hardware_buttons;
+// end_frame. hardware is the buttons down right now, from Frame_Input.mouse_buttons;
 // without it the UI goes by the events alone.
 // text is the bytes Text and Marked_Text events point into.
-begin_frame :: proc(u: ^State, events: []platform.Event, r: ^render.Renderer, t: ^text.State, width, height: f32, time: f64, hardware: Maybe(Mouse_Buttons) = nil, text_bytes: []u8 = nil) {
+begin_frame :: proc(u: ^State, events: []platform.Event, r: ^render.Renderer, t: ^text.State, width, height: f32, time: f64, hardware: Maybe(platform.Mouse_Buttons) = nil, text_bytes: []u8 = nil) {
 	ctx = u
 	u.frame += 1
 	if width != u.width || height != u.height || len(events) > 0 {
@@ -469,7 +469,7 @@ prune :: proc(u: ^State) {
 // its way. Cancelled buttons don't release or click anything, and a drag
 // they held ends without a drop.
 @(private)
-release_stale :: proc(u: ^State, events: []platform.Event, hardware: Mouse_Buttons) {
+release_stale :: proc(u: ^State, events: []platform.Event, hardware: platform.Mouse_Buttons) {
 	held := hardware
 	// A control-click goes down as the left button and counts as the right.
 	if u.control_click && .Left in held {
@@ -497,7 +497,7 @@ cancel_pointer :: proc(u: ^State) {
 }
 
 @(private)
-cancel_buttons :: proc(u: ^State, buttons: Mouse_Buttons) {
+cancel_buttons :: proc(u: ^State, buttons: platform.Mouse_Buttons) {
 	u.input.buttons -= buttons
 	for b in buttons {
 		u.active[b] = 0

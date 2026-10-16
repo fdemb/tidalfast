@@ -102,6 +102,16 @@ static void request_redraw(void) {
   CFRunLoopWakeUp(g_main_run_loop);
 }
 
+// From the whole login session, so it sees releases that went to other apps.
+static uint32_t held_mouse_buttons(void) {
+  uint32_t held = 0;
+  // Mouse_Button's values are CGMouseButton's: left, right, center.
+  for (uint32_t b = MOUSE_BUTTON_LEFT; b <= MOUSE_BUTTON_MIDDLE; b++) {
+    if (CGEventSourceButtonState(kCGEventSourceStateCombinedSessionState, b)) held |= 1u << b;
+  }
+  return held;
+}
+
 static void draw_frame(void) {
   if (!g_app.api.frame) return;
   atomic_store(&g_needs_redraw, false);
@@ -117,6 +127,7 @@ static void draw_frame(void) {
       .text = g_text,
       .text_length = g_text_len,
       .key_window = g_window.isKeyWindow,
+      .mouse_buttons = held_mouse_buttons(),
   };
   Frame_Result result;
   @autoreleasepool {

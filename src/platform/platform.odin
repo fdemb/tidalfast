@@ -2,7 +2,7 @@
 // this file field for field. Change both together and bump ABI_VERSION.
 package platform
 
-ABI_VERSION :: 4
+ABI_VERSION :: 5
 
 Event_Kind :: enum u32 {
 	None,
@@ -45,6 +45,7 @@ Mouse_Button :: enum u32 {
 	Right,
 	Middle,
 }
+Mouse_Buttons :: bit_set[Mouse_Button; u32]
 
 // Mirrors NSEventPhase. Trackpad scrolls carry a phase while the fingers are
 // down and a momentum phase for the inertia that follows. Mouse wheels have
@@ -236,6 +237,10 @@ Frame_Input :: struct {
 	text:          [^]u8, // what Text and Marked_Text events point into
 	text_length:   u32,
 	key_window:    b32, // the window gets key events
+	// Held down now, whichever app got the events, so the UI can drop a press
+	// whose release went elsewhere.
+	mouse_buttons: Mouse_Buttons,
+	_:             u32,
 }
 
 Frame_Result :: struct {
@@ -258,7 +263,7 @@ App_API :: struct {
 	shutdown:    proc "c" (mem: ^Memory),
 	frame:       proc "c" (mem: ^Memory, shell: ^Shell, input: ^Frame_Input) -> Frame_Result,
 }
-#assert(size_of(Frame_Input) == 48)
+#assert(size_of(Frame_Input) == 56)
 #assert(size_of(Frame_Result) == 8)
 #assert(size_of(App_API) == 48)
 

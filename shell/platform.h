@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#define PLATFORM_ABI_VERSION 4
+#define PLATFORM_ABI_VERSION 5
 
 typedef enum {
   EVENT_NONE,
@@ -258,8 +258,10 @@ typedef struct {
   const uint8_t *text; // what EVENT_TEXT and EVENT_MARKED_TEXT point into
   uint32_t text_length;
   uint32_t key_window;
+  uint32_t mouse_buttons; // 1 << Mouse_Button for each held down now, in any app
+  uint32_t _pad;
 } Frame_Input;
-_Static_assert(sizeof(Frame_Input) == 48, "Frame_Input size must match platform.odin");
+_Static_assert(sizeof(Frame_Input) == 56, "Frame_Input size must match platform.odin");
 
 typedef struct {
   int32_t animating;

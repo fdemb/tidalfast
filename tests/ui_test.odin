@@ -275,7 +275,7 @@ test_ui_interaction :: proc(t: ^testing.T) {
 	sig, _ = frame(&u, &now, {kind = .Mouse_Down, x = 20, y = 20, modifiers = {.Control}})
 	testing.expect(t, sig.right_clicked && !sig.pressed)
 	frame(&u, &now, {kind = .Mouse_Up, x = 20, y = 20})
-	testing.expect_value(t, u.input.buttons, ui.Mouse_Buttons{})
+	testing.expect_value(t, u.input.buttons, platform.Mouse_Buttons{})
 
 	// Tab focuses it, Enter clicks it, Escape drops the focus.
 	frame(&u, &now, {kind = .Mouse_Down, x = 250, y = 150}, {kind = .Mouse_Up, x = 250, y = 150})
@@ -688,7 +688,7 @@ drag_frame :: proc(u: ^ui.State, now: ^f64, events: ..platform.Event) -> (droppe
 
 // drag_frame with the buttons the hardware reports, if given.
 @(private = "file")
-drag_frame_held :: proc(u: ^ui.State, now: ^f64, hardware: Maybe(ui.Mouse_Buttons), events: ..platform.Event) -> (dropped: u64, ok: bool) {
+drag_frame_held :: proc(u: ^ui.State, now: ^f64, hardware: Maybe(platform.Mouse_Buttons), events: ..platform.Event) -> (dropped: u64, ok: bool) {
 	now^ += 1.0 / 120
 	ui.begin_frame(u, events, nil, nil, 300, 200, now^, hardware)
 	target := ui.box_make("target", {.Clickable}, ui.px(300), ui.px(40))
@@ -889,8 +889,8 @@ test_ui_missed_release_cancels :: proc(t: ^testing.T) {
 	ui.init(&u)
 	defer ui_destroy(&u)
 	now := 0.0
-	down := ui.Mouse_Buttons{.Left}
-	up := ui.Mouse_Buttons{}
+	down := platform.Mouse_Buttons{.Left}
+	up := platform.Mouse_Buttons{}
 	for _ in 0 ..< 3 {
 		drag_frame_held(&u, &now, up)
 	}
@@ -909,7 +909,7 @@ test_ui_missed_release_cancels :: proc(t: ^testing.T) {
 	drag_frame_held(&u, &now, up)
 	_, dragging = ui.drag_payload()
 	testing.expect(t, !dragging, "a missed release cancels the drag")
-	testing.expect_value(t, u.input.buttons, ui.Mouse_Buttons{})
+	testing.expect_value(t, u.input.buttons, platform.Mouse_Buttons{})
 	testing.expect_value(t, u.active[.Left], ui.Key(0))
 
 	// Back in the window, a click on the target drops nothing.
@@ -927,7 +927,7 @@ test_ui_missed_release_cancels :: proc(t: ^testing.T) {
 	now = 0
 	tap :: proc(u: ^ui.State, now: ^f64, events: ..platform.Event) -> ui.Signal {
 		now^ += 1.0 / 120
-		ui.begin_frame(u, events, nil, nil, 300, 200, now^, ui.Mouse_Buttons{})
+		ui.begin_frame(u, events, nil, nil, 300, 200, now^, platform.Mouse_Buttons{})
 		sig := ui.signal(ui.box_make("button", {.Clickable}, ui.px(100), ui.px(40)))
 		ui.end_frame()
 		return sig
