@@ -1053,7 +1053,7 @@ place_go :: proc(s: ^State, p: ^Pending) {
 	search_stop(s)
 	#partial switch p.kind {
 	case .Playlist:
-		select_playlist(s, p.index)
+		select_playlist(s, playlist_index(s, p))
 	case .List:
 		open_list(s, p)
 	case .Search:
@@ -1076,13 +1076,12 @@ History :: struct {
 history_visit :: proc(s: ^State, p: Pending) {
 	h := &s.history
 	if h.count == 0 {
-		h.places[0] = {kind = .Playlist, index = s.library.playlist}
+		h.places[0] = playlist_place(s, s.library.playlist)
 		h.count, h.at = 1, 0
 	}
 	p := p
 	if p.kind == .Playlist {
-		// A playlist found by the fake search carries a source and name.
-		p = {kind = .Playlist, index = p.index}
+		p = playlist_place(s, p.index)
 	}
 	now := &h.places[h.at]
 	if now.kind == p.kind && now.source == p.source && now.index == p.index && now.id == p.id {
@@ -1097,6 +1096,30 @@ history_visit :: proc(s: ^State, p: Pending) {
 	}
 	h.places[h.at] = p
 	h.count = h.at + 1
+}
+
+// playlist_place is sidebar entry i as a place. A TIDAL playlist goes by
+// its id, since the sidebar can change order before Back returns to it.
+playlist_place :: proc(s: ^State, i: int) -> Pending {
+	items := s.data.sidebar.items
+	if s.data.fake || i < 1 || i > len(items) {
+		return {kind = .Playlist, index = i}
+	}
+	return {kind = .Playlist, id = small(items[i - 1].id)}
+}
+
+// playlist_index is where a playlist place is in the sidebar now, -1 when
+// it's gone.
+playlist_index :: proc(s: ^State, p: ^Pending) -> int {
+	if p.id.len == 0 {
+		return p.index
+	}
+	for it, i in s.data.sidebar.items {
+		if it.id == small_str(&p.id) {
+			return i + 1
+		}
+	}
+	return -1
 }
 
 history_can_back :: proc(s: ^State) -> bool {

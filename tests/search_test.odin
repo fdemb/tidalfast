@@ -781,3 +781,36 @@ back_and_forward_reopen_tidal_lists :: proc(t: ^testing.T) {
 	library_frame(t, s, &f)
 }
 
+
+// Back to a sidebar playlist opens the same playlist after the sidebar
+// changed order, and Liked Songs when the playlist is gone.
+@(test)
+back_finds_playlists_by_id :: proc(t: ^testing.T) {
+	arena: vmem.Arena
+	_ = vmem.arena_init_growing(&arena)
+	defer vmem.arena_destroy(&arena)
+	context.allocator = vmem.arena_allocator(&arena)
+	s := library_state(false)
+	defer library_state_free(s)
+	alpha := app.Sidebar_Item{id = "alpha-id", name = "Alpha", tracks = 1}
+	beta := app.Sidebar_Item{id = "beta-id", name = "Beta", tracks = 2}
+	s.data.sidebar.items = []app.Sidebar_Item{alpha, beta}
+	f: Frame
+	library_frame(t, s, &f)
+	library_frame(t, s, &f, press(s, "Alpha,"))
+	library_frame(t, s, &f, press(s, "Beta,"))
+	testing.expect_value(t, app.small_str(&s.data.view.id), "beta-id")
+
+	s.data.sidebar.items[0], s.data.sidebar.items[1] = beta, alpha
+	library_frame(t, s, &f, press(s, "Back"))
+	testing.expect_value(t, app.small_str(&s.data.view.id), "alpha-id")
+	testing.expect_value(t, s.library.playlist, 2)
+
+	library_frame(t, s, &f, press(s, "Beta,"))
+	library_frame(t, s, &f, press(s, "Back"))
+	testing.expect_value(t, app.small_str(&s.data.view.id), "alpha-id")
+
+	s.data.sidebar.items = s.data.sidebar.items[1:]
+	library_frame(t, s, &f, press(s, "Forward"))
+	testing.expect_value(t, s.data.view.source, app.Source.Liked)
+}
