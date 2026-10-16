@@ -52,6 +52,13 @@
 //
 //     curl 'http://127.0.0.1:8787/mock/change?playlist=1'
 //
+// The app's own edits work too. GET /playlists/<uuid> gives a playlist and
+// its ETag, and POST /playlists/<uuid>/items with that ETag in If-None-Match
+// adds trackIds at the end, skipping one that's there already, and moves
+// lastUpdated on. A stale ETag gets 412. POST /users/123/favorites/tracks
+// likes trackId, unless it's liked already. Any track id from the mock can
+// be added, and it's listed as it is elsewhere.
+//
 // It never prints tokens or Authorization headers.
 package mock_tidal
 
@@ -61,6 +68,7 @@ import "core:hash"
 import "core:math"
 import "core:net"
 import "core:os"
+import "core:slice"
 import "core:strconv"
 import "core:strings"
 import "core:sync"
@@ -119,7 +127,13 @@ Server :: struct {
 	pkce:          bool, // the current tokens came from the PKCE login
 	pkce_codes:    int,
 	changes:       [len(PLAYLISTS)]int, // /mock/change calls per playlist
-	liked_extra:   int, // tracks liked through /mock/change, newest first
+	liked_added:   [dynamic]int, // track ids liked through /mock/change or a POST, oldest first; heap
+	added:         [len(PLAYLISTS)][dynamic]Added_Item, // tracks added by a POST; heap
+}
+
+Added_Item :: struct {
+	at: int, // the row it went in at
+	id: int,
 }
 
 server: Server
@@ -243,6 +257,7 @@ Request :: struct {
 	form:   map[string]string,
 	auth:   string,
 	range:  string,
+	etag:   string, // If-None-Match
 }
 
 Response :: struct {
@@ -252,6 +267,7 @@ Response :: struct {
 	retry_after:   int,
 	content_range: string,
 	location:      string,
+	etag:          string,
 	audio:         bool, // send with -audio-delay and -audio-rate
 }
 
@@ -269,6 +285,9 @@ serve :: proc(client: net.TCP_Socket) {
 	}
 	if resp.location != "" {
 		head = fmt.tprintf("%sLocation: %s\r\n", head, resp.location)
+	}
+	if resp.etag != "" {
+		head = fmt.tprintf("%sETag: %s\r\n", head, resp.etag)
 	}
 	if resp.audio {
 		head = fmt.tprintf("%sAccept-Ranges: bytes\r\n", head)
@@ -339,6 +358,8 @@ read_request :: proc(client: net.TCP_Socket) -> (req: Request, ok: bool) {
 			req.auth = value
 		} else if strings.equal_fold(name, "range") {
 			req.range = value
+		} else if strings.equal_fold(name, "if-none-match") {
+			req.etag = value
 		}
 	}
 	for len(buf) < header_end + 4 + content_length {
@@ -438,8 +459,8 @@ route :: proc(req: ^Request) -> Response {
 			fmt.printfln("mock: playlist %d changed, %d tracks", p, PLAYLISTS[p].tracks)
 		}
 		if "liked" in req.query {
-			server.liked_extra += 1
-			fmt.printfln("mock: a new liked track, %d liked", LIKED + server.liked_extra)
+			append(&server.liked_added, 98 * 1_000_000 + len(server.liked_added))
+			fmt.printfln("mock: a new liked track, %d liked", LIKED + len(server.liked_added))
 		}
 		return json_response(200, "{}")
 	}
@@ -483,8 +504,21 @@ route :: proc(req: ^Request) -> Response {
 			return hires_playbackinfo(id, quality, pkce)
 		}
 		return playbackinfo_response(id)
+	case path == fmt.tprintf("/users/%d/favorites/tracks", USER_ID) && req.method == "POST":
+		id, _ := parse_i(req.form["trackId"] or_else "")
+		sync.guard(&server.mutex)
+		if is_liked(id) {
+			fmt.printfln("mock: track %d is liked already", id)
+		} else {
+			append(&server.liked_added, id)
+			fmt.printfln("mock: liked track %d, %d liked", id, LIKED + len(server.liked_added))
+		}
+		return json_response(200, "{}")
 	case path == fmt.tprintf("/users/%d/favorites/tracks", USER_ID):
-		extra := 0 if server.config.hires_only else sync.atomic_load(&server.liked_extra)
+		sync.mutex_lock(&server.mutex)
+		liked_added := slice.clone(server.liked_added[:], context.temp_allocator)
+		sync.mutex_unlock(&server.mutex)
+		extra := 0 if server.config.hires_only else len(liked_added)
 		liked := len(HIRES) if server.config.hires_only else LIKED + extra
 		limit = min(limit, LIKED_LIMIT)
 		b := list_begin(liked, offset, limit)
@@ -496,7 +530,7 @@ route :: proc(req: ^Request) -> Response {
 				}
 				first = false
 				fmt.sbprintf(&b, `{{"created":"2026-01-01T10:00:00.000+0000","item":`)
-				write_track(&b, 98, extra - 1 - at)
+				write_track_id(&b, liked_added[extra - 1 - at])
 				strings.write_byte(&b, '}')
 				continue
 			}
@@ -533,9 +567,9 @@ route :: proc(req: ^Request) -> Response {
 			if i > offset {
 				strings.write_byte(&b, ',')
 			}
-			pl := PLAYLISTS[i]
-			fmt.sbprintf(&b, `{{"type":"USER_CREATED","created":"%s","playlist":{{"uuid":"%s","title":%q,"numberOfTracks":%d,"numberOfVideos":0,"type":"USER","creator":{{"id":%d}},"squareImage":"%s","image":"%s","lastUpdated":"%s"}}}}`,
-				date(i), playlist_id(i), pl.name, pl.tracks, USER_ID, image_id(1000 + i), image_id(2000 + i), last_updated(i, server.changes[i]))
+			fmt.sbprintf(&b, `{{"type":"USER_CREATED","created":"%s","playlist":`, date(i))
+			write_playlist(&b, i)
+			strings.write_byte(&b, '}')
 		}
 		strings.write_string(&b, "]}")
 		return json_response(200, strings.to_string(b))
@@ -547,27 +581,43 @@ route :: proc(req: ^Request) -> Response {
 	case strings.has_prefix(path, "/artists/") && strings.has_suffix(path, "/toptracks"):
 		id, _ := parse_i(strings.trim_suffix(strings.trim_prefix(path, "/artists/"), "/toptracks"))
 		return made_up_tracks(-1, id, offset, limit)
-	case strings.has_prefix(path, "/playlists/") && strings.has_suffix(path, "/tracks"):
-		id := strings.trim_suffix(strings.trim_prefix(path, "/playlists/"), "/tracks")
-		p := -1
-		for i in 0 ..< len(PLAYLISTS) {
-			if playlist_id(i) == id {
-				p = i
-			}
+	case strings.has_prefix(path, "/playlists/") && strings.has_suffix(path, "/items") && req.method == "POST":
+		p := playlist_index(strings.trim_suffix(strings.trim_prefix(path, "/playlists/"), "/items"))
+		if p < 0 {
+			return json_response(404, `{"status":404,"userMessage":"Playlist not found"}`)
 		}
+		return add_items(p, req)
+	case strings.has_prefix(path, "/playlists/") && strings.count(path, "/") == 2:
+		p := playlist_index(strings.trim_prefix(path, "/playlists/"))
+		if p < 0 {
+			return json_response(404, `{"status":404,"userMessage":"Playlist not found"}`)
+		}
+		b := strings.builder_make(context.temp_allocator)
+		sync.guard(&server.mutex)
+		write_playlist(&b, p)
+		r := json_response(200, strings.to_string(b))
+		r.etag = playlist_etag(p)
+		return r
+	case strings.has_prefix(path, "/playlists/") && strings.has_suffix(path, "/tracks"):
+		p := playlist_index(strings.trim_suffix(strings.trim_prefix(path, "/playlists/"), "/tracks"))
 		if p < 0 {
 			return json_response(404, `{"status":404,"userMessage":"Playlist not found"}`)
 		}
 		if server.config.page_delay > 0 {
 			time.sleep(time.Duration(server.config.page_delay) * time.Millisecond)
 		}
-		sync.mutex_lock(&server.mutex)
+		sync.guard(&server.mutex)
 		total := PLAYLISTS[p].tracks
-		sync.mutex_unlock(&server.mutex)
 		b := list_begin(total, offset, limit)
-		for i in offset ..< min(offset + limit, total) {
+		rows: for i in offset ..< min(offset + limit, total) {
 			if i > offset {
 				strings.write_byte(&b, ',')
+			}
+			for a in server.added[p] {
+				if a.at == i {
+					write_track_id(&b, a.id)
+					continue rows
+				}
 			}
 			write_track(&b, p, i)
 		}
@@ -647,6 +697,100 @@ token_response :: proc(req: ^Request) -> Response {
 		kind, server.token, kind, server.token, server.config.expires_in, USER_ID))
 }
 
+playlist_index :: proc(id: string) -> int {
+	for i in 0 ..< len(PLAYLISTS) {
+		if playlist_id(i) == id {
+			return i
+		}
+	}
+	return -1
+}
+
+// write_playlist writes playlist p as TIDAL's playlist object. Hold the
+// mutex.
+write_playlist :: proc(b: ^strings.Builder, p: int) {
+	pl := PLAYLISTS[p]
+	fmt.sbprintf(b, `{{"uuid":"%s","title":%q,"numberOfTracks":%d,"numberOfVideos":0,"type":"USER","creator":{{"id":%d}},"squareImage":"%s","image":"%s","lastUpdated":"%s"}}`,
+		playlist_id(p), pl.name, pl.tracks, USER_ID, image_id(1000 + p), image_id(2000 + p), last_updated(p, server.changes[p]))
+}
+
+// playlist_etag changes with every change to playlist p. Hold the mutex.
+playlist_etag :: proc(p: int) -> string {
+	return fmt.tprintf(`"%d-%d"`, p, server.changes[p])
+}
+
+// add_items adds the request's trackIds to the end of playlist p, as
+// POST /playlists/<uuid>/items does.
+add_items :: proc(p: int, req: ^Request) -> Response {
+	sync.guard(&server.mutex)
+	if req.etag != playlist_etag(p) {
+		fmt.printfln("mock: adding to playlist %d with a stale ETag, 412", p)
+		return json_response(412, `{"status":412,"subStatus":0,"userMessage":"The playlist was changed"}`)
+	}
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_string(&b, `{"addedItemIds":[`)
+	ids := req.form["trackIds"] or_else ""
+	first := true
+	for s in strings.split_iterator(&ids, ",") {
+		id, ok := parse_i(s)
+		if !ok || in_playlist(p, id) {
+			fmt.printfln("mock: track %s is in playlist %d already", s, p)
+			continue
+		}
+		append(&server.added[p], Added_Item{PLAYLISTS[p].tracks, id})
+		PLAYLISTS[p].tracks += 1
+		if !first {
+			strings.write_byte(&b, ',')
+		}
+		first = false
+		fmt.sbprintf(&b, "%d", id)
+		fmt.printfln("mock: added track %d to playlist %d, %d tracks", id, p, PLAYLISTS[p].tracks)
+	}
+	if !first {
+		server.changes[p] += 1
+	}
+	fmt.sbprintf(&b, `],"lastUpdated":"%s"}}`, last_updated(p, server.changes[p]))
+	return json_response(200, strings.to_string(b))
+}
+
+// in_playlist says whether playlist p lists track id. Hold the mutex.
+in_playlist :: proc(p, id: int) -> bool {
+	for a in server.added[p] {
+		if a.id == id {
+			return true
+		}
+	}
+	at := id % 1_000_000
+	if id / 1_000_000 != p || at >= PLAYLISTS[p].tracks {
+		return false
+	}
+	for a in server.added[p] {
+		if a.at == at {
+			return false // another track took that row
+		}
+	}
+	return true
+}
+
+// is_liked says whether track id is among the liked tracks. Hold the mutex.
+is_liked :: proc(id: int) -> bool {
+	for l in server.liked_added {
+		if l == id {
+			return true
+		}
+	}
+	if id >= ALBUM_TRACK_ID && id < ALBUM_TRACK_ID + 3 || id >= HIRES_TRACK_ID && id < HIRES_TRACK_ID + len(HIRES) {
+		return true
+	}
+	at := id - 99 * 1_000_000
+	for u in UNAVAILABLE {
+		if at == u {
+			return false
+		}
+	}
+	return at >= 3 + len(HIRES) && at < LIKED
+}
+
 list_begin :: proc(total, offset, limit: int) -> strings.Builder {
 	b := strings.builder_make(context.temp_allocator)
 	fmt.sbprintf(&b, `{{"limit":%d,"offset":%d,"totalNumberOfItems":%d,"items":[`, limit, offset, total)
@@ -672,6 +816,19 @@ date :: proc(i: int) -> string {
 
 track_hash :: proc(playlist, i: int) -> u32 {
 	return u32(playlist * 100_003 + i) * 2654435761
+}
+
+// write_track_id writes the track with this id as the rest of the mock
+// lists it: the gapless album, the hi-res album, or a playlist's row.
+write_track_id :: proc(b: ^strings.Builder, id: int) {
+	switch {
+	case id >= ALBUM_TRACK_ID && id < ALBUM_TRACK_ID + 3:
+		write_album_track(b, id - ALBUM_TRACK_ID)
+	case id >= HIRES_TRACK_ID && id < HIRES_TRACK_ID + len(HIRES):
+		write_hires_track(b, id - HIRES_TRACK_ID)
+	case:
+		write_track(b, id / 1_000_000, id % 1_000_000)
+	}
 }
 
 write_track :: proc(b: ^strings.Builder, playlist, i: int) {

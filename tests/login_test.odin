@@ -565,6 +565,47 @@ cover_401_keeps_the_login :: proc(t: ^testing.T) {
 	testing.expect_value(t, status, os_services.SECRET_OK)
 }
 
+// An Add_Track adds the track on TIDAL, then brings back the list's version
+// and the track as the list has it now, for the kept copies. A track the
+// list has already comes back not added.
+@(test)
+add_track_job :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m, {{"track", 11}, {"track", 22}})
+	defer mock_stop(&m)
+	s := mock_data_state(&m)
+	defer data_state_free(s)
+	d := &s.data
+	tidal.session_restore(d.session, {token_type = "Bearer", access_token = "a", refresh_token = "r", user_id = 123, user_kind = .Logged_In_User})
+	d.account = .Signed_In
+	app.workers_start(d)
+
+	app.push_job(d, {kind = .Add_Track, source = .Playlist, id = app.small("pl"), key = 33})
+	res, ok := wait_result(d, 5 * time.Second)
+	testing.expect(t, ok)
+	testing.expect_value(t, res.err, nil)
+	testing.expect(t, res.added)
+	testing.expect(t, len(res.rows) == 1 && res.rows[0].id == 33 && res.rows[0].added == "Feb 3, 2026")
+	testing.expect_value(t, res.version.count, 3)
+	testing.expect(t, res.version.updated != 0)
+	ids := mock_item_ids(&m, context.temp_allocator)
+	testing.expect(t, len(ids) == 3 && ids[2] == 33)
+	app.result_free(&res)
+
+	app.push_job(d, {kind = .Add_Track, source = .Playlist, id = app.small("pl"), key = 33})
+	res, ok = wait_result(d, 5 * time.Second)
+	testing.expect(t, ok && res.err == nil && !res.added && len(res.rows) == 0)
+	testing.expect_value(t, len(mock_item_ids(&m, context.temp_allocator)), 3)
+	app.result_free(&res)
+
+	app.push_job(d, {kind = .Add_Track, source = .Liked, key = 5000})
+	res, ok = wait_result(d, 5 * time.Second)
+	testing.expect(t, ok && res.err == nil && res.added)
+	testing.expect(t, len(res.rows) == 1 && res.rows[0].id == 5000)
+	testing.expect_value(t, res.version, app.List_Version{count = MOCK_LIKED + 1, newest = 5000})
+	app.result_free(&res)
+}
+
 // The approval got the tokens, then loading the session was held back
 // until after the code expired. The tokens still finish the login.
 @(test)

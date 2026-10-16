@@ -13,6 +13,7 @@ import "core:time"
 import app "../src/app"
 import "../src/audio"
 import "../src/jobs"
+import "../src/tidal"
 
 @(private = "file")
 no_wake :: proc "c" () {}
@@ -529,6 +530,119 @@ own_edits_write_through :: proc(t: ^testing.T) {
 		job, ok = jobs.try_pop(&d.lists.queue)
 	}
 	testing.expect(t, ok && job.op == .Delete && app.small_str(&job.id) == "5")
+}
+
+// add_job takes the Add_Track the app queued.
+@(private = "file")
+add_job :: proc(s: ^app.State) -> (job: app.Job, ok: bool) {
+	for {
+		job = jobs.try_pop(&s.data.queue) or_return
+		if job.kind == .Add_Track {
+			return job, true
+		}
+	}
+}
+
+// Dropping a row on a playlist adds it on TIDAL, and the kept copies take
+// it at the version TIDAL answers, so the list isn't fetched again. Before
+// this, the drop only said it was added and the playlist's cache went
+// stale.
+@(test)
+adding_a_track_updates_the_cache :: proc(t: ^testing.T) {
+	dir := cache_dir("add")
+	defer delete(dir, runtime.heap_allocator())
+	defer os.remove_all(dir)
+	s := cache_state(dir)
+	defer cache_state_free(s)
+	d := &s.data
+	lib := &s.library
+	sidebar(s, updated = 1, count = 3)
+	run_disk(s)
+	serve(s, rows_of(LIKED_IDS))
+	app.select_playlist(s, 2)
+	run_disk(s)
+	serve(s, rows_of({1, 2, 3}))
+	run_disk(s)
+	app.select_playlist(s, 0) // the playlist goes to memory
+	run_disk(s)
+	track_jobs(s)
+
+	// Track 900 onto the playlist.
+	app.add_to_list(s, 0, 2)
+	testing.expect_value(t, app.status_text(s), "Adding Song 900 夜に駆ける to A playlist…")
+	job, ok := add_job(s)
+	testing.expect(t, ok && job.source == .Playlist && app.small_str(&job.id) == "pl" && job.key == 900)
+	res := app.Result {
+		job     = job,
+		added   = true,
+		rows    = rows_of({900}),
+		version = {updated = 2, count = 4},
+	}
+	app.handle_result(s, &res, 0)
+	testing.expect_value(t, app.status_text(s), "Added Song 900 夜に駆ける to A playlist")
+	testing.expect_value(t, d.sidebar.items[1].tracks, 4)
+	testing.expect_value(t, d.sidebar.items[1].updated, i64(2))
+	run_disk(s)
+
+	// It opens with the track at the end and asks TIDAL for nothing.
+	app.select_playlist(s, 2)
+	run_disk(s)
+	testing.expect(t, slice.equal(view_ids(&d.view), []i64{1, 2, 3, 900}))
+	testing.expect_value(t, d.view.version, app.List_Version{updated = 2, count = 4})
+	testing.expect_value(t, track_jobs(s), 0)
+	testing.expect_value(t, d.refresh.source, app.Source.None)
+
+	// TIDAL already had it: nothing changes.
+	app.add_to_list(s, 3, 2)
+	job, _ = add_job(s)
+	res = {job = job, added = false}
+	app.handle_result(s, &res, 0)
+	testing.expect_value(t, app.status_text(s), "Song 900 夜に駆ける is already in A playlist")
+	testing.expect(t, slice.equal(view_ids(&d.view), []i64{1, 2, 3, 900}))
+
+	// A like goes on top of Liked Songs. Liking it again adds nothing,
+	// which only the count tells.
+	app.add_to_list(s, 0, 0)
+	job, _ = add_job(s)
+	testing.expect_value(t, job.source, app.Source.Liked)
+	res = {job = job, added = true, rows = rows_of({1}), version = {count = 4, newest = 1}}
+	app.handle_result(s, &res, 0)
+	testing.expect_value(t, app.status_text(s), "Added Song 1 夜に駆ける to Liked Songs")
+	testing.expect_value(t, d.sidebar.liked_count, 4)
+	app.add_to_list(s, 0, 0)
+	job, _ = add_job(s)
+	res = {job = job, added = true, rows = rows_of({1}), version = {count = 4, newest = 1}}
+	app.handle_result(s, &res, 0)
+	testing.expect_value(t, app.status_text(s), "Song 1 夜に駆ける is already in Liked Songs")
+	app.select_playlist(s, 0)
+	run_disk(s)
+	testing.expect(t, slice.equal(view_ids(&d.view), []i64{1, 900, 901, 902}))
+	testing.expect_value(t, track_jobs(s), 0)
+
+	// A failed add changes nothing and says so.
+	app.add_to_list(s, 1, 2)
+	job, _ = add_job(s)
+	res = {job = job, err = tidal.Error_Kind.Http}
+	app.handle_result(s, &res, 0)
+	testing.expect_value(t, app.status_text(s), "Couldn't add Song 900 夜に駆ける to A playlist")
+	testing.expect_value(t, d.sidebar.items[1].tracks, 4)
+
+	// Added, but without the row TIDAL lists now: the open list is fetched
+	// again and its file goes.
+	app.select_playlist(s, 2)
+	run_disk(s)
+	app.add_to_list(s, 0, 2)
+	job, _ = add_job(s)
+	res = {job = job, added = true}
+	app.handle_result(s, &res, 0)
+	testing.expect_value(t, d.refresh.source, app.Source.Playlist)
+	testing.expect(t, track_jobs(s) > 0)
+	deleted := false
+	for disk in jobs.try_pop(&d.lists.queue) {
+		id := disk.id
+		deleted ||= disk.op == .Delete && app.small_str(&id) == "pl"
+	}
+	testing.expect(t, deleted, "the playlist's file is deleted")
 }
 
 // Signing out deletes the user's cache folder and what's in memory.

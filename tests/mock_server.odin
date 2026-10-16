@@ -10,9 +10,9 @@ import "core:thread"
 import "core:time"
 
 // A one-connection-at-a-time HTTP server on 127.0.0.1 standing in for TIDAL.
-// It models one playlist's items, the session endpoints, an echo endpoint,
-// a rate-limited endpoint, a slow one, token refresh and the device login,
-// and records every request line.
+// It models one playlist's items, adding tracks to it and liking tracks,
+// the session endpoints, an echo endpoint, a rate-limited endpoint, a slow
+// one, token refresh and the device login, and records every request line.
 
 Mock_Item :: struct {
 	kind: string, // "track" or "video"
@@ -28,6 +28,8 @@ Mock_Request :: struct {
 	method:     string,
 	path:       string,
 	query:      map[string]string,
+	form:       map[string]string, // the body, decoded
+	etag:       string, // If-None-Match
 	authorized: bool,
 }
 
@@ -39,6 +41,7 @@ Mock :: struct {
 
 	mutex:      sync.Mutex,
 	items:      [dynamic]Mock_Item,
+	liked:      [dynamic]i64, // tracks liked by a POST, newest first, on top of the MOCK_LIKED
 	// Accept DELETEs without removing anything.
 	stuck:      bool,
 	requests:   [dynamic]string, // "METHOD /path?query"
@@ -69,6 +72,7 @@ Mock :: struct {
 mock_start :: proc(m: ^Mock, items: []Mock_Item = nil) {
 	m.allocator = runtime.heap_allocator()
 	m.items = make([dynamic]Mock_Item, m.allocator)
+	m.liked = make([dynamic]i64, m.allocator)
 	m.requests = make([dynamic]string, m.allocator)
 	m.poll_times = make([dynamic]time.Tick, m.allocator)
 	m.files = make(map[string][]u8, m.allocator)
@@ -98,6 +102,7 @@ mock_stop :: proc(m: ^Mock) {
 	}
 	delete(m.requests)
 	delete(m.items)
+	delete(m.liked)
 	delete(m.poll_times)
 	clear_query(&m.last_query, m.allocator)
 	delete(m.last_query)
@@ -176,6 +181,7 @@ mock_handle :: proc(m: ^Mock, client: net.TCP_Socket) {
 	head := string(buf[:header_end])
 	content_length := 0
 	authorized := false
+	etag: string
 	lines := strings.split(head, "\r\n", context.temp_allocator)
 	for line in lines[1:] {
 		name, _, value := strings.partition(line, ":")
@@ -184,6 +190,8 @@ mock_handle :: proc(m: ^Mock, client: net.TCP_Socket) {
 			content_length, _ = strconv.parse_int(value)
 		} else if strings.equal_fold(name, "authorization") {
 			authorized = true
+		} else if strings.equal_fold(name, "if-none-match") {
+			etag = value
 		}
 	}
 	for len(buf) < header_end + 4 + content_length {
@@ -200,6 +208,7 @@ mock_handle :: proc(m: ^Mock, client: net.TCP_Socket) {
 	}
 	req := Mock_Request {
 		method     = parts[0],
+		etag       = etag,
 		authorized = authorized,
 	}
 	target := parts[1]
@@ -213,27 +222,31 @@ mock_handle :: proc(m: ^Mock, client: net.TCP_Socket) {
 		dv, _ := net.percent_decode(v, context.temp_allocator)
 		req.query[dk] = dv
 	}
+	req.form = make(map[string]string, 8, context.temp_allocator)
+	form := string(buf[header_end + 4:])
+	for pair in strings.split_iterator(&form, "&") {
+		k, _, v := strings.partition(pair, "=")
+		plus, _ := strings.replace_all(v, "+", " ", context.temp_allocator)
+		dk, _ := net.percent_decode(k, context.temp_allocator)
+		dv, _ := net.percent_decode(plus, context.temp_allocator)
+		req.form[dk] = dv
+	}
 
 	if req.path == "/token" {
 		sync.guard(&m.mutex)
 		clear_query(&m.token_form, m.allocator)
-		form := string(buf[header_end + 4:])
-		for pair in strings.split_iterator(&form, "&") {
-			k, _, v := strings.partition(pair, "=")
-			plus, _ := strings.replace_all(v, "+", " ", context.temp_allocator)
-			dk, _ := net.percent_decode(k, context.temp_allocator)
-			dv, _ := net.percent_decode(plus, context.temp_allocator)
-			m.token_form[strings.clone(dk, m.allocator)] = strings.clone(dv, m.allocator)
+		for k, v in req.form {
+			m.token_form[strings.clone(k, m.allocator)] = strings.clone(v, m.allocator)
 		}
 	}
-	status, body, etag := mock_route(m, req, target)
+	status, body, out_etag := mock_route(m, req, target)
 	// A 429 always asks for one second.
 	extra := "Retry-After: 1\r\n" if status == 429 else ""
 	resp := fmt.tprintf(
 		"HTTP/1.1 %d X\r\nContent-Type: application/json\r\nContent-Length: %d\r\nETag: %s\r\n%sConnection: close\r\n\r\n%s",
 		status,
 		len(body),
-		etag,
+		out_etag,
 		extra,
 		body,
 	)
@@ -291,8 +304,18 @@ mock_route :: proc(m: ^Mock, req: Mock_Request, target: string) -> (status: int,
 		return 200, `{"id":123,"username":"user","firstName":"F","lastName":"L","email":"u@example.com"}`, etag
 	case req.path == "/users/123/subscription":
 		return 200, `{}`, etag
+	case req.path == "/users/123/favorites/tracks" && req.method == "POST":
+		id, _ := strconv.parse_i64(req.form["trackId"] or_else "")
+		liked := id >= 1 && id <= MOCK_LIKED
+		for l in m.liked {
+			liked ||= l == id
+		}
+		if !liked {
+			inject_at(&m.liked, 0, id)
+		}
+		return 200, `{}`, etag
 	case req.path == "/users/123/favorites/tracks":
-		return 200, mock_liked_page(req.query["offset"] or_else "0", req.query["limit"] or_else "50"), etag
+		return 200, mock_liked_page(req.query["offset"] or_else "0", req.query["limit"] or_else "50", m.liked[:]), etag
 	case req.path == "/echo":
 		return 200, `{}`, etag
 	case req.path == "/refused":
@@ -354,6 +377,55 @@ mock_route :: proc(m: ^Mock, req: Mock_Request, target: string) -> (status: int,
 			}
 		}
 		return 200, `{}`, etag
+	case req.path == "/playlists/pl/items" && req.method == "POST":
+		if req.etag != etag {
+			return 412, `{"status":412,"userMessage":"The playlist was changed"}`, etag
+		}
+		b := strings.builder_make(context.temp_allocator)
+		strings.write_string(&b, `{"addedItemIds":[`)
+		ids := req.form["trackIds"] or_else ""
+		first := true
+		ids_loop: for s in strings.split_iterator(&ids, ",") {
+			id, ok := strconv.parse_i64(s)
+			if !ok {
+				continue
+			}
+			if req.form["onDupes"] != "ADD" {
+				for it in m.items {
+					if it.kind == "track" && it.id == id {
+						continue ids_loop
+					}
+				}
+			}
+			append(&m.items, Mock_Item{"track", id})
+			if !first {
+				strings.write_byte(&b, ',')
+			}
+			first = false
+			fmt.sbprintf(&b, "%d", id)
+		}
+		strings.write_string(&b, "]}")
+		return 200, strings.to_string(b), etag
+	case req.path == "/playlists/pl/tracks":
+		offset, _ := strconv.parse_int(req.query["offset"] or_else "0")
+		limit, _ := strconv.parse_int(req.query["limit"] or_else "1000")
+		b := strings.builder_make(context.temp_allocator)
+		fmt.sbprintf(&b, `{{"totalNumberOfItems":%d,"items":[`, tracks)
+		n := 0
+		for it in m.items {
+			if it.kind != "track" {
+				continue
+			}
+			if n >= offset && n < offset + limit {
+				if n > offset {
+					strings.write_byte(&b, ',')
+				}
+				fmt.sbprintf(&b, `{{"id":%d,"title":"t%d","duration":200,"dateAdded":"2026-02-03T10:00:00.000+0000","artist":{{"id":1,"name":"A"}},"artists":[{{"id":1,"name":"A"}}],"album":{{"id":2,"title":"B","cover":""}}}}`, it.id, it.id)
+			}
+			n += 1
+		}
+		strings.write_string(&b, "]}")
+		return 200, strings.to_string(b), etag
 	case req.path == "/playlists/pl/items":
 		offset, _ := strconv.parse_int(req.query["offset"] or_else "0")
 		limit, _ := strconv.parse_int(req.query["limit"] or_else "1000")
@@ -369,7 +441,7 @@ mock_route :: proc(m: ^Mock, req: Mock_Request, target: string) -> (status: int,
 		strings.write_string(&b, "]}")
 		return 200, strings.to_string(b), etag
 	case req.path == "/playlists/pl":
-		return 200, fmt.tprintf(`{{"uuid":"pl","title":"pl","numberOfTracks":%d,"numberOfVideos":%d,"type":"USER"}}`, tracks, videos), etag
+		return 200, fmt.tprintf(`{{"uuid":"pl","title":"pl","numberOfTracks":%d,"numberOfVideos":%d,"type":"USER","lastUpdated":"2026-03-01T10:00:%02d.000+0000"}}`, tracks, videos, len(m.items) % 60), etag
 	}
 	return 404, `{"userMessage":"not found"}`, etag
 }
@@ -382,15 +454,25 @@ MOCK_UNAVAILABLE :: [?]int{120, 777, 1400}
 
 // mock_liked_page answers users/123/favorites/tracks as TIDAL does: at
 // most MOCK_LIKED_LIMIT a page, the unavailable tracks left out, and
-// totalNumberOfItems counting them.
-mock_liked_page :: proc(offset_s, limit_s: string) -> string {
+// totalNumberOfItems counting them. Tracks liked by a POST come first.
+mock_liked_page :: proc(offset_s, limit_s: string, liked: []i64 = nil) -> string {
 	offset, _ := strconv.parse_int(offset_s)
 	limit, _ := strconv.parse_int(limit_s)
 	limit = min(limit, MOCK_LIKED_LIMIT)
 	b := strings.builder_make(context.temp_allocator)
-	fmt.sbprintf(&b, `{{"limit":%d,"offset":%d,"totalNumberOfItems":%d,"items":[`, limit, offset, MOCK_LIKED)
+	total := MOCK_LIKED + len(liked)
+	fmt.sbprintf(&b, `{{"limit":%d,"offset":%d,"totalNumberOfItems":%d,"items":[`, limit, offset, total)
 	first := true
-	outer: for i in offset ..< min(offset + limit, MOCK_LIKED) {
+	outer: for at in offset ..< min(offset + limit, total) {
+		if at < len(liked) {
+			if !first {
+				strings.write_byte(&b, ',')
+			}
+			first = false
+			fmt.sbprintf(&b, `{{"created":"2026-02-03T10:00:00.000+0000","item":{{"id":%d,"title":"t%d","duration":200,"artist":{{"id":1,"name":"A"}},"artists":[{{"id":1,"name":"A"}}],"album":{{"id":2,"title":"B","cover":""}}}}}}`, liked[at], liked[at])
+			continue
+		}
+		i := at - len(liked)
 		for u in MOCK_UNAVAILABLE {
 			if i == u {
 				continue outer

@@ -84,6 +84,9 @@ Status :: enum u8 {
 	Playing,
 	Added,
 	Copied,
+	Adding,
+	Already_In,
+	Add_Failed,
 }
 
 PLAYLISTS := [?]string {
@@ -212,7 +215,7 @@ draw_sidebar :: proc(s: ^State) {
 			item.border_color = ACCENT
 		}
 		if track, ok := ui.dropped(item); ok {
-			set_status(s, .Added, int(track), i)
+			add_to_list(s, int(track), i)
 		}
 		sig := ui.signal(item)
 		if sig.clicked {
@@ -933,8 +936,14 @@ status_text :: proc(s: ^State) -> string {
 	case .None:
 	case .Playing:
 		return fmt.tprintf("Playing %s by %s", t.title, t.artist)
+	case .Adding:
+		return fmt.tprintf("Adding %s to %s…", t.title, sidebar_entry(s, lib.status_list).name)
 	case .Added:
 		return fmt.tprintf("Added %s to %s", t.title, sidebar_entry(s, lib.status_list).name)
+	case .Already_In:
+		return fmt.tprintf("%s is already in %s", t.title, sidebar_entry(s, lib.status_list).name)
+	case .Add_Failed:
+		return fmt.tprintf("Couldn't add %s to %s", t.title, sidebar_entry(s, lib.status_list).name)
 	case .Copied:
 		return fmt.tprintf("Copied the link to %s", t.title)
 	}

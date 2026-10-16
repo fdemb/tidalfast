@@ -125,8 +125,9 @@ Data :: struct {
 	// and results from an older one are dropped.
 	auth_gen:       u32,
 	retry:          bit_set[Job_Kind; u16], // pushes the queue refused, tried again next frame
-	// Stream and Artwork jobs the queue refused. Their parameters can't be
-	// rebuilt from the kind, so they're kept whole and pushed again.
+	// Stream, Artwork and Add_Track jobs the queue refused. Their
+	// parameters can't be rebuilt from the kind, so they're kept whole and
+	// pushed again.
 	held:           [4]Held_Job,
 	refresh_errors: int, // token refreshes in a row that failed without ending the login (atomic)
 	keychain_mutex: sync.Mutex, // orders a sign-out's delete against the workers' saves
@@ -501,7 +502,7 @@ push_job :: proc(d: ^Data, job: Job, priority: u8 = PRIORITY_DATA) -> bool {
 	job := job
 	job.auth = d.auth_gen
 	if !jobs.push(&d.queue, job, priority) {
-		if job.kind == .Stream || job.kind == .Artwork {
+		if job.kind == .Stream || job.kind == .Artwork || job.kind == .Add_Track {
 			hold_job(d, job, priority)
 		} else {
 			d.retry += {job.kind}
@@ -511,8 +512,8 @@ push_job :: proc(d: ^Data, job: Job, priority: u8 = PRIORITY_DATA) -> bool {
 	return true
 }
 
-// hold_job keeps a refused playback job for the next frame. When the list is
-// full the oldest goes, since its track has most likely moved on.
+// hold_job keeps a refused playback or add job for the next frame. When the
+// list is full the oldest goes, since its track has most likely moved on.
 @(private = "file")
 hold_job :: proc(d: ^Data, job: Job, priority: u8) {
 	for &h in d.held {
@@ -792,6 +793,8 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 		sidebar_save(d)
 	case .Disk:
 		disk_result(s, res)
+	case .Add_Track:
+		add_result(s, res)
 	case .Tracks:
 		v := &d.view
 		r := &d.refresh

@@ -69,6 +69,7 @@ Job_Kind :: enum u8 {
 	Login_Pkce, // finish a PKCE login with the pasted address, see login.odin
 	Save_Settings, // write the settings, see settings.odin
 	Disk, // read or write a cache file, on the disk thread, see lists.odin
+	Add_Track, // like a track or add it to a playlist, see add_to_list
 }
 
 Source :: enum u8 {
@@ -88,7 +89,7 @@ Job :: struct {
 	view:       u32, // Tracks: the view generation it's for; Stream: the track's serial; Search: the query's generation; Login_Start, Login_Wait, Login_Pkce: the login attempt
 	offset:     i32,
 	limit:      i32,
-	key:        u64, // Cover: the cache key; Stream: the track id; Artwork: the track's serial; Disk: the user id
+	key:        u64, // Cover: the cache key; Stream, Add_Track: the track id; Artwork: the track's serial; Disk: the user id
 	size:       u16, // Cover: pixels across on screen
 	fetch:      u16, // Cover: the size to download
 	interval:   f32, // Login_Wait: seconds between polls
@@ -141,6 +142,7 @@ Result :: struct {
 	hit:         bool, // Disk: the file was there and good
 	version:     List_Version, // Disk: what the list was fetched at
 	fetched:     i64, // Disk: when, unix seconds
+	added:       bool, // Add_Track: TIDAL added it rather than finding it there
 }
 
 workers_start :: proc(d: ^Data) {
@@ -429,6 +431,8 @@ run_job :: proc(d: ^Data, job: Job) -> (res: Result) {
 		for t, i in tracks {
 			res.rows[i] = row_from_track(t, alloc)
 		}
+	case .Add_Track:
+		run_add_track(s, job, &res, alloc)
 	case .Search:
 		found, err := tidal.search(s, small_str(&id), {.Track, .Album, .Artist, .Playlist}, SEARCH_PAGE, 0, alloc)
 		if err != nil {
@@ -564,6 +568,56 @@ run_playlists :: proc(s: ^tidal.Session, res: ^Result, alloc: mem.Allocator) {
 		}
 	}
 	res.playlists = items[:]
+}
+
+// run_add_track likes a track or adds it to the end of a playlist, then
+// asks for the list's version and the track as the list now has it, so
+// the kept copies can take it in place. If that second ask fails, the add
+// still stands and res.rows stays empty.
+@(private = "file")
+run_add_track :: proc(s: ^tidal.Session, job: Job, res: ^Result, alloc: mem.Allocator) {
+	track := fmt.tprint(job.key)
+	id := job.id
+	if job.source == .Liked {
+		if err := tidal.favorites_add_track(s, {track}); err != nil {
+			fail(res, err)
+			return
+		}
+		res.added = true // add_result tells from the count whether it was there
+		newest, count, err := tidal.favorites_tracks(s, 1, 0, .Date, .Descending, alloc)
+		if err == nil && len(newest) == 1 && newest[0].id == i64(job.key) {
+			res.version = {count = i64(count), newest = newest[0].id}
+			res.rows = make([]Row, 1, alloc)
+			res.rows[0] = row_from_track(newest[0], alloc)
+		}
+		return
+	}
+	pl, err := tidal.playlist_get(s, small_str(&id), context.temp_allocator)
+	if err != nil {
+		fail(res, err)
+		return
+	}
+	added: []i64
+	added, err = tidal.user_playlist_add(s, &pl, {track}, allocator = context.temp_allocator)
+	if err != nil {
+		fail(res, err)
+		return
+	}
+	res.added = len(added) > 0
+	if !res.added || pl.num_tracks == 0 {
+		return
+	}
+	// user_playlist_add read the playlist again, so pl is as it is now.
+	version := List_Version{count = i64(pl.num_tracks)}
+	if t, ok := pl.last_updated.?; ok {
+		version.updated = time.to_unix_nanoseconds(t) / 1e6
+	}
+	last, total, lerr := tidal.playlist_tracks(s, small_str(&id), 1, pl.num_tracks - 1, allocator = alloc)
+	if lerr == nil && total == pl.num_tracks && len(last) == 1 && last[0].id == i64(job.key) {
+		res.version = version
+		res.rows = make([]Row, 1, alloc)
+		res.rows[0] = row_from_track(last[0], alloc)
+	}
 }
 
 // fetch_size is the size a Cover or Artwork job downloads. Artwork is shown

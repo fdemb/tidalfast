@@ -462,15 +462,95 @@ refresh_land :: proc(s: ^State) {
 
 // Own edits
 
+ADD_STATUSES :: bit_set[Status]{.Adding, .Added, .Already_In, .Add_Failed}
+
+// add_to_list adds row track of the open list to sidebar entry entry on
+// TIDAL: Liked Songs likes it, a playlist gets it at the end. add_result
+// puts it in the kept copies. The fake data only says it was added.
+add_to_list :: proc(s: ^State, track, entry: int) {
+	d := &s.data
+	row := view_row(s, track)
+	if row == nil {
+		return
+	}
+	if d.fake {
+		set_status(s, .Added, track, entry)
+		return
+	}
+	if entry < 0 || entry > len(d.sidebar.items) || row.id == 0 {
+		return
+	}
+	job := Job{kind = .Add_Track, source = .Liked, key = u64(row.id)}
+	if entry > 0 {
+		job.source = .Playlist
+		job.id = small(d.sidebar.items[entry - 1].id)
+	}
+	push_job(d, job) // a refused one is held and pushed next frame
+	set_status(s, .Adding, track, entry)
+}
+
+// add_result takes an Add_Track. With the row as TIDAL now lists it, the
+// kept copies take it in place at the version TIDAL gave, so nothing is
+// fetched again. Without it they're dropped and the list is fetched again.
+// The status line says how it went if it still names this add.
+add_result :: proc(s: ^State, res: ^Result) {
+	d := &s.data
+	lib := &s.library
+	job := &res.job
+	id := small_str(&job.id)
+	err, failed := res.err.?
+	added := res.added
+	if job.source == .Liked && len(res.rows) == 1 {
+		// Liking a liked track adds nothing, and only the count tells.
+		added = res.version.count > i64(d.sidebar.liked_count)
+	}
+	status := Status.Added
+	switch {
+	case failed:
+		status = .Add_Failed
+		log.warnf("lists: adding a track to %s failed: %v", list_name(job.source, id), err)
+	case !added:
+		status = .Already_In
+	case len(res.rows) == 1:
+		list_edited(s, job.source, id, true, res.rows[0], res.version)
+	case:
+		list_forget(s, job.source, id)
+	}
+	if lib.status != .Adding {
+		return
+	}
+	row := view_row(s, lib.status_track)
+	entry := lib.status_list
+	same_list := entry == 0 if job.source == .Liked else entry > 0 && entry <= len(d.sidebar.items) && d.sidebar.items[entry - 1].id == id
+	if row != nil && row.id == i64(job.key) && same_list {
+		lib.status = status
+	}
+}
+
+// list_forget drops the kept copies of a list that changed in a way the
+// app can't put in them. The open list is fetched again now, any other
+// when it next opens.
+list_forget :: proc(s: ^State, source: Source, id: string) {
+	d := &s.data
+	r := &d.refresh
+	if r.source == source && small_str(&r.id) == id {
+		refresh_drop(d)
+	}
+	v := &d.view
+	if v.source == source && small_str(&v.id) == id && v.fetched != 0 {
+		refresh_start(d)
+	} else if i := lru_find(d, source, id); i >= 0 {
+		lru_drop(d, i)
+	}
+	disk_push(d, {op = .Delete, source = source, id = small(id)})
+}
+
 // list_edited applies an edit the app made on TIDAL to the copies it keeps,
 // so neither the next open nor the next launch fetches the list again. With
 // add, row goes at the end of a playlist or the top of Liked Songs; without
 // it, the first row with row.id goes. version is the list's after the edit,
 // as TIDAL gave it, or {} to have the next sidebar refresh fetch it again.
 // Call it between frames, as results are handled.
-//
-// Nothing calls it yet: the app makes no edits on TIDAL. Dropping a row on a
-// playlist only says it was added.
 list_edited :: proc(s: ^State, source: Source, id: string, add: bool, row: Row, version: List_Version) {
 	d := &s.data
 	sb := &d.sidebar
@@ -590,7 +670,7 @@ sidebar_adopt :: proc(s: ^State, res: ^Result, from_disk: bool) {
 		fetched      = fetched if from_disk else time.tick_now(),
 	}
 	res.arena = nil
-	if lib.status == .Added {
+	if lib.status in ADD_STATUSES {
 		lib.status = .None // it names a sidebar entry by its place
 	}
 	if open != "" {
