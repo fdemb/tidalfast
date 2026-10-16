@@ -1173,7 +1173,9 @@ end_frame :: proc(r: ^Renderer) {
 	}
 	vk.CmdEndRenderPass(cmd)
 
+	// Present can clear g.extent, so the capture keeps its own size.
 	capture: Gpu_Buffer
+	capture_size := g.extent
 	if r.capture_path != "" && g.can_capture {
 		capture = record_capture(r, cmd, image)
 	}
@@ -1218,7 +1220,7 @@ end_frame :: proc(r: ^Renderer) {
 
 	if capture.buffer != 0 {
 		vk.WaitForFences(g.device, 1, &f.fence, true, max(u64))
-		w, h := uint(g.extent.width), uint(g.extent.height)
+		w, h := uint(capture_size.width), uint(capture_size.height)
 		pixels := capture.mapped[:w * h * 4]
 		if g.format == .R8G8B8A8_SRGB {
 			for i := 0; i < len(pixels); i += 4 {
@@ -1290,6 +1292,16 @@ record_capture :: proc(r: ^Renderer, cmd: vk.CommandBuffer, image: u32) -> Gpu_B
 		imageExtent      = {w, h, 1},
 	}
 	vk.CmdCopyImageToBuffer(cmd, img, .TRANSFER_SRC_OPTIMAL, buf.buffer, 1, &region)
+	readback := vk.BufferMemoryBarrier {
+		sType               = .BUFFER_MEMORY_BARRIER,
+		srcAccessMask       = {.TRANSFER_WRITE},
+		dstAccessMask       = {.HOST_READ},
+		srcQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED,
+		dstQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED,
+		buffer              = buf.buffer,
+		size                = vk.DeviceSize(vk.WHOLE_SIZE),
+	}
+	vk.CmdPipelineBarrier(cmd, {.TRANSFER}, {.HOST}, {}, 0, nil, 1, &readback, 0, nil)
 	image_barrier(cmd, img, .TRANSFER_SRC_OPTIMAL, .PRESENT_SRC_KHR, 0, 1, {.TRANSFER}, {.BOTTOM_OF_PIPE}, {.TRANSFER_READ}, {})
 	return buf
 }
