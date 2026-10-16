@@ -353,7 +353,7 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input, shell: ^platfor
 		s.show_overlay = !s.show_overlay
 	}
 	for key, screen in ([Screen]u32{.Library = ui.KEY_1, .Text = ui.KEY_2, .Shapes = ui.KEY_3}) {
-		if ui.key_pressed(key, {.Command}) {
+		if ui.key_pressed(key, {ui.PRIMARY}) {
 			s.screen = screen
 		}
 	}

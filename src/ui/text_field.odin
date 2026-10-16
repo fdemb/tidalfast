@@ -224,7 +224,8 @@ focus_text_field :: proc(b: ^Box, f: ^Text_Field) {
 }
 
 // field_key applies one key press, reporting whether the field used it and
-// whether it gave up the focus.
+// whether it gave up the focus. Movement and deletion keys are macOS's:
+// Option by word, Command or Control-A and Control-E to the line's ends.
 @(private)
 field_key :: proc(u: ^State, f: ^Text_Field, key: Key, k: Key_Press, sig: ^Field_Signal) -> (used, gave_up: bool) {
 	shift := .Shift in k.modifiers
@@ -260,10 +261,10 @@ field_key :: proc(u: ^State, f: ^Text_Field, key: Key, k: Key_Press, sig: ^Field
 			return
 		}
 	case KEY_A:
-		switch k.modifiers {
-		case {.Command}:
+		switch {
+		case k.modifiers == {PRIMARY}:
 			field_select_all(f)
-		case {.Control}, {.Control, .Shift}:
+		case base == {.Control}:
 			field_move(f, -1, .Line, shift)
 		case:
 			return
@@ -274,7 +275,7 @@ field_key :: proc(u: ^State, f: ^Text_Field, key: Key, k: Key_Press, sig: ^Field
 		}
 		field_move(f, 1, .Line, shift)
 	case KEY_C, KEY_X:
-		if k.modifiers != {.Command} {
+		if k.modifiers != {PRIMARY} {
 			return
 		}
 		sel := field_selected(f) if k.code == KEY_C else field_cut(f)
@@ -282,7 +283,7 @@ field_key :: proc(u: ^State, f: ^Text_Field, key: Key, k: Key_Press, sig: ^Field
 			u.clipboard_set(raw_data(sel), uint(len(sel)))
 		}
 	case KEY_V:
-		if k.modifiers != {.Command} {
+		if k.modifiers != {PRIMARY} {
 			return
 		}
 		if u.clipboard_get != nil {
@@ -295,9 +296,9 @@ field_key :: proc(u: ^State, f: ^Text_Field, key: Key, k: Key_Press, sig: ^Field
 		}
 	case KEY_Z:
 		switch k.modifiers {
-		case {.Command}:
+		case {PRIMARY}:
 			field_undo(f)
-		case {.Command, .Shift}:
+		case {PRIMARY, .Shift}:
 			field_redo(f)
 		case:
 			return

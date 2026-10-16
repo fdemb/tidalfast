@@ -685,7 +685,7 @@ key_down :: proc(u: ^State, e: platform.Event) {
 	mods := e.modifiers & {.Shift, .Control, .Option, .Command}
 	code := e.key_code
 	switch {
-	case !e.repeat && (code == KEY_F1 || (code == KEY_D && mods == {.Command, .Shift})):
+	case !e.repeat && (code == KEY_F1 || (code == KEY_D && mods == {PRIMARY, .Shift})):
 		u.debug = !u.debug
 		return
 	case shortcut_for(u, {code, mods}) != 0:
