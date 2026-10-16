@@ -3452,7 +3452,11 @@ typedef struct kbts_blob_header
   kbts_u32 GlyphLookupMatrixOffsetFromStartOfFile;
   kbts_u32 GlyphLookupSubtableMatrixOffsetFromStartOfFile;
   kbts_u32 LookupSubtableIndexOffsetsOffsetFromStartOfFile;
-  kbts_u32 SubtableInfosOffsetFromStartOfFile;
+  // TIDALfast: was SubtableInfosOffsetFromStartOfFile, unused since
+  // KBTS_BLOB_VERSION_REMOVED_SUBTABLE_INFOS_ALIGNED_TABLES. Set by
+  // tidalfast_compact_blob in kb_text_shape.c, which stores the glyph lookup
+  // matrices as blocks; see kbts__MatrixBit.
+  kbts_u32 MatrixBlocksOffsetFromStartOfFile;
 
   kbts_blob_table Tables[KBTS_BLOB_TABLE_ID_COUNT];
 } kbts_blob_header;
@@ -13426,6 +13430,7 @@ struct kbts_shape_scratchpad
   kbts_shape_config *Config;
 
   kbts_u32 *GlyphLookupSubtableMatrix;
+  kbts_u16 *GlyphLookupSubtableMatrixBlocks; // TIDALfast
   kbts_u32 *LookupSubtableIndexOffsets;
   kbts_u32 GlyphIdCount;
   kbts_u32 LookupSubtableCount;
@@ -16203,6 +16208,32 @@ typedef struct kbts__matrix_index
   kbts_un BitIndex;
 } kbts__matrix_index;
 
+// TIDALfast: a compacted matrix splits each row into blocks of
+// KBTS__MATRIX_BLOCK_BITS glyphs. Blocks has a u16 per block of every row,
+// the block's index in Matrix, and block 0 is all zeros, so the rows can
+// share it for most of their length.
+#define KBTS__MATRIX_BLOCK_BITS 512
+#define KBTS__MATRIX_BLOCK_WORDS (KBTS__MATRIX_BLOCK_BITS / 32)
+
+// TIDALfast: tests a bit of a dense matrix, or of a compacted one when
+// Blocks is set.
+static kbts_b32 kbts__MatrixBit(kbts_u32 *Matrix, kbts_u16 *Blocks, kbts_un Row, kbts_un GlyphId, kbts_un GlyphCount, kbts__matrix_index Index)
+{
+  kbts_u32 Word;
+  if(Blocks)
+  {
+    kbts_un BlocksPerRow = (GlyphCount + KBTS__MATRIX_BLOCK_BITS - 1) / KBTS__MATRIX_BLOCK_BITS;
+    kbts_un Block = Blocks[Row * BlocksPerRow + GlyphId / KBTS__MATRIX_BLOCK_BITS];
+    kbts_un Bit = GlyphId % KBTS__MATRIX_BLOCK_BITS;
+    Word = Matrix[Block * KBTS__MATRIX_BLOCK_WORDS + Bit / 32] >> (Bit % 32);
+  }
+  else
+  {
+    Word = Matrix[Index.WordIndex] >> Index.BitIndex;
+  }
+  return Word & 1;
+}
+
 static kbts__matrix_index kbts__GlyphLookupMatrixIndex(kbts_un LookupIndex, kbts_un GlyphIndex, kbts_un GlyphCount)
 {
   kbts_un FlatIndex = LookupIndex * GlyphCount + GlyphIndex;
@@ -16265,7 +16296,7 @@ static kbts_b32 kbts__GlyphIncludedInLookupSubtable(kbts_shape_scratchpad *Scrat
     if(Id < GlyphCount)
     {
       kbts__matrix_index MatrixIndex = kbts__GlyphLookupSubtableMatrixIndex(FlatSubtableIndex, SubtableCount, Id, GlyphCount);
-      if(!(GlyphLookupSubtableMatrix[MatrixIndex.WordIndex] & (1u << MatrixIndex.BitIndex)))
+      if(!kbts__MatrixBit(GlyphLookupSubtableMatrix, Scratchpad->GlyphLookupSubtableMatrixBlocks, FlatSubtableIndex, Id, GlyphCount, MatrixIndex))
       {
         Result = 0;
       }
@@ -17761,6 +17792,12 @@ KBTS_EXPORT kbts_shape_scratchpad *kbts_PlaceShapeScratchpad(kbts_shape_config *
       if(Blob->GlyphLookupSubtableMatrixOffsetFromStartOfFile)
       {
         Result->GlyphLookupSubtableMatrix = KBTS__POINTER_OFFSET(kbts_u32, Blob, Blob->GlyphLookupSubtableMatrixOffsetFromStartOfFile);
+      }
+
+      if(Blob->MatrixBlocksOffsetFromStartOfFile)
+      {
+        kbts_un BlocksPerRow = (Blob->GlyphCount + KBTS__MATRIX_BLOCK_BITS - 1) / KBTS__MATRIX_BLOCK_BITS;
+        Result->GlyphLookupSubtableMatrixBlocks = KBTS__POINTER_OFFSET(kbts_u16, Blob, Blob->MatrixBlocksOffsetFromStartOfFile) + Blob->LookupCount * BlocksPerRow;
       }
 
       if(Blob->LookupSubtableIndexOffsetsOffsetFromStartOfFile)
@@ -23394,6 +23431,11 @@ static kbts_shape_config *kbts__PlaceShapeConfig(kbts_font *Font, kbts_script Sc
       kbts_un GlyphCount = Font->Blob->GlyphCount;
 
       kbts_u32 *GlyphLookupMatrix = KBTS__POINTER_OFFSET(kbts_u32, Font->Blob, Font->Blob->GlyphLookupMatrixOffsetFromStartOfFile);
+      kbts_u16 *GlyphLookupMatrixBlocks = 0;
+      if(Font->Blob->MatrixBlocksOffsetFromStartOfFile)
+      {
+        GlyphLookupMatrixBlocks = KBTS__POINTER_OFFSET(kbts_u16, Font->Blob, Font->Blob->MatrixBlocksOffsetFromStartOfFile);
+      }
       kbts_un GposLookupIndexOffset = Font->Blob->GposLookupIndexOffset;
 
       kbts__sequential_lookup *SequentialLookups = 0;
@@ -23580,7 +23622,7 @@ static kbts_shape_config *kbts__PlaceShapeConfig(kbts_font *Font, kbts_script Sc
                     KBTS__FOR(GlyphIndex, 0, GlyphCount)
                     {
                       kbts__matrix_index MatrixIndex = kbts__GlyphLookupMatrixIndex(FlatLookupIndex, GlyphIndex, GlyphCount);
-                      if(GlyphLookupMatrix[MatrixIndex.WordIndex] & (1u << MatrixIndex.BitIndex))
+                      if(kbts__MatrixBit(GlyphLookupMatrix, GlyphLookupMatrixBlocks, FlatLookupIndex, GlyphIndex, GlyphCount, MatrixIndex))
                       {
                         kbts__matrix_index SequentialMatrixIndex = kbts__IdSequentialLookupMatrixIndex(ThisSequentialLookupCount, GlyphIndex, SequentialLookupCount);
                         IdSequentialLookupMatrix[SequentialMatrixIndex.WordIndex] |= 1u << SequentialMatrixIndex.BitIndex;

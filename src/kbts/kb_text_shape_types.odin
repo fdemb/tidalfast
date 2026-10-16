@@ -1829,7 +1829,7 @@ blob_header :: struct {
 	GlyphLookupMatrixOffsetFromStartOfFile:          u32,
 	GlyphLookupSubtableMatrixOffsetFromStartOfFile:  u32,
 	LookupSubtableIndexOffsetsOffsetFromStartOfFile: u32,
-	SubtableInfosOffsetFromStartOfFile:              u32,
+	MatrixBlocksOffsetFromStartOfFile:               u32, // TIDALfast, see kb_text_shape.h
 
 	Tables: [blob_table_id]blob_table,
 }

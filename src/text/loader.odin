@@ -388,13 +388,31 @@ load_kb_font :: proc(f: ^kbts.font, data: []byte, index: int) -> (blob: rawptr, 
 	}
 	// PlaceBlob fails on a null buffer even when it needs no bytes.
 	scratch := libc.malloc(uint(max(scratch_size, 1)))
-	defer libc.free(scratch)
 	blob = libc.malloc(uint(max(out_size, 1)))
-	if kbts.PlaceBlob(f, &state, scratch, blob) != .NONE {
+	placed := kbts.PlaceBlob(f, &state, scratch, blob)
+	libc.free(scratch)
+	if placed != .NONE {
 		libc.free(blob)
 		return nil, false
 	}
-	return blob, true
+	// The placed blob is mostly zeros for a big font: 4.4 MB for a CJK face,
+	// 0.9 MB compacted. Loading the copy points f at it.
+	size := kbts.tidalfast_compact_blob(blob, nil)
+	if size <= 0 || size >= out_size {
+		return blob, true
+	}
+	small := libc.malloc(uint(size))
+	if small == nil {
+		return blob, true
+	}
+	kbts.tidalfast_compact_blob(blob, small)
+	libc.free(blob)
+	_, _, err = kbts.LoadFont(f, &state, ([^]byte)(small)[:size], 0)
+	if err != .NONE {
+		libc.free(small)
+		return nil, false
+	}
+	return small, true
 }
 
 // free_face releases what a face owns. The face may come from any loaded
