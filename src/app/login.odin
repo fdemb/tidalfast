@@ -16,7 +16,7 @@ import "core:os"
 import "core:strings"
 import "core:sync"
 
-import "../mac"
+import "../os_services"
 import "../render"
 import "../text"
 import "../tidal"
@@ -188,7 +188,7 @@ device_card :: proc(s: ^State) {
 		line(code, .Bold, 40, 52, TEXT)
 		ui.spacer(ui.px(18))
 		if centered_button("open_link", "Open in your browser", 240, 40, ACCENT, PANEL) {
-			mac.open_url(small_str(&l.link.uri_full))
+			os_services.open_url(small_str(&l.link.uri_full))
 		}
 		ui.spacer(ui.px(18))
 		if l.note.len > 0 {
@@ -261,7 +261,7 @@ pkce_prepare :: proc(d: ^Data) {
 // pkce_begin opens TIDAL's login page for the PKCE client in the browser.
 pkce_begin :: proc(d: ^Data) {
 	pkce_show(d)
-	mac.open_url(tidal.pkce_login_url(d.session, context.temp_allocator))
+	os_services.open_url(tidal.pkce_login_url(d.session, context.temp_allocator))
 }
 
 // pkce_show switches to the PKCE login as a new attempt, without the

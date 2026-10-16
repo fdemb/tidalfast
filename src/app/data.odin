@@ -21,7 +21,7 @@ import "core:time"
 
 import "../cover"
 import "../jobs"
-import "../mac"
+import "../os_services"
 import "../platform"
 import "../render"
 import "../tidal"
@@ -455,11 +455,11 @@ auth_restore :: proc(s: ^tidal.Session, data: []u8, partial := false) -> bool {
 // macOS may ask the user whether this build may read the item, and that
 // blocks the caller until they answer.
 auth_load :: proc(d: ^Data, res: ^Result) -> bool {
-	data, status := mac.keychain_get(keychain_service(d), KEYCHAIN_ACCOUNT, context.temp_allocator)
-	if status == mac.ERR_SEC_ITEM_NOT_FOUND {
+	data, status := os_services.secret_get(keychain_service(d), KEYCHAIN_ACCOUNT, context.temp_allocator)
+	if status == os_services.SECRET_NOT_FOUND {
 		return false
 	}
-	if status != mac.ERR_SEC_SUCCESS {
+	if status != os_services.SECRET_OK {
 		res.message = small(fmt.tprintf("Couldn't read the Keychain (error %d)", status))
 		return false
 	}
@@ -484,7 +484,7 @@ auth_changed :: proc(s: ^tidal.Session, data: rawptr) {
 		return
 	}
 	bytes := auth_marshal(a, context.temp_allocator)
-	if status := mac.keychain_set(keychain_service(d), KEYCHAIN_ACCOUNT, bytes); status != mac.ERR_SEC_SUCCESS {
+	if status := os_services.secret_set(keychain_service(d), KEYCHAIN_ACCOUNT, bytes); status != os_services.SECRET_OK {
 		log.errorf("app: couldn't save the login to the Keychain (error %d)", status)
 	}
 }
@@ -540,7 +540,7 @@ sign_out :: proc(s: ^State, why: string) {
 	account_end(s)
 	{
 		sync.guard(&d.keychain_mutex)
-		mac.keychain_delete(keychain_service(d), KEYCHAIN_ACCOUNT)
+		os_services.secret_delete(keychain_service(d), KEYCHAIN_ACCOUNT)
 	}
 	lists_forget(d)
 	d.login = {

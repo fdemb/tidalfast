@@ -16,7 +16,7 @@ src/tidal/      TIDAL API library, see src/tidal/README.md
 src/audio/      FLAC and DASH streaming, fMP4, decoding, miniaudio and CoreAudio HAL output, the play queue's rules, ReplayGain
 src/jobs/       a thread-safe priority queue for jobs and results
 src/cover/      cover sizes, decoding and the texture cache
-src/mac/        Keychain and opening URLs, called straight from Odin
+src/os_services/  secret store (the Keychain), opening URLs, one file per OS
 tests/          `odin test tests`
 tests/mock_tidal/  a stand-in TIDAL server for running the app without an account
 tests/audio_check/ compares a capture of the audio output with the source it came from
@@ -301,7 +301,7 @@ The PKCE scope is `r_usr+w_usr+w_sub`, as tidalapi sends it. mare-player found T
 
 The tokens go in the login Keychain as one generic password item: service `tidalfast`, account `auth`, label `TIDALfast`. Its data is JSON: token type, access and refresh tokens, expiry, session id, country code and user id. Nothing goes in a file.
 
-`src/mac` calls Security's `SecItemAdd`, `SecItemUpdate`, `SecItemCopyMatching` and `SecItemDelete` directly from Odin with hand-written foreign declarations, along with the CoreFoundation calls to build their dictionaries. These are plain C functions, so they don't hit the compiler's Obj-C bug, and going through the shell would have meant a new ABI version for no gain. They're thread safe, which matters because the tokens are saved from workers.
+`src/os_services/os_services_darwin.odin` calls Security's `SecItemAdd`, `SecItemUpdate`, `SecItemCopyMatching` and `SecItemDelete` directly from Odin with hand-written foreign declarations, along with the CoreFoundation calls to build their dictionaries. These are plain C functions, so they don't hit the compiler's Obj-C bug, and going through the shell would have meant a new ABI version for no gain. They're thread safe, which matters because the tokens are saved from workers.
 
 `src/tidal` refreshes the access token one request at a time: concurrent requests that find it expired wait on one refresh (`refresh_access_token` holds `refresh_mutex`). TIDAL may send a new refresh token with each refresh and the old one stops working, so the session now calls `Session.on_auth_change` after every refresh and login, on the thread that did it, while still holding that mutex. The app's handler writes the item. So the Keychain always has the latest refresh token, and writes never overlap.
 

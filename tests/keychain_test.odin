@@ -4,7 +4,7 @@ import "core:crypto"
 import "core:fmt"
 import "core:testing"
 
-import "../src/mac"
+import "../src/os_services"
 
 // Round trip through the real login Keychain under a service name of its
 // own, deleted afterwards. The random suffix keeps a run from touching an
@@ -17,18 +17,18 @@ keychain_round_trip :: proc(t: ^testing.T) {
 	service := fmt.tprintf("tidalfast-test-%x", key)
 	account := "auth"
 
-	_, status := mac.keychain_get(service, account, context.temp_allocator)
-	testing.expect_value(t, status, mac.ERR_SEC_ITEM_NOT_FOUND)
+	_, status := os_services.secret_get(service, account, context.temp_allocator)
+	testing.expect_value(t, status, os_services.SECRET_NOT_FOUND)
 
-	testing.expect_value(t, mac.keychain_set(service, account, transmute([]u8)string("first")), mac.ERR_SEC_SUCCESS)
-	defer testing.expect_value(t, mac.keychain_delete(service, account), mac.ERR_SEC_SUCCESS)
-	data, gstatus := mac.keychain_get(service, account, context.temp_allocator)
-	testing.expect_value(t, gstatus, mac.ERR_SEC_SUCCESS)
+	testing.expect_value(t, os_services.secret_set(service, account, transmute([]u8)string("first")), os_services.SECRET_OK)
+	defer testing.expect_value(t, os_services.secret_delete(service, account), os_services.SECRET_OK)
+	data, gstatus := os_services.secret_get(service, account, context.temp_allocator)
+	testing.expect_value(t, gstatus, os_services.SECRET_OK)
 	testing.expect_value(t, string(data), "first")
 
 	// A second set replaces the data instead of failing as a duplicate.
-	testing.expect_value(t, mac.keychain_set(service, account, transmute([]u8)string("rotated refresh token")), mac.ERR_SEC_SUCCESS)
-	data, gstatus = mac.keychain_get(service, account, context.temp_allocator)
-	testing.expect_value(t, gstatus, mac.ERR_SEC_SUCCESS)
+	testing.expect_value(t, os_services.secret_set(service, account, transmute([]u8)string("rotated refresh token")), os_services.SECRET_OK)
+	data, gstatus = os_services.secret_get(service, account, context.temp_allocator)
+	testing.expect_value(t, gstatus, os_services.SECRET_OK)
 	testing.expect_value(t, string(data), "rotated refresh token")
 }

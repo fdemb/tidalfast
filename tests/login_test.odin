@@ -11,7 +11,7 @@ import app "../src/app"
 import "../src/audio"
 import "../src/cover"
 import "../src/jobs"
-import "../src/mac"
+import "../src/os_services"
 import "../src/platform"
 import tidal "../src/tidal"
 
@@ -297,7 +297,7 @@ data_state :: proc() -> ^app.State {
 
 @(private = "file")
 data_state_free :: proc(s: ^app.State) {
-	mac.keychain_delete(app.keychain_service(&s.data), app.KEYCHAIN_ACCOUNT)
+	os_services.secret_delete(app.keychain_service(&s.data), app.KEYCHAIN_ACCOUNT)
 	app.data_shutdown(s)
 	free(s)
 }
@@ -319,8 +319,8 @@ auth_failures_sign_out_once :: proc(t: ^testing.T) {
 	tidal.session_restore(d.session, {token_type = "Bearer", access_token = "old", refresh_token = "old-r", user_id = 123, user_kind = .Logged_In_User})
 	d.account = .Signed_In
 	app.auth_changed(d.session, d)
-	_, status := mac.keychain_get(service, app.KEYCHAIN_ACCOUNT, context.temp_allocator)
-	testing.expect_value(t, status, mac.ERR_SEC_SUCCESS)
+	_, status := os_services.secret_get(service, app.KEYCHAIN_ACCOUNT, context.temp_allocator)
+	testing.expect_value(t, status, os_services.SECRET_OK)
 
 	// Two requests under the old login, both refused.
 	app.push_job(d, {kind = .Playlists})
@@ -331,8 +331,8 @@ auth_failures_sign_out_once :: proc(t: ^testing.T) {
 	app.handle_result(s, &first, 0)
 	testing.expect_value(t, d.auth_gen, 1)
 	testing.expect_value(t, d.account, app.Account.Signed_Out)
-	_, status = mac.keychain_get(service, app.KEYCHAIN_ACCOUNT, context.temp_allocator)
-	testing.expect_value(t, status, mac.ERR_SEC_ITEM_NOT_FOUND)
+	_, status = os_services.secret_get(service, app.KEYCHAIN_ACCOUNT, context.temp_allocator)
+	testing.expect_value(t, status, os_services.SECRET_NOT_FOUND)
 	testing.expect_value(t, tidal.session_auth(d.session, context.temp_allocator).access_token, "")
 	// The login screen shows the PKCE login, which waits for the user.
 	queued, _ := jobs.pending(&d.queue)
@@ -351,8 +351,8 @@ auth_failures_sign_out_once :: proc(t: ^testing.T) {
 	testing.expect_value(t, d.account, app.Account.Signed_In)
 	queued, _ = jobs.pending(&d.queue)
 	testing.expect_value(t, queued, 0)
-	data, kstatus := mac.keychain_get(service, app.KEYCHAIN_ACCOUNT, context.temp_allocator)
-	testing.expect_value(t, kstatus, mac.ERR_SEC_SUCCESS)
+	data, kstatus := os_services.secret_get(service, app.KEYCHAIN_ACCOUNT, context.temp_allocator)
+	testing.expect_value(t, kstatus, os_services.SECRET_OK)
 	restored := tidal.session_create()
 	defer tidal.session_destroy(restored)
 	testing.expect(t, app.auth_restore(restored, data))
@@ -561,8 +561,8 @@ cover_401_keeps_the_login :: proc(t: ^testing.T) {
 	testing.expect_value(t, d.account, app.Account.Signed_In)
 	testing.expect_value(t, d.auth_gen, 0)
 	testing.expect_value(t, tidal.session_auth(d.session, context.temp_allocator).access_token, "new")
-	_, status := mac.keychain_get(service, app.KEYCHAIN_ACCOUNT, context.temp_allocator)
-	testing.expect_value(t, status, mac.ERR_SEC_SUCCESS)
+	_, status := os_services.secret_get(service, app.KEYCHAIN_ACCOUNT, context.temp_allocator)
+	testing.expect_value(t, status, os_services.SECRET_OK)
 }
 
 // The approval got the tokens, then loading the session was held back
