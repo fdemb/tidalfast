@@ -7,6 +7,7 @@ package app
 import "core:strconv"
 import "core:strings"
 import "core:sync"
+import "core:sys/linux"
 import "core:sys/posix"
 import "core:time"
 
@@ -16,13 +17,13 @@ import "../render"
 footprint_peak_seen: int
 
 // process_start_ns reads when the kernel started this process: its start
-// in clock ticks after boot, from /proc/self/stat, and the boot time from
-// /proc/stat. Ticks are 10 ms.
+// in clock ticks after boot, from /proc/self/stat, against the time since
+// boot now. Ticks are 10 ms. /proc/stat's boot time is whole seconds, too
+// coarse to use.
 process_start_ns :: proc() -> i64 {
 	now := time.to_unix_nanoseconds(time.now())
-	stat_buf, boot_buf: [4096]u8
+	stat_buf: [4096]u8
 	stat := read_proc_file("/proc/self/stat", stat_buf[:])
-	boot := read_proc_file("/proc/stat", boot_buf[:])
 	// The command name can hold spaces, so fields count from its closing bracket.
 	close := -1
 	for i := len(stat) - 1; i >= 0; i -= 1 {
@@ -43,12 +44,13 @@ process_start_ns :: proc() -> i64 {
 			break
 		}
 	}
-	btime := proc_field(boot, "btime")
-	if start_ticks < 0 || btime <= 0 {
+	boot, err := linux.clock_gettime(.BOOTTIME)
+	if start_ticks < 0 || err != .NONE {
 		return now
 	}
-	ticks := int(posix.sysconf(._CLK_TCK))
-	return i64(btime) * 1e9 + i64(start_ticks) * 1e9 / i64(max(ticks, 1))
+	ticks := i64(max(int(posix.sysconf(._CLK_TCK)), 1))
+	since_start := i64(boot.time_sec) * 1e9 + i64(boot.time_nsec) - i64(start_ticks) * 1e9 / ticks
+	return now - max(since_start, 0)
 }
 
 // process_memory reads /proc/self/status. footprint is the anonymous memory

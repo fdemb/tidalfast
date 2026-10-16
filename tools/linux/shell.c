@@ -69,7 +69,9 @@ static void on_signal(int sig) {
 }
 
 // When the kernel started this process, as Unix seconds: its start in clock
-// ticks after boot from /proc/self/stat, plus the boot time.
+// ticks after boot from /proc/self/stat, against the time since boot now.
+// /proc/stat's boot time is whole seconds, which would put up to a second of
+// error in every mark.
 static void measure_init(void) {
   const char *measure = getenv("TIDALFAST_MEASURE");
   g_measure = measure && *measure;
@@ -86,14 +88,10 @@ static void measure_init(void) {
   unsigned long long start = 0;
   for (int field = 2; p && field < 22; field++) p = strchr(p + 1, ' ');
   if (p) start = strtoull(p + 1, NULL, 10);
-  long btime = 0;
-  f = fopen("/proc/stat", "r");
-  if (!f) return;
-  char line[256];
-  while (fgets(line, sizeof(line), f))
-    if (sscanf(line, "btime %ld", &btime) == 1) break;
-  fclose(f);
-  if (start && btime) g_process_start = btime + (double)start / sysconf(_SC_CLK_TCK);
+  struct timespec boot;
+  clock_gettime(CLOCK_BOOTTIME, &boot);
+  double since_start = boot.tv_sec + boot.tv_nsec / 1e9 - (double)start / sysconf(_SC_CLK_TCK);
+  if (start && since_start >= 0) g_process_start -= since_start;
 }
 
 static void measure_mark(const char *name) {
