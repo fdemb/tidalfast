@@ -27,6 +27,11 @@ PROP_ALIVE :: 2
 
 HAL_SETTLE_TIMEOUT :: 2 * time.Second
 
+// BIT_PERFECT says whether this OS has bit-perfect output. Without it the
+// app hides the setting, since the miniaudio fallback would leave out the
+// volume and ReplayGain for nothing.
+BIT_PERFECT :: false
+
 // Hal has the fields the player reads; none of them is ever set.
 Hal :: struct {
 	device:      Audio_Object_ID,

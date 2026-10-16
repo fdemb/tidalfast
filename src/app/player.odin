@@ -136,6 +136,9 @@ playback_start :: proc(s: ^State, shell: ^platform.Shell) {
 	pb.settings_path = settings_default_path(runtime.heap_allocator())
 	s.data.settings_path = strings.clone(pb.settings_path, runtime.heap_allocator())
 	pb.settings, _ = settings_load(pb.settings_path)
+	when !audio.BIT_PERFECT {
+		pb.settings.bit_perfect, pb.settings.hog = false, false
+	}
 	// The app died with a device switched to a track's rate. Put it back
 	// before anything plays.
 	if pb.settings.device.rate != 0 {

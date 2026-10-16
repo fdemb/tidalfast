@@ -256,6 +256,9 @@ Hal :: struct {
 
 HAL_SETTLE_TIMEOUT :: 2 * time.Second
 
+// BIT_PERFECT says whether this OS has bit-perfect output.
+BIT_PERFECT :: true
+
 // hal_configure readies dev for rate, channels and bits: hog mode if
 // asked, then the nominal rate and a physical format that holds every bit
 // of the source. Waits off the main thread (polling, up to

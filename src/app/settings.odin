@@ -189,7 +189,8 @@ playback_set_settings :: proc(s: ^State, st: Settings) {
 }
 
 output_of :: proc(st: Settings) -> audio.Output {
-	return {bit_perfect = st.bit_perfect, hog = st.bit_perfect && st.hog}
+	on := audio.BIT_PERFECT && st.bit_perfect
+	return {bit_perfect = on, hog = on && st.hog}
 }
 
 // draw_output_button is the player bar's button for the output menu. In
@@ -211,20 +212,22 @@ draw_output_button :: proc(s: ^State) {
 
 	if ui.menu("output_menu", 300) {
 		ui.text_style(.Regular, 13, TEXT)
-		st := pb.settings
-		if ui.menu_item(fmt.tprintf("%s Bit-perfect output###bit_perfect", "✓" if st.bit_perfect else "   ")).clicked {
-			st.bit_perfect = !st.bit_perfect
-			playback_set_settings(s, st)
-			ui.close_menu()
-		}
-		if st.bit_perfect {
-			if ui.menu_item(fmt.tprintf("%s Hog mode###hog", "✓" if st.hog else "   ")).clicked {
-				st.hog = !st.hog
+		when audio.BIT_PERFECT {
+			st := pb.settings
+			if ui.menu_item(fmt.tprintf("%s Bit-perfect output###bit_perfect", "✓" if st.bit_perfect else "   ")).clicked {
+				st.bit_perfect = !st.bit_perfect
 				playback_set_settings(s, st)
 				ui.close_menu()
 			}
+			if st.bit_perfect {
+				if ui.menu_item(fmt.tprintf("%s Hog mode###hog", "✓" if st.hog else "   ")).clicked {
+					st.hog = !st.hog
+					playback_set_settings(s, st)
+					ui.close_menu()
+				}
+			}
+			ui.menu_separator()
 		}
-		ui.menu_separator()
 		ui.text_style(.Regular, 11, DIM)
 		note := ui.label(output_description(s), ui.fill(), ui.px(26))
 		note.text_pad = 14

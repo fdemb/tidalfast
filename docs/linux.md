@@ -20,7 +20,7 @@ What's different from macOS:
 - The memory numbers come from `/proc/self/status`. The footprint is `RssAnon` plus `RssShmem`, and its peak is the highest the app has seen.
 - Primary shortcuts use Control where macOS uses Command. Control-A and Control-E don't move to the line's start and end, and Control-click isn't a right click.
 
-Not done yet: bit-perfect output (with the setting on, the player logs that it isn't available and plays through miniaudio's shared device at the track's own rate), media keys and MPRIS, the screen reader tree (AT-SPI) and client-side decorations. The Vulkan backend gives each texture its own `VkDeviceMemory`, which is fine for the few hundred textures the app makes but could use a sub-allocator.
+Not done yet: bit-perfect output (the Output menu hides the setting, and a saved one is ignored), media keys and MPRIS, the screen reader tree (AT-SPI) and client-side decorations. The Vulkan backend gives each texture its own `VkDeviceMemory`, which is fine for the few hundred textures the app makes but could use a sub-allocator.
 
 To check the Linux build without a display, run a headless Weston and point the app at it. Mesa's lavapipe gives a software Vulkan device, so this works with no GPU too:
 
