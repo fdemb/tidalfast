@@ -1149,7 +1149,6 @@ login_wait_done :: proc(d: ^Data, res: ^Result, job: Login_Wait_Job, err: tidal.
 		l.link.interval = res.link.interval
 	}
 	if !failed {
-		d.login = {}
 		signed_in(d)
 		return
 	}
@@ -1578,10 +1577,12 @@ show_login :: proc(s: ^State) -> bool {
 	return s.data.account == .Signed_Out || (s.data.account == .Signed_In && s.data.relogin)
 }
 
-// signed_in starts loading a login's account. A login from the device-code
-// client gets the notice that it only streams AAC.
+// signed_in starts loading a login's account. The login screen starts
+// over, and a login from the device-code client gets the notice that it
+// only streams AAC.
 signed_in :: proc(d: ^Data) {
 	d.account = .Signed_In
+	d.login = {}
 	d.relogin = false
 	d.device_login = !tidal.session_is_pkce(d.session)
 	d.notice_hidden = false

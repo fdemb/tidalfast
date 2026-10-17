@@ -371,7 +371,6 @@ pkce_resume :: proc(d: ^Data) {
 pkce_done :: proc(d: ^Data, res: ^Result, failed: bool) {
 	l := &d.login
 	if !failed {
-		d.login = {}
 		d.pkce_verifier, d.pkce_key = {}, {}
 		signed_in(d)
 		return
