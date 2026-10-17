@@ -195,10 +195,7 @@ search_send :: proc(s: ^State, q: string) {
 		return
 	}
 	sr.loading = true
-	if !push_job(&s.data, {kind = .Search, view = sr.gen, id = small(q)}) {
-		// The queue is full: try again shortly.
-		sr.due = s.ui.time + 0.1
-	}
+	push_job(&s.data, {kind = .Search, view = sr.gen, id = small(q)})
 }
 
 // search_again puts q in the field and searches for it, for Back and

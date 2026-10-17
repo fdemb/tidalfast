@@ -361,33 +361,6 @@ auth_failures_sign_out_once :: proc(t: ^testing.T) {
 	testing.expect_value(t, tidal.session_auth(restored, context.temp_allocator).access_token, "new")
 }
 
-@(test)
-refused_pushes_are_retried :: proc(t: ^testing.T) {
-	s := data_state()
-	defer data_state_free(s)
-	d := &s.data
-	d.account = .Signed_In
-	for jobs.push(&d.queue, app.Job{kind = .Cover}, app.PRIORITY_COVER) {}
-
-	app.request_playlists(d)
-	app.view_open(d, .Playlist, "pl", "pl", "", 300)
-	testing.expect(t, !d.sidebar.loading)
-	testing.expect_value(t, d.view.in_flight, 0)
-	testing.expect_value(t, d.retry, bit_set[app.Job_Kind; u16]{.Playlists, .Tracks})
-
-	// Still full: nothing changes and the retries stay wanted.
-	app.data_retry(d)
-	testing.expect_value(t, d.retry, bit_set[app.Job_Kind; u16]{.Playlists, .Tracks})
-
-	for _ in 0 ..< 3 {
-		jobs.try_pop(&d.queue)
-	}
-	app.data_retry(d)
-	testing.expect(t, d.sidebar.loading)
-	testing.expect_value(t, d.view.in_flight, 2)
-	testing.expect_value(t, d.retry, bit_set[app.Job_Kind; u16]{})
-}
-
 // data_jobs empties the queue and returns the jobs in it but covers.
 @(private = "file")
 data_jobs :: proc(d: ^app.Data) -> [dynamic]app.Job {
@@ -431,12 +404,12 @@ refused_jobs_wait_for_room :: proc(t: ^testing.T) {
 	closed := d.view.gen
 	app.view_open(d, .Playlist, "open", "open", "", 300)
 	app.push_job(d, {kind = .Add_Track, source = .Liked, key = 5})
-	app.data_retry(d)
+	app.data_retry(s)
 	testing.expect_value(t, len(data_jobs(d)), 0)
 
 	fill_with_covers(d)
 	free_slots(d, 8)
-	app.data_retry(d)
+	app.data_retry(s)
 	playlists, adds: int
 	pages := make([dynamic]i32, context.temp_allocator)
 	for job in data_jobs(d) {
@@ -465,7 +438,7 @@ refused_jobs_wait_for_room :: proc(t: ^testing.T) {
 	app.push_job(d, {kind = .Add_Track, source = .Liked, key = 6})
 	app.account_end(s)
 	free_slots(d, 8)
-	app.data_retry(d)
+	app.data_retry(s)
 	testing.expect_value(t, len(data_jobs(d)), 0)
 }
 
@@ -481,9 +454,9 @@ refused_login_jobs_wait_for_room :: proc(t: ^testing.T) {
 	fill_with_covers(d)
 
 	app.request_login_code(d)
-	app.data_retry(d)
+	app.data_retry(s)
 	free_slots(d, 4)
-	app.data_retry(d)
+	app.data_retry(s)
 	queued := data_jobs(d)
 	if testing.expect_value(t, len(queued), 1) {
 		testing.expect_value(t, queued[0].kind, app.Job_Kind.Login_Start)
@@ -494,7 +467,7 @@ refused_login_jobs_wait_for_room :: proc(t: ^testing.T) {
 	fill_with_covers(d)
 	app.request_login_poll(d)
 	free_slots(d, 4)
-	app.data_retry(d)
+	app.data_retry(s)
 	queued = data_jobs(d)
 	if testing.expect_value(t, len(queued), 1) {
 		testing.expect_value(t, queued[0].kind, app.Job_Kind.Login_Wait)
@@ -509,7 +482,7 @@ refused_login_jobs_wait_for_room :: proc(t: ^testing.T) {
 	d.login = {}
 	d.account = .Signed_In
 	free_slots(d, 4)
-	app.data_retry(d)
+	app.data_retry(s)
 	queued = data_jobs(d)
 	for job in queued {
 		testing.expect(t, job.kind != .Login_Start, "no code for a login that finished")

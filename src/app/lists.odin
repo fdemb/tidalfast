@@ -503,7 +503,7 @@ add_to_list :: proc(s: ^State, track, entry: int) {
 		job.source = .Playlist
 		job.id = small(d.sidebar.items[entry - 1].id)
 	}
-	push_job(d, job) // a refused one is held and pushed next frame
+	push_job(d, job)
 	set_status(s, .Adding, track, entry)
 }
 

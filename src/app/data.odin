@@ -124,11 +124,10 @@ Data :: struct {
 	// Goes up with every sign_out. Jobs carry the one they were queued in,
 	// and results from an older one are dropped.
 	auth_gen:       u32,
-	retry:          bit_set[Job_Kind; u16], // pushes the queue refused, tried again next frame
-	// Stream, Artwork and Add_Track jobs the queue refused. Their
-	// parameters can't be rebuilt from the kind, so they're kept whole and
-	// pushed again.
-	held:           [4]Held_Job,
+	// Jobs the queue refused, oldest first, pushed again next frame while
+	// they're still wanted. See hold_job.
+	held:           [HELD_JOBS]Held_Job,
+	held_count:     int,
 	refresh_errors: int, // token refreshes in a row that failed without ending the login (atomic)
 	keychain_mutex: sync.Mutex, // orders a sign-out's delete against the workers' saves
 	session:        ^tidal.Session, // made by this dylib, so closed on unload
@@ -505,35 +504,67 @@ Held_Job :: struct {
 	priority: u8,
 }
 
-// push_job queues job for the current login. If the queue is full the
-// kind goes in d.retry, and data_update tries again next frame. A worker
-// finishing a job frees a slot and asks for that frame.
-push_job :: proc(d: ^Data, job: Job, priority: u8 = PRIORITY_DATA) -> bool {
+HELD_JOBS :: 16
+
+// push_job queues job for the current login. If the queue is full it's
+// held, and data_retry pushes it again next frame, so to its caller it's
+// out either way. A worker finishing a job frees a slot and asks for that
+// frame.
+push_job :: proc(d: ^Data, job: Job, priority: u8 = PRIORITY_DATA) {
 	job := job
 	job.auth = d.auth_gen
 	if !jobs.push(&d.queue, job, priority) {
-		if job.kind == .Stream || job.kind == .Artwork || job.kind == .Add_Track {
-			hold_job(d, job, priority)
-		} else {
-			d.retry += {job.kind}
-		}
-		return false
+		hold_job(d, job, priority)
 	}
-	return true
 }
 
-// hold_job keeps a refused playback or add job for the next frame. When the
-// list is full the oldest goes, since its track has most likely moved on.
+// hold_job keeps a job the queue refused. One held Save_Settings saves the
+// newest settings, so it stands for any later one. When the list is full
+// the oldest Stream, Artwork or Add_Track goes: a playback job's track has
+// most likely moved on. The other kinds each have a flag that waits for
+// their answer and holds back another push, so there are only a few of
+// them.
 @(private = "file")
 hold_job :: proc(d: ^Data, job: Job, priority: u8) {
-	for &h in d.held {
-		if h.job.kind == .None {
-			h = {job, priority}
-			return
+	held := d.held[:d.held_count]
+	if job.kind == .Save_Settings {
+		for h in held {
+			if h.job.kind == .Save_Settings {
+				return
+			}
 		}
 	}
-	copy(d.held[:], d.held[1:])
-	d.held[len(d.held) - 1] = {job, priority}
+	if d.held_count == len(d.held) {
+		drop := 0
+		for h, i in held {
+			if h.job.kind == .Stream || h.job.kind == .Artwork || h.job.kind == .Add_Track {
+				drop = i
+				break
+			}
+		}
+		job_free(&d.held[drop].job)
+		copy(d.held[drop:], d.held[drop + 1:])
+		d.held_count -= 1
+	}
+	d.held[d.held_count] = {job, priority}
+	d.held_count += 1
+}
+
+// held_free drops every held job.
+@(private = "file")
+held_free :: proc(d: ^Data) {
+	for &h in d.held[:d.held_count] {
+		job_free(&h.job)
+	}
+	d.held_count = 0
+}
+
+// job_free frees what a job owns, for a job that won't run.
+job_free :: proc(job: ^Job) {
+	if job.kind == .Disk || job.kind == .Launch_Log {
+		delete(job.blob, runtime.heap_allocator())
+		job.blob = nil
+	}
 }
 
 @(private = "file")
@@ -568,8 +599,7 @@ sign_out :: proc(s: ^State, why: string) {
 account_end :: proc(s: ^State) {
 	d := &s.data
 	sync.atomic_add(&d.auth_gen, 1) // the disk thread reads it
-	d.retry = {}
-	d.held = {}
+	held_free(d)
 	jobs.remove_if(&d.queue, drop_account_job, nil)
 	tidal.session_clear_auth(d.session)
 	d.account = .Signed_Out
@@ -595,7 +625,8 @@ request_login_code :: proc(d: ^Data) {
 		return
 	}
 	sync.atomic_store(&d.device_cancel, false)
-	d.login.requested = push_job(d, {kind = .Login_Start, view = d.login_attempt})
+	push_job(d, {kind = .Login_Start, view = d.login_attempt})
+	d.login.requested = true
 	d.login.start_for = d.login_attempt
 }
 
@@ -613,7 +644,8 @@ request_login_poll :: proc(d: ^Data) {
 	if l.waiting {
 		return
 	}
-	l.waiting = push_job(d, {kind = .Login_Wait, view = d.login_attempt, id = l.link.device_code, interval = l.link.interval, deadline = l.deadline, not_before = l.poll_at, once = l.poll_once})
+	l.waiting = true
+	push_job(d, {kind = .Login_Wait, view = d.login_attempt, id = l.link.device_code, interval = l.link.interval, deadline = l.deadline, not_before = l.poll_at, once = l.poll_once})
 }
 
 // login_next_attempt starts a new login attempt. Tokens that arrive for an
@@ -628,51 +660,66 @@ request_playlists :: proc(d: ^Data) {
 	if d.sidebar.loading {
 		return
 	}
-	d.sidebar.loading = push_job(d, {kind = .Playlists})
+	d.sidebar.loading = true
+	push_job(d, {kind = .Playlists})
 }
 
-// data_retry pushes again what the queue refused last frame, if it's still
+// data_retry pushes again the jobs the queue refused, if they're still
 // wanted.
-data_retry :: proc(d: ^Data) {
+data_retry :: proc(s: ^State) {
+	d := &s.data
 	held := d.held
-	d.held = {}
-	for h in held {
-		if h.job.kind != .None && h.job.auth == d.auth_gen {
+	n := d.held_count
+	d.held_count = 0
+	for &h in held[:n] {
+		if held_wanted(s, h.job) {
 			push_job(d, h.job, h.priority)
+		} else {
+			job_free(&h.job)
 		}
 	}
-	kinds := d.retry
-	d.retry = {}
-	for kind in kinds {
-		#partial switch kind {
-		case .Restore:
-			if d.account == .Restoring {
-				push_job(d, {kind = .Restore})
-			}
-		case .Login_Start:
-			if d.account == .Signed_Out && d.login.pkce == .Off && d.login.error.len == 0 {
-				request_login_code(d)
-			}
-		case .Login_Wait:
-			if d.account == .Signed_Out && d.login.pkce == .Off && (d.login.link.device_code.len > 0 || login_has_tokens(d)) {
-				request_login_poll(d)
-			}
-		case .Playlists:
-			if d.account == .Signed_In {
-				request_playlists(d)
-			}
-		case .Tracks:
-			view_request_pages(d)
-		case .Login_Pkce:
-			if d.account == .Signed_Out && d.login.pkce == .Exchanging {
-				push_job(d, {kind = .Login_Pkce, view = d.login_attempt})
-			}
-		case .Save_Settings:
-			push_job(d, {kind = .Save_Settings})
-		case .Search:
-			// search_send tries again itself through due.
+}
+
+// held_wanted says whether a held job is still wanted: its login hasn't
+// ended and what it's for still waits for it. Kinds whose answer is checked
+// when it comes, as Stream's track serial is, always are.
+@(private = "file")
+held_wanted :: proc(s: ^State, job: Job) -> bool {
+	d := &s.data
+	l := &d.login
+	if job.auth != d.auth_gen {
+		return false
+	}
+	#partial switch job.kind {
+	case .Restore:
+		return d.account == .Restoring
+	case .Login_Start:
+		// Also when the user went on to another login: its answer clears
+		// requested, which holds back the next login's code.
+		return l.requested && l.start_for == job.view
+	case .Login_Wait:
+		return l.waiting
+	case .Login_Pkce:
+		return d.account == .Signed_Out && l.pkce == .Exchanging
+	case .Playlists:
+		return d.account == .Signed_In
+	case .Tracks:
+		return track_view(d, job.view) != nil
+	case .Search:
+		return job.view == s.search.gen
+	}
+	return true
+}
+
+// track_view is the list, open, fetched again or followed by the play
+// queue, that gen names, or nil.
+track_view :: proc(d: ^Data, gen: u32) -> ^Track_View {
+	for v in ([]^Track_View{&d.refresh, &d.queued, &d.view}) {
+		if v.gen == gen && v.source != .None {
+			return v
 		}
 	}
+	return nil
 }
 
 sidebar_free :: proc(d: ^Data) {
@@ -704,7 +751,7 @@ data_update :: proc(s: ^State, now: f64) {
 	if queued, _ := jobs.pending(&d.results); queued > 0 {
 		ui.request_frame()
 	}
-	data_retry(d)
+	data_retry(s)
 	d.bench.upload_ms = f32(time.duration_milliseconds(time.tick_since(begin)))
 }
 
@@ -808,14 +855,9 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 	case .Add_Track:
 		add_result(s, res)
 	case .Tracks:
-		v := &d.view
 		r := &d.refresh
-		q := &d.queued
-		if res.job.view == r.gen && r.source != .None {
-			v = r
-		} else if res.job.view == q.gen && q.source != .None {
-			v = q
-		} else if res.job.view != v.gen {
+		v := track_view(d, res.job.view)
+		if v == nil {
 			return
 		}
 		v.in_flight -= 1
@@ -1194,9 +1236,7 @@ view_pages :: proc(d: ^Data, v: ^Track_View) {
 			limit  = i32(limit),
 			id     = v.id,
 		}
-		if !push_job(d, job) {
-			return // d.retry has it
-		}
+		push_job(d, job)
 		v.next_offset += limit
 		v.in_flight += 1
 	}

@@ -345,7 +345,6 @@ pkce_submit :: proc(s: ^State, text: string) {
 	sync.atomic_store(&d.device_cancel, true)
 	l.pkce = .Exchanging
 	l.pkce_note = {}
-	// A full queue keeps the kind in d.retry; data_retry pushes it again.
 	push_job(d, {kind = .Login_Pkce, view = d.login_attempt})
 }
 

@@ -175,13 +175,11 @@ refused_pkce_login_is_retried :: proc(t: ^testing.T) {
 	for jobs.push(&d.queue, app.Job{kind = .Tracks}, app.PRIORITY_DATA) {}
 	app.pkce_submit(s, REDIRECT + "?code=c")
 	testing.expect_value(t, d.login.pkce, app.Pkce_Step.Exchanging)
-	testing.expect(t, .Login_Pkce in d.retry)
 	_, ok := jobs.try_pop(&d.queue)
 	testing.expect(t, ok)
-	app.data_retry(d)
+	app.data_retry(s)
 	kinds, _ := queued_kinds(d)
 	testing.expect(t, .Login_Pkce in kinds)
-	testing.expect(t, .Login_Pkce not_in d.retry)
 }
 
 // A saved login from the device-code client gets the AAC notice; a PKCE one
