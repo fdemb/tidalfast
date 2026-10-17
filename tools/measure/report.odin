@@ -380,8 +380,8 @@ significant :: proc(unit: string, a, diff: f64) -> bool {
 }
 
 // write_compare prints each pair with its change. Lower is better for every
-// unit, so a significant change is marked worse or better.
-write_compare :: proc(sb: ^strings.Builder, deltas: []Delta) {
+// unit, so a significant change is marked worse or better, if marks is set.
+write_compare :: proc(sb: ^strings.Builder, deltas: []Delta, marks := true) {
 	fmt.sbprintfln(sb, "%-8s %-5s %-13s %-18s %10s %10s %10s %8s", "scenario", "setup", "row", "field", "a", "b", "delta", "change")
 	for d in deltas {
 		diff := d.b - d.value
@@ -389,7 +389,7 @@ write_compare :: proc(sb: ^strings.Builder, deltas: []Delta) {
 		flag := ""
 		if d.value != 0 {
 			change = fmt.tprintf("%+.1f%%", diff / math.abs(d.value) * 100)
-			if significant(d.unit, d.value, diff) {
+			if marks && significant(d.unit, d.value, diff) {
 				flag = " worse" if diff > 0 else " better"
 			}
 		}

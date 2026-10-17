@@ -88,8 +88,10 @@ run_ab :: proc(cfg: ^Config, base, stamp: string) -> int {
 	b := strings.builder_make()
 	fmt.sbprintln(&b, "\nstartup, b against a: medians of each, then of the differences between runs next to each other")
 	write_paired(&b, paired[:])
-	fmt.sbprintln(&b, "\nmemory, one run each:")
-	write_compare(&b, compare(memory_metrics(results[0].metrics[:]), results[1].metrics[:]))
+	// Builds of the same code came out 12 MB apart on one memory run each, so
+	// one run doesn't get marked.
+	fmt.sbprintln(&b, "\nmemory, one run each, not marked: compare `measure memory -runs=N` of each build for that")
+	write_compare(&b, compare(memory_metrics(results[0].metrics[:]), results[1].metrics[:]), marks = false)
 	fmt.print(strings.to_string(b))
 	stem := strings.trim_suffix(cfg.out, ".json")
 	for k in 0 ..< 2 {
