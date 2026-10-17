@@ -1029,7 +1029,14 @@ queue_save :: proc(s: ^State) {
 	if pb.index >= 0 {
 		key = 14695981039346656037
 		ended := pb.status.state == .Ended && pb.status.serial == pb.cur.serial
-		for v in ([]u64{u64(pb.queue_gen), u64(len(pb.entries)), u64(pb.loaded), u64(pb.index), u64(pb.cur.track), u64(pb.paused), u64(pb.status.seek_id), u64(ended)}) {
+		// Each page of the queue's list changes the queue. Writing the whole
+		// queue for each one costs milliseconds a page, so it's written
+		// again once the list has loaded, or stopped on an error.
+		count, loaded := u64(len(pb.entries)), u64(pb.loaded)
+		if v := queue_list(&s.data); v != nil && v.error.len == 0 && !view_complete(v) {
+			count, loaded = 0, max(u64)
+		}
+		for v in ([]u64{u64(pb.queue_gen), count, loaded, u64(pb.index), u64(pb.cur.track), u64(pb.paused), u64(pb.status.seek_id), u64(ended)}) {
 			key = (key ~ v) * 1099511628211
 		}
 	}
