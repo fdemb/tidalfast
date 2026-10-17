@@ -110,18 +110,30 @@ cmd_doctor() {
 
 cmd_mock_start() {
 	mkdir -p "$STATE"
-	ours "$(cat "$STATE/mock.pid" 2>/dev/null)" && { echo "verify: mock already at $(cat "$STATE/mock.url")"; return; }
+	if ours "$(cat "$STATE/mock.pid" 2>/dev/null)"; then
+		url=$(cat "$STATE/mock.url" 2>/dev/null)
+		loopback_url "$url" || die "mock.url is empty or not a loopback http URL: run verify.sh mock-stop, then mock-start"
+		echo "verify: mock already at $url"
+		return
+	fi
 	[ -x "$BIN/mock_tidal" ] || die "no mock: run verify.sh build"
+	rm -f "$STATE/mock.url"
 	"$BIN/mock_tidal" -port=0 -audio-dir="$STATE/mock-audio" >"$STATE/mock.log" 2>&1 &
-	echo $! >"$STATE/mock.pid"
+	pid=$!
+	echo "$pid" >"$STATE/mock.pid"
+	url=
 	for _ in $(seq 1 100); do
 		url=$(sed -n 's/^mock: listening on //p' "$STATE/mock.log" | head -1)
 		[ -n "$url" ] && break
 		/bin/sleep 0.1
 	done
-	[ -n "$url" ] || die "mock didn't start; see $STATE/mock.log"
+	if ! loopback_url "$url"; then
+		kill "$pid" 2>/dev/null
+		rm -f "$STATE/mock.pid"
+		die "mock didn't start; see $STATE/mock.log"
+	fi
 	echo "$url" >"$STATE/mock.url"
-	echo "verify: mock $(cat "$STATE/mock.pid") at $url"
+	echo "verify: mock $pid at $url"
 }
 
 cmd_mock_stop() {
