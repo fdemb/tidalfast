@@ -64,7 +64,6 @@ Library :: struct {
 	playlist:      int,
 	selected:      int, // track row, -1 for none
 	playing:       int, // the row playing in this list, -1 for none
-	volume:        f32,
 	menu_row:      int, // the row the context menu is for
 	menu_track:    i64, // row_key of menu_row when the menu opened
 	menu_list:     u64, // list_gen when the menu opened
@@ -152,7 +151,6 @@ library_init :: proc(lib: ^Library) {
 		sidebar_w   = SIDEBAR_DEFAULT,
 		selected    = -1,
 		playing     = -1,
-		volume      = 0.7,
 		menu_row    = -1,
 		drop_target = -1,
 		anchor_row  = -1,
@@ -920,20 +918,18 @@ skip_stop :: proc() {
 // draw_volume is a slider: press or drag along it to set the volume. A
 // press and release in one frame still counts, at the release.
 draw_volume :: proc(s: ^State, width: f32) {
-	lib := &s.library
 	slider := ui.column("volume", {.Clickable}, ui.px(width), ui.fill())
-	ui.accessible(slider, .Slider, "Volume", fmt.tprintf("%d%%", int(math.round(lib.volume * 100))))
+	ui.accessible(slider, .Slider, "Volume", fmt.tprintf("%d%%", int(math.round(s.playback.settings.volume * 100))))
 	sig := ui.signal(slider)
 	if (sig.held || sig.released) && slider.rect.w > 0 {
-		lib.volume = clamp((sig.mouse.x - slider.rect.x) / slider.rect.w, 0, 1)
-		playback_set_volume(s, lib.volume)
+		playback_set_volume(s, clamp((sig.mouse.x - slider.rect.x) / slider.rect.w, 0, 1), sig.released)
 	}
 	ui.spacer(ui.fill())
 	{
 		track := ui.row("", {.Draw_Background}, ui.fill(), ui.px(4))
 		track.background = SURFACE_ACTIVE
 		track.radius = 2
-		level := ui.box_make("", {.Draw_Background}, ui.pct(lib.volume, 1), ui.fill())
+		level := ui.box_make("", {.Draw_Background}, ui.pct(s.playback.settings.volume, 1), ui.fill())
 		level.background = mix(SECONDARY, ACCENT, max(slider.hot_t, slider.active_t))
 		level.radius = 2
 	}

@@ -15,6 +15,10 @@ package app
 // reload makes a new one and plays the same sources from where they were.
 // The sources' URLs are in heap memory that outlives the dylib.
 //
+// The queue and where it was are kept on disk with the account's lists,
+// so the next start shows the same track, paused at the same place
+// (queue_save, playback_restore).
+//
 // With TIDALFAST_FAKE the fake rows play sine tones, 30 s each, so the
 // player bar, queue and gapless switching work without an account.
 //
@@ -108,12 +112,16 @@ Playback :: struct {
 	dragging:        bool, // the progress bar is held: show the drag position
 	drag_seconds:    f64,
 	volume_sent:     f32,
+	// The file's volume while TIDALFAST_VOLUME stands in for it, so the
+	// override isn't saved unless the slider moves.
+	volume_file:     Maybe(f32),
 	message:         Small,
 	error_seen:      u64,
 
 	art:             Artwork, // the current track's, for Now Playing
 	next_art:        Artwork, // the next track's, fetched with its stream
 	np_key:          u64, // what was last sent to Now Playing
+	save_key:        u64, // what the queue's file was last written for
 
 	// The row of the open list found holding the current track, for when
 	// the queue's index doesn't (see playing_row), and what it was found in.
@@ -134,12 +142,13 @@ playback_start :: proc(s: ^State, shell: ^platform.Shell) {
 		pb.window = kb << 10
 	}
 	pb.null_output = os.get_env("TIDALFAST_AUDIO_NULL", context.temp_allocator) != ""
-	if v, ok := strconv.parse_f32(os.get_env("TIDALFAST_VOLUME", context.temp_allocator)); ok {
-		s.library.volume = clamp(v, 0, 1)
-	}
 	pb.settings_path = settings_default_path(runtime.heap_allocator())
 	s.data.settings_path = strings.clone(pb.settings_path, runtime.heap_allocator())
 	pb.settings, _ = settings_load(pb.settings_path)
+	if v, ok := strconv.parse_f32(os.get_env("TIDALFAST_VOLUME", context.temp_allocator)); ok {
+		pb.volume_file = pb.settings.volume
+		pb.settings.volume = clamp(v, 0, 1)
+	}
 	when !audio.BIT_PERFECT {
 		pb.settings.bit_perfect, pb.settings.hog = false, false
 	}
@@ -148,10 +157,10 @@ playback_start :: proc(s: ^State, shell: ^platform.Shell) {
 	if pb.settings.device.rate != 0 {
 		audio.device_change_undo(&pb.settings.device)
 		pb.settings.device = {}
-		settings_queue(&s.data, pb.settings)
+		settings_queue(&s.data, settings_to_save(pb))
 	}
-	pb.player = audio.create(shell.request_redraw, s.library.volume, small_str(&pb.capture), pb.window, pb.null_output, output_of(pb.settings))
-	pb.volume_sent = s.library.volume
+	pb.player = audio.create(shell.request_redraw, pb.settings.volume, small_str(&pb.capture), pb.window, pb.null_output, output_of(pb.settings))
+	pb.volume_sent = pb.settings.volume
 }
 
 playback_unload :: proc(s: ^State) {
@@ -171,7 +180,7 @@ playback_unload :: proc(s: ^State) {
 playback_reload :: proc(s: ^State, shell: ^platform.Shell) {
 	pb := &s.playback
 	pb.set_now_playing = shell.set_now_playing
-	pb.player = audio.create(shell.request_redraw, s.library.volume, window = pb.window, null_output = pb.null_output, output = output_of(pb.settings))
+	pb.player = audio.create(shell.request_redraw, pb.settings.volume, window = pb.window, null_output = pb.null_output, output = output_of(pb.settings))
 	// The new player's seek ids start again; a pending seek is in resume_sample.
 	pb.seek_id = 0
 	if pb.cur.resolved {
@@ -186,12 +195,24 @@ playback_reload :: proc(s: ^State, shell: ^platform.Shell) {
 
 playback_shutdown :: proc(s: ^State) {
 	pb := &s.playback
+	// The workers and the disk thread drop what's queued when they stop,
+	// so pending settings and the last position are written here, after.
+	// The results queue stops first: a disk thread blocked on a full one
+	// would never be joined.
+	workers_stop(&s.data)
+	if !settings_flush(&s.data) {
+		log.errorf("app: couldn't save the settings to %s", s.data.settings_path)
+	}
+	if pb.player != nil && pb.index >= 0 && disk_on(&s.data) {
+		pb.status = audio.status(pb.player)
+		queue_write_now(&s.data, queue_file(pb, context.temp_allocator))
+	}
 	audio.destroy(pb.player)
 	pb.player = nil
 	// destroy put the device back.
 	if pb.settings.device.rate != 0 {
 		pb.settings.device = {}
-		settings_queue(&s.data, pb.settings, now = true)
+		settings_queue(&s.data, settings_to_save(pb), now = true)
 	}
 	if pb.set_now_playing != nil {
 		none: platform.Now_Playing
@@ -259,14 +280,8 @@ source_of :: proc(pb: ^Playback, t: ^Track_Source) -> audio.Source {
 @(private = "file")
 queue_snapshot :: proc(s: ^State) {
 	pb := &s.playback
-	if pb.has_arena {
-		vmem.arena_destroy(&pb.arena)
-	}
-	pb.has_arena = vmem.arena_init_growing(&pb.arena) == nil
-	a := vmem.arena_allocator(&pb.arena)
 	n := view_count(s)
-	pb.items = make([]Queue_Item, n, a)
-	pb.entries = make([]audio.Queue_Entry, n, a)
+	a := queue_reset(pb, n)
 	pb.fake = s.data.fake
 	pb.list_key = list_key(s)
 	pb.view_gen = s.data.view.gen
@@ -276,21 +291,41 @@ queue_snapshot :: proc(s: ^State) {
 		if row == nil {
 			continue
 		}
-		pb.items[i] = {
-			title     = strings.clone(row.title, a),
-			artist    = strings.clone(row.artist, a),
-			album     = strings.clone(row.album, a),
-			cover     = strings.clone(row.cover, a),
-			seconds   = row.seconds,
-			album_id  = row.album_id,
-			artists   = slice.clone(row.artists, a),
-			row       = fake_row_index(s, i),
-		}
-		pb.entries[i] = {id = row.id, album_id = row.album_id, track_num = row.track}
+		queue_fill(pb, i, row, a)
+		pb.items[i].row = fake_row_index(s, i)
 		if pb.fake {
 			pb.entries[i].id = -i64(i + 1)
 		}
 	}
+}
+
+// queue_reset makes a new, empty queue of n items, and returns its
+// arena's allocator.
+@(private = "file")
+queue_reset :: proc(pb: ^Playback, n: int) -> runtime.Allocator {
+	if pb.has_arena {
+		vmem.arena_destroy(&pb.arena)
+	}
+	pb.has_arena = vmem.arena_init_growing(&pb.arena) == nil
+	a := vmem.arena_allocator(&pb.arena)
+	pb.items = make([]Queue_Item, n, a)
+	pb.entries = make([]audio.Queue_Entry, n, a)
+	return a
+}
+
+// queue_fill makes queue item i row, its strings copied with a.
+@(private = "file")
+queue_fill :: proc(pb: ^Playback, i: int, row: ^Row, a: runtime.Allocator) {
+	pb.items[i] = {
+		title    = strings.clone(row.title, a),
+		artist   = strings.clone(row.artist, a),
+		album    = strings.clone(row.album, a),
+		cover    = strings.clone(row.cover, a),
+		seconds  = row.seconds,
+		album_id = row.album_id,
+		artists  = slice.clone(row.artists, a),
+	}
+	pb.entries[i] = {id = row.id, album_id = row.album_id, track_num = row.track}
 }
 
 // playback_play_row plays row i of the open list, with the rest of the
@@ -328,8 +363,10 @@ playback_stop :: proc(s: ^State) {
 		settings        = pb.settings,
 		settings_path   = pb.settings_path,
 		volume_sent     = pb.volume_sent,
+		volume_file     = pb.volume_file,
 		serial          = pb.serial,
 		queue_gen       = pb.queue_gen,
+		save_key        = pb.save_key,
 		index           = -1,
 	}
 	if pb.set_now_playing != nil {
@@ -339,15 +376,16 @@ playback_stop :: proc(s: ^State) {
 	s.library.playing = -1
 }
 
-// start_item makes queue item i the current track, from sample at.
+// start_item makes queue item i the current track, from sample at, and
+// plays it unless paused is set.
 @(private = "file")
-start_item :: proc(s: ^State, i: int, at: i64 = 0) {
+start_item :: proc(s: ^State, i: int, at: i64 = 0, paused := false) {
 	pb := &s.playback
 	if i < 0 || i >= len(pb.entries) || pb.entries[i].id == 0 {
 		return
 	}
 	pb.index = i
-	pb.paused = false
+	pb.paused = paused
 	pb.seek_id = 0
 	pb.message = {}
 	if next_failed(pb, i) {
@@ -360,7 +398,7 @@ start_item :: proc(s: ^State, i: int, at: i64 = 0) {
 		pb.next = {}
 		pb.cur.at = at
 		if pb.cur.resolved {
-			audio.play(pb.player, source_of(pb, &pb.cur), at)
+			audio.play(pb.player, source_of(pb, &pb.cur), at, paused)
 		}
 		artwork_free(&pb.art)
 		pb.art = pb.next_art
@@ -377,7 +415,7 @@ start_item :: proc(s: ^State, i: int, at: i64 = 0) {
 	pb.cur = {serial = pb.serial, queue = pb.queue_gen, item = i, track = pb.entries[i].id, at = at}
 	// Silence until the stream resolves, rather than more of the old track.
 	if !pb.fake {
-		audio.play(pb.player, {serial = pb.cur.serial}, at)
+		audio.play(pb.player, {serial = pb.cur.serial}, at, paused)
 	}
 	resolve(s, &pb.cur)
 }
@@ -390,7 +428,7 @@ resolve :: proc(s: ^State, t: ^Track_Source) {
 		t.resolved = true
 		t.rate = 44100
 		if t == &pb.cur {
-			audio.play(pb.player, source_of(pb, t), t.at)
+			audio.play(pb.player, source_of(pb, t), t.at, pb.paused)
 		} else {
 			audio.set_next(pb.player, source_of(pb, t))
 		}
@@ -478,6 +516,10 @@ playback_result :: proc(s: ^State, res: ^Result) {
 		t.dash_end = last.start + last.length
 	}
 	t.gain = audio.replay_gain_linear(rg, mode)
+	// A restored position is in the rate it was saved at.
+	if t.rate > 0 && info.sample_rate > 0 && t.rate != info.sample_rate {
+		t.at = t.at * i64(info.sample_rate) / i64(t.rate)
+	}
 	t.rate = info.sample_rate
 	t.resolved = true
 	log.infof("app: track %d resolved: %s %s%s, %d-bit %d Hz, %s gain %.2f dB -> x%.3f", info.track_id, tidal.quality_name(info.quality), tidal.codec_name(info.codec), fmt.tprintf(" in DASH, %d segments", len(info.segments)) if info.dash else "", info.bit_depth, info.sample_rate, mode, 20 * math.log10(f64(t.gain)), t.gain)
@@ -508,7 +550,7 @@ skip_failed :: proc(s: ^State) {
 		return
 	}
 	msg := pb.message
-	start_item(s, n)
+	start_item(s, n, paused = pb.paused)
 	pb.message = msg
 }
 
@@ -574,6 +616,10 @@ playback_seek :: proc(s: ^State, seconds: f64) {
 	sample := i64(at * f64(rate))
 	if !pb.cur.resolved {
 		pb.cur.at = sample
+		// The silent placeholder holds the position status reports.
+		if !pb.fake {
+			audio.play(pb.player, {serial = pb.cur.serial}, sample, pb.paused)
+		}
 		return
 	}
 	if pb.status.state == .Ended && pb.status.serial == pb.cur.serial {
@@ -586,11 +632,18 @@ playback_seek :: proc(s: ^State, seconds: f64) {
 	pb.seek_seconds = at
 }
 
-playback_set_volume :: proc(s: ^State, v: f32) {
+// playback_set_volume sets the volume, and saves it when save is set, as
+// at the end of a drag.
+playback_set_volume :: proc(s: ^State, v: f32, save: bool) {
 	pb := &s.playback
+	pb.settings.volume = v
 	if pb.player != nil && v != pb.volume_sent {
 		audio.set_volume(pb.player, v)
 		pb.volume_sent = v
+	}
+	if save {
+		pb.volume_file = nil
+		settings_queue(&s.data, pb.settings)
 	}
 }
 
@@ -674,7 +727,7 @@ playback_update :: proc(s: ^State, events: []platform.Event) {
 	// lasts, so a start after a crash can put it back.
 	if st.change != pb.settings.device {
 		pb.settings.device = st.change
-		settings_queue(&s.data, pb.settings)
+		settings_queue(&s.data, settings_to_save(pb))
 	}
 	if pb.seek_id != 0 && (pb.seek_serial != pb.cur.serial || (st.serial == pb.cur.serial && st.seek_id >= pb.seek_id)) {
 		pb.seek_id = 0
@@ -742,6 +795,7 @@ playback_update :: proc(s: ^State, events: []platform.Event) {
 	}
 	s.library.playing = playing_row(s)
 	update_now_playing(s)
+	queue_save(s)
 }
 
 // next_failed says whether queue item i is the next track that failed to
@@ -876,4 +930,108 @@ update_now_playing :: proc(s: ^State) {
 		np.artwork_height = u32(pb.art.h)
 	}
 	pb.set_now_playing(&np)
+}
+
+// queue_save writes the queue's file when what it holds changes: the
+// queue, its current track, pause, a finished seek or the end. The running
+// position isn't one of those; playback_shutdown writes the last one. A
+// queue that stopped is deleted, so it doesn't come back.
+@(private = "file")
+queue_save :: proc(s: ^State) {
+	pb := &s.playback
+	if pb.fake {
+		return
+	}
+	key: u64
+	if pb.index >= 0 {
+		key = 14695981039346656037
+		ended := pb.status.state == .Ended && pb.status.serial == pb.cur.serial
+		for v in ([]u64{u64(pb.queue_gen), u64(len(pb.entries)), u64(pb.loaded), u64(pb.index), u64(pb.cur.track), u64(pb.paused), u64(pb.status.seek_id), u64(ended)}) {
+			key = (key ~ v) * 1099511628211
+		}
+	}
+	if key == pb.save_key {
+		return
+	}
+	pb.save_key = key
+	if key == 0 {
+		disk_push(&s.data, {op = .Delete_Queue})
+		return
+	}
+	disk_push(&s.data, {op = .Write_Queue, blob = queue_file(pb, runtime.heap_allocator())})
+}
+
+// queue_file is the queue as its file, at the current position.
+@(private = "file")
+queue_file :: proc(pb: ^Playback, allocator: runtime.Allocator) -> []u8 {
+	st := &pb.status
+	head := Queue_Header {
+		index    = i64(pb.index),
+		sample   = pb.cur.at,
+		rate     = i64(pb.cur.rate),
+		list_key = pb.list_key,
+	}
+	if st.serial != 0 && st.serial == pb.cur.serial {
+		head.sample = st.sample
+		if st.rate > 0 {
+			head.rate = i64(st.rate)
+		}
+		if st.state == .Ended {
+			head.sample = 0
+		}
+	}
+	if pb.seek_id != 0 && pb.seek_serial == pb.cur.serial {
+		head.sample = pb.seek_sample
+	}
+	rows := make([]Row, len(pb.items), context.temp_allocator)
+	for &it, i in pb.items {
+		e := pb.entries[i]
+		rows[i] = {
+			title    = it.title,
+			artist   = it.artist,
+			album    = it.album,
+			cover    = it.cover,
+			seconds  = it.seconds,
+			id       = e.id,
+			album_id = it.album_id,
+			artists  = it.artists,
+			track    = e.track_num,
+		}
+	}
+	return queue_encode(head, rows, allocator)
+}
+
+// playback_restore takes the queue's file read at sign-in: the queue comes
+// back with its track paused where it was, its stream resolving so play
+// starts at once.
+playback_restore :: proc(s: ^State, res: ^Result) {
+	pb := &s.playback
+	if !res.hit || pb.index >= 0 || s.data.fake || pb.player == nil || len(res.rows) == 0 {
+		return
+	}
+	head := res.queue
+	a := queue_reset(pb, len(res.rows))
+	for &row, i in res.rows {
+		queue_fill(pb, i, &row, a)
+	}
+	pb.fake = false
+	pb.list_key = head.list_key
+	// A gen no view is given, so playback_update never takes the queue
+	// for a snapshot of the open list.
+	pb.view_gen = view_gen(&s.data)
+	pb.loaded = len(res.rows)
+	pb.queue_gen += 1
+	i := int(head.index)
+	at := head.sample
+	if i < 0 || i >= len(pb.entries) || pb.entries[i].id == 0 {
+		i = audio.queue_next(pb.entries, clamp(i, 0, len(pb.entries)) - 1)
+		at = 0
+	}
+	if i < 0 {
+		queue_reset(pb, 0)
+		return
+	}
+	start_item(s, i, max(at, 0), paused = true)
+	pb.cur.rate = int(head.rate)
+	log.infof("app: resumed the queue at item %d of %d, %.1f s in", i, len(pb.entries), playback_position(s))
 }

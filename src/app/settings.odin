@@ -1,7 +1,7 @@
 package app
 
-// Settings: bit-perfect output, hog mode and how lists show their
-// scrollbars. They live in a small JSON file, ~/Library/Application Support/tidalfast/settings.json, or
+// Settings: the volume, bit-perfect output, hog mode and how lists show
+// their scrollbars. They live in a small JSON file, ~/Library/Application Support/tidalfast/settings.json, or
 // wherever TIDALFAST_SETTINGS points. A worker writes it, so a click never
 // waits on the disk. Saves go one at a time and only the newest settings
 // are written (settings_queue).
@@ -35,7 +35,10 @@ Settings :: struct {
 	hog:         bool,
 	device:      audio.Device_Change, // rate 0 when no device is changed
 	scrollbars:  ui.Scrollbars,
+	volume:      f32, // 0 to 1
 }
+
+VOLUME_DEFAULT :: 0.7
 
 // Settings_File is Settings as the JSON in the file.
 @(private = "file")
@@ -44,6 +47,7 @@ Settings_File :: struct {
 	hog:           bool,
 	scrollbars:    ui.Scrollbars,
 	device_change: Maybe(Device_Change_File) `json:"device_change,omitempty"`,
+	volume:        Maybe(f32) `json:"volume,omitempty"`, // missing in files from before it was saved
 }
 
 @(private = "file")
@@ -71,11 +75,11 @@ settings_default_path :: proc(allocator: runtime.Allocator) -> string {
 // the defaults, with ok false.
 settings_load :: proc(path: string) -> (st: Settings, ok: bool) {
 	if path == "" {
-		return {}, false
+		return {volume = VOLUME_DEFAULT}, false
 	}
 	data, err := os.read_entire_file(path, context.temp_allocator)
 	if err != nil {
-		return {}, false
+		return {volume = VOLUME_DEFAULT}, false
 	}
 	if st, ok = settings_decode_json(data); !ok {
 		log.warnf("app: %s isn't valid settings, using the defaults", path)
@@ -87,9 +91,9 @@ settings_load :: proc(path: string) -> (st: Settings, ok: bool) {
 settings_decode_json :: proc(data: []u8) -> (st: Settings, ok: bool) {
 	f: Settings_File
 	if json.unmarshal(data, &f, allocator = context.temp_allocator) != nil {
-		return {}, false
+		return {volume = VOLUME_DEFAULT}, false
 	}
-	st = {bit_perfect = f.bit_perfect, hog = f.hog, scrollbars = f.scrollbars}
+	st = {bit_perfect = f.bit_perfect, hog = f.hog, scrollbars = f.scrollbars, volume = clamp(f.volume.? or_else VOLUME_DEFAULT, 0, 1)}
 	if c, has := f.device_change.?; has && c.rate != 0 && len(c.uid) <= len(st.device.uid) {
 		st.device = {orig_rate = c.orig_rate, orig_format = c.orig_format, rate = c.rate}
 		st.device.uid_len = copy(st.device.uid[:], c.uid)
@@ -110,6 +114,7 @@ settings_save :: proc(path: string, st: Settings) -> bool {
 		bit_perfect = st.bit_perfect,
 		hog         = st.hog,
 		scrollbars  = st.scrollbars,
+		volume      = st.volume,
 	}
 	if st.device.rate != 0 {
 		c := st.device
@@ -185,7 +190,16 @@ playback_set_settings :: proc(s: ^State, st: Settings) {
 	if pb.player != nil {
 		audio.set_output(pb.player, output_of(st))
 	}
-	settings_queue(&s.data, st)
+	settings_queue(&s.data, settings_to_save(pb))
+}
+
+// settings_to_save is pb.settings as the file should have them.
+settings_to_save :: proc(pb: ^Playback) -> Settings {
+	st := pb.settings
+	if v, ok := pb.volume_file.?; ok {
+		st.volume = v
+	}
+	return st
 }
 
 output_of :: proc(st: Settings) -> audio.Output {
@@ -295,10 +309,8 @@ draw_settings_button :: proc(s: ^State) {
 			item := ui.menu_item(fmt.tprintf("%s %s###scrollbars_%s", "✓" if on else "   ", name, name))
 			ui.accessible(item.box, .Menu_Item, name, selected = on)
 			if item.clicked {
-				st := pb.settings
-				st.scrollbars = mode
-				pb.settings = st
-				settings_queue(&s.data, st)
+				pb.settings.scrollbars = mode
+				settings_queue(&s.data, settings_to_save(pb))
 			}
 		}
 	}

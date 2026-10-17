@@ -320,7 +320,7 @@ player_bar_fits_at_every_width :: proc(t: ^testing.T) {
 	pb.index = 0
 	pb.cur = {serial = 1, rate = 96000, resolved = true}
 	pb.status = {serial = 1, rate = 96000, total = 96000 * 3725, sample = 96000 * 3500, state = .Playing}
-	s.library.volume = 1
+	s.playback.settings.volume = 1
 
 	for w in ([]f32{575, 820, 1100, 1600}) {
 		free_all(context.temp_allocator)

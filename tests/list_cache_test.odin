@@ -856,3 +856,64 @@ old_search_results_are_not_refreshed :: proc(t: ^testing.T) {
 	testing.expect_value(t, d.refresh.source, app.Source.None)
 	testing.expect_value(t, len(d.view.found.albums), 1)
 }
+
+// The play queue's file keeps the queue's rows and where it was, and a
+// file cut short or not a queue's reads as none.
+@(test)
+queue_file_round_trip :: proc(t: ^testing.T) {
+	rows := []app.Row {
+		{title = "Jóga", artist = "Björk", album = "Homogenic", cover = "c-1", seconds = 305, id = 101, album_id = 11, track = 3},
+		{title = "Hunter", artist = "Björk", album = "Homogenic", cover = "c-1", seconds = 255, id = 102, album_id = 11, track = 1, artists = {{id = 9, start = 0, end = 6}}},
+		{title = "Army of Me", artist = "Björk", album = "Post", seconds = 234, id = 103, album_id = 12, track = 1},
+	}
+	data := app.queue_encode({index = 1, sample = 441000, rate = 44100, list_key = 0xabc}, rows, context.temp_allocator)
+	aligned, _ := mem.alloc_bytes_non_zeroed(len(data), 16, context.temp_allocator)
+	copy(aligned, data)
+
+	head, got, err := app.queue_decode(aligned, context.temp_allocator)
+	testing.expect_value(t, err, app.File_Error.None)
+	testing.expect_value(t, head.index, 1)
+	testing.expect_value(t, head.sample, 441000)
+	testing.expect_value(t, head.rate, 44100)
+	testing.expect_value(t, head.list_key, 0xabc)
+	if !testing.expect_value(t, len(got), 3) {
+		return
+	}
+	testing.expect_value(t, got[0].title, "Jóga")
+	testing.expect_value(t, got[1].title, "Hunter")
+	testing.expect_value(t, got[2].title, "Army of Me")
+	testing.expect_value(t, got[0].id, 101)
+	testing.expect_value(t, got[1].id, 102)
+	testing.expect_value(t, got[2].id, 103)
+	testing.expect_value(t, got[0].track, 3)
+	testing.expect_value(t, got[1].track, 1)
+	testing.expect_value(t, got[2].album, "Post")
+	testing.expect_value(t, got[1].artist, "Björk")
+	testing.expect_value(t, got[0].cover, "c-1")
+	testing.expect_value(t, got[2].seconds, 234)
+	testing.expect_value(t, got[2].album_id, 12)
+	testing.expect(t, slice.equal(got[1].artists, []app.Artist_Ref{{id = 9, start = 0, end = 6}}))
+
+	_, _, err = app.queue_decode(aligned[:len(aligned) - 1], context.temp_allocator)
+	testing.expect_value(t, err, app.File_Error.Short)
+	_, _, err = app.queue_decode(aligned[:20], context.temp_allocator)
+	testing.expect_value(t, err, app.File_Error.Short)
+	aligned[0] = 'X'
+	_, _, err = app.queue_decode(aligned, context.temp_allocator)
+	testing.expect_value(t, err, app.File_Error.Magic)
+
+	bad := []app.Queue_Header{{index = 1, sample = -1, rate = 44100}, {index = 1, sample = 441000, rate = 10_000_000}, {index = 1, sample = 44100 * 86400 + 1, rate = 44100}}
+	for h in bad {
+		data = app.queue_encode(h, rows, context.temp_allocator)
+		aligned, _ = mem.alloc_bytes_non_zeroed(len(data), 16, context.temp_allocator)
+		copy(aligned, data)
+		_, _, err = app.queue_decode(aligned, context.temp_allocator)
+		testing.expect_value(t, err, app.File_Error.Damaged)
+	}
+	data = app.queue_encode({index = 1, sample = 441000}, rows, context.temp_allocator)
+	aligned, _ = mem.alloc_bytes_non_zeroed(len(data), 16, context.temp_allocator)
+	copy(aligned, data)
+	head, _, err = app.queue_decode(aligned, context.temp_allocator)
+	testing.expect_value(t, err, app.File_Error.None)
+	testing.expect_value(t, head.sample, 0)
+}
