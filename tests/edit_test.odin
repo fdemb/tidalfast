@@ -406,6 +406,39 @@ test_text_field_events :: proc(t: ^testing.T) {
 	testing.expect(t, input.text == nil, "no field has the focus")
 }
 
+// Keys the focused field uses never reach the app. The rest wait for the
+// app, matched on the exact modifiers, and each press goes to one caller.
+@(test)
+test_app_keys_after_text_field :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer field_ui_destroy(&u)
+	f := new(ui.Text_Field)
+	defer free(f)
+	now := 0.0
+	frame :: proc(u: ^ui.State, f: ^ui.Text_Field, now: ^f64, events: ..platform.Event) {
+		now^ += 0.016
+		ui.begin_frame(u, events, nil, nil, 300, 200, now^)
+		ui.text_field("search", f, "Search", ui.px(200), ui.px(30))
+	}
+	frame(&u, f, &now)
+	ui.end_frame()
+	frame(&u, f, &now, {kind = .Mouse_Down, x = 50, y = 15, button = .Left, click_count = 1}, {kind = .Mouse_Up, x = 50, y = 15, button = .Left})
+	ui.end_frame()
+
+	frame(&u, f, &now, {kind = .Key_Down, key = .Left}, {kind = .Key_Down, key = .Grave}, {kind = .Key_Down, key = .Digit_1, modifiers = {ui.PRIMARY}})
+	testing.expect(t, !ui.take_key(.Left), "the field used Left")
+	testing.expect(t, ui.take_key(.Grave))
+	testing.expect(t, !ui.take_key(.Grave), "a press goes to one caller")
+	testing.expect(t, !ui.take_key(.Digit_1), "modifiers must match")
+	testing.expect(t, ui.take_key(.Digit_1, {ui.PRIMARY}))
+	ui.end_frame()
+
+	frame(&u, f, &now)
+	testing.expect(t, !ui.take_key(.Digit_1, {ui.PRIMARY}), "presses last one frame")
+	ui.end_frame()
+}
+
 // The shell's mirror applies text and marked text before the app sees
 // them, so after the field takes any, the shell hears the field's state
 // even when nothing changed: here a composition and a commit that don't

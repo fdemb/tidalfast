@@ -5,17 +5,24 @@ A native TIDAL client. Odin for the app, a small Obj-C shell for the parts of ma
 ## Layout
 
 ```
-shell/          Obj-C: NSApplication, window, CAMetalLayer, event queue, dylib loader, IME, media keys, Keychain
-src/platform/   types shared by the shell and Odin (events, the app API table, shell callbacks)
-src/app/        the hot-reloaded app dylib: frame loop, views, app state
-src/render/     instanced Metal rect renderer
-src/text/       font loading, shaping (kb_text_shape), rasterizing (CoreText), glyph atlas
-src/ui/         box tree, layout, interaction, animation
-src/tidal/      the TIDAL API library (package `tidal`)
-src/audio/      decoding, playback, CoreAudio device control
-tests/          `odin test tests`
-examples/cli/   CLI on top of src/tidal
-build.sh        builds everything; `./build.sh app` rebuilds only the dylib for hot reload
+shell/            Obj-C: NSApplication, window, CAMetalLayer, event queue, dylib loader, IME, media keys, Keychain
+src/platform/     types shared by the shell and Odin (events, the app API table, shell callbacks)
+src/app/          the hot-reloaded app dylib: frame loop, views, app state
+src/render/       instanced Metal rect renderer
+src/text/         font loading, shaping (kb_text_shape), rasterizing (CoreText), glyph atlas
+src/ui/           box tree, layout, interaction, animation
+src/tidal/        the TIDAL API library (package `tidal`)
+src/audio/        decoding, playback, CoreAudio device control
+src/jobs/         bounded priority queues between the UI thread and the workers, plain data that survives a hot reload
+src/cover/        cover art sizes, decoding on a worker, and the texture cache
+src/os_services/  secret store (Keychain, libsecret), opening URLs, settings and cache paths
+src/kbts/         kb_text_shape's C source and Odin bindings, which build.sh compiles into build/kbts
+tests/            `odin test tests`
+examples/cli/     CLI on top of src/tidal
+tools/measure/    startup and memory measurement (docs/measuring.md)
+tools/save_cost/  times what a list save and a queue save cost the UI thread
+tools/icons.sh    cuts the Phosphor icon fonts down to the icons the app draws
+build.sh          builds everything; `./build.sh app` rebuilds only the dylib for hot reload
 ```
 
 The API library is one component. Only `src/app` knows about all the others.

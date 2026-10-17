@@ -26,6 +26,7 @@ import "core:strings"
 import "core:sync"
 import "core:sys/posix"
 import "core:time"
+import "core:unicode/utf8"
 
 import "../cover"
 import "../jobs"
@@ -46,6 +47,9 @@ Small :: struct {
 
 small :: proc(s: string) -> (out: Small) {
 	n := min(len(s), len(out.buf))
+	for n > 0 && n < len(s) && !utf8.rune_start(s[n]) {
+		n -= 1
+	}
 	copy(out.buf[:], s[:n])
 	out.len = u8(n)
 	return

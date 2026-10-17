@@ -1266,8 +1266,10 @@ text_style :: proc(font: text.Font, size: f32, color: render.Color) -> Text_Styl
 
 // Queries for the app
 
-// key_pressed reports and uses up a key press the UI didn't take.
-key_pressed :: proc(code: platform.Key, modifiers: platform.Modifiers = {}) -> bool {
+// take_key removes one press of code with exactly these modifiers from this
+// frame's unused keys and reports whether there was one. The first caller
+// gets it.
+take_key :: proc(code: platform.Key, modifiers: platform.Modifiers = {}) -> bool {
 	u := ctx
 	for i in 0 ..< u.key_count {
 		k := u.keys[i]

@@ -5,6 +5,8 @@ import "core:crypto"
 import "core:fmt"
 import "core:os"
 import "core:slice"
+import "core:strings"
+import "core:sync"
 import "core:testing"
 import "core:thread"
 import "core:time"
@@ -798,9 +800,13 @@ api_override_only_for_loopback :: proc(t: ^testing.T) {
 	}
 }
 
-// The only test that sets an environment variable, which is process-wide.
+// Held by the tests that set environment variables, which are process-wide.
+@(private = "file")
+env_mutex: sync.Mutex
+
 @(test)
 api_override_debug_only :: proc(t: ^testing.T) {
+	sync.guard(&env_mutex)
 	os.set_env("TIDALFAST_API", "http://127.0.0.1:8787")
 	defer os.unset_env("TIDALFAST_API")
 	when ODIN_DEBUG {
@@ -809,6 +815,180 @@ api_override_debug_only :: proc(t: ^testing.T) {
 		testing.expect_value(t, app.api_override(), "")
 	} else {
 		testing.expect_value(t, app.api_override(), "")
+	}
+}
+
+// A run that asks for the mock, with TIDALFAST_KEYCHAIN, TIDALFAST_API or
+// TIDALFAST_PKCE_REDIRECT, but has no mock URL the app takes never falls
+// back to the user's login: no session to reach TIDAL with, no Keychain
+// read queued, not the real item or list cache. d.running is set before
+// data_start so that no worker can start and read the Keychain if it does
+// fall back.
+@(test)
+mock_run_without_mock_url_keeps_off_tidal :: proc(t: ^testing.T) {
+	sync.guard(&env_mutex)
+	saved := env_clear()
+	defer env_restore(saved)
+	os.set_env("TIDALFAST_SETTINGS", fmt.tprintf("%s/tidalfast-settings-%d/settings.json", temp_base(), time.now()._nsec))
+	real_cache := app.lists_root(false)
+	defer delete(real_cache, runtime.heap_allocator())
+	keychain := test_keychain_service()
+
+	Case :: struct {
+		api, keychain, pkce: Maybe(string),
+		service:             string, // the Keychain item the login is read from, "" for none
+	}
+	cases := make([dynamic]Case, context.temp_allocator)
+	append(
+		&cases,
+		Case{keychain = keychain},
+		Case{keychain = keychain, api = ""},
+		Case{keychain = keychain, api = "http://example.com"},
+		Case{keychain = keychain, api = strings.concatenate({"http://127.0.0.1:1/", strings.repeat("x", 300, context.temp_allocator)}, context.temp_allocator)},
+		Case{api = ""},
+		Case{pkce = "http://127.0.0.1:1/android/login/auth?code=mock-pkce-code-1"},
+	)
+	when ODIN_DEBUG {
+		append(&cases, Case{api = "http://127.0.0.1:8787", keychain = keychain, service = keychain})
+	}
+	for c in cases {
+		env_put("TIDALFAST_API", c.api)
+		env_put("TIDALFAST_KEYCHAIN", c.keychain)
+		env_put("TIDALFAST_PKCE_REDIRECT", c.pkce)
+		s := new(app.State)
+		d := &s.data
+		d.running = true
+		shell := platform.Shell {
+			request_redraw = proc "c" () {},
+		}
+		app.data_start(s, &shell)
+		queued, _ := jobs.pending(&d.queue)
+		label := fmt.tprint(c)
+		if c.service != "" {
+			testing.expect(t, d.session != nil, label)
+			testing.expect(t, app.keychain_service(d) == c.service, label)
+			testing.expect(t, queued == 1, label)
+		} else {
+			testing.expect(t, d.session == nil, label)
+			testing.expect(t, app.keychain_service(d) != app.KEYCHAIN_SERVICE, label)
+			testing.expect(t, queued == 0, label)
+			testing.expect(t, d.lists.root != real_cache, label)
+		}
+		d.running = false
+		for {
+			if _, ok := jobs.try_pop(&d.queue); !ok {
+				break
+			}
+		}
+		app.data_shutdown(s)
+		free(s)
+	}
+}
+
+// Only a run that asks for neither the mock nor fake data gets TIDAL and the
+// user's Keychain item. The mock gets its own item, and fake data, asked
+// for or fallen back to, gets none. Fake data asked for uses a settings
+// file only when TIDALFAST_SETTINGS names one, so its loud tones never
+// play bit-perfect from the user's settings.
+@(test)
+run_decide_picks_the_run :: proc(t: ^testing.T) {
+	CONFIG :: "/config"
+	DEFAULT :: CONFIG + "/tidalfast/settings.json"
+	MOCK :: "http://127.0.0.1:8787"
+	Case :: struct {
+		env:  app.Run_Env,
+		want: app.Run,
+	}
+	cases := []Case {
+		{{config_dir = CONFIG}, {mode = .Real, keychain = app.KEYCHAIN_SERVICE, settings = DEFAULT}},
+		{{settings = "/s.json", config_dir = CONFIG}, {mode = .Real, keychain = app.KEYCHAIN_SERVICE, settings = "/s.json"}},
+		{{}, {mode = .Real, keychain = app.KEYCHAIN_SERVICE}},
+		{{bench = "covers", config_dir = CONFIG}, {mode = .Real, keychain = app.KEYCHAIN_SERVICE, settings = DEFAULT}},
+		{{api = MOCK, wants_mock = true, config_dir = CONFIG}, {mode = .Mock, keychain = app.KEYCHAIN_MOCK_SERVICE, settings = DEFAULT}},
+		{{api = MOCK, wants_mock = true, keychain = "tidalfast-test"}, {mode = .Mock, keychain = "tidalfast-test"}},
+		{{api = MOCK, wants_mock = true, keychain = app.KEYCHAIN_SERVICE}, {mode = .Mock, keychain = app.KEYCHAIN_MOCK_SERVICE}},
+		{{wants_mock = true, keychain = "tidalfast-test", settings = "/s.json", config_dir = CONFIG}, {mode = .Fake, fallback = true}},
+		{{fake = "1", settings = "/s.json", config_dir = CONFIG}, {mode = .Fake, settings = "/s.json"}},
+		{{fake = "1", wants_mock = true, config_dir = CONFIG}, {mode = .Fake}},
+		{{bench = "1", api = MOCK, wants_mock = true, config_dir = CONFIG}, {mode = .Fake}},
+		{{bench = "text", config_dir = CONFIG}, {mode = .Fake}},
+	}
+	for c in cases {
+		testing.expect_value(t, app.run_decide(c.env, context.temp_allocator), c.want)
+	}
+}
+
+// A run that fell back to the fake data, as above, plays its tones
+// without bit-perfect output or hog mode whatever the settings say, and
+// reads and writes no settings file: not the user's, not TIDALFAST_SETTINGS.
+@(test)
+mock_fallback_leaves_bit_perfect_and_the_settings_alone :: proc(t: ^testing.T) {
+	sync.guard(&env_mutex)
+	saved := env_clear()
+	defer env_restore(saved)
+	dir := fmt.tprintf("%s/tidalfast-settings-%d", temp_base(), time.now()._nsec)
+	defer os.remove_all(dir)
+	testing.expect(t, os.make_directory_all(dir) == nil)
+	path := fmt.tprintf("%s/settings.json", dir)
+	on := `{"bit_perfect": true, "hog": true, "volume": 0.5}`
+	testing.expect(t, os.write_entire_file(path, transmute([]u8)on) == nil)
+	os.set_env("TIDALFAST_API", "")
+
+	for settings in ([]Maybe(string){nil, path}) {
+		env_put("TIDALFAST_SETTINGS", settings)
+		s := new(app.State)
+		d := &s.data
+		d.running = true
+		shell := platform.Shell {
+			request_redraw = proc "c" () {},
+		}
+		app.data_start(s, &shell)
+		label := fmt.tprint(settings)
+		testing.expect(t, d.fake, label)
+		testing.expect_value(t, app.output_of(s.settings), audio.Output{})
+		testing.expect_value(t, d.settings_path, "")
+		if settings != nil {
+			st := s.settings
+			st.volume = 0.2
+			app.settings_queue(d, st, now = true)
+			data, _ := os.read_entire_file(path, context.temp_allocator)
+			testing.expect_value(t, string(data), on)
+		}
+		d.running = false
+		app.data_shutdown(s)
+		free(s)
+	}
+}
+
+// The variables the mock tests set, cleared for the test and put back by
+// env_restore.
+@(private = "file")
+MOCK_ENV :: [?]string{"TIDALFAST_API", "TIDALFAST_KEYCHAIN", "TIDALFAST_PKCE_REDIRECT", "TIDALFAST_SETTINGS", "TIDALFAST_FAKE", "TIDALFAST_BENCH"}
+
+@(private = "file")
+env_clear :: proc() -> (saved: [len(MOCK_ENV)]Maybe(string)) {
+	for name, i in MOCK_ENV {
+		if value, found := os.lookup_env(name, context.temp_allocator); found {
+			saved[i] = value
+		}
+		os.unset_env(name)
+	}
+	return
+}
+
+@(private = "file")
+env_restore :: proc(saved: [len(MOCK_ENV)]Maybe(string)) {
+	for name, i in MOCK_ENV {
+		env_put(name, saved[i])
+	}
+}
+
+@(private = "file")
+env_put :: proc(name: string, value: Maybe(string)) {
+	if v, ok := value.?; ok {
+		os.set_env(name, v)
+	} else {
+		os.unset_env(name)
 	}
 }
 
