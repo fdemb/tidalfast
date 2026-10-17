@@ -115,7 +115,7 @@ text_field :: proc(id: string, f: ^Text_Field, placeholder: string, width, heigh
 		case .Key:
 			used, gave_up := field_key(u, f, b.key, e.key, &sig)
 			if used {
-				take_key(u, e.key)
+				take_key(e.key.code, e.key.modifiers)
 			}
 			live = !gave_up
 		case .Text:
@@ -327,18 +327,6 @@ field_key :: proc(u: ^State, f: ^Text_Field, key: Key, k: Key_Press, sig: ^Field
 	}
 	used = true
 	return
-}
-
-// take_key removes the first press of k from the keys the app can ask for.
-@(private)
-take_key :: proc(u: ^State, k: Key_Press) {
-	for i in 0 ..< u.key_count {
-		if u.keys[i] == k {
-			copy(u.keys[i:u.key_count], u.keys[i + 1:u.key_count])
-			u.key_count -= 1
-			return
-		}
-	}
 }
 
 @(private)
