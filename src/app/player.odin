@@ -195,11 +195,13 @@ playback_reload :: proc(s: ^State, shell: ^platform.Shell) {
 
 playback_shutdown :: proc(s: ^State) {
 	pb := &s.playback
+	// The workers and the disk thread drop what's queued when they stop,
+	// so the last position is written here, after. The results queue
+	// stops first: a disk thread blocked on a full one would never be
+	// joined.
+	workers_stop(&s.data)
 	if pb.player != nil && pb.index >= 0 && disk_on(&s.data) {
-		// The disk thread drops what's queued when it stops, so the last
-		// position is written here, after it has.
 		pb.status = audio.status(pb.player)
-		disk_stop(&s.data)
 		queue_write_now(&s.data, queue_file(pb, context.temp_allocator))
 	}
 	audio.destroy(pb.player)

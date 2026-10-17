@@ -1184,7 +1184,7 @@ settings_saves_in_order :: proc(t: ^testing.T) {
 }
 
 // The settings path the workers save to belongs to Data, so it outlives
-// playback_shutdown, which runs before data_shutdown stops the workers.
+// playback_shutdown.
 @(test)
 settings_path_outlives_playback :: proc(t: ^testing.T) {
 	dir := fmt.tprintf("%s/tidalfast-settings-order-%d", temp_base(), time.now()._nsec)
