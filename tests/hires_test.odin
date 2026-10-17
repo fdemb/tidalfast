@@ -1127,22 +1127,18 @@ device_loss_reopens :: proc(t: ^testing.T) {
 settings_saves_in_order :: proc(t: ^testing.T) {
 	dir := fmt.tprintf("%s/tidalfast-settings-race-%d", temp_base(), time.now()._nsec)
 	defer os.remove_all(dir)
-	s := new(app.State)
-	defer free(s)
-	d := &s.data
-	d.settings_store.path = strings.clone(fmt.tprintf("%s/settings.json", dir))
-	defer delete(d.settings_store.path)
+	store := app.Settings_Store {
+		path = fmt.tprintf("%s/settings.json", dir),
+	}
 
 	Shared :: struct {
-		d:        ^app.Data,
-		done:     bool,
-		bad:      int,
-		reads:    int,
-		path:     string,
+		store: ^app.Settings_Store,
+		done:  bool,
+		bad:   int,
+		reads: int,
 	}
 	sh := Shared {
-		d    = d,
-		path = d.settings_store.path,
+		store = &store,
 	}
 	writer :: proc(sh: ^Shared) {
 		for i in 0 ..< 40 {
@@ -1151,12 +1147,13 @@ settings_saves_in_order :: proc(t: ^testing.T) {
 				hog         = i % 2 == 0,
 				device      = {rate = f64(1000 + i), orig_rate = 48000, uid_len = 3, uid = {0 = 'u', 1 = 'i', 2 = 'd'}},
 			}
-			app.settings_queue(sh.d, st, now = true)
+			app.settings_put(sh.store, st)
+			app.settings_flush(sh.store)
 		}
 	}
 	reader :: proc(sh: ^Shared) {
 		for !sync.atomic_load(&sh.done) {
-			data, err := os.read_entire_file(sh.path, context.temp_allocator)
+			data, err := os.read_entire_file(sh.store.path, context.temp_allocator)
 			if err == nil {
 				sh.reads += 1
 				if _, ok := app.settings_decode_json(data); !ok {
@@ -1176,13 +1173,14 @@ settings_saves_in_order :: proc(t: ^testing.T) {
 		thread.destroy(w)
 	}
 	// The newest settings, written last by whichever thread.
-	app.settings_queue(d, {bit_perfect = true, hog = true}, now = true)
+	app.settings_put(&store, {bit_perfect = true, hog = true})
+	testing.expect(t, app.settings_flush(&store))
 	sync.atomic_store(&sh.done, true)
 	thread.join(r)
 	thread.destroy(r)
 
 	testing.expectf(t, sh.bad == 0, "%d of %d reads weren't whole settings", sh.bad, sh.reads)
-	st, ok := app.settings_load(d.settings_store.path)
+	st, ok := app.settings_load(store.path)
 	testing.expect(t, ok)
 	testing.expect_value(t, st, app.Settings{bit_perfect = true, hog = true})
 	entries, _ := os.read_all_directory_by_path(dir, context.temp_allocator)
