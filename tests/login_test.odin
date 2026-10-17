@@ -627,6 +627,36 @@ full_hold_list_never_drops_a_waiting_job :: proc(t: ^testing.T) {
 	testing.fail_now(t, "a full hold list of waiting jobs pushed one out")
 }
 
+// A held page for a list that's ended since isn't sent: page 50 came back as
+// the list's last while page 150 waited for room.
+@(test)
+held_page_past_the_end_stays_home :: proc(t: ^testing.T) {
+	s := data_state()
+	defer data_state_free(s)
+	d := &s.data
+	d.account = .Signed_In
+	app.view_open(d, .Playlist, "pl", "pl", "", 300)
+	v := &d.view
+	out := data_jobs(d)
+	testing.expect_value(t, len(out), 2)
+	fill_with_covers(d)
+
+	first := app.Result{job = out[0], rows = fake_rows(app.PAGE_FIRST), total = 300}
+	app.handle_result(s, &first, 0)
+	testing.expect_value(t, v.in_flight, 2)
+	last := app.Result{job = out[1], rows = fake_rows(120 - app.PAGE_FIRST), total = 120}
+	app.handle_result(s, &last, 0)
+
+	free_slots(d, 8)
+	app.data_retry(d)
+	for job in data_jobs(d) {
+		p, page := job.payload.(app.Tracks_Job)
+		testing.expect(t, !page, fmt.tprint("a page past the end went out at", p.offset))
+	}
+	testing.expect_value(t, v.in_flight, 0)
+	testing.expect(t, app.view_complete(v), "the list loaded in full")
+	testing.expect_value(t, v.loaded_rows, 120)
+}
 
 @(private = "file")
 fake_rows :: proc(n: int) -> []app.Row {

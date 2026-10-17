@@ -599,6 +599,14 @@ held_remove_if :: proc(d: ^Data, pred: proc(job: ^Job, data: rawptr) -> bool, da
 	return removed
 }
 
+// page_of picks the pages of the list gen names. Once a list is done it
+// wants no more of them, as view_pages wouldn't ask, and its held ones go.
+@(private = "file")
+page_of :: proc(job: ^Job, gen: rawptr) -> bool {
+	p, page := job.payload.(Tracks_Job)
+	return page && p.view == (^u32)(gen)^
+}
+
 // job_free frees what a job owns, once it has run for good or won't run.
 job_free :: proc(job: ^Job) {
 	#partial switch &p in job.payload {
@@ -924,9 +932,13 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 			}
 			v.error = res.message
 			v.done = true
+			v.in_flight -= held_remove_if(d, page_of, &v.gen)
 			return
 		}
 		view_add_rows(v, int(p.offset), int(p.limit), res.rows, res.total)
+		if v.done {
+			v.in_flight -= held_remove_if(d, page_of, &v.gen)
+		}
 		view_pages(d, v)
 		if v != r {
 			list_loaded(d, v)
