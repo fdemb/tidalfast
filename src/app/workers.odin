@@ -494,7 +494,7 @@ run_job :: proc(d: ^Data, job: Job) -> (res: Result) {
 			res.err = .Io
 		}
 	case Save_Settings_Job:
-		if !settings_flush(d) {
+		if !settings_flush(&d.settings_store) {
 			res.err = .Io
 			res.message = small("Couldn't save the settings")
 		}

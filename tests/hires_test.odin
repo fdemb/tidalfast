@@ -1130,8 +1130,8 @@ settings_saves_in_order :: proc(t: ^testing.T) {
 	s := new(app.State)
 	defer free(s)
 	d := &s.data
-	d.settings_path = strings.clone(fmt.tprintf("%s/settings.json", dir))
-	defer delete(d.settings_path)
+	d.settings_store.path = strings.clone(fmt.tprintf("%s/settings.json", dir))
+	defer delete(d.settings_store.path)
 
 	Shared :: struct {
 		d:        ^app.Data,
@@ -1142,7 +1142,7 @@ settings_saves_in_order :: proc(t: ^testing.T) {
 	}
 	sh := Shared {
 		d    = d,
-		path = d.settings_path,
+		path = d.settings_store.path,
 	}
 	writer :: proc(sh: ^Shared) {
 		for i in 0 ..< 40 {
@@ -1182,7 +1182,7 @@ settings_saves_in_order :: proc(t: ^testing.T) {
 	thread.destroy(r)
 
 	testing.expectf(t, sh.bad == 0, "%d of %d reads weren't whole settings", sh.bad, sh.reads)
-	st, ok := app.settings_load(d.settings_path)
+	st, ok := app.settings_load(d.settings_store.path)
 	testing.expect(t, ok)
 	testing.expect_value(t, st, app.Settings{bit_perfect = true, hog = true})
 	entries, _ := os.read_all_directory_by_path(dir, context.temp_allocator)
@@ -1202,8 +1202,8 @@ settings_burst_writes_the_newest_once :: proc(t: ^testing.T) {
 	s := new(app.State)
 	defer free(s)
 	d := &s.data
-	d.settings_path = strings.clone(path)
-	defer delete(d.settings_path)
+	d.settings_store.path = strings.clone(path)
+	defer delete(d.settings_store.path)
 	d.running = true
 
 	app.settings_queue(d, {volume = 0.1})
@@ -1244,8 +1244,8 @@ shutdown_writes_the_newest_settings :: proc(t: ^testing.T) {
 	s := new(app.State)
 	defer free(s)
 	d := &s.data
-	d.settings_path = strings.clone(path)
-	defer delete(d.settings_path)
+	d.settings_store.path = strings.clone(path)
+	defer delete(d.settings_store.path)
 	d.running = true
 
 	s.settings = {volume = 0.4, repeat = .All, device = {orig_rate = 48000, rate = 96000}}
@@ -1257,7 +1257,7 @@ shutdown_writes_the_newest_settings :: proc(t: ^testing.T) {
 		}
 	}
 	testing.expect(t, !os.exists(path))
-	testing.expect(t, app.settings_flush(d))
+	testing.expect(t, app.settings_flush(&d.settings_store))
 	st, ok := app.settings_load(path)
 	testing.expect(t, ok)
 	testing.expect_value(t, st, app.Settings{volume = 0.4, repeat = .All, device = {orig_rate = 48000, rate = 96000}})
