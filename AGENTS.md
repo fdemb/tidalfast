@@ -31,7 +31,7 @@ The window is often covered or the screen locked, and real input may not reach i
 - **Frame time.** `TIDALFAST_BENCH=1` (library), `=text` or `=covers` (live data, so set `TIDALFAST_API` to the mock with it) auto-scrolls and logs CPU time per frame. `TIDALFAST_OVERLAY=1` or the backtick key shows the overlay: frame and UI time, draw calls, instances, memory.
 - **Profiling.** `TIDALFAST_SPALL=path` writes a spall trace. `sample <pid>` has hung in this environment before; timers inside the code worked when it did.
 - **Metal.** `MTL_DEBUG_LAYER=1 METAL_DEVICE_WRAPPER_TYPE=1` turns on validation.
-- **Linux without a display.** Run `weston --backend=headless` with its own `XDG_RUNTIME_DIR` and socket, and point the app at it with `WAYLAND_DISPLAY`. Mesa's lavapipe is a software Vulkan device. `size=w,h` in `TIDALFAST_SHELL_TEST` resizes the window, since nobody else will. `docs/linux.md` has the commands, including running the keychain tests against a throwaway keyring in a private D-Bus session.
+- **Linux without a display.** Run `weston --backend=headless` with its own `XDG_RUNTIME_DIR` and socket, and point the app at it with `WAYLAND_DISPLAY`. Mesa's lavapipe is a software Vulkan device. `size=w,h` in `TIDALFAST_SHELL_TEST` resizes the window, since nobody else will. `docs/linux.md` has the commands, including running the keychain test against a throwaway keyring in a private D-Bus session.
 
 ## Measuring RAM and startup
 

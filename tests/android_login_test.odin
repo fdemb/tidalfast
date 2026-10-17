@@ -5,9 +5,10 @@ package tidal_tests
 // stream quality fallback.
 
 import "base:runtime"
-import "core:crypto"
 import "core:encoding/base64"
+import "core:encoding/json"
 import "core:fmt"
+import "core:log"
 import "core:reflect"
 import "core:slice"
 import "core:strings"
@@ -30,14 +31,16 @@ AAC_MESSAGE :: "TIDAL sent AAC for this login. Log in with TIDAL again for lossl
 @(private = "file")
 quiet :: proc "c" () {}
 
-// A State with a session that sends nothing and a Keychain item of its own.
+// A State with a keychain in memory and a session that sends nothing, or
+// talks to m.
 @(private = "file")
-login_state :: proc() -> ^app.State {
+login_state :: proc(m: ^Mock = nil) -> ^app.State {
 	s := new(app.State)
 	d := &s.data
-	key: u64
-	crypto.rand_bytes(([^]u8)(&key)[:8])
-	d.keychain = app.small(fmt.tprintf("tidalfast-test-%x", key))
+	test_keychain(d)
+	if m != nil {
+		d.api = app.small(m.base_url)
+	}
 	d.wake = quiet
 	s.playback.index = -1
 	s.library.selected = -1
@@ -47,12 +50,12 @@ login_state :: proc() -> ^app.State {
 
 @(private = "file")
 login_state_free :: proc(s: ^app.State) {
-	os_services.secret_delete(app.keychain_service(&s.data), app.KEYCHAIN_ACCOUNT)
 	if s.playback.player != nil {
 		app.workers_stop(&s.data)
 		app.playback_shutdown(s)
 	}
 	app.data_shutdown(s)
+	test_state_free(s)
 	free(s)
 }
 
@@ -125,59 +128,57 @@ pkce_redirect_check :: proc(t: ^testing.T) {
 // to a worker. The code login is the other way in.
 @(test)
 login_screen_transitions :: proc(t: ^testing.T) {
-	s := login_state()
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := login_state(&m)
 	defer login_state_free(s)
 	d := &s.data
-	res := app.Result {
-		job = {payload = app.Restore_Job{}},
-	}
-	app.handle_result(s, &res, 0)
-	testing.expect_value(t, d.account, app.Account.Signed_Out)
-	testing.expect_value(t, d.login.pkce, app.Pkce_Step.Paste)
-	testing.expect(t, app.show_login(s))
-	testing.expect(t, d.pkce_verifier.len > 0, "the login page's verifier is ready")
+	redirect := fmt.tprintf("%sandroid/login/auth", m.base_url)
+	launch_signed_out(s)
+	screen := login_screen(t, s)
+	testing.expect(t, shows(screen, "Log in to TIDAL"), screen)
+	testing.expect(t, shows(screen, fmt.tprintf("It starts with %s", redirect)), screen)
+	page := tidal.pkce_login_url(d.session, context.temp_allocator)
+	testing.expect(t, strings.contains(page, "code_challenge=") && !strings.contains(page, "code_challenge=&"), "the login page's verifier is ready")
 	kinds, _ := queued_kinds(d)
 	expect_kinds(t, kinds)
 
 	app.pkce_submit(s, "https://example.com/?code=x")
-	testing.expect_value(t, d.login.pkce, app.Pkce_Step.Paste)
-	testing.expect_value(t, app.small_str(&d.login.pkce_note), "That isn't the address TIDAL ends on.")
+	screen = login_screen(t, s)
+	testing.expect(t, shows(screen, "That isn't the address TIDAL ends on."), screen)
+	testing.expect(t, shows(screen, "Log in with TIDAL"), screen)
 	kinds, _ = queued_kinds(d)
 	expect_kinds(t, kinds)
 
-	app.pkce_submit(s, " " + REDIRECT + "?code=good&state=na\n")
-	testing.expect_value(t, d.login.pkce, app.Pkce_Step.Exchanging)
-	testing.expect_value(t, d.login.pkce_note.len, 0)
-	testing.expect_value(t, string(d.pkce_redirect[:d.pkce_len]), REDIRECT + "?code=good&state=na")
+	// Pasted with spaces around it and sent with Continue.
+	pasted := fmt.tprintf(" %s?code=good&state=na ", redirect)
+	login_press(t, s, "Paste the address here", .Access_Focus)
+	login_screen(t, s, {{kind = .Text, text_length = u32(len(pasted))}}, pasted)
+	login_press(t, s, "Continue")
+	screen = login_screen(t, s)
+	testing.expect(t, shows(screen, "Logging you in…"), screen)
+	testing.expect(t, !shows(screen, "That isn't the address TIDAL ends on."), screen)
 	queued: [dynamic]app.Job
 	kinds, queued = queued_kinds(d)
 	expect_kinds(t, kinds, app.Login_Pkce_Job)
-	testing.expect_value(t, queued[0].payload.(app.Login_Pkce_Job).attempt, d.login_attempt)
 
 	// The exchange failed: back to an empty field, with a plain reason.
-	ui.field_set_text(&d.login.field, REDIRECT + "?code=good&state=na")
-	failed := app.Result {
-		job = {payload = app.Login_Pkce_Job{attempt = d.login_attempt}},
-		err = .Authentication,
-		message = app.small("Authentication: TIDAL didn't accept this login."),
+	m.polls = {"denied"}
+	{
+		// tidal logs TIDAL's refusal as an error, which fails a test.
+		context.logger = log.nil_logger()
+		run_now(s, queued[0])
 	}
-	app.handle_result(s, &failed, 0)
-	testing.expect_value(t, d.account, app.Account.Signed_Out)
-	testing.expect_value(t, d.login.pkce, app.Pkce_Step.Paste)
-	testing.expect_value(t, app.small_str(&d.login.pkce_note), "TIDAL didn't take this address. Log in with TIDAL again.")
-	testing.expect_value(t, ui_text(&d.login), "")
+	testing.expect_value(t, m.token_form["code"], "good")
+	screen = login_screen(t, s)
+	testing.expect(t, shows(screen, "TIDAL didn't take this address. Log in with TIDAL again."), screen)
+	testing.expect(t, !strings.contains(screen, "code=good"), screen)
 
-	before := d.login_attempt
 	app.device_begin(d)
-	testing.expect_value(t, d.login.pkce, app.Pkce_Step.Off)
-	testing.expect(t, d.login_attempt > before)
+	testing.expect(t, shows(login_screen(t, s), "Log in with a code"))
 	kinds, _ = queued_kinds(d)
 	expect_kinds(t, kinds, app.Login_Start_Job)
-}
-
-@(private = "file")
-ui_text :: proc(l: ^app.Login) -> string {
-	return string(l.field.buf[:l.field.len])
 }
 
 // A Login_Pkce the full queue refused goes out again on the next frame.
@@ -186,10 +187,10 @@ refused_pkce_login_is_retried :: proc(t: ^testing.T) {
 	s := login_state()
 	defer login_state_free(s)
 	d := &s.data
-	d.account = .Signed_Out
+	launch_signed_out(s)
 	for jobs.push(&d.queue, app.Job{payload = app.Tracks_Job{}}, app.PRIORITY_DATA) {}
 	app.pkce_submit(s, REDIRECT + "?code=c")
-	testing.expect_value(t, d.login.pkce, app.Pkce_Step.Exchanging)
+	testing.expect(t, shows(login_screen(t, s), "Logging you in…"))
 	_, ok := jobs.try_pop(&d.queue)
 	testing.expect(t, ok)
 	app.data_retry(d)
@@ -197,61 +198,54 @@ refused_pkce_login_is_retried :: proc(t: ^testing.T) {
 	testing.expect(t, slice.contains(kinds, app.Login_Pkce_Job))
 }
 
-// A saved login from the device-code client gets the AAC notice; a PKCE one
-// doesn't. Logging in again over it keeps the Keychain item until the new
-// login replaces it.
+// A device-code login gets the AAC notice; a PKCE one doesn't. Logging in
+// again over it keeps the keychain item until the new login replaces it.
 @(test)
 device_login_notice :: proc(t: ^testing.T) {
-	s := login_state()
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := login_state(&m)
 	defer login_state_free(s)
 	d := &s.data
-	tidal.session_restore(d.session, {token_type = "Bearer", access_token = "a", refresh_token = "r", user_id = 123, user_kind = .Logged_In_User})
-	app.auth_changed(d.session, d)
-
-	// The Keychain item names the device client, which restores as not PKCE.
-	item, status := os_services.secret_get(app.keychain_service(d), app.KEYCHAIN_ACCOUNT, context.temp_allocator)
-	testing.expect_value(t, status, os_services.SECRET_OK)
-	testing.expect(t, strings.contains(string(item), fmt.tprintf(`"client_id":"%s"`, d.session.config.client_id)))
-	restored := tidal.session_create()
-	defer tidal.session_destroy(restored)
-	testing.expect(t, app.auth_restore(restored, item))
-	testing.expect(t, !tidal.session_is_pkce(restored))
-
-	res := app.Result {
-		job       = {payload = app.Restore_Job{}},
-		signed_in = true,
-	}
-	app.handle_result(s, &res, 0)
-	testing.expect_value(t, d.account, app.Account.Signed_In)
-	testing.expect(t, d.device_login)
+	m.polls = {"ok", "ok"}
+	show_code(t, s, interval = 0.2)
+	testing.expect_value(t, run_queued(s, app.Login_Wait_Job), 1)
 	testing.expect(t, !app.show_login(s), "the user can browse")
+	NOTICE :: "This login can only stream AAC. Log in again for lossless."
+	notice := screen_of(s, app.draw_login_notice)
+	testing.expect(t, shows(notice, NOTICE), notice)
 
-	// "Log in with TIDAL" on the notice, as relogin_begin does without the
-	// browser.
-	d.relogin = true
-	d.login = {}
-	testing.expect(t, app.show_login(s))
-	app.pkce_submit(s, REDIRECT + "?code=c")
-	testing.expect_value(t, d.account, app.Account.Signed_Out)
-	testing.expect(t, !d.relogin)
-	testing.expect(t, !d.device_login)
-	testing.expect_value(t, d.auth_gen, 1)
-	testing.expect_value(t, tidal.session_auth(d.session, context.temp_allocator).access_token, "")
-	_, status = os_services.secret_get(app.keychain_service(d), app.KEYCHAIN_ACCOUNT, context.temp_allocator)
+	// The keychain item names the device client, which restores as not PKCE.
+	item, status := app.keychain_get(test_keychain(d), context.temp_allocator)
 	testing.expect_value(t, status, os_services.SECRET_OK)
+	stored: app.Stored_Auth
+	testing.expect(t, json.unmarshal(item, &stored, allocator = context.temp_allocator) == nil, string(item))
+	testing.expect_value(t, stored.client_id, "fX2JxdmntZWK0ixT")
+	saved, ok := keychain_auth(d)
+	testing.expect(t, ok && !saved.is_pkce)
+
+	// "Log in with TIDAL" on the notice, without the browser.
+	app.relogin_show(d)
+	screen := login_screen(t, s)
+	testing.expect(t, shows(screen, "Back to your library"), screen)
+	app.pkce_submit(s, fmt.tprintf("%sandroid/login/auth?code=c", m.base_url))
+	screen = login_screen(t, s)
+	testing.expect(t, shows(screen, "Logging you in…"), screen)
+	testing.expect(t, !shows(screen, "Back to your library"), screen)
+	testing.expect_value(t, tidal.session_auth(d.session, context.temp_allocator).access_token, "")
+	saved, ok = keychain_auth(d)
+	testing.expect(t, ok && !saved.is_pkce, "the device login stays saved until the new one replaces it")
 	kinds, queued := queued_kinds(d)
 	expect_kinds(t, kinds, app.Login_Pkce_Job)
-	testing.expect_value(t, queued[0].auth, 1)
 
 	// The PKCE login finished.
-	tidal.session_restore(d.session, {token_type = "Bearer", access_token = "p", refresh_token = "pr", user_id = 123, user_kind = .Logged_In_User, is_pkce = true})
-	done := app.Result {
-		job = {auth = d.auth_gen, payload = app.Login_Pkce_Job{attempt = d.login_attempt}},
-	}
-	app.handle_result(s, &done, 0)
-	testing.expect_value(t, d.account, app.Account.Signed_In)
-	testing.expect(t, !d.device_login)
+	run_now(s, queued[0])
 	testing.expect(t, !app.show_login(s))
+	notice = screen_of(s, app.draw_login_notice)
+	testing.expect(t, !shows(notice, NOTICE), notice)
+	saved, ok = keychain_auth(d)
+	testing.expect(t, ok && saved.is_pkce)
 }
 
 // A stream that comes as AAC says so in the player bar and stops there:
@@ -262,7 +256,8 @@ aac_stream_message :: proc(t: ^testing.T) {
 	defer login_state_free(s)
 	d := &s.data
 	s.playback.player = audio.create(quiet, 0, null_output = true)
-	d.account = .Signed_In
+	sign_in(s)
+	queued_kinds(d)
 	app.view_open(d, .Playlist, "pl", "pl", "", 3)
 	rows := make([]app.Row, 3, context.temp_allocator)
 	for &r, i in rows {
@@ -408,27 +403,23 @@ stale_login_start_is_dropped :: proc(t: ^testing.T) {
 	s := login_state()
 	defer login_state_free(s)
 	d := &s.data
-	d.account = .Signed_Out
-	answer :: proc(job: app.Job) -> app.Result {
-		return {job = job, link = {user_code = app.small("ABCDE"), device_code = app.small("dc"), interval = 1, expires = 300}}
-	}
+	launch_signed_out(s)
 	start_job :: proc(t: ^testing.T, d: ^app.Data) -> app.Job {
 		kinds, queued := queued_kinds(d)
 		expect_kinds(t, kinds, app.Login_Start_Job)
 		if len(queued) == 0 {
 			return {}
 		}
-		testing.expect_value(t, queued[0].payload.(app.Login_Start_Job).attempt, d.login_attempt)
 		return queued[0]
 	}
 
 	app.device_begin(d)
 	first := start_job(t, d)
 	app.pkce_show(d)
-	late := answer(first)
-	app.handle_result(s, &late, 0)
-	testing.expect_value(t, d.login.pkce, app.Pkce_Step.Paste)
-	testing.expect_value(t, d.login.link.device_code.len, 0)
+	answer_login_start(s, first)
+	screen := login_screen(t, s)
+	testing.expect(t, shows(screen, "Log in to TIDAL"), screen)
+	testing.expect(t, !shows(screen, "ABCDE"), screen)
 	kinds, _ := queued_kinds(d)
 	expect_kinds(t, kinds)
 
@@ -438,15 +429,16 @@ stale_login_start_is_dropped :: proc(t: ^testing.T) {
 	app.device_begin(d)
 	kinds, _ = queued_kinds(d)
 	expect_kinds(t, kinds)
-	stale := answer(second)
-	app.handle_result(s, &stale, 0)
-	testing.expect_value(t, d.login.link.device_code.len, 0)
+	answer_login_start(s, second)
+	screen = login_screen(t, s)
+	testing.expect(t, shows(screen, "Getting a code from TIDAL…"), screen)
+	testing.expect(t, !shows(screen, "ABCDE"), screen)
 	third := start_job(t, d)
 
-	fresh := answer(third)
-	app.handle_result(s, &fresh, 0)
-	testing.expect_value(t, d.login.pkce, app.Pkce_Step.Off)
-	testing.expect_value(t, app.small_str(&d.login.link.user_code), "ABCDE")
+	answer_login_start(s, third)
+	screen = login_screen(t, s)
+	testing.expect(t, shows(screen, "Log in with a code"), screen)
+	testing.expect(t, shows(screen, "ABCDE"), screen)
 	kinds, _ = queued_kinds(d)
 	expect_kinds(t, kinds, app.Login_Wait_Job)
 }
@@ -480,7 +472,8 @@ failed_prefetch_is_not_retried :: proc(t: ^testing.T) {
 	d := &s.data
 	pb := &s.playback
 	pb.player = audio.create(quiet, 0, null_output = true)
-	d.account = .Signed_In
+	sign_in(s)
+	queued_kinds(d)
 	app.view_open(d, .Playlist, "pl", "pl", "", 3)
 	rows := make([]app.Row, 3, context.temp_allocator)
 	for &r, i in rows {
@@ -633,7 +626,8 @@ artwork_downloads_at_its_size :: proc(t: ^testing.T) {
 	d := &s.data
 	pb := &s.playback
 	pb.player = audio.create(quiet, 0, null_output = true)
-	d.account = .Signed_In
+	sign_in(s)
+	queued_kinds(d)
 	app.view_open(d, .Playlist, "pl", "pl", "", 1)
 	rows := make([]app.Row, 1, context.temp_allocator)
 	rows[0] = {title = "Track", id = 1000, seconds = 5, cover = "aa-bb-cc"}

@@ -15,6 +15,7 @@ import "core:math"
 import vmem "core:mem/virtual"
 import "core:os"
 import "core:reflect"
+import "core:slice"
 import "core:strings"
 import "core:sync"
 import "core:sys/posix"
@@ -120,7 +121,7 @@ Data :: struct {
 	fake:           bool,
 	mock:           bool, // api is set
 	api:            Small, // TIDALFAST_API once checked, "" for TIDAL
-	keychain:       Small, // the Keychain service the login goes in
+	keychain:       Keychain, // where the login goes
 	account:        Account,
 	// Goes up with every sign_out. Jobs carry the one they were queued in,
 	// and results from an older one are dropped.
@@ -232,7 +233,7 @@ data_start :: proc(s: ^State, shell: ^platform.Shell) {
 	d.lists.root = lists_root(d.mock)
 	d.bench.running = bench == "covers"
 	d.api = small(api)
-	d.keychain = small(run.keychain)
+	d.keychain = Os_Keychain{small(run.keychain)}
 	session_open(d)
 	d.account = .Restoring
 	push_job(d, {payload = Restore_Job{}})
@@ -449,11 +450,64 @@ session_open :: proc(d: ^Data) {
 	d.session = s
 }
 
-// keychain_service is where the login goes. Against a mock server,
-// TIDALFAST_KEYCHAIN can name another item, so test runs of differently
-// signed builds don't share one and the Keychain doesn't ask for access.
-keychain_service :: proc(d: ^Data) -> string {
-	return small_str(&d.keychain)
+// Keychain is where the login is kept between runs: the OS Keychain item
+// for a service, or, in tests, an item in memory.
+Keychain :: union {
+	Os_Keychain,
+	^Memory_Keychain,
+}
+
+// Os_Keychain is the item (service, KEYCHAIN_ACCOUNT). Against a mock
+// server, TIDALFAST_KEYCHAIN can name another service, so test runs of
+// differently signed builds don't share one and the Keychain doesn't ask
+// for access.
+Os_Keychain :: struct {
+	service: Small,
+}
+
+// Memory_Keychain holds the item on the heap, nil for none. Workers read
+// and write it, so it has a lock of its own.
+Memory_Keychain :: struct {
+	mutex: sync.Mutex,
+	item:  []u8,
+}
+
+keychain_get :: proc(k: ^Keychain, allocator := context.allocator) -> ([]u8, os_services.Status) {
+	switch &k in k {
+	case Os_Keychain:
+		return os_services.secret_get(small_str(&k.service), KEYCHAIN_ACCOUNT, allocator)
+	case ^Memory_Keychain:
+		sync.guard(&k.mutex)
+		if k.item == nil {
+			return nil, os_services.SECRET_NOT_FOUND
+		}
+		return slice.clone(k.item, allocator), os_services.SECRET_OK
+	}
+	return nil, os_services.SECRET_NOT_FOUND
+}
+
+keychain_set :: proc(k: ^Keychain, data: []u8) -> os_services.Status {
+	switch &k in k {
+	case Os_Keychain:
+		return os_services.secret_set(small_str(&k.service), KEYCHAIN_ACCOUNT, data)
+	case ^Memory_Keychain:
+		sync.guard(&k.mutex)
+		delete(k.item, runtime.heap_allocator())
+		k.item = slice.clone(data, runtime.heap_allocator())
+	}
+	return os_services.SECRET_OK
+}
+
+keychain_delete :: proc(k: ^Keychain) -> os_services.Status {
+	switch &k in k {
+	case Os_Keychain:
+		return os_services.secret_delete(small_str(&k.service), KEYCHAIN_ACCOUNT)
+	case ^Memory_Keychain:
+		sync.guard(&k.mutex)
+		delete(k.item, runtime.heap_allocator())
+		k.item = nil
+	}
+	return os_services.SECRET_OK
 }
 
 // Stored_Auth is what goes in the Keychain item, as JSON.
@@ -536,7 +590,7 @@ auth_restore :: proc(s: ^tidal.Session, data: []u8, partial := false) -> bool {
 // macOS may ask the user whether this build may read the item, and that
 // blocks the caller until they answer.
 auth_load :: proc(d: ^Data, res: ^Result) -> bool {
-	data, status := os_services.secret_get(keychain_service(d), KEYCHAIN_ACCOUNT, context.temp_allocator)
+	data, status := keychain_get(&d.keychain, context.temp_allocator)
 	if status == os_services.SECRET_NOT_FOUND {
 		return false
 	}
@@ -565,7 +619,7 @@ auth_changed :: proc(s: ^tidal.Session, data: rawptr) {
 		return
 	}
 	bytes := auth_marshal(a, context.temp_allocator)
-	if status := os_services.secret_set(keychain_service(d), KEYCHAIN_ACCOUNT, bytes); status != os_services.SECRET_OK {
+	if status := keychain_set(&d.keychain, bytes); status != os_services.SECRET_OK {
 		log.errorf("app: couldn't save the login to the Keychain (error %d)", status)
 	}
 }
@@ -734,7 +788,7 @@ sign_out :: proc(s: ^State, why: string) {
 	account_end(s)
 	{
 		sync.guard(&d.keychain_mutex)
-		os_services.secret_delete(keychain_service(d), KEYCHAIN_ACCOUNT)
+		keychain_delete(&d.keychain)
 	}
 	lists_forget(d)
 	d.login = {

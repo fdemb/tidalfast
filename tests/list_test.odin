@@ -140,7 +140,8 @@ open_with_ids :: proc(s: ^app.State, source: app.Source, id: string, ids: []i64)
 playing_row_survives_reopening_its_list :: proc(t: ^testing.T) {
 	s := new(app.State)
 	defer free(s)
-	s.data.account = .Signed_In
+	defer test_state_free(s)
+	sign_in(s)
 	s.library.selected = -1
 	s.playback.index = -1
 	s.playback.player = audio.create(no_wake, 0, null_output = true)
@@ -314,7 +315,11 @@ player_bar_fits_at_every_width :: proc(t: ^testing.T) {
 	cover.init(&s.data.covers, 1 << 20)
 	app.search_init(s)
 	defer app.search_shutdown(s)
-	s.data.account = .Signed_In
+	sign_in(s)
+	defer {
+		app.data_shutdown(s)
+		test_state_free(s)
+	}
 	pb := &s.playback
 	items := []app.Queue_Item{{title = "Quiet Noise 24/96", artist = "Mock", seconds = 3725}}
 	pb.items = items
