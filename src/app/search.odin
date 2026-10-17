@@ -155,7 +155,8 @@ search_query :: proc(s: ^State) -> string {
 
 @(private = "file")
 drop_search_jobs :: proc(job: ^Job, _: rawptr) -> bool {
-	return job.kind == .Search
+	_, search := job.payload.(Search_Job)
+	return search
 }
 
 // search_edited starts the debounce over. An empty field ends the search
@@ -171,7 +172,7 @@ search_edited :: proc(s: ^State) {
 }
 
 // search_stop forgets the search that's waiting or out: the debounce, the
-// queued job, and the result, which arrives for an older generation.
+// queued or held job, and the result, which arrives for an older generation.
 search_stop :: proc(s: ^State) {
 	sr := &s.search
 	sr.gen += 1
@@ -179,6 +180,7 @@ search_stop :: proc(s: ^State) {
 	sr.loading = false
 	if !s.data.fake {
 		jobs.remove_if(&s.data.queue, drop_search_jobs, nil)
+		held_remove_if(&s.data, drop_search_jobs, nil)
 	}
 }
 
@@ -195,10 +197,7 @@ search_send :: proc(s: ^State, q: string) {
 		return
 	}
 	sr.loading = true
-	if !push_job(&s.data, {kind = .Search, view = sr.gen, id = small(q)}) {
-		// The queue is full: try again shortly.
-		sr.due = s.ui.time + 0.1
-	}
+	push_job(&s.data, {payload = Search_Job{gen = sr.gen, query = small(q)}})
 }
 
 // search_again puts q in the field and searches for it, for Back and
@@ -244,9 +243,9 @@ search_leave :: proc(s: ^State) -> (was_browsing: bool) {
 }
 
 // search_result takes a Search job's result.
-search_result :: proc(s: ^State, res: ^Result) {
+search_result :: proc(s: ^State, res: ^Result, job: Search_Job) {
 	sr := &s.search
-	if res.job.view != sr.gen {
+	if job.gen != sr.gen {
 		return // for an older query
 	}
 	sr.loading = false
@@ -259,7 +258,7 @@ search_result :: proc(s: ^State, res: ^Result) {
 	sr.arena = res.arena
 	res.arena = nil
 	sr.found = res.found
-	sr.query = res.job.id
+	sr.query = job.query
 	q := small_str(&sr.query)
 	log.infof("search: \"%s\": %d songs, %d albums, %d artists, %d playlists", q, len(res.rows), len(sr.found.albums), len(sr.found.artists), len(sr.found.playlists))
 
@@ -663,7 +662,7 @@ found_lists :: proc(r: tidal.Search_Results, a: runtime.Allocator) -> (out: Foun
 
 // more_tracks is a page of a list that isn't a sidebar entry, for a Tracks
 // job: more search results, an album's tracks or an artist's top tracks.
-more_tracks :: proc(s: ^tidal.Session, job: Job, a: runtime.Allocator) -> (tracks: []tidal.Track, err: tidal.Error) {
+more_tracks :: proc(s: ^tidal.Session, job: Tracks_Job, a: runtime.Allocator) -> (tracks: []tidal.Track, err: tidal.Error) {
 	id := job.id
 	key := small_str(&id)
 	#partial switch job.source {

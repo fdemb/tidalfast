@@ -81,11 +81,11 @@ List_Entry :: struct {
 
 Disk_Op :: enum u8 {
 	Read,
-	Write, // Job.blob, from list_encode or sidebar_encode
+	Write, // Disk_Job.blob, from list_encode or sidebar_encode
 	Touch, // mark it opened now, for eviction
 	Delete,
 	Read_Queue, // the play queue's file, see queue_save
-	Write_Queue, // Job.blob, from queue_encode
+	Write_Queue, // Disk_Job.blob, from queue_encode
 	Delete_Queue,
 }
 
@@ -498,12 +498,12 @@ add_to_list :: proc(s: ^State, track, entry: int) {
 	if entry < 0 || entry > len(d.sidebar.items) || row.id == 0 {
 		return
 	}
-	job := Job{kind = .Add_Track, source = .Liked, key = u64(row.id)}
+	job := Add_Track_Job{track = row.id, source = .Liked}
 	if entry > 0 {
 		job.source = .Playlist
 		job.id = small(d.sidebar.items[entry - 1].id)
 	}
-	push_job(d, job) // a refused one is held and pushed next frame
+	push_job(d, {payload = job})
 	set_status(s, .Adding, track, entry)
 }
 
@@ -511,10 +511,10 @@ add_to_list :: proc(s: ^State, track, entry: int) {
 // kept copies take it in place at the version TIDAL gave, so nothing is
 // fetched again. Without it they're dropped and the list is fetched again.
 // The status line says how it went if it still names this add.
-add_result :: proc(s: ^State, res: ^Result) {
+add_result :: proc(s: ^State, res: ^Result, job: Add_Track_Job) {
 	d := &s.data
 	lib := &s.library
-	job := &res.job
+	job := job
 	id := small_str(&job.id)
 	err, failed := res.err.?
 	added := res.added
@@ -540,7 +540,7 @@ add_result :: proc(s: ^State, res: ^Result) {
 	row := view_row(s, lib.status_track)
 	entry := lib.status_list
 	same_list := entry == 0 if job.source == .Liked else entry > 0 && entry <= len(d.sidebar.items) && d.sidebar.items[entry - 1].id == id
-	if row != nil && row.id == i64(job.key) && same_list {
+	if row != nil && row.id == job.track && same_list {
 		lib.status = status
 	}
 }
@@ -754,20 +754,18 @@ lists_forget :: proc(d: ^Data) {
 
 @(private = "file")
 drop_disk_job :: proc(job: ^Job, _: rawptr) -> bool {
-	delete(job.blob, runtime.heap_allocator())
-	job.blob = nil
+	job_free(job)
 	return true
 }
 
 // disk_push queues a disk job for the signed-in user. The disk cache is
 // best effort: a full queue drops it.
-disk_push :: proc(d: ^Data, job: Job) -> bool {
-	job := job
-	job.kind = .Disk
-	job.auth = d.auth_gen
-	job.key = u64(d.lists.user)
+disk_push :: proc(d: ^Data, disk: Disk_Job) -> bool {
+	disk := disk
+	disk.user = d.lists.user
+	job := Job{auth = d.auth_gen, payload = disk}
 	if !disk_on(d) || !jobs.push(&d.lists.queue, job) {
-		delete(job.blob, runtime.heap_allocator())
+		job_free(&job)
 		return false
 	}
 	return true
@@ -868,11 +866,12 @@ fnv64 :: proc(s: string) -> u64 {
 }
 
 // disk_run does a disk job. Reads answer with a Result; the rest don't.
-disk_run :: proc(d: ^Data, job: Job) -> (res: Result, reply: bool) {
-	res.job = job
+disk_run :: proc(d: ^Data, queued: Job) -> (res: Result, reply: bool) {
+	res.job = queued
+	job := queued.payload.(Disk_Job)
 	defer delete(job.blob, runtime.heap_allocator())
 	id := job.id
-	dir := disk_dir(d.lists.root, i64(job.key), context.temp_allocator)
+	dir := disk_dir(d.lists.root, job.user, context.temp_allocator)
 	path := disk_path(dir, job.source, small_str(&id), context.temp_allocator)
 	#partial switch job.op {
 	case .Read:
@@ -892,7 +891,7 @@ disk_run :: proc(d: ^Data, job: Job) -> (res: Result, reply: bool) {
 		file_seal(job.blob)
 	}
 	sync.guard(&d.lists.mutex)
-	if job.auth != sync.atomic_load(&d.auth_gen) {
+	if queued.auth != sync.atomic_load(&d.auth_gen) {
 		return // that account is gone
 	}
 	switch job.op {
@@ -1112,15 +1111,15 @@ cover_write :: proc(d: ^Data, dir, path: string, data: []u8) {
 
 // disk_result takes a disk read: the open list's rows, the sidebar or the
 // play queue.
-disk_result :: proc(s: ^State, res: ^Result) {
+disk_result :: proc(s: ^State, res: ^Result, job: Disk_Job) {
 	d := &s.data
-	if res.job.op == .Read_Queue {
+	if job.op == .Read_Queue {
 		if res.job.auth == d.auth_gen {
 			playback_restore(s, res)
 		}
 		return
 	}
-	if res.job.source == .None {
+	if job.source == .None {
 		if res.hit && !d.sidebar.fresh {
 			log.debugf("lists: sidebar from disk, %d playlists", len(res.playlists))
 			sidebar_adopt(s, res, true)
@@ -1128,7 +1127,7 @@ disk_result :: proc(s: ^State, res: ^Result) {
 		return
 	}
 	v := &d.view
-	if res.job.view != v.gen || !v.reading {
+	if job.view != v.gen || !v.reading {
 		return
 	}
 	v.reading = false

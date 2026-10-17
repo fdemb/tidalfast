@@ -149,7 +149,7 @@ settings_queue :: proc(d: ^Data, st: Settings, now := false) {
 	d.settings_gen += 1
 	sync.unlock(&d.settings_mutex)
 	if d.running && !now {
-		push_job(d, {kind = .Save_Settings})
+		push_job(d, {payload = Save_Settings_Job{}})
 	} else if !settings_flush(d) {
 		log.errorf("app: couldn't save the settings to %s", d.settings_path)
 	}

@@ -78,10 +78,11 @@ liked_songs_load_past_short_pages :: proc(t: ^testing.T) {
 	// What the workers would do with the jobs view_open and
 	// view_request_pages queue, one page at a time.
 	for !d.view.done {
-		job, ok := jobs.try_pop(&d.queue)
+		queued, ok := jobs.try_pop(&d.queue)
 		if !testing.expect(t, ok, "the view stopped asking for pages before the end") {
 			return
 		}
+		job := queued.payload.(app.Tracks_Job)
 		tracks, total, err := tidal.favorites_tracks(s, int(job.limit), int(job.offset), allocator = context.temp_allocator)
 		testing.expect_value(t, err, nil)
 		testing.expect_value(t, total, MOCK_LIKED)

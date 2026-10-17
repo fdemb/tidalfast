@@ -118,7 +118,10 @@ type_text :: proc(f: ^Frame, s: string) -> platform.Event {
 
 @(private = "file")
 search_jobs :: proc(s: ^app.State) -> int {
-	return jobs.remove_if(&s.data.queue, proc(job: ^app.Job, _: rawptr) -> bool {return job.kind == .Search}, nil)
+	return jobs.remove_if(&s.data.queue, proc(job: ^app.Job, _: rawptr) -> bool {
+		_, search := job.payload.(app.Search_Job)
+		return search
+	}, nil)
 }
 
 // two_artists is a song's two artists, the first with a comma in its name.
@@ -255,11 +258,11 @@ artist_and_album_links :: proc(t: ^testing.T) {
 	albums := []app.Found{{id = 5, name = "An album", subtitle = "Album · Tyler, The Creator, Kali Uchis"}}
 	albums[0].artist, albums[0].artists = two_artists()
 	res := app.Result {
-		job   = {kind = .Search, view = sr.gen, id = app.small("abc")},
+		job   = {payload = app.Search_Job{gen = sr.gen, query = app.small("abc")}},
 		rows  = []app.Row{{title = "Found song", artist = "Someone", id = 1}},
 		found = {albums = albums},
 	}
-	app.search_result(s, &res)
+	app.handle_result(s, &res, 0)
 	library_frame(t, s, &f)
 	library_frame(t, s, &f, press(s, "Albums"))
 	library_frame(t, s, &f)
@@ -313,6 +316,44 @@ artist_links_stop_at_the_edge :: proc(t: ^testing.T) {
 	testing.expect(t, first.frame[2] > 0)
 }
 
+// A search the full queue held gives way to the next query, which goes out
+// once there's room.
+@(test)
+held_search_gives_way_to_the_next_query :: proc(t: ^testing.T) {
+	arena: vmem.Arena
+	_ = vmem.arena_init_growing(&arena)
+	defer vmem.arena_destroy(&arena)
+	context.allocator = vmem.arena_allocator(&arena)
+	s := library_state(false)
+	defer library_state_free(s)
+	f: Frame
+	library_frame(t, s, &f)
+	for jobs.push(&s.data.queue, app.Job{payload = app.Cover_Job{}}, app.PRIORITY_COVER) {}
+	library_frame(t, s, &f, {kind = .Key_Down, key = .F, modifiers = {ui.PRIMARY}})
+	library_frame(t, s, &f, type_text(&f, "abc"))
+	library_frame(t, s, &f, {kind = .Key_Down, key = .Return})
+	library_frame(t, s, &f, type_text(&f, "d"))
+	library_frame(t, s, &f, {kind = .Key_Down, key = .Return})
+	testing.expect_value(t, search_jobs(s), 0)
+
+	for _ in 0 ..< 4 {
+		jobs.try_pop(&s.data.queue)
+	}
+	app.data_retry(&s.data)
+	queries := make([dynamic]string, context.temp_allocator)
+	for {
+		job := jobs.try_pop(&s.data.queue) or_break
+		if p, search := job.payload.(app.Search_Job); search {
+			testing.expect_value(t, p.gen, s.search.gen)
+			append(&queries, strings.clone(app.small_str(&p.query), context.temp_allocator))
+		}
+	}
+	testing.expect_value(t, len(queries), 1)
+	if len(queries) == 1 {
+		testing.expect_value(t, queries[0], "abcd")
+	}
+}
+
 // Picking a sidebar entry while a search waits for its debounce, or while
 // its request is out, ends the search: its result mustn't bring the
 // results back over the playlist.
@@ -349,10 +390,10 @@ sidebar_pick_ends_the_search :: proc(t: ^testing.T) {
 	testing.expect(t, sr.gen != sent)
 	testing.expect_value(t, search_jobs(s), 0)
 	res := app.Result {
-		job  = {kind = .Search, view = sent, id = app.small("abc")},
+		job  = {payload = app.Search_Job{gen = sent, query = app.small("abc")}},
 		rows = []app.Row{{title = "Late", id = 1}},
 	}
-	app.search_result(s, &res)
+	app.handle_result(s, &res, 0)
 	testing.expect(t, !app.search_showing(s))
 	testing.expect_value(t, s.data.view.source, app.Source.Liked)
 	library_frame(t, s, &f)
@@ -521,10 +562,10 @@ track_menu_closes_with_its_list :: proc(t: ^testing.T) {
 		r = {title = "Found song", artist = "Other Artist", album = "Other Album", id = i64(100 + i), album_id = 22}
 	}
 	res := app.Result {
-		job  = {kind = .Search, view = s.search.gen, id = app.small("found")},
+		job  = {payload = app.Search_Job{gen = s.search.gen, query = app.small("found")}},
 		rows = rows,
 	}
-	app.search_result(s, &res)
+	app.handle_result(s, &res, 0)
 	library_frame(t, s, &f, press(s, "Go to album"))
 	testing.expect(t, !ui.menu_is_open("track_menu"))
 	testing.expect_value(t, s.data.view.source, app.Source.Search)
@@ -573,11 +614,11 @@ search_results_come_back_from_memory :: proc(t: ^testing.T) {
 	testing.expect_value(t, search_jobs(s), 1)
 	albums := []app.Found{{id = 5, name = "An album", subtitle = "Album · Someone"}}
 	res := app.Result {
-		job   = {kind = .Search, view = sr.gen, id = app.small("abc")},
+		job   = {payload = app.Search_Job{gen = sr.gen, query = app.small("abc")}},
 		rows  = []app.Row{{title = "Found song", artist = "Someone", id = 1}, {title = "Other song", artist = "Someone", id = 2}},
 		found = {albums = albums},
 	}
-	app.search_result(s, &res)
+	app.handle_result(s, &res, 0)
 	testing.expect(t, s.data.view.done)
 	library_frame(t, s, &f)
 
@@ -859,11 +900,11 @@ sign_out_forgets_history_and_search :: proc(t: ^testing.T) {
 	library_frame(t, s, &f, type_text(&f, "abc"))
 	library_frame(t, s, &f, key(.Return))
 	res := app.Result {
-		job   = {kind = .Search, view = sr.gen, id = app.small("abc")},
+		job   = {payload = app.Search_Job{gen = sr.gen, query = app.small("abc")}},
 		rows  = []app.Row{{title = "Found song", artist = "Someone", id = 1}},
 		found = {albums = []app.Found{{id = 5, name = "An album"}}},
 	}
-	app.search_result(s, &res)
+	app.handle_result(s, &res, 0)
 	library_frame(t, s, &f)
 	testing.expect(t, enabled(s, "Back"))
 
@@ -876,4 +917,44 @@ sign_out_forgets_history_and_search :: proc(t: ^testing.T) {
 	testing.expect_value(t, ui.field_text(&sr.field), "")
 	testing.expect_value(t, app.small_str(&sr.query), "")
 	testing.expect_value(t, len(sr.found.albums), 0)
+}
+
+// Return on an unchanged query while the queue is full, as when TIDAL
+// answers 429, keeps one search waiting, and it goes out once there's room.
+@(test)
+return_on_a_full_queue_holds_one_search :: proc(t: ^testing.T) {
+	arena: vmem.Arena
+	_ = vmem.arena_init_growing(&arena)
+	defer vmem.arena_destroy(&arena)
+	context.allocator = vmem.arena_allocator(&arena)
+	s := library_state(false)
+	defer library_state_free(s)
+	d := &s.data
+	f: Frame
+	library_frame(t, s, &f)
+	for jobs.push(&d.queue, app.Job{payload = app.Cover_Job{}}, app.PRIORITY_COVER) {}
+	library_frame(t, s, &f, {kind = .Key_Down, key = .F, modifiers = {ui.PRIMARY}})
+	library_frame(t, s, &f, type_text(&f, "abc"))
+	for _ in 0 ..< app.HELD_JOBS + 4 {
+		library_frame(t, s, &f, {kind = .Key_Down, key = .Return})
+		app.data_retry(d)
+	}
+	testing.expect_value(t, d.held_count, 1)
+
+	jobs.try_pop(&d.queue)
+	app.data_retry(d)
+	searches := 0
+	for {
+		job, ok := jobs.try_pop(&d.queue)
+		if !ok {
+			break
+		}
+		if p, search := job.payload.(app.Search_Job); search {
+			testing.expect_value(t, p.gen, s.search.gen)
+			testing.expect_value(t, app.small_str(&p.query), "abc")
+			searches += 1
+		}
+	}
+	testing.expect_value(t, searches, 1)
+	testing.expect_value(t, d.held_count, 0)
 }

@@ -8,6 +8,8 @@ import "base:runtime"
 import "core:crypto"
 import "core:encoding/base64"
 import "core:fmt"
+import "core:reflect"
+import "core:slice"
 import "core:strings"
 import "core:testing"
 import "core:time"
@@ -54,18 +56,31 @@ login_state_free :: proc(s: ^app.State) {
 	free(s)
 }
 
-// queued_kinds empties the queue and returns what was in it.
+// queued_kinds empties the queue and returns what was in it, and the
+// payload types of those jobs.
 @(private = "file")
-queued_kinds :: proc(d: ^app.Data) -> (kinds: bit_set[app.Job_Kind; u16], jobs_out: [dynamic]app.Job) {
+queued_kinds :: proc(d: ^app.Data) -> (kinds: []typeid, jobs_out: [dynamic]app.Job) {
 	jobs_out = make([dynamic]app.Job, context.temp_allocator)
+	types := make([dynamic]typeid, context.temp_allocator)
 	for {
 		job, ok := jobs.try_pop(&d.queue)
 		if !ok {
-			return
+			return types[:], jobs_out
 		}
-		kinds += {job.kind}
+		if !slice.contains(types[:], reflect.union_variant_typeid(job.payload)) {
+			append(&types, reflect.union_variant_typeid(job.payload))
+		}
 		append(&jobs_out, job)
 	}
+}
+
+@(private = "file")
+expect_kinds :: proc(t: ^testing.T, kinds: []typeid, want: ..typeid, loc := #caller_location) {
+	same := len(kinds) == len(want)
+	for k in want {
+		same &&= slice.contains(kinds, k)
+	}
+	testing.expectf(t, same, "queued %v, want %v", kinds, want, loc = loc)
 }
 
 @(test)
@@ -114,7 +129,7 @@ login_screen_transitions :: proc(t: ^testing.T) {
 	defer login_state_free(s)
 	d := &s.data
 	res := app.Result {
-		job = {kind = .Restore},
+		job = {payload = app.Restore_Job{}},
 	}
 	app.handle_result(s, &res, 0)
 	testing.expect_value(t, d.account, app.Account.Signed_Out)
@@ -122,13 +137,13 @@ login_screen_transitions :: proc(t: ^testing.T) {
 	testing.expect(t, app.show_login(s))
 	testing.expect(t, d.pkce_verifier.len > 0, "the login page's verifier is ready")
 	kinds, _ := queued_kinds(d)
-	testing.expect_value(t, kinds, bit_set[app.Job_Kind; u16]{})
+	expect_kinds(t, kinds)
 
 	app.pkce_submit(s, "https://example.com/?code=x")
 	testing.expect_value(t, d.login.pkce, app.Pkce_Step.Paste)
 	testing.expect_value(t, app.small_str(&d.login.pkce_note), "That isn't the address TIDAL ends on.")
 	kinds, _ = queued_kinds(d)
-	testing.expect_value(t, kinds, bit_set[app.Job_Kind; u16]{})
+	expect_kinds(t, kinds)
 
 	app.pkce_submit(s, " " + REDIRECT + "?code=good&state=na\n")
 	testing.expect_value(t, d.login.pkce, app.Pkce_Step.Exchanging)
@@ -136,13 +151,13 @@ login_screen_transitions :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(d.pkce_redirect[:d.pkce_len]), REDIRECT + "?code=good&state=na")
 	queued: [dynamic]app.Job
 	kinds, queued = queued_kinds(d)
-	testing.expect_value(t, kinds, bit_set[app.Job_Kind; u16]{.Login_Pkce})
-	testing.expect_value(t, queued[0].view, d.login_attempt)
+	expect_kinds(t, kinds, app.Login_Pkce_Job)
+	testing.expect_value(t, queued[0].payload.(app.Login_Pkce_Job).attempt, d.login_attempt)
 
 	// The exchange failed: back to an empty field, with a plain reason.
 	ui.field_set_text(&d.login.field, REDIRECT + "?code=good&state=na")
 	failed := app.Result {
-		job = {kind = .Login_Pkce, view = d.login_attempt},
+		job = {payload = app.Login_Pkce_Job{attempt = d.login_attempt}},
 		err = .Authentication,
 		message = app.small("Authentication: TIDAL didn't accept this login."),
 	}
@@ -157,7 +172,7 @@ login_screen_transitions :: proc(t: ^testing.T) {
 	testing.expect_value(t, d.login.pkce, app.Pkce_Step.Off)
 	testing.expect(t, d.login_attempt > before)
 	kinds, _ = queued_kinds(d)
-	testing.expect_value(t, kinds, bit_set[app.Job_Kind; u16]{.Login_Start})
+	expect_kinds(t, kinds, app.Login_Start_Job)
 }
 
 @(private = "file")
@@ -172,16 +187,14 @@ refused_pkce_login_is_retried :: proc(t: ^testing.T) {
 	defer login_state_free(s)
 	d := &s.data
 	d.account = .Signed_Out
-	for jobs.push(&d.queue, app.Job{kind = .Tracks}, app.PRIORITY_DATA) {}
+	for jobs.push(&d.queue, app.Job{payload = app.Tracks_Job{}}, app.PRIORITY_DATA) {}
 	app.pkce_submit(s, REDIRECT + "?code=c")
 	testing.expect_value(t, d.login.pkce, app.Pkce_Step.Exchanging)
-	testing.expect(t, .Login_Pkce in d.retry)
 	_, ok := jobs.try_pop(&d.queue)
 	testing.expect(t, ok)
 	app.data_retry(d)
 	kinds, _ := queued_kinds(d)
-	testing.expect(t, .Login_Pkce in kinds)
-	testing.expect(t, .Login_Pkce not_in d.retry)
+	testing.expect(t, slice.contains(kinds, app.Login_Pkce_Job))
 }
 
 // A saved login from the device-code client gets the AAC notice; a PKCE one
@@ -205,7 +218,7 @@ device_login_notice :: proc(t: ^testing.T) {
 	testing.expect(t, !tidal.session_is_pkce(restored))
 
 	res := app.Result {
-		job       = {kind = .Restore},
+		job       = {payload = app.Restore_Job{}},
 		signed_in = true,
 	}
 	app.handle_result(s, &res, 0)
@@ -227,13 +240,13 @@ device_login_notice :: proc(t: ^testing.T) {
 	_, status = os_services.secret_get(app.keychain_service(d), app.KEYCHAIN_ACCOUNT, context.temp_allocator)
 	testing.expect_value(t, status, os_services.SECRET_OK)
 	kinds, queued := queued_kinds(d)
-	testing.expect_value(t, kinds, bit_set[app.Job_Kind; u16]{.Login_Pkce})
+	expect_kinds(t, kinds, app.Login_Pkce_Job)
 	testing.expect_value(t, queued[0].auth, 1)
 
 	// The PKCE login finished.
 	tidal.session_restore(d.session, {token_type = "Bearer", access_token = "p", refresh_token = "pr", user_id = 123, user_kind = .Logged_In_User, is_pkce = true})
 	done := app.Result {
-		job = {kind = .Login_Pkce, view = d.login_attempt, auth = d.auth_gen},
+		job = {auth = d.auth_gen, payload = app.Login_Pkce_Job{attempt = d.login_attempt}},
 	}
 	app.handle_result(s, &done, 0)
 	testing.expect_value(t, d.account, app.Account.Signed_In)
@@ -262,7 +275,7 @@ aac_stream_message :: proc(t: ^testing.T) {
 	stream_job :: proc(d: ^app.Data) -> (app.Job, bool) {
 		_, queued := queued_kinds(d)
 		for job in queued {
-			if job.kind == .Stream {
+			if _, stream := job.payload.(app.Stream_Job); stream {
 				return job, true
 			}
 		}
@@ -401,11 +414,11 @@ stale_login_start_is_dropped :: proc(t: ^testing.T) {
 	}
 	start_job :: proc(t: ^testing.T, d: ^app.Data) -> app.Job {
 		kinds, queued := queued_kinds(d)
-		testing.expect_value(t, kinds, bit_set[app.Job_Kind; u16]{.Login_Start})
+		expect_kinds(t, kinds, app.Login_Start_Job)
 		if len(queued) == 0 {
 			return {}
 		}
-		testing.expect_value(t, queued[0].view, d.login_attempt)
+		testing.expect_value(t, queued[0].payload.(app.Login_Start_Job).attempt, d.login_attempt)
 		return queued[0]
 	}
 
@@ -417,14 +430,14 @@ stale_login_start_is_dropped :: proc(t: ^testing.T) {
 	testing.expect_value(t, d.login.pkce, app.Pkce_Step.Paste)
 	testing.expect_value(t, d.login.link.device_code.len, 0)
 	kinds, _ := queued_kinds(d)
-	testing.expect_value(t, kinds, bit_set[app.Job_Kind; u16]{})
+	expect_kinds(t, kinds)
 
 	app.device_begin(d)
 	second := start_job(t, d)
 	app.pkce_show(d)
 	app.device_begin(d)
 	kinds, _ = queued_kinds(d)
-	testing.expect_value(t, kinds, bit_set[app.Job_Kind; u16]{})
+	expect_kinds(t, kinds)
 	stale := answer(second)
 	app.handle_result(s, &stale, 0)
 	testing.expect_value(t, d.login.link.device_code.len, 0)
@@ -435,7 +448,7 @@ stale_login_start_is_dropped :: proc(t: ^testing.T) {
 	testing.expect_value(t, d.login.pkce, app.Pkce_Step.Off)
 	testing.expect_value(t, app.small_str(&d.login.link.user_code), "ABCDE")
 	kinds, _ = queued_kinds(d)
-	testing.expect_value(t, kinds, bit_set[app.Job_Kind; u16]{.Login_Wait})
+	expect_kinds(t, kinds, app.Login_Wait_Job)
 }
 
 // stream_jobs empties the queue and returns the Stream jobs in it.
@@ -444,7 +457,7 @@ stream_jobs :: proc(d: ^app.Data) -> [dynamic]app.Job {
 	out := make([dynamic]app.Job, context.temp_allocator)
 	_, queued := queued_kinds(d)
 	for job in queued {
-		if job.kind == .Stream {
+		if _, stream := job.payload.(app.Stream_Job); stream {
 			append(&out, job)
 		}
 	}
@@ -492,14 +505,14 @@ failed_prefetch_is_not_retried :: proc(t: ^testing.T) {
 	// The whole file is in at once, so the player asks for the next track.
 	next: app.Job
 	start := time.tick_now()
-	for next.kind == .None && time.tick_since(start) < 3 * time.Second {
+	for next.payload == nil && time.tick_since(start) < 3 * time.Second {
 		app.playback_update(s, nil)
 		for job in stream_jobs(d) {
 			next = job
 		}
 		time.sleep(5 * time.Millisecond)
 	}
-	testing.expect_value(t, next.key, u64(1001))
+	testing.expect_value(t, next.payload.(app.Stream_Job).track, 1001)
 	failed := app.Result {
 		job     = next,
 		err     = .Stream_Not_Available,
@@ -531,7 +544,7 @@ failed_prefetch_is_not_retried :: proc(t: ^testing.T) {
 	if len(queued) != 1 {
 		return
 	}
-	testing.expect_value(t, queued[0].key, u64(1001))
+	testing.expect_value(t, queued[0].payload.(app.Stream_Job).track, 1001)
 	again := failed
 	again.job = queued[0]
 	app.handle_result(s, &again, 0)
@@ -540,7 +553,7 @@ failed_prefetch_is_not_retried :: proc(t: ^testing.T) {
 	queued = stream_jobs(d)
 	testing.expect_value(t, len(queued), 1)
 	if len(queued) == 1 {
-		testing.expect_value(t, queued[0].key, u64(1002))
+		testing.expect_value(t, queued[0].payload.(app.Stream_Job).track, 1002)
 	}
 }
 
@@ -630,9 +643,9 @@ artwork_downloads_at_its_size :: proc(t: ^testing.T) {
 	_, queued := queued_kinds(d)
 	found := false
 	for job in queued {
-		if job.kind == .Artwork {
+		if p, artwork := job.payload.(app.Artwork_Job); artwork {
 			found = true
-			testing.expect_value(t, app.fetch_size(job), 640)
+			testing.expect_value(t, app.fetch_size(p.image), 640)
 		}
 	}
 	testing.expect(t, found, "playing a track with a cover queues its artwork")

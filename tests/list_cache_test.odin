@@ -99,11 +99,12 @@ serve :: proc(s: ^app.State, rows: []app.Row) -> int {
 		if !ok {
 			return n
 		}
-		if job.kind != .Tracks {
+		p, tracks := job.payload.(app.Tracks_Job)
+		if !tracks {
 			continue
 		}
-		lo := min(int(job.offset), len(rows))
-		hi := min(lo + int(job.limit), len(rows))
+		lo := min(int(p.offset), len(rows))
+		hi := min(lo + int(p.limit), len(rows))
 		res := app.Result {
 			job   = job,
 			rows  = rows[lo:hi],
@@ -117,7 +118,10 @@ serve :: proc(s: ^app.State, rows: []app.Row) -> int {
 // track_jobs counts the queued Tracks jobs and drops them.
 @(private = "file")
 track_jobs :: proc(s: ^app.State) -> int {
-	return jobs.remove_if(&s.data.queue, proc(job: ^app.Job, _: rawptr) -> bool {return job.kind == .Tracks}, nil)
+	return jobs.remove_if(&s.data.queue, proc(job: ^app.Job, _: rawptr) -> bool {
+		_, tracks := job.payload.(app.Tracks_Job)
+		return tracks
+	}, nil)
 }
 
 // run_disk runs the queued disk jobs and hands reads to the app. It
@@ -147,7 +151,7 @@ sidebar :: proc(s: ^app.State, updated: i64, count: int, liked := 3, newest: i64
 	items[0] = {id = "other", name = "Other", tracks = 2, updated = 1}
 	items[1] = {id = "pl", name = "A playlist", tracks = count, updated = updated}
 	res := app.Result {
-		job          = {kind = .Playlists},
+		job          = {payload = app.Playlists_Job{}},
 		playlists    = items,
 		liked_count  = liked,
 		liked_newest = newest,
@@ -523,10 +527,11 @@ queue_gets_the_rest_of_a_closed_list :: proc(t: ^testing.T) {
 	for {
 		job, ok := jobs.try_pop(&d.queue)
 		testing.expect(t, ok)
-		if !ok || job.kind != .Tracks || job.offset != 0 {
+		p, tracks := job.payload.(app.Tracks_Job)
+		if !ok || !tracks || p.offset != 0 {
 			continue
 		}
-		res := app.Result{job = job, rows = rows[:job.limit], total = len(rows)}
+		res := app.Result{job = job, rows = rows[:p.limit], total = len(rows)}
 		app.handle_result(s, &res, 0)
 		break
 	}
@@ -568,11 +573,12 @@ queue_file_is_written_once_its_list_loads :: proc(t: ^testing.T) {
 		if !ok {
 			break
 		}
-		if job.kind != .Tracks {
+		p, tracks := job.payload.(app.Tracks_Job)
+		if !tracks {
 			continue
 		}
-		lo := min(int(job.offset), len(rows))
-		res := app.Result{job = job, rows = rows[lo:min(lo + int(job.limit), len(rows))], total = len(rows)}
+		lo := min(int(p.offset), len(rows))
+		res := app.Result{job = job, rows = rows[lo:min(lo + int(p.limit), len(rows))], total = len(rows)}
 		app.handle_result(s, &res, 0)
 		pages += 1
 		if pages == 1 {
@@ -584,7 +590,7 @@ queue_file_is_written_once_its_list_loads :: proc(t: ^testing.T) {
 			if !dok {
 				break
 			}
-			writes += int(dj.op == .Write_Queue)
+			writes += int(dj.payload.(app.Disk_Job).op == .Write_Queue)
 			disk, reply := app.disk_run(d, dj)
 			if reply {
 				app.handle_result(s, &disk, 0)
@@ -594,7 +600,7 @@ queue_file_is_written_once_its_list_loads :: proc(t: ^testing.T) {
 	}
 	testing.expect(t, pages > 20, "the list came in many pages")
 	testing.expectf(t, writes > 1 && writes <= 12, "%d queue writes for %d pages", writes, pages)
-	res, _ := app.disk_run(d, {op = .Read_Queue, key = 7})
+	res, _ := app.disk_run(d, {payload = app.Disk_Job{op = .Read_Queue, user = 7}})
 	defer app.result_free(&res)
 	testing.expect(t, res.hit, "the queue's file reads back")
 	if testing.expect_value(t, len(res.rows), 3000) {
@@ -620,12 +626,12 @@ queue_file_written_at_quit_reads_back :: proc(t: ^testing.T) {
 	app.playback_play_row(s, 7)
 	app.playback_update(s, nil)
 	jobs.remove_if(&s.data.lists.queue, proc(job: ^app.Job, _: rawptr) -> bool {
-		delete(job.blob, runtime.heap_allocator())
+		app.job_free(job)
 		return true
 	}, nil)
 	app.playback_shutdown(s)
 
-	res, _ := app.disk_run(&s.data, {op = .Read_Queue, key = 7})
+	res, _ := app.disk_run(&s.data, {payload = app.Disk_Job{op = .Read_Queue, user = 7}})
 	defer app.result_free(&res)
 	testing.expect(t, res.hit, "the queue's file reads back")
 	testing.expect_value(t, res.queue.index, 7)
@@ -648,8 +654,9 @@ list_loading_for_the_queue_opens_again :: proc(t: ^testing.T) {
 	app.select_playlist(s, 2)
 	rows := rows_of(ids_from(1000, 1300))
 	job, ok := jobs.try_pop(&d.queue)
-	testing.expect(t, ok && job.kind == .Tracks && job.offset == 0)
-	res := app.Result{job = job, rows = rows[:job.limit], total = len(rows)}
+	p, tracks := job.payload.(app.Tracks_Job)
+	testing.expect(t, ok && tracks && p.offset == 0)
+	res := app.Result{job = job, rows = rows[:p.limit], total = len(rows)}
 	app.handle_result(s, &res, 0)
 	app.playback_play_row(s, 0)
 
@@ -722,10 +729,11 @@ own_edits_write_through :: proc(t: ^testing.T) {
 	// A list only on disk loses its file, so it's fetched when it opens.
 	app.list_edited(s, .Album, "5", true, added, {})
 	job, ok := jobs.try_pop(&d.lists.queue)
-	for ok && job.op != .Delete {
+	for ok && job.payload.(app.Disk_Job).op != .Delete {
 		job, ok = jobs.try_pop(&d.lists.queue)
 	}
-	testing.expect(t, ok && job.op == .Delete && app.small_str(&job.id) == "5")
+	disk := job.payload.(app.Disk_Job) or_else {}
+	testing.expect(t, ok && disk.op == .Delete && app.small_str(&disk.id) == "5")
 }
 
 // add_job takes the Add_Track the app queued.
@@ -733,7 +741,7 @@ own_edits_write_through :: proc(t: ^testing.T) {
 add_job :: proc(s: ^app.State) -> (job: app.Job, ok: bool) {
 	for {
 		job = jobs.try_pop(&s.data.queue) or_return
-		if job.kind == .Add_Track {
+		if _, add := job.payload.(app.Add_Track_Job); add {
 			return job, true
 		}
 	}
@@ -767,7 +775,8 @@ adding_a_track_updates_the_cache :: proc(t: ^testing.T) {
 	app.add_to_list(s, 0, 2)
 	testing.expect_value(t, app.status_text(s), "Adding Song 900 夜に駆ける to A playlist…")
 	job, ok := add_job(s)
-	testing.expect(t, ok && job.source == .Playlist && app.small_str(&job.id) == "pl" && job.key == 900)
+	add := job.payload.(app.Add_Track_Job) or_else {}
+	testing.expect(t, ok && add.source == .Playlist && app.small_str(&add.id) == "pl" && add.track == 900)
 	res := app.Result {
 		job     = job,
 		added   = true,
@@ -800,7 +809,7 @@ adding_a_track_updates_the_cache :: proc(t: ^testing.T) {
 	// which only the count tells.
 	app.add_to_list(s, 0, 0)
 	job, _ = add_job(s)
-	testing.expect_value(t, job.source, app.Source.Liked)
+	testing.expect_value(t, job.payload.(app.Add_Track_Job).source, app.Source.Liked)
 	res = {job = job, added = true, rows = rows_of({1}), version = {count = 4, newest = 1}}
 	app.handle_result(s, &res, 0)
 	testing.expect_value(t, app.status_text(s), "Added Song 1 夜に駆ける to Liked Songs")
@@ -834,7 +843,8 @@ adding_a_track_updates_the_cache :: proc(t: ^testing.T) {
 	testing.expect_value(t, d.refresh.source, app.Source.Playlist)
 	testing.expect(t, track_jobs(s) > 0)
 	deleted := false
-	for disk in jobs.try_pop(&d.lists.queue) {
+	for job in jobs.try_pop(&d.lists.queue) {
+		disk := job.payload.(app.Disk_Job)
 		id := disk.id
 		deleted ||= disk.op == .Delete && app.small_str(&id) == "pl"
 	}
@@ -882,7 +892,10 @@ sidebar_refreshes_when_the_window_becomes_key :: proc(t: ^testing.T) {
 	d := &s.data
 	sidebar(s, updated = 1, count = 3)
 	playlists :: proc(s: ^app.State) -> int {
-		return jobs.remove_if(&s.data.queue, proc(job: ^app.Job, _: rawptr) -> bool {return job.kind == .Playlists}, nil)
+		return jobs.remove_if(&s.data.queue, proc(job: ^app.Job, _: rawptr) -> bool {
+			_, playlists := job.payload.(app.Playlists_Job)
+			return playlists
+		}, nil)
 	}
 	app.lists_window_key(s, true)
 	testing.expect_value(t, playlists(s), 0) // just fetched
@@ -906,7 +919,7 @@ added_status_goes_with_the_old_sidebar :: proc(t: ^testing.T) {
 	app.set_status(s, .Added, 0, 2)
 	testing.expect_value(t, app.status_text(s), "Added Song 900 夜に駆ける to A playlist")
 	res := app.Result {
-		job       = {kind = .Playlists},
+		job       = {payload = app.Playlists_Job{}},
 		playlists = []app.Sidebar_Item{{id = "other", name = "Other", tracks = 2, updated = 1}},
 	}
 	app.handle_result(s, &res, 0)
@@ -983,7 +996,10 @@ sidebar_from_disk_is_fetched_again_after_a_failure :: proc(t: ^testing.T) {
 	defer delete(dir, runtime.heap_allocator())
 	defer os.remove_all(dir)
 	playlists :: proc(s: ^app.State) -> int {
-		return jobs.remove_if(&s.data.queue, proc(job: ^app.Job, _: rawptr) -> bool {return job.kind == .Playlists}, nil)
+		return jobs.remove_if(&s.data.queue, proc(job: ^app.Job, _: rawptr) -> bool {
+			_, playlists := job.payload.(app.Playlists_Job)
+			return playlists
+		}, nil)
 	}
 	{
 		s := cache_state(dir)
@@ -1000,7 +1016,7 @@ sidebar_from_disk_is_fetched_again_after_a_failure :: proc(t: ^testing.T) {
 	run_disk(s)
 	testing.expect(t, d.sidebar.loaded && !d.sidebar.fresh)
 	failed := app.Result {
-		job = {kind = .Playlists},
+		job = {payload = app.Playlists_Job{}},
 		err = .Network,
 	}
 	app.handle_result(s, &failed, 0)
@@ -1042,11 +1058,11 @@ old_search_results_are_not_refreshed :: proc(t: ^testing.T) {
 	sidebar(s, updated = 1, count = 3)
 	serve(s, rows_of(LIKED_IDS))
 	res := app.Result {
-		job   = {kind = .Search, view = s.search.gen, id = app.small("abc")},
+		job   = {payload = app.Search_Job{gen = s.search.gen, query = app.small("abc")}},
 		rows  = rows_of({1, 2}),
 		found = {albums = []app.Found{{id = 5, name = "An album"}}},
 	}
-	app.search_result(s, &res)
+	app.handle_result(s, &res, 0)
 	testing.expect_value(t, d.view.source, app.Source.Search)
 	testing.expect(t, d.view.fetched != 0)
 	d.view.fetched -= app.SEARCH_MAX_AGE + 1

@@ -302,10 +302,10 @@ restored_queue_stays_paused_past_a_failure :: proc(t: ^testing.T) {
 	testing.expect(t, !app.playback_playing(s))
 
 	res := app.Result {
-		job = {kind = .Stream, view = u32(pb.cur.serial)},
+		job = {payload = app.Stream_Job{serial = pb.cur.serial}},
 		err = .Stream_Not_Available,
 	}
-	app.playback_result(s, &res)
+	app.handle_result(s, &res, 0)
 	testing.expect_value(t, pb.index, 1)
 	testing.expect(t, !app.playback_playing(s), "the next track plays without the user")
 	testing.expect(t, wait_until(s, proc(s: ^app.State) -> bool {return s.playback.status.serial == s.playback.cur.serial}))
@@ -351,10 +351,10 @@ failed_track_stops_the_player :: proc(t: ^testing.T) {
 		testing.expect(t, wait_until(s, proc(s: ^app.State) -> bool {return s.playback.status.serial == s.playback.cur.serial && s.playback.status.state == .Playing}), c.name)
 
 		res := app.Result {
-			job = {kind = .Stream, view = u32(pb.cur.serial)},
+			job = {payload = app.Stream_Job{serial = pb.cur.serial}},
 			err = c.err,
 		}
-		app.playback_result(s, &res)
+		app.handle_result(s, &res, 0)
 		testing.expect(t, pb.paused, c.name)
 		testing.expectf(t, wait_until(s, proc(s: ^app.State) -> bool {return s.playback.status.state != .Playing}), "%s: the player still plays", c.name)
 		app.playback_shutdown(s)
