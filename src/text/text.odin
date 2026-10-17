@@ -1,4 +1,4 @@
-// Text: Inter loaded from memory into kb_text_shape and the OS's font
+// Text: Inter and the Phosphor icons loaded from memory into kb_text_shape and the OS's font
 // rasterizer (CoreText on macOS, FreeType on Linux), shaping with
 // kb_text_shape, rasterizing into glyph atlases, and drawing through the
 // rect renderer.
@@ -44,15 +44,32 @@ Font :: enum u8 {
 	Medium,
 	Semibold,
 	Bold,
+	Icon, // Phosphor Bold, the ICON_ strings below
+	Icon_Fill, // Phosphor Fill
 }
 
 @(private)
 FONT_FILES := [Font][]byte {
-	.Regular  = #load("../../assets/fonts/Inter-Regular.ttf"),
-	.Medium   = #load("../../assets/fonts/Inter-Medium.ttf"),
-	.Semibold = #load("../../assets/fonts/Inter-SemiBold.ttf"),
-	.Bold     = #load("../../assets/fonts/Inter-Bold.ttf"),
+	.Regular   = #load("../../assets/fonts/Inter-Regular.ttf"),
+	.Medium    = #load("../../assets/fonts/Inter-Medium.ttf"),
+	.Semibold  = #load("../../assets/fonts/Inter-SemiBold.ttf"),
+	.Bold      = #load("../../assets/fonts/Inter-Bold.ttf"),
+	.Icon      = #load("../../assets/fonts/Phosphor-Bold.ttf"),
+	.Icon_Fill = #load("../../assets/fonts/Phosphor-Fill.ttf"),
 }
+
+// The icons in the Phosphor fonts, cut down to these by tools/icons.sh.
+// Each is drawn as text in .Icon or .Icon_Fill, as noted. A glyph fills a
+// square em, centred on the line.
+ICON_PLAY :: "\ue3d0" // Icon_Fill
+ICON_PAUSE :: "\ue39e" // Icon_Fill
+ICON_SKIP_BACK :: "\ue5a4" // Icon_Fill
+ICON_SKIP_FORWARD :: "\ue5a6" // Icon_Fill
+ICON_SHUFFLE :: "\ue422" // Icon
+ICON_REPEAT :: "\ue3f6" // Icon
+ICON_REPEAT_ONCE :: "\ue3f8" // Icon
+ICON_CARET_LEFT :: "\ue138" // Icon
+ICON_CARET_RIGHT :: "\ue13a" // Icon
 
 MAX_FACES :: 32 // also kb_text_shape's font stack limit
 FALLBACK_CAPACITY :: 4096 // to start with; it doubles when three quarters full
@@ -204,6 +221,9 @@ init :: proc(t: ^State, wake: proc "c" () = nil) -> bool {
 	t.loader.wake = wake
 	loader_start(&t.loader)
 	for font in Font {
+		if font == .Icon || font == .Icon_Fill {
+			continue // drawn only with their own ICON_ strings
+		}
 		for r in PREWARM {
 			fallback_face(t, font, r)
 		}

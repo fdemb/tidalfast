@@ -58,7 +58,7 @@ font_ref_release :: proc(ref: Font_Ref) {
 	cf_release(ref)
 }
 
-// load_primary loads one of the Inter faces from its #load data.
+// load_primary loads one of the built-in faces from its #load data.
 @(private)
 load_primary :: proc(t: ^State, font: Font, data: []byte) -> bool {
 	// The #load data lives in this dylib's image. A debug build, which
