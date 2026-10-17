@@ -404,12 +404,12 @@ refused_jobs_wait_for_room :: proc(t: ^testing.T) {
 	closed := d.view.gen
 	app.view_open(d, .Playlist, "open", "open", "", 300)
 	app.push_job(d, {payload = app.Add_Track_Job{track = 5, source = .Liked}})
-	app.data_retry(s)
+	app.data_retry(d)
 	testing.expect_value(t, len(data_jobs(d)), 0)
 
 	fill_with_covers(d)
 	free_slots(d, 8)
-	app.data_retry(s)
+	app.data_retry(d)
 	playlists, adds: int
 	pages := make([dynamic]i32, context.temp_allocator)
 	for job in data_jobs(d) {
@@ -438,7 +438,7 @@ refused_jobs_wait_for_room :: proc(t: ^testing.T) {
 	app.push_job(d, {payload = app.Add_Track_Job{track = 6, source = .Liked}})
 	app.account_end(s)
 	free_slots(d, 8)
-	app.data_retry(s)
+	app.data_retry(d)
 	testing.expect_value(t, len(data_jobs(d)), 0)
 }
 
@@ -458,7 +458,7 @@ held_jobs_keep_what_waits :: proc(t: ^testing.T) {
 		app.push_job(d, {payload = app.Add_Track_Job{track = i64(track), source = .Liked}})
 	}
 	free_slots(d, 32)
-	app.data_retry(s)
+	app.data_retry(d)
 	pages, playlists: int
 	adds := make([dynamic]i64, context.temp_allocator)
 	for job in data_jobs(d) {
@@ -489,9 +489,9 @@ refused_login_jobs_wait_for_room :: proc(t: ^testing.T) {
 	fill_with_covers(d)
 
 	app.request_login_code(d)
-	app.data_retry(s)
+	app.data_retry(d)
 	free_slots(d, 4)
-	app.data_retry(s)
+	app.data_retry(d)
 	queued := data_jobs(d)
 	if testing.expect_value(t, len(queued), 1) {
 		start, ok := queued[0].payload.(app.Login_Start_Job)
@@ -503,7 +503,7 @@ refused_login_jobs_wait_for_room :: proc(t: ^testing.T) {
 	fill_with_covers(d)
 	app.request_login_poll(d)
 	free_slots(d, 4)
-	app.data_retry(s)
+	app.data_retry(d)
 	queued = data_jobs(d)
 	if testing.expect_value(t, len(queued), 1) {
 		wait, ok := queued[0].payload.(app.Login_Wait_Job)
@@ -519,7 +519,7 @@ refused_login_jobs_wait_for_room :: proc(t: ^testing.T) {
 	d.login = {}
 	d.account = .Signed_In
 	free_slots(d, 4)
-	app.data_retry(s)
+	app.data_retry(d)
 	queued = data_jobs(d)
 	for job in queued {
 		_, start := job.payload.(app.Login_Start_Job)
@@ -565,7 +565,7 @@ held_login_code_follows_the_login_shown :: proc(t: ^testing.T) {
 	app.request_login_code(d)
 	app.pkce_show(d)
 	free_slots(d, 4)
-	app.data_retry(s)
+	app.data_retry(d)
 	testing.expect_value(t, login_starts(t, s), 0)
 
 	app.device_begin(d)
@@ -595,7 +595,7 @@ evicted_held_jobs_are_asked_for_again :: proc(t: ^testing.T) {
 	app.pkce_show(d)
 	app.device_begin(d)
 	free_slots(d, app.HELD_JOBS + 1)
-	app.data_retry(s)
+	app.data_retry(d)
 	testing.expect_value(t, login_starts(t, s), 1)
 
 	d.account = .Signed_In
@@ -603,7 +603,7 @@ evicted_held_jobs_are_asked_for_again :: proc(t: ^testing.T) {
 	app.view_open(d, .Playlist, "pl", "pl", "", 300)
 	hold_covers(d, app.HELD_JOBS - 1)
 	free_slots(d, app.HELD_JOBS + 1)
-	app.data_retry(s)
+	app.data_retry(d)
 	v := &d.view
 	for page := 0; page < 10; page += 1 {
 		served := 0

@@ -192,7 +192,7 @@ refused_pkce_login_is_retried :: proc(t: ^testing.T) {
 	testing.expect_value(t, d.login.pkce, app.Pkce_Step.Exchanging)
 	_, ok := jobs.try_pop(&d.queue)
 	testing.expect(t, ok)
-	app.data_retry(s)
+	app.data_retry(d)
 	kinds, _ := queued_kinds(d)
 	testing.expect(t, slice.contains(kinds, app.Login_Pkce_Job))
 }

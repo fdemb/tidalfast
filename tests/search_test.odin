@@ -338,7 +338,7 @@ held_search_gives_way_to_the_next_query :: proc(t: ^testing.T) {
 	for _ in 0 ..< 4 {
 		jobs.try_pop(&s.data.queue)
 	}
-	app.data_retry(s)
+	app.data_retry(&s.data)
 	queries := make([dynamic]string, context.temp_allocator)
 	for {
 		job := jobs.try_pop(&s.data.queue) or_break

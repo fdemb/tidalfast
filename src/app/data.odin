@@ -531,9 +531,8 @@ hold_job :: proc(d: ^Data, job: Job, priority: u8) {
 		}
 	}
 	if d.held_count == len(d.held) {
-		s := container_of(d, State, "data") // the app's Data is always its State's
-		i := held_victim(s)
-		held_drop(s, &d.held[i].job)
+		i := held_victim(d)
+		held_drop(d, &d.held[i].job)
 		copy(d.held[i:], d.held[i + 1:])
 		d.held_count -= 1
 	}
@@ -547,10 +546,10 @@ hold_job :: proc(d: ^Data, job: Job, priority: u8) {
 // that last case doesn't happen. For a page it's its list's newest held
 // one, so the list asks again from there and no page after it comes twice.
 @(private = "file")
-held_victim :: proc(s: ^State) -> int {
-	held := s.data.held[:s.data.held_count]
+held_victim :: proc(d: ^Data) -> int {
+	held := d.held[:d.held_count]
 	for h, i in held {
-		if !held_wanted(s, h.job) {
+		if !held_wanted(d, h.job) {
 			return i
 		}
 	}
@@ -571,12 +570,10 @@ held_victim :: proc(s: ^State) -> int {
 }
 
 // held_drop lets go of a held job that won't be pushed. Its caller counted
-// it as out, so the flag holding back the next one is cleared, a list's
-// page is left for view_request_pages to ask for again, and a search waits
-// to be sent again.
+// it as out, so the flag holding back the next one is cleared, and a list's
+// page is left for view_request_pages to ask for again.
 @(private = "file")
-held_drop :: proc(s: ^State, job: ^Job) {
-	d := &s.data
+held_drop :: proc(d: ^Data, job: ^Job) {
 	l := &d.login
 	#partial switch p in job.payload {
 	case Login_Start_Job:
@@ -592,13 +589,25 @@ held_drop :: proc(s: ^State, job: ^Job) {
 			v.in_flight -= 1
 			v.next_offset = min(v.next_offset, int(p.offset))
 		}
-	case Search_Job:
-		if p.gen == s.search.gen {
-			s.search.loading = false
-			s.search.due = s.ui.time
-		}
 	}
 	job_free(job)
+}
+
+// held_remove_if drops the held jobs pred picks, as jobs.remove_if does the
+// queued ones, and returns how many went.
+held_remove_if :: proc(d: ^Data, pred: proc(job: ^Job, data: rawptr) -> bool, data: rawptr) -> int {
+	n := 0
+	for &h in d.held[:d.held_count] {
+		if pred(&h.job, data) {
+			held_drop(d, &h.job)
+		} else {
+			d.held[n] = h
+			n += 1
+		}
+	}
+	removed := d.held_count - n
+	d.held_count = n
+	return removed
 }
 
 // job_free frees what a job owns, once it has run for good or won't run.
@@ -651,7 +660,7 @@ account_end :: proc(s: ^State) {
 	d := &s.data
 	sync.atomic_add(&d.auth_gen, 1) // the disk thread reads it
 	for &h in d.held[:d.held_count] {
-		held_drop(s, &h.job)
+		held_drop(d, &h.job)
 	}
 	d.held_count = 0
 	jobs.remove_if(&d.queue, drop_account_job, nil)
@@ -722,8 +731,7 @@ request_playlists :: proc(d: ^Data) {
 
 // data_retry pushes again the jobs the queue refused, if they're still
 // wanted.
-data_retry :: proc(s: ^State) {
-	d := &s.data
+data_retry :: proc(d: ^Data) {
 	n := d.held_count
 	if n == 0 {
 		return
@@ -731,20 +739,20 @@ data_retry :: proc(s: ^State) {
 	held := d.held
 	d.held_count = 0
 	for &h in held[:n] {
-		if held_wanted(s, h.job) {
+		if held_wanted(d, h.job) {
 			push_job(d, h.job, h.priority)
 		} else {
-			held_drop(s, &h.job)
+			held_drop(d, &h.job)
 		}
 	}
 }
 
 // held_wanted says whether a held job is still wanted: its login hasn't
 // ended and what it's for still waits for it. Kinds whose answer is checked
-// when it comes, as Stream's track serial is, always are.
+// when it comes, as Stream's track serial is, always are, and so is Search:
+// search_stop drops the held one with the queued one.
 @(private = "file")
-held_wanted :: proc(s: ^State, job: Job) -> bool {
-	d := &s.data
+held_wanted :: proc(d: ^Data, job: Job) -> bool {
 	l := &d.login
 	if job.auth != d.auth_gen {
 		return false
@@ -762,8 +770,6 @@ held_wanted :: proc(s: ^State, job: Job) -> bool {
 		return d.account == .Signed_In
 	case Tracks_Job:
 		return track_view(d, p.view) != nil
-	case Search_Job:
-		return p.gen == s.search.gen
 	}
 	return true
 }
@@ -808,7 +814,7 @@ data_update :: proc(s: ^State, now: f64) {
 	if queued, _ := jobs.pending(&d.results); queued > 0 {
 		ui.request_frame()
 	}
-	data_retry(s)
+	data_retry(d)
 	d.bench.upload_ms = f32(time.duration_milliseconds(time.tick_since(begin)))
 }
 

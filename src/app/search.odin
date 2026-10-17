@@ -172,7 +172,7 @@ search_edited :: proc(s: ^State) {
 }
 
 // search_stop forgets the search that's waiting or out: the debounce, the
-// queued job, and the result, which arrives for an older generation.
+// queued or held job, and the result, which arrives for an older generation.
 search_stop :: proc(s: ^State) {
 	sr := &s.search
 	sr.gen += 1
@@ -180,6 +180,7 @@ search_stop :: proc(s: ^State) {
 	sr.loading = false
 	if !s.data.fake {
 		jobs.remove_if(&s.data.queue, drop_search_jobs, nil)
+		held_remove_if(&s.data, drop_search_jobs, nil)
 	}
 }
 
