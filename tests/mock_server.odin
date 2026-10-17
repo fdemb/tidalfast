@@ -54,6 +54,9 @@ Mock :: struct {
 	token_error:   string, // the OAuth error with token_status
 	token_delay:   time.Duration, // before /token answers
 	sessions_fail: int, // /sessions answers this many requests with a 503
+	// After a POST adds to the playlist, this many GETs of it answer 429.
+	add_then_limit: int,
+	limit_left:     int,
 	// /device_token, and /oauth2/token for an app session, answers poll i
 	// with polls[i]: "pending", "slow_down", "denied", "429" or "ok"; past
 	// the end, "pending". poll_times has when each poll arrived.
@@ -290,6 +293,11 @@ mock_route :: proc(m: ^Mock, req: Mock_Request, target: string) -> (status: int,
 		return a.status, a.body, etag
 	}
 
+	if m.limit_left > 0 && req.method == "GET" && strings.has_prefix(req.path, "/playlists/pl") {
+		m.limit_left -= 1
+		return 429, `{"userMessage":"Too many requests"}`, etag
+	}
+
 	switch {
 	case req.path == "/sessions":
 		if m.sessions_fail > 0 {
@@ -405,6 +413,7 @@ mock_route :: proc(m: ^Mock, req: Mock_Request, target: string) -> (status: int,
 			fmt.sbprintf(&b, "%d", id)
 		}
 		strings.write_string(&b, "]}")
+		m.limit_left = m.add_then_limit
 		return 200, strings.to_string(b), etag
 	case req.path == "/playlists/pl/tracks":
 		offset, _ := strconv.parse_int(req.query["offset"] or_else "0")

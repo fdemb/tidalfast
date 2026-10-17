@@ -247,7 +247,7 @@ lru_oldest :: proc(d: ^Data) -> int {
 }
 
 // list_keep puts a closed list in memory in place of an older copy, then
-// drops the lists used longest ago until the rest fit LIST_MEMORY_BUDGET.
+// trims the kept lists to LIST_MEMORY_BUDGET.
 list_keep :: proc(d: ^Data, v: Track_View) {
 	l := &d.lists
 	v := v
@@ -263,6 +263,14 @@ list_keep :: proc(d: ^Data, v: Track_View) {
 	l.entries[l.count] = {v, l.clock, bytes}
 	l.count += 1
 	l.bytes += bytes
+	lists_trim(d)
+}
+
+// lists_trim drops the lists used longest ago until the rest fit
+// LIST_MEMORY_BUDGET.
+@(private = "file")
+lists_trim :: proc(d: ^Data) {
+	l := &d.lists
 	for l.bytes > LIST_MEMORY_BUDGET && l.count > 0 {
 		lru_drop(d, lru_oldest(d))
 	}
@@ -280,6 +288,14 @@ lists_clear :: proc(d: ^Data) {
 list_open :: proc(d: ^Data, source: Source, id, name, image: string, hint: int) {
 	view_close(d)
 	v := &d.view
+	if q := &d.queued; q.source == source && small_str(&q.id) == id {
+		// Still loading for the play queue: it opens as far as it got.
+		v^ = q^
+		q^ = {}
+		v.name = small(name)
+		v.image = small(image)
+		return
+	}
 	if d.lists.memory {
 		if i := lru_find(d, source, id); i >= 0 {
 			gen := v.gen
@@ -325,8 +341,7 @@ list_check :: proc(d: ^Data) {
 }
 
 // list_loaded is for a list whose last page came in: it's written to disk.
-list_loaded :: proc(d: ^Data) {
-	v := &d.view
+list_loaded :: proc(d: ^Data, v: ^Track_View) {
 	if v.fetched != 0 || !view_complete(v) {
 		return
 	}
@@ -588,6 +603,7 @@ list_edited :: proc(s: ^State, source: Source, id: string, add: bool, row: Row, 
 		e.bytes = arena_bytes(&e.view.arena)
 		d.lists.bytes += e.bytes
 		list_save(d, &e.view)
+		lists_trim(d)
 		return
 	}
 	// Only on disk, if at all: it's fetched again when it opens.
@@ -599,17 +615,13 @@ view_edit :: proc(v: ^Track_View, add: bool, row: Row) -> bool {
 	if !v.has_arena {
 		return false
 	}
-	a := vmem.arena_allocator(&v.arena)
 	n := min(v.count, len(v.rows))
 	if add {
-		rows := make([]Row, n + 1, a)
-		loaded := make([]bool, n + 1, a)
+		view_reserve(v, n + 1)
 		at := 0 if v.source == .Liked else n
-		copy(rows[:at], v.rows[:at])
-		rows[at] = row_clone(row, a)
-		copy(rows[at + 1:], v.rows[at:n])
-		slice.fill(loaded, true)
-		v.rows, v.loaded = rows, loaded
+		copy(v.rows[at + 1:n + 1], v.rows[at:n])
+		v.rows[at] = row_clone(row, vmem.arena_allocator(&v.arena))
+		slice.fill(v.loaded[:n + 1], true)
 		v.count = n + 1
 		v.loaded_rows = n + 1
 		v.hint += 1

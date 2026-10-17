@@ -96,6 +96,7 @@ Job :: struct {
 	interval:   f32, // Login_Wait: seconds between polls
 	deadline:   time.Tick, // Login_Wait: when the code expires
 	not_before: time.Tick, // Login_Wait: when to poll first, {} for now
+	remote:     bool, // Cover, Artwork: not on disk, so it waits out a backoff
 	id:         Small, // playlist id, image id, device code, query, album or artist id
 	op:         Disk_Op,
 	blob:       []u8, // Disk writes: the file, heap, freed by the disk thread; Launch_Log: the line, freed by the worker
@@ -184,20 +185,27 @@ worker_main :: proc "c" (arg: rawptr) -> rawptr {
 	d := (^Data)(arg)
 	temp_given := false
 	for {
-		job, ticket, ok := jobs.pop_wait(&d.queue)
-		if !ok {
-			break
-		}
-		// Every worker checks the session's backoff before it sends
-		// anything, cover downloads included, so a 429 or an anti-abuse
-		// 403 holds all of them back until TIDAL's Retry-After has passed.
+		job: Job
+		ticket: jobs.Ticket
+		// A 429 or an anti-abuse 403 holds back everything that would talk
+		// to TIDAL, cover downloads included, until its Retry-After has
+		// passed. Jobs that stay on this machine still run.
 		if wait := tidal.backoff_remaining(d.session); wait > 0 {
-			jobs.requeue(&d.queue, job, ticket)
-			d.wake()
-			if jobs.sleep(&d.queue, time.Duration(wait * f64(time.Second))) {
+			ok, stopped: bool
+			job, ticket, ok, stopped = jobs.pop_wait_where(&d.queue, is_local, time.Duration(wait * f64(time.Second)))
+			if stopped {
 				break
 			}
-			continue
+			if !ok {
+				d.wake()
+				continue
+			}
+		} else {
+			ok: bool
+			job, ticket, ok = jobs.pop_wait(&d.queue)
+			if !ok {
+				break
+			}
 		}
 		temp_take_back(&temp_given)
 		res := run_job(d, job)
@@ -300,12 +308,29 @@ retry_later :: proc(d: ^Data, res: Result) -> bool {
 	return false
 }
 
+// is_local says a job sends nothing to TIDAL, so a backoff doesn't hold
+// it. A cover counts until it's found missing from disk.
+@(private = "file")
+is_local :: proc(job: ^Job) -> bool {
+	#partial switch job.kind {
+	case .Save_Settings, .Launch_Log, .Disk:
+		return true
+	case .Cover, .Artwork:
+		return !job.remote
+	}
+	return false
+}
+
 // requeued is job as it goes back in the queue. A Login_Wait that polled
 // keeps the interval TIDAL asked for, slow_down included, and polls again
-// no sooner than that interval from now.
+// no sooner than that interval from now. A cover that went to TIDAL waits
+// out the backoff with the other requests.
 @(private = "file")
 requeued :: proc(job: Job, res: Result) -> Job {
 	job := job
+	if (job.kind == .Cover || job.kind == .Artwork) && res.err != nil {
+		job.remote = true
+	}
 	if job.kind == .Login_Wait && res.link.interval > 0 {
 		job.interval = res.link.interval
 		job.not_before = time.tick_add(time.tick_now(), time.Duration(f64(job.interval) * f64(time.Second)))
@@ -611,10 +636,11 @@ run_add_track :: proc(s: ^tidal.Session, job: Job, res: ^Result, alloc: mem.Allo
 		return
 	}
 	res.added = len(added) > 0
-	if !res.added || pl.num_tracks == 0 {
+	// Without an ETag the playlist wasn't read again after the add, so pl
+	// is as it was before.
+	if !res.added || pl.num_tracks == 0 || pl.etag == "" {
 		return
 	}
-	// user_playlist_add read the playlist again, so pl is as it is now.
 	version := List_Version{count = i64(pl.num_tracks)}
 	if t, ok := pl.last_updated.?; ok {
 		version.updated = time.to_unix_nanoseconds(t) / 1e6
