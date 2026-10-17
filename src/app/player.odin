@@ -196,14 +196,6 @@ playback_reload :: proc(s: ^State, shell: ^platform.Shell) {
 
 playback_shutdown :: proc(s: ^State) {
 	pb := &s.playback
-	// The workers and the disk thread drop what's queued when they stop,
-	// so pending settings and the last position are written here, after.
-	// The results queue stops first: a disk thread blocked on a full one
-	// would never be joined.
-	workers_stop(&s.data)
-	if !settings_flush(&s.data) {
-		log.errorf("app: couldn't save the settings to %s", s.data.settings_path)
-	}
 	if pb.player != nil && pb.index >= 0 && disk_on(&s.data) {
 		pb.status = audio.status(pb.player)
 		queue_write_now(&s.data, queue_file(pb, context.temp_allocator))

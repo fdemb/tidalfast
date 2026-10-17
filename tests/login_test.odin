@@ -820,7 +820,10 @@ sign_out_stops_playback :: proc(t: ^testing.T) {
 	pb.set_now_playing = count_now_playing
 	pb.player = audio.create(proc "c" () {}, 0.5, null_output = true)
 	pb.volume_sent = 0.5
-	defer app.playback_shutdown(s)
+	defer {
+		app.workers_stop(&s.data)
+		app.playback_shutdown(s)
+	}
 
 	app.playback_play_row(s, 0)
 	start := time.tick_now()

@@ -166,6 +166,14 @@ app_shutdown :: proc "c" (m: ^platform.Memory) {
 		posix.close(posix.FD(s.spall_ctx.fd))
 	}
 	measure_unload(s)
+	// The workers and the disk thread drop what's queued when they stop,
+	// so the pending settings and the last position are written here,
+	// after. The results queue stops first: a disk thread blocked on a
+	// full one would never be joined.
+	workers_stop(&s.data)
+	if !settings_flush(&s.data) {
+		log.errorf("app: couldn't save the settings to %s", s.data.settings_path)
+	}
 	playback_shutdown(s)
 	data_shutdown(s)
 	search_shutdown(s)
