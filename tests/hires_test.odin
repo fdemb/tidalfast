@@ -372,7 +372,7 @@ settings_persistence :: proc(t: ^testing.T) {
 
 	st, ok := app.settings_load(path)
 	testing.expect(t, !ok)
-	testing.expect_value(t, st, app.Settings{})
+	testing.expect_value(t, st, app.Settings{volume = 0.7})
 	testing.expect(t, app.settings_save(path, {bit_perfect = true, hog = true}))
 	st, ok = app.settings_load(path)
 	testing.expect(t, ok)
@@ -392,12 +392,12 @@ settings_persistence :: proc(t: ^testing.T) {
 	_ = os.write_entire_file(path, transmute([]u8)string(`{"hog": true, "scrollbars": "Sideways"}`))
 	st, ok = app.settings_load(path)
 	testing.expect(t, ok)
-	testing.expect_value(t, st, app.Settings{hog = true})
+	testing.expect_value(t, st, app.Settings{hog = true, volume = 0.7})
 
 	_ = os.write_entire_file(path, transmute([]u8)string("{not json"))
 	st, ok = app.settings_load(path)
 	testing.expect(t, !ok)
-	testing.expect_value(t, st, app.Settings{})
+	testing.expect_value(t, st, app.Settings{volume = 0.7})
 
 	// A device that bit-perfect output changed goes in the file while it
 	// lasts, and leaves it again.
@@ -413,6 +413,22 @@ settings_persistence :: proc(t: ^testing.T) {
 	testing.expect(t, app.settings_save(path, {bit_perfect = true}))
 	data, _ = os.read_entire_file(path, context.temp_allocator)
 	testing.expect(t, !strings.contains(string(data), "device_change"))
+	// The volume is kept. A file from before it was, or one with a volume
+	// out of range, gives the default or the nearest end.
+	testing.expect(t, app.settings_save(path, {volume = 0.35}))
+	st, ok = app.settings_load(path)
+	testing.expect(t, ok)
+	testing.expect_value(t, st.volume, 0.35)
+	testing.expect(t, app.settings_save(path, {volume = 0}))
+	st, _ = app.settings_load(path)
+	testing.expect_value(t, st.volume, 0)
+	_ = os.write_entire_file(path, transmute([]u8)string(`{"bit_perfect": false, "hog": false, "scrollbars": "Floating"}`))
+	st, ok = app.settings_load(path)
+	testing.expect(t, ok)
+	testing.expect_value(t, st.volume, 0.7)
+	_ = os.write_entire_file(path, transmute([]u8)string(`{"volume": 3}`))
+	st, _ = app.settings_load(path)
+	testing.expect_value(t, st.volume, 1)
 	// Hog mode only counts with bit-perfect output.
 	testing.expect_value(t, app.output_of({hog = true}), audio.Output{})
 }

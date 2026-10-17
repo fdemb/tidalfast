@@ -108,6 +108,9 @@ Playback :: struct {
 	dragging:        bool, // the progress bar is held: show the drag position
 	drag_seconds:    f64,
 	volume_sent:     f32,
+	// The file's volume while TIDALFAST_VOLUME stands in for it, so the
+	// override isn't saved unless the slider moves.
+	volume_file:     Maybe(f32),
 	message:         Small,
 	error_seen:      u64,
 
@@ -134,12 +137,13 @@ playback_start :: proc(s: ^State, shell: ^platform.Shell) {
 		pb.window = kb << 10
 	}
 	pb.null_output = os.get_env("TIDALFAST_AUDIO_NULL", context.temp_allocator) != ""
-	if v, ok := strconv.parse_f32(os.get_env("TIDALFAST_VOLUME", context.temp_allocator)); ok {
-		s.library.volume = clamp(v, 0, 1)
-	}
 	pb.settings_path = settings_default_path(runtime.heap_allocator())
 	s.data.settings_path = strings.clone(pb.settings_path, runtime.heap_allocator())
 	pb.settings, _ = settings_load(pb.settings_path)
+	if v, ok := strconv.parse_f32(os.get_env("TIDALFAST_VOLUME", context.temp_allocator)); ok {
+		pb.volume_file = pb.settings.volume
+		pb.settings.volume = clamp(v, 0, 1)
+	}
 	when !audio.BIT_PERFECT {
 		pb.settings.bit_perfect, pb.settings.hog = false, false
 	}
@@ -148,10 +152,10 @@ playback_start :: proc(s: ^State, shell: ^platform.Shell) {
 	if pb.settings.device.rate != 0 {
 		audio.device_change_undo(&pb.settings.device)
 		pb.settings.device = {}
-		settings_queue(&s.data, pb.settings)
+		settings_queue(&s.data, settings_to_save(pb))
 	}
-	pb.player = audio.create(shell.request_redraw, s.library.volume, small_str(&pb.capture), pb.window, pb.null_output, output_of(pb.settings))
-	pb.volume_sent = s.library.volume
+	pb.player = audio.create(shell.request_redraw, pb.settings.volume, small_str(&pb.capture), pb.window, pb.null_output, output_of(pb.settings))
+	pb.volume_sent = pb.settings.volume
 }
 
 playback_unload :: proc(s: ^State) {
@@ -171,7 +175,7 @@ playback_unload :: proc(s: ^State) {
 playback_reload :: proc(s: ^State, shell: ^platform.Shell) {
 	pb := &s.playback
 	pb.set_now_playing = shell.set_now_playing
-	pb.player = audio.create(shell.request_redraw, s.library.volume, window = pb.window, null_output = pb.null_output, output = output_of(pb.settings))
+	pb.player = audio.create(shell.request_redraw, pb.settings.volume, window = pb.window, null_output = pb.null_output, output = output_of(pb.settings))
 	// The new player's seek ids start again; a pending seek is in resume_sample.
 	pb.seek_id = 0
 	if pb.cur.resolved {
@@ -191,7 +195,7 @@ playback_shutdown :: proc(s: ^State) {
 	// destroy put the device back.
 	if pb.settings.device.rate != 0 {
 		pb.settings.device = {}
-		settings_queue(&s.data, pb.settings, now = true)
+		settings_queue(&s.data, settings_to_save(pb), now = true)
 	}
 	if pb.set_now_playing != nil {
 		none: platform.Now_Playing
@@ -328,6 +332,7 @@ playback_stop :: proc(s: ^State) {
 		settings        = pb.settings,
 		settings_path   = pb.settings_path,
 		volume_sent     = pb.volume_sent,
+		volume_file     = pb.volume_file,
 		serial          = pb.serial,
 		queue_gen       = pb.queue_gen,
 		index           = -1,
@@ -586,11 +591,18 @@ playback_seek :: proc(s: ^State, seconds: f64) {
 	pb.seek_seconds = at
 }
 
-playback_set_volume :: proc(s: ^State, v: f32) {
+// playback_set_volume sets the volume, and saves it when save is set, as
+// at the end of a drag.
+playback_set_volume :: proc(s: ^State, v: f32, save: bool) {
 	pb := &s.playback
+	pb.settings.volume = v
 	if pb.player != nil && v != pb.volume_sent {
 		audio.set_volume(pb.player, v)
 		pb.volume_sent = v
+	}
+	if save {
+		pb.volume_file = nil
+		settings_queue(&s.data, pb.settings)
 	}
 }
 
@@ -674,7 +686,7 @@ playback_update :: proc(s: ^State, events: []platform.Event) {
 	// lasts, so a start after a crash can put it back.
 	if st.change != pb.settings.device {
 		pb.settings.device = st.change
-		settings_queue(&s.data, pb.settings)
+		settings_queue(&s.data, settings_to_save(pb))
 	}
 	if pb.seek_id != 0 && (pb.seek_serial != pb.cur.serial || (st.serial == pb.cur.serial && st.seek_id >= pb.seek_id)) {
 		pb.seek_id = 0
