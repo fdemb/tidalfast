@@ -6,6 +6,7 @@ package tidal_tests
 
 import "base:runtime"
 import "core:encoding/base64"
+import "core:encoding/json"
 import "core:fmt"
 import "core:log"
 import "core:reflect"
@@ -216,10 +217,11 @@ device_login_notice :: proc(t: ^testing.T) {
 	testing.expect(t, shows(notice, NOTICE), notice)
 
 	// The keychain item names the device client, which restores as not PKCE.
-	item, status := app.keychain_get(&d.keychain, context.temp_allocator)
+	item, status := app.keychain_get(test_keychain(d), context.temp_allocator)
 	testing.expect_value(t, status, os_services.SECRET_OK)
-	testing.expect(t, strings.contains(string(item), `"client_id":"`), string(item))
-	testing.expect(t, !strings.contains(string(item), d.session.config.client_id_pkce), string(item))
+	stored: app.Stored_Auth
+	testing.expect(t, json.unmarshal(item, &stored, allocator = context.temp_allocator) == nil, string(item))
+	testing.expect_value(t, stored.client_id, "fX2JxdmntZWK0ixT")
 	saved, ok := keychain_auth(d)
 	testing.expect(t, ok && !saved.is_pkce)
 

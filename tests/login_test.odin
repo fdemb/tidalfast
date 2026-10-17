@@ -1436,18 +1436,27 @@ login_5xx_backs_off :: proc(t: ^testing.T) {
 	s := mock_data_state(&m)
 	defer data_state_free(s)
 	d := &s.data
-	m.polls = {"503", "503", "503", "503", "503", "503", "503", "503"}
+	m.polls = {"503", "503", "503"}
 	show_code(t, s, interval = 0.2)
-	app.workers_start(d)
 
+	poll, ok := jobs.try_pop(&d.queue)
+	testing.expect(t, ok, "the code is polled")
 	for want_wait in ([]int{2, 4}) {
-		res, ok := wait_result(d, 5 * time.Second)
-		testing.expect(t, ok)
-		testing.expect_value(t, res.err, tidal.Error_Kind.Network)
-		app.handle_result(s, &res, 0)
-		app.result_free(&res)
+		run_now(s, poll)
 		screen := login_screen(t, s)
 		testing.expect(t, shows(screen, fmt.tprintf("Can't reach TIDAL. Trying again in %d s.", want_wait)), screen)
+
+		// What the workers are asked to do next: one check, when the note says.
+		queued := data_jobs(d)
+		if !testing.expect_value(t, len(queued), 1) {
+			return
+		}
+		poll = queued[0]
+		retry, is_wait := poll.payload.(app.Login_Wait_Job)
+		testing.expect(t, is_wait, fmt.tprint(poll.payload))
+		testing.expect(t, retry.once, "the retry checks once")
+		wait := time.duration_seconds(time.tick_diff(time.tick_now(), retry.not_before))
+		testing.expectf(t, wait > f64(want_wait) - 0.2 && wait <= f64(want_wait), "the retry is in %.2f s, not %d s", wait, want_wait)
 	}
 	testing.expect_value(t, len(m.poll_times), 2)
 	if len(m.poll_times) == 2 {
