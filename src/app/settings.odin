@@ -2,7 +2,8 @@ package app
 
 // Settings: the volume, shuffle and repeat, bit-perfect output, hog mode
 // and how lists show their scrollbars. They live in a small JSON file, ~/Library/Application Support/tidalfast/settings.json, or
-// wherever TIDALFAST_SETTINGS points. A worker writes it, so a click never
+// wherever TIDALFAST_SETTINGS points, and a mock run without a mock URL has
+// none (data_start). A worker writes it, so a click never
 // waits on the disk. Saves go one at a time and only the newest settings
 // are written (settings_queue).
 //
@@ -179,7 +180,7 @@ settings_flush :: proc(d: ^Data) -> bool {
 	sync.lock(&d.settings_mutex)
 	st, gen := d.settings_latest, d.settings_gen
 	sync.unlock(&d.settings_mutex)
-	if gen == d.settings_written {
+	if gen == d.settings_written || d.settings_path == "" {
 		return true
 	}
 	if !settings_save(d.settings_path, st) {

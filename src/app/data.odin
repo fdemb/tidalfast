@@ -164,7 +164,7 @@ Data :: struct {
 	relogin:        bool, // the login screen shows over a signed-in account
 	// The settings file and the newest settings for it, see settings_queue.
 	// The path is Data's own copy, freed after the workers stop.
-	settings_path:    string, // heap
+	settings_path:    string, // heap, "" for none
 	launch_log_path:  string, // heap, "" for no launch log
 	settings_mutex:   sync.Mutex, // guards settings_latest and settings_gen
 	settings_latest:  Settings,
@@ -203,15 +203,19 @@ data_start :: proc(s: ^State, shell: ^platform.Shell) {
 	// Checked even with fake data, so a refused TIDALFAST_API is always
 	// logged.
 	api := api_override()
-	// Either variable, even empty, asks for the mock. Without a mock URL
-	// the app takes, falling back to TIDAL would use the user's login.
+	// Any of these, even empty, asks for the mock. Without a mock URL the
+	// app takes, falling back to TIDAL would use the user's login. The fake
+	// data shown instead gets no settings file, as the user's could turn on
+	// bit-perfect output for the loud test tones.
 	_, wants_api := os.lookup_env("TIDALFAST_API", context.temp_allocator)
 	_, wants_keychain := os.lookup_env("TIDALFAST_KEYCHAIN", context.temp_allocator)
-	if api == "" && (wants_api || wants_keychain) && !d.fake {
-		log.warn("app: TIDALFAST_API or TIDALFAST_KEYCHAIN is set but there's no mock URL to use, showing the fake data instead of TIDAL")
+	_, wants_pkce := os.lookup_env("TIDALFAST_PKCE_REDIRECT", context.temp_allocator)
+	if api == "" && (wants_api || wants_keychain || wants_pkce) && !d.fake {
+		log.warn("app: TIDALFAST_API, TIDALFAST_KEYCHAIN or TIDALFAST_PKCE_REDIRECT is set without a mock URL the app takes, showing the fake data instead of TIDAL")
 		d.fake = true
+	} else {
+		d.settings_path = settings_default_path(runtime.heap_allocator())
 	}
-	d.settings_path = settings_default_path(runtime.heap_allocator())
 	s.settings, _ = settings_load(d.settings_path)
 	if d.fake {
 		d.account = .Fake
