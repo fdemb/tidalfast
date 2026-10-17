@@ -419,6 +419,41 @@ memory_cache_keeps_to_its_budget :: proc(t: ^testing.T) {
 	testing.expect_value(t, sum, l.bytes)
 }
 
+// Adding to a kept list grows its rows in place, and the kept lists stay
+// under the budget as it grows. Before this, every add made new arrays
+// and kept the old ones, and only a list going in the cache trimmed it.
+@(test)
+memory_cache_keeps_to_its_budget_as_lists_grow :: proc(t: ^testing.T) {
+	s := cache_state()
+	defer cache_state_free(s)
+	d := &s.data
+	big := strings.repeat("x", 4000, context.temp_allocator)
+	for n in 0 ..< 30 {
+		rows := rows_of(ids_from(i64(n) * 1000, i64(n) * 1000 + 300))
+		for &r in rows {
+			r.album = big
+		}
+		app.view_open(d, .Album, fmt.tprint(n), "Album", "", len(rows))
+		serve(s, rows)
+	}
+	app.view_close(d)
+	l := &d.lists
+	before := l.entries[app.lru_find(d, .Album, "29")].bytes
+	for k in 0 ..< 200 {
+		app.list_edited(s, .Album, "29", true, rows_of({100_000 + i64(k)})[0], {})
+	}
+	i := app.lru_find(d, .Album, "29")
+	testing.expect(t, i >= 0)
+	testing.expect_value(t, l.entries[i].view.count, 500)
+	testing.expectf(t, l.entries[i].bytes < 2 * before, "%d bytes after the adds, %d before", l.entries[i].bytes, before)
+	testing.expect(t, l.bytes <= app.LIST_MEMORY_BUDGET)
+	sum := 0
+	for e in l.entries[:l.count] {
+		sum += e.bytes
+	}
+	testing.expect_value(t, sum, l.bytes)
+}
+
 // A background refresh lands on the open list: the selection, the track
 // menu and the first row in view follow their tracks, not their indices,
 // and the play queue goes on as it was.
@@ -466,6 +501,73 @@ refresh_finds_rows_by_track_id :: proc(t: ^testing.T) {
 	testing.expect_value(t, lib.playing, 54)
 	testing.expect_value(t, s.playback.index, 50)
 	testing.expect(t, slice.equal(s.playback.entries, queue), "the play queue changed")
+}
+
+// Playing a list that's still loading and then opening another: the list
+// goes on loading, and the play queue gets the rest of it. Before this,
+// closing the list dropped its pages and the queue stayed short.
+@(test)
+queue_gets_the_rest_of_a_closed_list :: proc(t: ^testing.T) {
+	s := cache_state()
+	defer cache_state_free(s)
+	s.playback.player = audio.create(no_wake, 0, null_output = true)
+	defer app.playback_shutdown(s)
+	d := &s.data
+	sidebar(s, updated = 1, count = 300)
+	serve(s, rows_of(LIKED_IDS))
+	app.select_playlist(s, 2)
+	rows := rows_of(ids_from(1000, 1300))
+	for {
+		job, ok := jobs.try_pop(&d.queue)
+		testing.expect(t, ok)
+		if !ok || job.kind != .Tracks || job.offset != 0 {
+			continue
+		}
+		res := app.Result{job = job, rows = rows[:job.limit], total = len(rows)}
+		app.handle_result(s, &res, 0)
+		break
+	}
+	app.playback_play_row(s, 0)
+	app.playback_update(s, nil)
+	testing.expect_value(t, len(s.playback.entries), 300)
+
+	app.select_playlist(s, 0)
+	testing.expect(t, serve(s, rows) > 0)
+	app.playback_update(s, nil)
+	testing.expect_value(t, s.playback.entries[299].id, 1299)
+	testing.expect_value(t, s.playback.index, 0)
+	testing.expect_value(t, d.queued.source, app.Source.None)
+	testing.expect(t, app.lru_find(d, .Playlist, "pl") >= 0, "the list is kept once it loaded")
+}
+
+// A list the play queue follows, opened again while it loads, opens as far
+// as it got and goes on loading, without asking for its first pages again.
+@(test)
+list_loading_for_the_queue_opens_again :: proc(t: ^testing.T) {
+	s := cache_state()
+	defer cache_state_free(s)
+	s.playback.player = audio.create(no_wake, 0, null_output = true)
+	defer app.playback_shutdown(s)
+	d := &s.data
+	sidebar(s, updated = 1, count = 300)
+	serve(s, rows_of(LIKED_IDS))
+	app.select_playlist(s, 2)
+	rows := rows_of(ids_from(1000, 1300))
+	job, ok := jobs.try_pop(&d.queue)
+	testing.expect(t, ok && job.kind == .Tracks && job.offset == 0)
+	res := app.Result{job = job, rows = rows[:job.limit], total = len(rows)}
+	app.handle_result(s, &res, 0)
+	app.playback_play_row(s, 0)
+
+	app.select_playlist(s, 0)
+	app.select_playlist(s, 2)
+	testing.expect_value(t, d.queued.source, app.Source.None)
+	testing.expect_value(t, d.view.gen, d.queue_view)
+	testing.expect_value(t, d.view.loaded_rows, 50)
+	serve(s, rows)
+	testing.expect_value(t, d.view.loaded_rows, 300)
+	app.playback_update(s, nil)
+	testing.expect_value(t, s.playback.entries[299].id, 1299)
 }
 
 // The app's own edits go into the kept copies and their files, with the

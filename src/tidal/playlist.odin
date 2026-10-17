@@ -164,7 +164,9 @@ playlist_wide_image_url :: proc(s: ^Session, pl: Playlist, width := 1080, height
 //
 // These change a playlist the logged in user owns. They send the playlist's
 // ETag, then re-read it into `allocator` and overwrite *pl. Old field
-// strings are not freed; keep playlists in an arena.
+// strings are not freed; keep playlists in an arena. If the change went
+// through and only the re-read failed, they still succeed: *pl keeps its
+// old fields and loses its ETag, so the next change reads it first.
 
 // Tracks plus videos. Item indices and positions count both.
 @(private = "file")
@@ -178,6 +180,14 @@ reparse :: proc(s: ^Session, pl: ^Playlist, allocator: Allocator) -> Error {
 	fresh := playlist_get(s, pl.id, allocator) or_return
 	pl^ = fresh
 	return nil
+}
+
+// reread is reparse after a change TIDAL took, which a failed read can't undo.
+@(private = "file")
+reread :: proc(s: ^Session, pl: ^Playlist, allocator: Allocator) {
+	if reparse(s, pl, allocator) != nil {
+		pl.etag = ""
+	}
 }
 
 @(private = "file")
@@ -199,7 +209,8 @@ user_playlist_edit :: proc(s: ^Session, pl: ^Playlist, title := "", description 
 	add_param(&data, "title", title if title != "" else pl.name)
 	add_param(&data, "description", description if description != "" else pl.description)
 	request(s, {method = .POST, path = fmt.tprintf("playlists/%s", pl.id), data = data[:]}, context.temp_allocator) or_return
-	return reparse(s, pl, allocator)
+	reread(s, pl, allocator)
+	return nil
 }
 
 // user_playlist_add adds tracks by id and returns the ids that were added.
@@ -237,7 +248,7 @@ user_playlist_add :: proc(
 		{method = .POST, path = fmt.tprintf("playlists/%s/items", pl.id), params = params[:], data = data[:], headers = headers},
 		context.temp_allocator,
 	) or_return
-	reparse(s, pl, allocator) or_return
+	reread(s, pl, allocator)
 	return added_item_ids(obj, allocator), nil
 }
 
@@ -274,7 +285,7 @@ user_playlist_merge :: proc(
 	add_param(&data, "onArtifactNotFound", "SKIP" if allow_missing else "FAIL")
 	add_param(&data, "onDupes", "ADD" if allow_duplicates else "SKIP")
 	obj := request_object(s, {method = .POST, path = fmt.tprintf("playlists/%s/items", pl.id), data = data[:], headers = headers}, context.temp_allocator) or_return
-	reparse(s, pl, allocator) or_return
+	reread(s, pl, allocator)
 	return added_item_ids(obj, allocator), nil
 }
 
@@ -386,7 +397,8 @@ user_playlist_move_by_indices :: proc(s: ^Session, pl: ^Playlist, indices: []int
 	add_param(&data, "toIndex", pos)
 	path := fmt.tprintf("playlists/%s/items/%s", pl.id, join_ints(indices))
 	request(s, {method = .POST, path = path, data = data[:], headers = headers}, context.temp_allocator) or_return
-	return reparse(s, pl, allocator)
+	reread(s, pl, allocator)
+	return nil
 }
 
 // user_playlist_remove_by_id removes the first item (track or video) with
@@ -424,7 +436,8 @@ user_playlist_remove_by_indices :: proc(s: ^Session, pl: ^Playlist, indices: []i
 	headers := etag_headers(s, pl, allocator) or_return
 	path := fmt.tprintf("playlists/%s/items/%s", pl.id, join_ints(indices))
 	request(s, {method = .DELETE, path = path, headers = headers}, context.temp_allocator) or_return
-	return reparse(s, pl, allocator)
+	reread(s, pl, allocator)
+	return nil
 }
 
 // user_playlist_clear removes all tracks and videos, chunk_size per request.
@@ -440,6 +453,9 @@ user_playlist_clear :: proc(s: ^Session, pl: ^Playlist, chunk_size := 50, alloca
 			indices[i] = i
 		}
 		user_playlist_remove_by_indices(s, pl, indices, allocator) or_return
+		if pl.etag == "" {
+			reparse(s, pl, allocator) or_return
+		}
 		if total_items_of(pl) >= before {
 			return make_error(.Bad_Response, "Playlist did not shrink after removing items")
 		}
@@ -460,7 +476,8 @@ set_visibility :: proc(s: ^Session, pl: ^Playlist, action: string, allocator: Al
 	scratch_begin(allocator)
 	path := fmt.tprintf("playlists/%s/%s", pl.id, action)
 	request(s, {method = .PUT, path = path, base_url = s.config.api_v2_location}, context.temp_allocator) or_return
-	return reparse(s, pl, allocator)
+	reread(s, pl, allocator)
+	return nil
 }
 
 // user_playlist_delete deletes the playlist.
@@ -536,7 +553,8 @@ folder_rename :: proc(s: ^Session, f: ^Folder, name: string, allocator := contex
 	add_param(&params, "trn", f.trn)
 	add_param(&params, "name", name)
 	request(s, {method = .PUT, path = FOLDERS_ENDPOINT + "/rename", base_url = s.config.api_v2_location, params = params[:]}, context.temp_allocator) or_return
-	return folder_reparse(s, f, allocator)
+	_ = folder_reparse(s, f, allocator) // the change stands if this fails
+	return nil
 }
 
 folder_remove :: proc(s: ^Session, f: Folder) -> (err: Error) {
@@ -583,7 +601,8 @@ folder_move_items_to_folder :: proc(s: ^Session, f: ^Folder, trns: []string, des
 	add_param(&params, "folderId", destination if destination != "" else f.id)
 	add_param(&params, "trns", join_ids(full_trns(trns, "playlist")))
 	request(s, {method = .PUT, path = FOLDERS_ENDPOINT + "/move", base_url = s.config.api_v2_location, params = params[:]}, context.temp_allocator) or_return
-	return folder_reparse(s, f, allocator)
+	_ = folder_reparse(s, f, allocator) // the change stands if this fails
+	return nil
 }
 
 // Prefixes bare ids with "trn:<kind>:".

@@ -91,7 +91,6 @@ Playback :: struct {
 	order:           []int, // the items in play order, see queue_reorder
 	loaded:          int, // rows loaded when the snapshot was taken
 	list_key:        u64, // list_key of the list the queue came from
-	view_gen:        u32,
 	queue_gen:       u32, // goes up each time a new list replaces the queue
 	fake:            bool,
 
@@ -278,18 +277,18 @@ source_of :: proc(pb: ^Playback, t: ^Track_Source) -> audio.Source {
 	return src
 }
 
-// queue_snapshot copies the open list into the queue.
+// queue_snapshot copies v, the open list or the one the queue follows,
+// into the queue. The fake data has only the open list.
 @(private = "file")
-queue_snapshot :: proc(s: ^State) {
+queue_snapshot :: proc(s: ^State, v: ^Track_View) {
 	pb := &s.playback
-	n := view_count(s)
+	n := view_count(s) if s.data.fake else v.count
 	a := queue_reset(pb, n)
 	pb.fake = s.data.fake
-	pb.list_key = list_key(s)
-	pb.view_gen = s.data.view.gen
-	pb.loaded = s.data.view.loaded_rows
+	s.data.queue_view = v.gen
+	pb.loaded = v.loaded_rows
 	for i in 0 ..< n {
-		row := view_row(s, i)
+		row := view_row(s, i) if s.data.fake else list_row(v, i)
 		if row == nil {
 			continue
 		}
@@ -347,7 +346,8 @@ playback_play_row :: proc(s: ^State, i: int) {
 	if row := view_row(s, i); row == nil || (row.id == 0 && !s.data.fake) {
 		return
 	}
-	queue_snapshot(s)
+	queue_snapshot(s, &s.data.view)
+	s.playback.list_key = list_key(s)
 	queue_reorder(&s.playback, {i})
 	s.playback.queue_gen += 1
 	start_item(s, i)
@@ -824,13 +824,14 @@ playback_update :: proc(s: ^State, events: []platform.Event) {
 		}
 	}
 
-	// Keep the queue in step with its list while pages arrive. A page that
-	// came back short moves the rows after it up, and the queue's tracks
-	// with them.
-	if !pb.fake && pb.index >= 0 && pb.view_gen == s.data.view.gen && pb.loaded != s.data.view.loaded_rows {
+	// Keep the queue in step with its list while pages arrive, whether or
+	// not the list is still open. A page that came back short moves the
+	// rows after it up, and the queue's tracks with them.
+	d := &s.data
+	if v := queue_list(d); !pb.fake && pb.index >= 0 && v != nil && pb.loaded != v.loaded_rows {
 		index := pb.index
 		played := order_played(pb)
-		queue_snapshot(s)
+		queue_snapshot(s, v)
 		pb.index = queue_find(pb, pb.cur.track, index)
 		pb.cur.item = pb.index
 		if pb.next.serial != 0 {
@@ -844,6 +845,9 @@ playback_update :: proc(s: ^State, events: []platform.Event) {
 			head[i] = queue_find(pb, p.track, p.item)
 		}
 		queue_reorder(pb, head)
+	}
+	if q := &d.queued; q.source != .None && (q.gen != d.queue_view || q.done && q.in_flight == 0 && (pb.index < 0 || pb.loaded == q.loaded_rows)) {
+		queued_drop(d)
 	}
 	s.library.playing = playing_row(s)
 	update_now_playing(s)
@@ -1097,7 +1101,7 @@ playback_restore :: proc(s: ^State, res: ^Result) {
 	pb.list_key = head.list_key
 	// A gen no view is given, so playback_update never takes the queue
 	// for a snapshot of the open list.
-	pb.view_gen = view_gen(&s.data)
+	s.data.queue_view = view_gen(&s.data)
 	pb.loaded = len(res.rows)
 	pb.queue_gen += 1
 	i := int(head.index)

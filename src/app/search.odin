@@ -265,7 +265,7 @@ search_result :: proc(s: ^State, res: ^Result) {
 	view_add_rows(v, 0, SEARCH_PAGE, res.rows)
 	v.next_offset = SEARCH_PAGE
 	view_request_pages(d)
-	list_loaded(d)
+	list_loaded(d, v)
 }
 
 // search_from_memory shows the results kept for q, if they're recent

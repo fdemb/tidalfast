@@ -174,6 +174,10 @@ Data :: struct {
 	sidebar:        Sidebar,
 	view:           Track_View,
 	refresh:        Track_View, // the open list fetched again, see refresh_start
+	// The list the play queue follows, still loading after it closed, see
+	// view_close. queue_view is that list's gen, open or not.
+	queued:         Track_View,
+	queue_view:     u32,
 	next_gen:       u32, // the last Track_View.gen handed out
 	lists:          Lists, // closed lists and the disk cache, see lists.odin
 	window_key:     bool, // the window had the keyboard last frame
@@ -277,6 +281,9 @@ data_shutdown :: proc(s: ^State) {
 	lists_shutdown(d)
 	if d.view.has_arena {
 		vmem.arena_destroy(&d.view.arena)
+	}
+	if d.queued.has_arena {
+		vmem.arena_destroy(&d.queued.arena)
 	}
 	if d.has_retired {
 		vmem.arena_destroy(&d.retired)
@@ -569,6 +576,7 @@ account_end :: proc(s: ^State) {
 	d.device_login = false
 	sidebar_free(d)
 	view_close(d)
+	queued_drop(d)
 	lists_clear(d)
 	playback_stop(s)
 	s.library.playlist = 0
@@ -802,8 +810,11 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 	case .Tracks:
 		v := &d.view
 		r := &d.refresh
+		q := &d.queued
 		if res.job.view == r.gen && r.source != .None {
 			v = r
+		} else if res.job.view == q.gen && q.source != .None {
+			v = q
 		} else if res.job.view != v.gen {
 			return
 		}
@@ -820,7 +831,7 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 		view_add_rows(v, int(res.job.offset), int(res.job.limit), res.rows, res.total)
 		view_pages(d, v)
 		if v != r {
-			list_loaded(d)
+			list_loaded(d, v)
 		} else if view_complete(r) {
 			refresh_land(s)
 		}
@@ -963,9 +974,16 @@ select_playlist :: proc(s: ^State, i: int) {
 	sidebar_check(d)
 }
 
+// drop_track_jobs drops the pages asked for but the ones for keep.
 @(private = "file")
-drop_track_jobs :: proc(job: ^Job, _: rawptr) -> bool {
-	return job.kind == .Tracks
+drop_track_jobs :: proc(job: ^Job, keep: rawptr) -> bool {
+	q := (^Track_View)(keep)
+	return job.kind == .Tracks && (q.source == .None || job.view != q.gen)
+}
+
+@(private = "file")
+drop_view_jobs :: proc(job: ^Job, view: rawptr) -> bool {
+	return job.kind == .Tracks && job.view == (^u32)(view)^
 }
 
 POISON :: 0xdb
@@ -976,11 +994,18 @@ view_gen :: proc(d: ^Data) -> u32 {
 }
 
 // view_close closes the open list. A list that loaded whole is kept in
-// memory (list_keep); the rest is freed. A refresh of it stops.
+// memory (list_keep). One the play queue follows that's still loading goes
+// on loading in d.queued, so the queue gets the rest of it. The rest is
+// freed. A refresh of it stops.
 view_close :: proc(d: ^Data) {
-	jobs.remove_if(&d.queue, drop_track_jobs, nil)
-	refresh_drop(d)
 	v := &d.view
+	if v.has_arena && v.gen == d.queue_view && !view_complete(v) && v.error.len == 0 && !v.reading {
+		queued_drop(d)
+		d.queued = v^
+		v.has_arena = false
+	}
+	jobs.remove_if(&d.queue, drop_track_jobs, &d.queued)
+	refresh_drop(d)
 	if v.has_arena {
 		if d.lists.memory && view_complete(v) && v.fetched != 0 {
 			list_keep(d, v^)
@@ -989,6 +1014,36 @@ view_close :: proc(d: ^Data) {
 		}
 	}
 	v^ = {gen = view_gen(d)}
+}
+
+// queued_drop stops loading the list the play queue followed. One that
+// loaded whole is kept like a closed list.
+queued_drop :: proc(d: ^Data) {
+	q := &d.queued
+	if q.source == .None {
+		return
+	}
+	jobs.remove_if(&d.queue, drop_view_jobs, &q.gen)
+	if q.has_arena {
+		if d.lists.memory && view_complete(q) && q.fetched != 0 {
+			list_keep(d, q^)
+		} else {
+			arena_free(d, &q.arena)
+		}
+	}
+	q^ = {}
+}
+
+// queue_list is the list the play queue follows while it loads, open or
+// in d.queued, or nil.
+queue_list :: proc(d: ^Data) -> ^Track_View {
+	if d.view.source != .None && d.view.gen == d.queue_view {
+		return &d.view
+	}
+	if d.queued.source != .None && d.queued.gen == d.queue_view {
+		return &d.queued
+	}
+	return nil
 }
 
 // view_open opens a list from TIDAL, whatever is kept of it. list_open
@@ -1125,6 +1180,7 @@ view_close_gap :: proc(v: ^Track_View, offset, row, limit, got: int) {
 view_request_pages :: proc(d: ^Data) {
 	view_pages(d, &d.view)
 	view_pages(d, &d.refresh)
+	view_pages(d, &d.queued)
 }
 
 view_pages :: proc(d: ^Data, v: ^Track_View) {
@@ -1253,7 +1309,11 @@ view_row :: proc(s: ^State, i: int) -> ^Row {
 		}
 		return &s.rows[i] if i >= 0 && i < len(s.rows) else nil
 	}
-	v := &s.data.view
+	return list_row(&s.data.view, i)
+}
+
+// list_row returns row i of v, or nil while it's loading.
+list_row :: proc(v: ^Track_View, i: int) -> ^Row {
 	if i < 0 || i >= len(v.loaded) || !v.loaded[i] {
 		return nil
 	}

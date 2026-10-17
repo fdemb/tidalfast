@@ -102,15 +102,56 @@ try_pop :: proc(q: ^Queue($T, $N)) -> (item: T, ok: bool) {
 	return item, true
 }
 
+// pop_wait_where is pop_wait for the items wanted says yes to, waiting at
+// most d for one. ok is false if none came in time or the queue stopped;
+// stopped says which. wanted runs with the queue locked.
+pop_wait_where :: proc(q: ^Queue($T, $N), wanted: proc(item: ^T) -> bool, d: time.Duration) -> (item: T, ticket: Ticket, ok, stopped: bool) {
+	sync.guard(&q.mutex)
+	deadline := time.tick_add(time.tick_now(), d)
+	for !q.stopped {
+		if at := next_where(q, wanted); at >= 0 {
+			item, ticket = take_at(q, at)
+			q.busy += 1
+			return item, ticket, true, false
+		}
+		left := time.tick_diff(time.tick_now(), deadline)
+		if left <= 0 {
+			return
+		}
+		sync.cond_wait_with_timeout(&q.cond, &q.mutex, left)
+	}
+	stopped = true
+	return
+}
+
 @(private)
 take :: proc(q: ^Queue($T, $N)) -> (item: T, ticket: Ticket) {
-	best := 0
-	for i in 1 ..< q.count {
+	return take_at(q, next_where(q, nil))
+}
+
+// next_where is the index of the item that comes out next among those
+// wanted says yes to, all of them if it's nil. -1 if there's none.
+@(private)
+next_where :: proc(q: ^Queue($T, $N), wanted: proc(item: ^T) -> bool) -> int {
+	best := -1
+	for i in 0 ..< q.count {
+		if wanted != nil && !wanted(&q.items[i]) {
+			continue
+		}
+		if best < 0 {
+			best = i
+			continue
+		}
 		a, b := q.tickets[i], q.tickets[best]
 		if a.priority < b.priority || (a.priority == b.priority && a.seq < b.seq) {
 			best = i
 		}
 	}
+	return best
+}
+
+@(private)
+take_at :: proc(q: ^Queue($T, $N), best: int) -> (item: T, ticket: Ticket) {
 	item, ticket = q.items[best], q.tickets[best]
 	q.count -= 1
 	q.items[best] = q.items[q.count]

@@ -1,8 +1,10 @@
 package tidal_tests
 
+import "base:runtime"
 import "core:crypto"
 import "core:fmt"
 import "core:os"
+import "core:slice"
 import "core:testing"
 import "core:thread"
 import "core:time"
@@ -604,6 +606,71 @@ add_track_job :: proc(t: ^testing.T) {
 	testing.expect(t, len(res.rows) == 1 && res.rows[0].id == 5000)
 	testing.expect_value(t, res.version, app.List_Version{count = MOCK_LIKED + 1, newest = 5000})
 	app.result_free(&res)
+}
+
+// TIDAL took the add, then rate limited the read after it. The add still
+// counts, without the row, so the kept copies are dropped. Before this,
+// the job failed and went back in the queue, and the second POST found
+// the track there and said it was already in.
+@(test)
+add_track_stands_when_the_read_after_fails :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m, {{"track", 11}, {"track", 22}})
+	defer mock_stop(&m)
+	m.add_then_limit = 1
+	s := mock_data_state(&m)
+	defer data_state_free(s)
+	d := &s.data
+	tidal.session_restore(d.session, {token_type = "Bearer", access_token = "a", refresh_token = "r", user_id = 123, user_kind = .Logged_In_User})
+	d.account = .Signed_In
+	app.workers_start(d)
+
+	app.push_job(d, {kind = .Add_Track, source = .Playlist, id = app.small("pl"), key = 33})
+	res, ok := wait_result(d, 5 * time.Second)
+	testing.expect(t, ok)
+	testing.expect_value(t, res.err, nil)
+	testing.expect(t, res.added)
+	testing.expect_value(t, len(res.rows), 0)
+	testing.expect_value(t, mock_count(&m, "POST /playlists/pl/items"), 1)
+	testing.expect_value(t, len(mock_item_ids(&m, context.temp_allocator)), 3)
+	app.result_free(&res)
+}
+
+// During a backoff the workers still run jobs that stay on this machine,
+// and keep the ones for TIDAL, a cover not on disk included, queued.
+@(test)
+local_jobs_run_during_a_backoff :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := mock_data_state(&m)
+	defer data_state_free(s)
+	d := &s.data
+	tidal.session_restore(d.session, {token_type = "Bearer", access_token = "a", refresh_token = "r", user_id = 123, user_kind = .Logged_In_User})
+	d.account = .Signed_In
+	tidal.backoff_restore(d.session, time.tick_add(time.tick_now(), 30 * time.Second), "test")
+	path := fmt.tprintf("/tmp/tidalfast-backoff-%d.log", time.tick_now()._nsec)
+	defer os.remove(path)
+	d.launch_log_path = path
+	defer d.launch_log_path = ""
+
+	app.push_job(d, {kind = .Playlists})
+	app.push_job(d, {kind = .Cover, key = 7, size = 80, fetch = 80, id = app.small("cover-id")}, app.PRIORITY_COVER)
+	app.push_job(d, {kind = .Launch_Log, blob = slice.clone([]u8{'x', '\n'}, runtime.heap_allocator())})
+	app.workers_start(d)
+	res, ok := wait_result(d, 2 * time.Second)
+	testing.expect(t, ok)
+	testing.expect_value(t, res.job.kind, app.Job_Kind.Launch_Log)
+	testing.expect_value(t, res.err, nil)
+	app.result_free(&res)
+
+	time.sleep(300 * time.Millisecond)
+	_, ok = jobs.try_pop(&d.results)
+	testing.expect(t, !ok)
+	queued, busy := jobs.pending(&d.queue)
+	testing.expect_value(t, queued, 2)
+	testing.expect_value(t, busy, 0)
+	testing.expect_value(t, mock_count(&m, ""), 0)
 }
 
 // The approval got the tokens, then loading the session was held back
