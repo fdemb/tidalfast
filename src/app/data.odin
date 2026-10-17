@@ -331,8 +331,9 @@ Run :: struct {
 
 // run_decide picks fake data, the mock or TIDAL. A run that asks for the
 // mock without a mock URL the app takes gets the fake data, as falling back
-// to TIDAL would use the user's login, and no settings file, as the user's
-// could turn on bit-perfect output for the loud test tones.
+// to TIDAL would use the user's login. Fake data gets no settings file
+// unless TIDALFAST_SETTINGS names one, and none after that fallback, as
+// the user's could turn on bit-perfect output for the loud test tones.
 run_decide :: proc(env: Run_Env, allocator: runtime.Allocator) -> (run: Run) {
 	fake := env.fake != "" || (env.bench != "" && env.bench != "covers")
 	switch {
@@ -354,7 +355,7 @@ run_decide :: proc(env: Run_Env, allocator: runtime.Allocator) -> (run: Run) {
 	}
 	if env.settings != "" {
 		run.settings = strings.clone(env.settings, allocator)
-	} else if env.config_dir != "" {
+	} else if run.mode != .Fake && env.config_dir != "" {
 		run.settings = strings.concatenate({env.config_dir, "/tidalfast/settings.json"}, allocator)
 	}
 	return

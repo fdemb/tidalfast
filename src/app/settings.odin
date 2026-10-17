@@ -2,7 +2,8 @@ package app
 
 // Settings: the volume, shuffle and repeat, bit-perfect output, hog mode
 // and how lists show their scrollbars. They live in a small JSON file, ~/Library/Application Support/tidalfast/settings.json, or
-// wherever TIDALFAST_SETTINGS points, and a mock run without a mock URL has
+// wherever TIDALFAST_SETTINGS points. The fake data has none unless
+// TIDALFAST_SETTINGS points to one, and a mock run without a mock URL has
 // none (run_decide). A worker writes it, so a click never
 // waits on the disk. Saves go one at a time and only the newest settings
 // are written (settings_queue).
