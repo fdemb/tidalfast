@@ -638,7 +638,6 @@ row_clone :: proc(r: Row, a: runtime.Allocator) -> Row {
 	out.artists = slice.clone(r.artists, a)
 	out.album = strings.clone(r.album, a)
 	out.added = strings.clone(r.added, a)
-	out.added_by = strings.clone(r.added_by, a)
 	out.duration = strings.clone(r.duration, a)
 	out.cover = strings.clone(r.cover, a)
 	return out

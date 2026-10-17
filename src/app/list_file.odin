@@ -17,7 +17,7 @@ import "core:os"
 import "core:slice"
 
 FILE_MAGIC :: 0x434c_4654 // "TFLC"
-FILE_FORMAT :: 2
+FILE_FORMAT :: 3
 
 File_Str :: struct {
 	off, len: u32,
@@ -41,7 +41,7 @@ File_Header :: struct {
 // File_Row is a Row on disk. Its artists are their Artist_Refs' bytes,
 // in the text.
 File_Row :: struct {
-	text:     [7]File_Str, // title, artist, album, added, added_by, duration, cover
+	text:     [6]File_Str, // title, artist, album, added, duration, cover
 	artists:  File_Str,
 	seconds:  i32,
 	track:    i32,
@@ -111,7 +111,7 @@ list_encode :: proc(v: ^Track_View, allocator: runtime.Allocator) -> []u8 {
 	n := min(v.count, len(v.rows))
 	text := 0
 	for &r in v.rows[:n] {
-		text += len(r.title) + len(r.artist) + len(r.album) + len(r.added) + len(r.added_by) + len(r.duration) + len(r.cover)
+		text += len(r.title) + len(r.artist) + len(r.album) + len(r.added) + len(r.duration) + len(r.cover)
 		text += len(r.artists) * size_of(Artist_Ref)
 	}
 	w, h := writer_make(v.source, small_str(&v.id), n, text, allocator)
@@ -121,7 +121,7 @@ list_encode :: proc(v: ^Track_View, allocator: runtime.Allocator) -> []u8 {
 	rows := ([^]File_Row)(raw_data(w.buf[size_of(File_Header):]))[:n]
 	for &r, i in v.rows[:n] {
 		rows[i] = {
-			text     = {put(&w, r.title), put(&w, r.artist), put(&w, r.album), put(&w, r.added), put(&w, r.added_by), put(&w, r.duration), put(&w, r.cover)},
+			text     = {put(&w, r.title), put(&w, r.artist), put(&w, r.album), put(&w, r.added), put(&w, r.duration), put(&w, r.cover)},
 			artists  = put(&w, string(slice.to_bytes(r.artists))),
 			seconds  = i32(r.seconds),
 			track    = i32(r.track),
@@ -231,7 +231,7 @@ list_decode :: proc(data: []u8, source: Source, id: string, allocator: runtime.A
 	rows = make([]Row, h.count, allocator)
 	for &f, i in file_rows {
 		r := &rows[i]
-		strs := [7]^string{&r.title, &r.artist, &r.album, &r.added, &r.added_by, &r.duration, &r.cover}
+		strs := [6]^string{&r.title, &r.artist, &r.album, &r.added, &r.duration, &r.cover}
 		for p, j in strs {
 			ok: bool
 			if p^, ok = file_str(text, f.text[j]); !ok {

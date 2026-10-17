@@ -167,7 +167,7 @@ list_file_round_trip :: proc(t: ^testing.T) {
 	defer app.view_close(d)
 	rows := rows_of({5, 6, 7})
 	rows[1].title = ""
-	rows[2].added_by = "someone"
+	rows[2].added = "Mar 3, 2024"
 	app.view_add_rows(&d.view, 0, 3, rows, 3)
 	d.view.version = {updated = 1700000000123, count = 3}
 	d.view.fetched = 1760000000
@@ -184,8 +184,8 @@ list_file_round_trip :: proc(t: ^testing.T) {
 	for r, i in back {
 		want := rows[i]
 		testing.expect(t, slice.equal(r.artists, want.artists), "the artists differ")
-		got_text := [7]string{r.title, r.artist, r.album, r.added, r.added_by, r.duration, r.cover}
-		want_text := [7]string{want.title, want.artist, want.album, want.added, want.added_by, want.duration, want.cover}
+		got_text := [6]string{r.title, r.artist, r.album, r.added, r.duration, r.cover}
+		want_text := [6]string{want.title, want.artist, want.album, want.added, want.duration, want.cover}
 		testing.expect_value(t, got_text, want_text)
 		testing.expect_value(t, [4]i64{r.id, r.album_id, i64(r.seconds), i64(r.track)}, [4]i64{want.id, want.album_id, i64(want.seconds), i64(want.track)})
 		lo := uintptr(raw_data(data))

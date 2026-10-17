@@ -185,25 +185,24 @@ test_ui_virtual_range :: proc(t: ^testing.T) {
 
 @(test)
 test_track_columns :: proc(t: ^testing.T) {
-	narrow := app.track_columns(560)
+	narrow := app.track_columns(560, true)
 	testing.expect_value(t, narrow.album, f32(0))
 	testing.expect_value(t, narrow.added, f32(0))
-	testing.expect_value(t, narrow.added_by, f32(0))
 	testing.expect(t, narrow.number > 0 && narrow.duration > 0)
 
-	medium := app.track_columns(561)
+	medium := app.track_columns(561, true)
 	testing.expect_value(t, medium.album, f32(561 * 0.28))
 	testing.expect_value(t, medium.added, f32(0))
 
-	wide := app.track_columns(761)
-	testing.expect(t, wide.album > 0 && wide.added > 0)
-	testing.expect_value(t, wide.added_by, f32(0))
-	testing.expect_value(t, app.track_columns(760).added, f32(0))
+	wide := app.track_columns(761, true)
+	testing.expect(t, wide.album > 0)
+	testing.expect_value(t, wide.added, f32(120))
+	testing.expect_value(t, app.track_columns(760, true).added, f32(0))
+	testing.expect_value(t, app.track_columns(2000, true).album, f32(360))
 
-	extra := app.track_columns(921)
-	testing.expect(t, extra.album > 0 && extra.added > 0 && extra.added_by > 0)
-	testing.expect_value(t, app.track_columns(920).added_by, f32(0))
-	testing.expect_value(t, app.track_columns(2000).album, f32(360))
+	undated := app.track_columns(2000, false)
+	testing.expect_value(t, undated.added, f32(0))
+	testing.expect_value(t, undated.album, f32(360))
 }
 
 // Builds a frame with one clickable box at the top left, the way an app

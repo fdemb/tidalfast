@@ -15,7 +15,6 @@ Row :: struct {
 	artist:   string,
 	album:    string,
 	added:    string, // date added
-	added_by: string,
 	duration: string,
 	cover:    string, // album cover image id, "" in the fake data
 	seconds:  int,
@@ -175,9 +174,6 @@ ALBUMS := [?]string {
 }
 
 @(private = "file")
-ADDED_BY := [?]string{"filip", "Ola", "Kuba", "Marta", "Tomek", "Zosia"}
-
-@(private = "file")
 MONTHS := [?]string{"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"}
 
 @(private = "file")
@@ -192,7 +188,6 @@ make_rows :: proc() -> []Row {
 		row.title = fmt.aprintf("%s%s", title, suffix)
 		row.artist = strings.clone(ARTISTS[(h >> 14) % len(ARTISTS)])
 		row.album = strings.clone(ALBUMS[(h >> 11) % len(ALBUMS)])
-		row.added_by = strings.clone(ADDED_BY[(h >> 26) % len(ADDED_BY)])
 		day := (h >> 3) % 28 + 1
 		row.added = fmt.aprintf("%s %d, %d", MONTHS[(h >> 17) % 12], day, 2016 + (ROW_COUNT - i) * 9 / ROW_COUNT)
 		seconds := 95 + int(h >> 4) % 400

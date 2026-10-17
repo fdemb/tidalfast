@@ -127,18 +127,17 @@ PLAYLISTS := [?]string {
 // Track_Columns is the width of each column in the track table; 0 hides it.
 // The title takes what's left.
 Track_Columns :: struct {
-	number, cover, album, added_by, added, duration, more: f32,
+	number, cover, album, added, duration, more: f32,
 }
 
-// track_columns follows spotifast: the album shows above 560 pt, the date
-// added above 760 and who added it above 920.
-track_columns :: proc(width: f32) -> Track_Columns {
+// track_columns follows spotifast: the album shows above 560 pt and the date
+// added above 760, in lists that have one.
+track_columns :: proc(width: f32, dated: bool) -> Track_Columns {
 	return {
 		number = 44,
 		cover = 52,
 		album = clamp(width * 0.28, 140, 360) if width > 560 else 0,
-		added_by = 130 if width > 920 else 0,
-		added = 120 if width > 760 else 0,
+		added = 120 if dated && width > 760 else 0,
 		duration = 56,
 		more = 36,
 	}
@@ -282,7 +281,10 @@ draw_sidebar_handle :: proc(s: ^State, window_w: f32) {
 
 draw_main_view :: proc(s: ^State, main_w: f32) {
 	lib := &s.library
-	cols := track_columns(main_w)
+	// Only playlists and Liked Songs say when a track was added. The fake
+	// data's .None is its playlists.
+	source := s.search.fake_source if s.data.fake else s.data.view.source
+	cols := track_columns(main_w, source in bit_set[Source]{.None, .Liked, .Playlist})
 	// Durations are m:ss however long, so the widest has the longest
 	// track's count of minute digits.
 	cols.duration = max(cols.duration, ui.counter_width(.Regular, 13, fmt.tprintf("%d:00", max(s.data.view.longest / 60, 10))) + 2 * CELL_PAD)
@@ -321,7 +323,6 @@ draw_main_view :: proc(s: ^State, main_w: f32) {
 		ui.spacer(ui.px(cols.cover))
 		ui.label("Title", ui.fill(), ui.fill())
 		header_cell("Album", cols.album, .Left)
-		header_cell("Added by", cols.added_by, .Left)
 		header_cell("Date added", cols.added, .Left)
 		header_cell("Time", cols.duration, .Right)
 		ui.spacer(ui.px(cols.more + 8 + ui.scroll_gutter("tracks")))
@@ -463,7 +464,6 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 			go_to_album(s, i)
 		}
 	}
-	cell(track.added_by, cols.added_by, .Left)
 	cell(track.added, cols.added, .Left)
 	cell(track.duration, cols.duration, .Right)
 
