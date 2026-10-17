@@ -92,6 +92,7 @@ Never `pkill tidalfast`. The user may have the real app open.
 
 - The real keychain item is service `tidalfast`. Fake mode never touches a keychain. Mock mode uses `tidalfast-verify-<random>`, and `cleanup` deletes only names with that prefix. Never pass `TIDALFAST_KEYCHAIN=tidalfast`.
 - Never point a run at real TIDAL. The app refuses a `TIDALFAST_API` that isn't loopback, and `env -i` keeps your shell's variables out.
+- Start the mock only with `mock-start`. `run` and `doctor` refuse a `mock.url` that is empty or not a loopback `http` URL, and the app shows the fake data instead of the real login when `TIDALFAST_KEYCHAIN` comes without a mock URL it takes.
 - The app takes focus when it starts, and AeroSpace may switch to its workspace. Tell the user before a long series of runs.
 - Bit-perfect mode changes the output device. Don't turn it on here. `AGENTS.md` and `docs/playback.md` cover how to test it.
 

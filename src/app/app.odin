@@ -405,8 +405,6 @@ start :: proc(s: ^State, shell: ^platform.Shell) {
 	if s.data.fake {
 		s.rows = make_rows()
 	}
-	s.data.settings_path = settings_default_path(runtime.heap_allocator())
-	s.settings, _ = settings_load(s.data.settings_path)
 	playback_start(s, shell)
 	search_init(s)
 	// TIDALFAST_BENCH=1 scrolls the library's track table, =text the text

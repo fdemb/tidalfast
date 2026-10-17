@@ -2,7 +2,8 @@ package app
 
 // Settings: the volume, shuffle and repeat, bit-perfect output, hog mode
 // and how lists show their scrollbars. They live in a small JSON file, ~/Library/Application Support/tidalfast/settings.json, or
-// wherever TIDALFAST_SETTINGS points. A worker writes it, so a click never
+// wherever TIDALFAST_SETTINGS points, and a mock run without a mock URL has
+// none (run_decide). A worker writes it, so a click never
 // waits on the disk. Saves go one at a time and only the newest settings
 // are written (settings_queue).
 //
@@ -14,7 +15,6 @@ package app
 // In bit-perfect mode the button shows what the device plays, such as
 // 24/96. The sidebar has one for the rest.
 
-import "base:runtime"
 import "core:crypto"
 import "core:encoding/json"
 import "core:fmt"
@@ -22,11 +22,9 @@ import "core:log"
 import "core:mem"
 import "core:os"
 import "core:path/filepath"
-import "core:strings"
 import "core:sync"
 
 import "../audio"
-import "../os_services"
 import "../render"
 import "../ui"
 
@@ -60,19 +58,6 @@ Device_Change_File :: struct {
 	orig_rate:   f64,
 	orig_format: audio.Stream_Description,
 	rate:        f64,
-}
-
-// settings_default_path is TIDALFAST_SETTINGS, or tidalfast/settings.json
-// in the OS's config directory. Allocated with allocator.
-settings_default_path :: proc(allocator: runtime.Allocator) -> string {
-	if p := os.get_env("TIDALFAST_SETTINGS", context.temp_allocator); p != "" {
-		return strings.clone(p, allocator)
-	}
-	dir := os_services.config_dir(context.temp_allocator)
-	if dir == "" {
-		return ""
-	}
-	return strings.concatenate({dir, "/tidalfast/settings.json"}, allocator)
 }
 
 // settings_load reads the file at path. A missing or broken file gives
@@ -179,7 +164,7 @@ settings_flush :: proc(d: ^Data) -> bool {
 	sync.lock(&d.settings_mutex)
 	st, gen := d.settings_latest, d.settings_gen
 	sync.unlock(&d.settings_mutex)
-	if gen == d.settings_written {
+	if gen == d.settings_written || d.settings_path == "" {
 		return true
 	}
 	if !settings_save(d.settings_path, st) {
