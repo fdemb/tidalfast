@@ -296,6 +296,8 @@ start :: proc(s: ^State, shell: ^platform.Shell) {
 		when DEV {
 			s.bench.running = true
 			s.dev.screen = .Text
+		} else {
+			log.warn("app: TIDALFAST_BENCH=text is ignored in release builds")
 		}
 	case:
 		s.bench.running = true
