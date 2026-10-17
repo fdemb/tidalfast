@@ -895,3 +895,43 @@ sign_out_forgets_history_and_search :: proc(t: ^testing.T) {
 	testing.expect_value(t, app.small_str(&sr.query), "")
 	testing.expect_value(t, len(sr.found.albums), 0)
 }
+
+// Return on an unchanged query while the queue is full, as when TIDAL
+// answers 429, keeps one search waiting, and it goes out once there's room.
+@(test)
+return_on_a_full_queue_holds_one_search :: proc(t: ^testing.T) {
+	arena: vmem.Arena
+	_ = vmem.arena_init_growing(&arena)
+	defer vmem.arena_destroy(&arena)
+	context.allocator = vmem.arena_allocator(&arena)
+	s := library_state(false)
+	defer library_state_free(s)
+	d := &s.data
+	f: Frame
+	library_frame(t, s, &f)
+	for jobs.push(&d.queue, app.Job{payload = app.Cover_Job{}}, app.PRIORITY_COVER) {}
+	library_frame(t, s, &f, {kind = .Key_Down, key = .F, modifiers = {ui.PRIMARY}})
+	library_frame(t, s, &f, type_text(&f, "abc"))
+	for _ in 0 ..< app.HELD_JOBS + 4 {
+		library_frame(t, s, &f, {kind = .Key_Down, key = .Return})
+		app.data_retry(d)
+	}
+	testing.expect_value(t, d.held_count, 1)
+
+	jobs.try_pop(&d.queue)
+	app.data_retry(d)
+	searches := 0
+	for {
+		job, ok := jobs.try_pop(&d.queue)
+		if !ok {
+			break
+		}
+		if p, search := job.payload.(app.Search_Job); search {
+			testing.expect_value(t, p.gen, s.search.gen)
+			testing.expect_value(t, app.small_str(&p.query), "abc")
+			searches += 1
+		}
+	}
+	testing.expect_value(t, searches, 1)
+	testing.expect_value(t, d.held_count, 0)
+}

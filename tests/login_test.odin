@@ -658,6 +658,40 @@ held_page_past_the_end_stays_home :: proc(t: ^testing.T) {
 	testing.expect_value(t, v.loaded_rows, 120)
 }
 
+// Pages go out in order while the queue is full. Page 250 mustn't go out
+// ahead of a held page 150 and end the list with rows 150 to 249 empty.
+@(test)
+held_page_keeps_later_pages_back :: proc(t: ^testing.T) {
+	s := data_state()
+	defer data_state_free(s)
+	d := &s.data
+	d.account = .Signed_In
+	app.view_open(d, .Playlist, "pl", "pl", "", 300)
+	v := &d.view
+	out := data_jobs(d)
+	testing.expect_value(t, len(out), 2)
+	fill_with_covers(d)
+
+	first := app.Result{job = out[0], rows = fake_rows(app.PAGE_FIRST), total = 300}
+	app.handle_result(s, &first, 0)
+	free_slots(d, 1)
+	second := app.Result{job = out[1], rows = fake_rows(app.PAGE_SIZE), total = 300}
+	app.handle_result(s, &second, 0)
+	app.data_retry(d)
+	for _ in 0 ..< 8 {
+		for job in data_jobs(d) {
+			if p, page := job.payload.(app.Tracks_Job); page {
+				res := app.Result{job = job, rows = fake_rows(clamp(300 - int(p.offset), 0, int(p.limit))), total = 300}
+				app.handle_result(s, &res, 0)
+			}
+		}
+		app.data_retry(d)
+	}
+	testing.expect(t, app.view_complete(v), "the list loaded")
+	testing.expect_value(t, v.count, 300)
+	testing.expect_value(t, v.loaded_rows, 300)
+}
+
 @(private = "file")
 fake_rows :: proc(n: int) -> []app.Row {
 	rows := make([]app.Row, n, context.temp_allocator)
