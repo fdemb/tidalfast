@@ -142,6 +142,7 @@ Result :: struct {
 	hit:         bool, // Disk: the file was there and good
 	version:     List_Version, // Disk: what the list was fetched at
 	fetched:     i64, // Disk: when, unix seconds
+	queue:       Queue_Header, // Disk, Read_Queue: the play queue's place; its rows are in rows
 	added:       bool, // Add_Track: TIDAL added it rather than finding it there
 }
 

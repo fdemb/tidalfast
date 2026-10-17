@@ -84,6 +84,9 @@ Disk_Op :: enum u8 {
 	Write, // Job.blob, from list_encode or sidebar_encode
 	Touch, // mark it opened now, for eviction
 	Delete,
+	Read_Queue, // the play queue's file, see queue_save
+	Write_Queue, // Job.blob, from queue_encode
+	Delete_Queue,
 }
 
 Lists :: struct {
@@ -714,10 +717,11 @@ disk_on :: proc(d: ^Data) -> bool {
 }
 
 // lists_signed_in points the disk cache at the user's folder and reads the
-// sidebar from it.
+// sidebar and the play queue from it.
 lists_signed_in :: proc(d: ^Data, user: i64) {
 	sync.atomic_store(&d.lists.user, user)
 	disk_push(d, {op = .Read})
+	disk_push(d, {op = .Read_Queue})
 }
 
 // lists_forget drops what's kept for the account that signed out: in memory
@@ -858,8 +862,15 @@ disk_run :: proc(d: ^Data, job: Job) -> (res: Result, reply: bool) {
 	id := job.id
 	dir := disk_dir(d.lists.root, i64(job.key), context.temp_allocator)
 	path := disk_path(dir, job.source, small_str(&id), context.temp_allocator)
-	if job.op == .Read {
+	#partial switch job.op {
+	case .Read:
 		disk_read(&res, path, job.source, small_str(&id))
+		return res, true
+	case .Read_Queue, .Write_Queue, .Delete_Queue:
+		path = queue_path(dir, context.temp_allocator)
+	}
+	if job.op == .Read_Queue {
+		queue_read(&res, path)
 		return res, true
 	}
 	sync.guard(&d.lists.mutex)
@@ -867,7 +878,9 @@ disk_run :: proc(d: ^Data, job: Job) -> (res: Result, reply: bool) {
 		return // that account is gone
 	}
 	switch job.op {
-	case .Read:
+	case .Read, .Read_Queue:
+	case .Write_Queue:
+		disk_write(dir, path, job.blob)
 	case .Write:
 		if disk_write(dir, path, job.blob) {
 			disk_evict(dir, LIST_DISK_BUDGET, ".tfl")
@@ -875,10 +888,51 @@ disk_run :: proc(d: ^Data, job: Job) -> (res: Result, reply: bool) {
 	case .Touch:
 		now := time.now()
 		os.change_times(path, now, now)
-	case .Delete:
+	case .Delete, .Delete_Queue:
 		os.remove(path)
 	}
 	return
+}
+
+// queue_path is the play queue's file. It isn't a .tfl, so disk_evict
+// never drops it.
+queue_path :: proc(dir: string, allocator: runtime.Allocator) -> string {
+	return fmt.aprintf("%s/queue.tfq", dir, allocator = allocator)
+}
+
+// queue_read reads the play queue's file into res, in an arena of its own.
+// A file that's damaged or of another format is deleted.
+@(private = "file")
+queue_read :: proc(res: ^Result, path: string) {
+	res.arena = new(vmem.Arena, runtime.heap_allocator())
+	if vmem.arena_init_growing(res.arena) != nil {
+		free(res.arena, runtime.heap_allocator())
+		res.arena = nil
+		return
+	}
+	a := vmem.arena_allocator(res.arena)
+	data, ok := file_read(path, a)
+	if !ok {
+		return
+	}
+	err: File_Error
+	if res.queue, res.rows, err = queue_decode(data, a); err != .None {
+		log.warnf("lists: dropping the play queue's file (%v)", err)
+		os.remove(path)
+		return
+	}
+	res.hit = true
+}
+
+// queue_write_now writes the play queue's file on this thread, after the
+// disk thread has stopped.
+queue_write_now :: proc(d: ^Data, blob: []u8) {
+	if !disk_on(d) {
+		return
+	}
+	dir := disk_dir(d.lists.root, d.lists.user, context.temp_allocator)
+	sync.guard(&d.lists.mutex)
+	disk_write(dir, queue_path(dir, context.temp_allocator), blob)
 }
 
 // disk_read reads a list or the sidebar into res, in an arena of its own
@@ -1036,9 +1090,16 @@ cover_write :: proc(d: ^Data, dir, path: string, data: []u8) {
 	}
 }
 
-// disk_result takes a disk read: the open list's rows, or the sidebar.
+// disk_result takes a disk read: the open list's rows, the sidebar or the
+// play queue.
 disk_result :: proc(s: ^State, res: ^Result) {
 	d := &s.data
+	if res.job.op == .Read_Queue {
+		if res.job.auth == d.auth_gen {
+			playback_restore(s, res)
+		}
+		return
+	}
 	if res.job.source == .None {
 		if res.hit && !d.sidebar.fresh {
 			log.debugf("lists: sidebar from disk, %d playlists", len(res.playlists))

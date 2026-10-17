@@ -68,9 +68,10 @@ File_Error :: enum u8 {
 
 @(private = "file")
 File_Writer :: struct {
-	buf:  []u8,
-	base: int, // where the text starts
-	text: int, // where the next string goes
+	whole:  []u8, // the prefix, then buf
+	buf:    []u8,
+	base:   int, // where the text starts
+	text:   int, // where the next string goes
 }
 
 @(private = "file")
@@ -81,10 +82,12 @@ put :: proc(w: ^File_Writer, s: string) -> File_Str {
 	return {u32(at - w.base), u32(len(s))}
 }
 
+// writer_make starts a file, after prefix bytes w.buf leaves out.
 @(private = "file")
-writer_make :: proc(source: Source, id: string, count, text: int, allocator: runtime.Allocator) -> (w: File_Writer, h: ^File_Header) {
+writer_make :: proc(source: Source, id: string, count, text: int, allocator: runtime.Allocator, prefix := 0) -> (w: File_Writer, h: ^File_Header) {
 	rec := size_of(File_Row) if source != .None else size_of(File_Item)
-	w.buf = make([]u8, size_of(File_Header) + count * rec + text + len(id), allocator)
+	w.whole = make([]u8, prefix + size_of(File_Header) + count * rec + text + len(id), allocator)
+	w.buf = w.whole[prefix:]
 	h = (^File_Header)(raw_data(w.buf))
 	h^ = {
 		magic  = FILE_MAGIC,
@@ -103,24 +106,29 @@ writer_make :: proc(source: Source, id: string, count, text: int, allocator: run
 writer_finish :: proc(w: ^File_Writer) -> []u8 {
 	h := (^File_Header)(raw_data(w.buf))
 	h.sum = hash.fnv64a(w.buf[size_of(File_Header):])
-	return w.buf
+	return w.whole
 }
 
 // list_encode is a done list as a file.
 list_encode :: proc(v: ^Track_View, allocator: runtime.Allocator) -> []u8 {
 	n := min(v.count, len(v.rows))
+	return rows_encode(v.source, small_str(&v.id), v.rows[:n], v.fetched, v.version, i64(v.hint), allocator)
+}
+
+// rows_encode is rows as a list file, after prefix bytes left zero.
+rows_encode :: proc(source: Source, id: string, rows: []Row, fetched: i64, version: List_Version, hint: i64, allocator: runtime.Allocator, prefix := 0) -> []u8 {
 	text := 0
-	for &r in v.rows[:n] {
+	for &r in rows {
 		text += len(r.title) + len(r.artist) + len(r.album) + len(r.added) + len(r.duration) + len(r.cover)
 		text += len(r.artists) * size_of(Artist_Ref)
 	}
-	w, h := writer_make(v.source, small_str(&v.id), n, text, allocator)
-	h.fetched = v.fetched
-	h.version = v.version
-	h.hint = i64(v.hint)
-	rows := ([^]File_Row)(raw_data(w.buf[size_of(File_Header):]))[:n]
-	for &r, i in v.rows[:n] {
-		rows[i] = {
+	w, h := writer_make(source, id, len(rows), text, allocator, prefix)
+	h.fetched = fetched
+	h.version = version
+	h.hint = hint
+	recs := ([^]File_Row)(raw_data(w.buf[size_of(File_Header):]))[:len(rows)]
+	for &r, i in rows {
+		recs[i] = {
 			text     = {put(&w, r.title), put(&w, r.artist), put(&w, r.album), put(&w, r.added), put(&w, r.duration), put(&w, r.cover)},
 			artists  = put(&w, string(slice.to_bytes(r.artists))),
 			seconds  = i32(r.seconds),
@@ -300,4 +308,51 @@ file_read :: proc(path: string, allocator: runtime.Allocator) -> ([]u8, bool) {
 		got += n
 	}
 	return buf, true
+}
+
+// The queue's file (see player.odin) is a Queue_Header, then the queue as
+// a list file of source .Search and id "queue". The header is a multiple
+// of 16 bytes, so the list file after it is as aligned as file_read's
+// buffer.
+
+QUEUE_MAGIC :: 0x5551_4654 // "TFQU"
+QUEUE_FORMAT :: 1
+
+Queue_Header :: struct {
+	magic:    u32,
+	format:   u32,
+	index:    i64, // the current item
+	sample:   i64, // where in it, in samples
+	rate:     i64, // the rate sample is in, 0 if unknown
+	list_key: u64, // Playback.list_key
+	_:        u64,
+}
+
+#assert(size_of(Queue_Header) % 16 == 0)
+
+// queue_encode is a queue file of rows.
+queue_encode :: proc(head: Queue_Header, rows: []Row, allocator: runtime.Allocator) -> []u8 {
+	buf := rows_encode(.Search, "queue", rows, 0, {}, i64(len(rows)), allocator, size_of(Queue_Header))
+	h := (^Queue_Header)(raw_data(buf))
+	h^ = head
+	h.magic = QUEUE_MAGIC
+	h.format = QUEUE_FORMAT
+	return buf
+}
+
+// queue_decode reads a queue file read whole into data, 16-byte aligned.
+// The rows' strings point into data.
+queue_decode :: proc(data: []u8, allocator: runtime.Allocator) -> (head: Queue_Header, rows: []Row, err: File_Error) {
+	if len(data) < size_of(Queue_Header) {
+		return {}, nil, .Short
+	}
+	head = (^Queue_Header)(raw_data(data))^
+	if head.magic != QUEUE_MAGIC {
+		return {}, nil, .Magic
+	}
+	if head.format != QUEUE_FORMAT {
+		return {}, nil, .Format
+	}
+	_, rows, err = list_decode(data[size_of(Queue_Header):], .Search, "queue", allocator)
+	return
 }
