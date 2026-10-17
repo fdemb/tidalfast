@@ -30,7 +30,7 @@ import "../ui"
 
 CLEAR_COLOR :: render.Color{0.063, 0.063, 0.063, 1}
 
-STATE_VERSION :: 21
+STATE_VERSION :: 22
 
 FRAME_HISTORY :: 120
 
@@ -72,6 +72,10 @@ State :: struct {
 	ui:           ui.State,
 	library:      Library,
 	data:         Data,
+	settings:     Settings, // see settings.odin
+	// The file's volume while TIDALFAST_VOLUME stands in for it, so the
+	// override isn't saved unless the slider moves.
+	volume_file:  Maybe(f32),
 	playback:     Playback,
 	search:       Search,
 	pending:      Pending, // what the frame being built asked for, done after it
@@ -292,6 +296,8 @@ start :: proc(s: ^State, shell: ^platform.Shell) {
 	if s.data.fake {
 		s.rows = make_rows()
 	}
+	s.data.settings_path = settings_default_path(runtime.heap_allocator())
+	s.settings, _ = settings_load(s.data.settings_path)
 	playback_start(s, shell)
 	search_init(s)
 	// TIDALFAST_BENCH=1 scrolls the library's track table, =text the text
@@ -354,7 +360,7 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input, shell: ^platfor
 	data_update(s, input.time)
 	lists_window_key(s, bool(input.key_window))
 	playback_update(s, events)
-	s.ui.scrollbars = s.playback.settings.scrollbars
+	s.ui.scrollbars = s.settings.scrollbars
 
 	// Backtick toggles the frame-time overlay. Cmd-1, 2 and 3 switch between
 	// the library and the phase 2 and phase 1 test screens.
