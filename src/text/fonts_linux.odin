@@ -15,7 +15,6 @@ package text
 import "core:c"
 import "core:hash"
 import "core:math"
-import "core:strings"
 import "core:sys/posix"
 
 import "../kbts"
@@ -179,7 +178,7 @@ raster_destroy :: proc(r: ^Raster) {
 @(private)
 font_ref_release :: proc(ref: Font_Ref) {}
 
-// load_primary loads one of the Inter faces from its #load data. A debug
+// load_primary loads one of the built-in faces from its #load data. A debug
 // build, which hot reload may replace, takes a copy; a release build reads
 // the image's bytes in place, as on macOS.
 @(private)
@@ -194,16 +193,18 @@ load_primary :: proc(t: ^State, font: Font, data: []byte) -> bool {
 	if !load_face(face, nil, data, 0, false) {
 		return false
 	}
-	face.name = hash.fnv64a(transmute([]byte)strings.concatenate({"Inter ", FONT_NAMES[font]}, context.temp_allocator))
+	face.name = hash.fnv64a(transmute([]byte)FONT_NAMES[font])
 	return true
 }
 
 @(private)
 FONT_NAMES := [Font]string {
-	.Regular  = "Regular",
-	.Medium   = "Medium",
-	.Semibold = "SemiBold",
-	.Bold     = "Bold",
+	.Regular   = "Inter Regular",
+	.Medium    = "Inter Medium",
+	.Semibold  = "Inter SemiBold",
+	.Bold      = "Inter Bold",
+	.Icon      = "Phosphor Bold",
+	.Icon_Fill = "Phosphor Fill",
 }
 
 // face_native_init notes which face of a collection this is and whether
@@ -265,10 +266,12 @@ load :: proc(l: ^Loader, req: Load_Request) -> (res: Load_Result) {
 	res.request = req
 	r := req.codepoint
 	WEIGHTS := [Font]c.int {
-		.Regular  = 80,
-		.Medium   = 100,
-		.Semibold = 180,
-		.Bold     = 200,
+		.Regular   = 80,
+		.Medium    = 100,
+		.Semibold  = 180,
+		.Bold      = 200,
+		.Icon      = 200,
+		.Icon_Fill = 200,
 	}
 	pattern := FcPatternCreate()
 	defer FcPatternDestroy(pattern)

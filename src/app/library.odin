@@ -8,7 +8,9 @@ import "core:fmt"
 import "core:math"
 import "core:strings"
 
+import "../audio"
 import "../render"
+import "../text"
 import "../ui"
 
 // Neutral greys and a cyan accent.
@@ -184,11 +186,11 @@ draw_library :: proc(s: ^State, w, h: f32) {
 draw_history_buttons :: proc(s: ^State) {
 	ui.row("", {}, ui.fill(), ui.px(32))
 	ui.spacer(ui.px(10))
-	if history_button("‹###back", "Back", history_can_back(s)).clicked {
+	if history_button(text.ICON_CARET_LEFT + "###back", "Back", history_can_back(s)).clicked {
 		pending_set(s, {kind = .Back})
 	}
 	ui.spacer(ui.px(2))
-	if history_button("›###forward", "Forward", history_can_forward(s)).clicked {
+	if history_button(text.ICON_CARET_RIGHT + "###forward", "Forward", history_can_forward(s)).clicked {
 		pending_set(s, {kind = .Forward})
 	}
 }
@@ -200,7 +202,7 @@ history_button :: proc(id, name: string, enabled: bool) -> ui.Signal {
 	if !enabled {
 		flags += {.Disabled}
 	}
-	ui.text_style(.Medium, 20, TEXT if enabled else DIM)
+	ui.text_style(.Icon, 16, TEXT if enabled else DIM)
 	b := ui.box_make(id, flags, ui.px(24), ui.px(24))
 	b.text_align = .Center
 	b.radius = 12
@@ -747,6 +749,14 @@ draw_player_bar :: proc(s: ^State, w: f32) {
 		{
 			ui.row("", {}, ui.fill(), ui.px(36))
 			ui.spacer(ui.fill())
+			shuffle := s.playback.settings.shuffle
+			shuffle_sig := toggle_button("shuffle", text.ICON_SHUFFLE, "Shuffle", "On" if shuffle else "Off", shuffle)
+			if shuffle_sig.clicked {
+				playback_set_shuffle(s, !shuffle)
+				ui.data_changed() // this frame drew the old state
+			}
+			ui.tooltip(shuffle_sig, "Shuffle")
+			ui.spacer(ui.px(16))
 			prev := skip_button("prev", false)
 			if prev.clicked {
 				playback_previous(s)
@@ -765,6 +775,19 @@ draw_player_bar :: proc(s: ^State, w: f32) {
 				playback_next(s)
 			}
 			ui.tooltip(next, "Next")
+			ui.spacer(ui.px(16))
+			repeat := s.playback.settings.repeat
+			REPEAT_NAMES := [audio.Repeat]string {
+				.Off = "Off",
+				.All = "All",
+				.One = "One",
+			}
+			repeat_sig := toggle_button("repeat", text.ICON_REPEAT_ONCE if repeat == .One else text.ICON_REPEAT, "Repeat", REPEAT_NAMES[repeat], repeat != .Off)
+			if repeat_sig.clicked {
+				playback_set_repeat(s, audio.Repeat((int(repeat) + 1) % len(audio.Repeat)))
+				ui.data_changed()
+			}
+			ui.tooltip(repeat_sig, "Repeat one" if repeat == .One else "Repeat")
 			ui.spacer(ui.fill())
 		}
 		ui.spacer(ui.px(6))
@@ -852,67 +875,48 @@ draw_progress :: proc(s: ^State, position, duration: f64, active: bool) {
 	level.radius = 2
 }
 
-// The transport glyphs are Inter's triangles and plain rects: the media
-// symbols in the Unicode blocks come out as colour emoji.
-
 play_button :: proc(playing: bool) -> ui.Signal {
-	b := ui.row("play", {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects, .Draw_Active_Effects}, ui.px(36), ui.px(36))
+	ui.text_style(.Icon_Fill, 18, PANEL)
+	id := text.ICON_PAUSE + "###play" if playing else text.ICON_PLAY + "###play"
+	b := ui.box_make(id, {.Clickable, .Focusable, .Draw_Background, .Draw_Text, .Draw_Hot_Effects, .Draw_Active_Effects}, ui.px(36), ui.px(36))
+	b.text_align = .Center
 	b.background = TEXT
 	b.radius = 18
 	b.hover_color = {1, 1, 1, 0.5}
 	b.active_color = {0, 0, 0, 0.15}
 	ui.accessible(b, .Button, "Pause" if playing else "Play")
-	if playing {
-		ui.spacer(ui.fill())
-		pause_bar()
-		ui.spacer(ui.px(4))
-		pause_bar()
-		ui.spacer(ui.fill())
-	} else {
-		ui.spacer(ui.px(2))
-		ui.text_style(.Bold, 14, PANEL)
-		icon := ui.label("▶", ui.fill(), ui.fill())
-		icon.text_align = .Center
-	}
 	return ui.signal(b)
-}
-
-pause_bar :: proc() {
-	ui.column("", {}, ui.px(4), ui.fill())
-	ui.spacer(ui.fill())
-	bar := ui.box_make("", {.Draw_Background}, ui.fill(), ui.px(14))
-	bar.background = PANEL
-	bar.radius = 1
-	ui.spacer(ui.fill())
 }
 
 skip_button :: proc(id: string, forward: bool) -> ui.Signal {
-	b := ui.row(id, {.Clickable, .Focusable, .Draw_Hot_Effects, .Draw_Active_Effects}, ui.px(36), ui.px(36))
+	ui.text_style(.Icon_Fill, 18, SECONDARY)
+	icon := text.ICON_SKIP_FORWARD if forward else text.ICON_SKIP_BACK
+	b := ui.box_make(fmt.tprintf("%s###%s", icon, id), {.Clickable, .Focusable, .Draw_Text, .Draw_Hot_Effects, .Draw_Active_Effects}, ui.px(36), ui.px(36))
+	b.text_align = .Center
 	b.radius = 18
 	ui.accessible(b, .Button, "Next" if forward else "Previous")
-	ui.spacer(ui.fill())
-	if forward {
-		skip_glyph("▶")
-		skip_stop()
-	} else {
-		skip_stop()
-		skip_glyph("◀")
-	}
-	ui.spacer(ui.fill())
 	return ui.signal(b)
 }
 
-skip_glyph :: proc(s: string) {
-	ui.text_style(.Regular, 12, SECONDARY)
-	ui.label(s, ui.text_size(), ui.fill())
-}
-
-skip_stop :: proc() {
-	ui.column("", {}, ui.px(2), ui.fill())
-	ui.spacer(ui.fill())
-	bar := ui.box_make("", {.Draw_Background}, ui.fill(), ui.px(11))
-	bar.background = SECONDARY
-	ui.spacer(ui.fill())
+// toggle_button is a transport button lit while on, with a dot under it.
+toggle_button :: proc(id, icon, name, value: string, on: bool) -> ui.Signal {
+	b := ui.column(id, {.Clickable, .Focusable, .Draw_Hot_Effects, .Draw_Active_Effects}, ui.px(36), ui.px(36))
+	b.radius = 18
+	ui.accessible(b, .Button, name, value)
+	ui.spacer(ui.px(6))
+	ui.text_style(.Icon, 18, ACCENT if on else SECONDARY)
+	glyph := ui.label(icon, ui.fill(), ui.px(20))
+	glyph.text_align = .Center
+	ui.spacer(ui.px(2))
+	{
+		ui.row("", {}, ui.fill(), ui.px(4))
+		ui.spacer(ui.fill())
+		dot := ui.box_make("", {.Draw_Background}, ui.px(4), ui.px(4))
+		dot.background = ACCENT if on else {}
+		dot.radius = 2
+		ui.spacer(ui.fill())
+	}
+	return ui.signal(b)
 }
 
 // draw_volume is a slider: press or drag along it to set the volume. A

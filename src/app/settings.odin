@@ -1,7 +1,7 @@
 package app
 
-// Settings: the volume, bit-perfect output, hog mode and how lists show
-// their scrollbars. They live in a small JSON file, ~/Library/Application Support/tidalfast/settings.json, or
+// Settings: the volume, shuffle and repeat, bit-perfect output, hog mode
+// and how lists show their scrollbars. They live in a small JSON file, ~/Library/Application Support/tidalfast/settings.json, or
 // wherever TIDALFAST_SETTINGS points. A worker writes it, so a click never
 // waits on the disk. Saves go one at a time and only the newest settings
 // are written (settings_queue).
@@ -36,6 +36,8 @@ Settings :: struct {
 	device:      audio.Device_Change, // rate 0 when no device is changed
 	scrollbars:  ui.Scrollbars,
 	volume:      f32, // 0 to 1
+	shuffle:     bool,
+	repeat:      audio.Repeat,
 }
 
 VOLUME_DEFAULT :: 0.7
@@ -48,6 +50,8 @@ Settings_File :: struct {
 	scrollbars:    ui.Scrollbars,
 	device_change: Maybe(Device_Change_File) `json:"device_change,omitempty"`,
 	volume:        Maybe(f32) `json:"volume,omitempty"`, // missing in files from before it was saved
+	shuffle:       bool,
+	repeat:        audio.Repeat,
 }
 
 @(private = "file")
@@ -93,7 +97,7 @@ settings_decode_json :: proc(data: []u8) -> (st: Settings, ok: bool) {
 	if json.unmarshal(data, &f, allocator = context.temp_allocator) != nil {
 		return {volume = VOLUME_DEFAULT}, false
 	}
-	st = {bit_perfect = f.bit_perfect, hog = f.hog, scrollbars = f.scrollbars, volume = clamp(f.volume.? or_else VOLUME_DEFAULT, 0, 1)}
+	st = {bit_perfect = f.bit_perfect, hog = f.hog, scrollbars = f.scrollbars, volume = clamp(f.volume.? or_else VOLUME_DEFAULT, 0, 1), shuffle = f.shuffle, repeat = f.repeat}
 	if c, has := f.device_change.?; has && c.rate != 0 && len(c.uid) <= len(st.device.uid) {
 		st.device = {orig_rate = c.orig_rate, orig_format = c.orig_format, rate = c.rate}
 		st.device.uid_len = copy(st.device.uid[:], c.uid)
@@ -115,6 +119,8 @@ settings_save :: proc(path: string, st: Settings) -> bool {
 		hog         = st.hog,
 		scrollbars  = st.scrollbars,
 		volume      = st.volume,
+		shuffle     = st.shuffle,
+		repeat      = st.repeat,
 	}
 	if st.device.rate != 0 {
 		c := st.device
