@@ -782,6 +782,31 @@ show_code :: proc(t: ^testing.T, s: ^app.State, interval: f32 = 1, expires: f32 
 	testing.expect(t, shows(login_screen(t, s, loc = loc), "ABCDE"), "the code shows", loc = loc)
 }
 
+// A code that expired is replaced, whether a poll found it expired or it
+// ran out while TIDAL couldn't be reached. The card says so and asks TIDAL
+// for a new one.
+@(test)
+expired_code_is_replaced :: proc(t: ^testing.T) {
+	for kind in ([]tidal.Error_Kind{.Timeout, .Network}) {
+		s := data_state()
+		show_code(t, s, expires = 0)
+		polls := data_jobs(&s.data)
+		if testing.expect_value(t, len(polls), 1) {
+			res := app.Result{job = polls[0], err = kind}
+			app.handle_result(s, &res, 0)
+			screen := login_screen(t, s)
+			testing.expect(t, shows(screen, "The code expired. Here's a new one."), screen)
+			testing.expect(t, !shows(screen, "ABCDE"), screen)
+			starts := data_jobs(&s.data)
+			if testing.expectf(t, len(starts) == 1, "%v: queued %v", kind, starts) {
+				_, start := starts[0].payload.(app.Login_Start_Job)
+				testing.expectf(t, start, "%v asks for a new code: %v", kind, starts[0].payload)
+			}
+		}
+		data_state_free(s)
+	}
+}
+
 // A code the queue refused isn't asked for once the user has moved on to
 // the PKCE login, and going back to the code login asks for one code.
 @(test)
