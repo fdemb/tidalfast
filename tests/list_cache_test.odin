@@ -543,8 +543,9 @@ queue_gets_the_rest_of_a_closed_list :: proc(t: ^testing.T) {
 	testing.expect(t, app.lru_find(d, .Playlist, "pl") >= 0, "the list is kept once it loaded")
 }
 
-// Playing a list that's still loading writes the queue's file at play and
-// once more when the list has loaded, with every row, not once per page.
+// Playing a list that's still loading writes the queue's file at play,
+// when its loaded rows double, and once more when the list has loaded,
+// with every row. Before this it was written once per page.
 @(test)
 queue_file_is_written_once_its_list_loads :: proc(t: ^testing.T) {
 	dir := cache_dir("queue-pages")
@@ -555,16 +556,13 @@ queue_file_is_written_once_its_list_loads :: proc(t: ^testing.T) {
 	s.playback.player = audio.create(no_wake, 0, null_output = true)
 	defer app.playback_shutdown(s)
 	d := &s.data
-	sidebar(s, updated = 1, count = 300)
+	sidebar(s, updated = 1, count = 3000)
 	serve(s, rows_of(LIKED_IDS))
 	app.select_playlist(s, 2)
 	run_disk(s)
-	rows := rows_of(ids_from(1000, 1300))
+	rows := rows_of(ids_from(1000, 4000))
 
-	writes := 0
-	last: []u8
-	pages := 0
-	played := false
+	writes, pages := 0, 0
 	for {
 		job, ok := jobs.try_pop(&d.queue)
 		if !ok {
@@ -577,9 +575,8 @@ queue_file_is_written_once_its_list_loads :: proc(t: ^testing.T) {
 		res := app.Result{job = job, rows = rows[lo:min(lo + int(job.limit), len(rows))], total = len(rows)}
 		app.handle_result(s, &res, 0)
 		pages += 1
-		if !played {
+		if pages == 1 {
 			app.playback_play_row(s, 0)
-			played = true
 		}
 		app.playback_update(s, nil)
 		for {
@@ -587,25 +584,21 @@ queue_file_is_written_once_its_list_loads :: proc(t: ^testing.T) {
 			if !dok {
 				break
 			}
-			if dj.op == .Write_Queue {
-				writes += 1
-				delete(last, runtime.heap_allocator())
-				last = dj.blob
-			} else {
-				delete(dj.blob, runtime.heap_allocator())
+			writes += int(dj.op == .Write_Queue)
+			disk, reply := app.disk_run(d, dj)
+			if reply {
+				app.handle_result(s, &disk, 0)
 			}
+			app.result_free(&disk)
 		}
 	}
-	defer delete(last, runtime.heap_allocator())
-	testing.expect(t, pages > 2, "the list came in several pages")
-	testing.expect_value(t, writes, 2)
-	aligned, _ := mem.alloc_bytes_non_zeroed(len(last), 16, context.temp_allocator)
-	copy(aligned, last)
-	app.queue_seal(aligned)
-	_, got, err := app.queue_decode(aligned, context.temp_allocator)
-	testing.expect_value(t, err, app.File_Error.None)
-	if testing.expect_value(t, len(got), 300) {
-		testing.expect_value(t, got[299].id, 1299)
+	testing.expect(t, pages > 20, "the list came in many pages")
+	testing.expectf(t, writes > 1 && writes <= 12, "%d queue writes for %d pages", writes, pages)
+	res, _ := app.disk_run(d, {op = .Read_Queue, key = 7})
+	defer app.result_free(&res)
+	testing.expect(t, res.hit, "the queue's file reads back")
+	if testing.expect_value(t, len(res.rows), 3000) {
+		testing.expect_value(t, res.rows[2999].id, 3999)
 	}
 }
 

@@ -8,8 +8,9 @@
 // The queue path copies the rows the way queue_file does, then encodes.
 // Each run times one call per size and kind, the sizes and kinds taking
 // turns, into a new heap block each time as in the app. -gap=100 sleeps
-// before each call, as a save between idle frames comes on a cold cache. The blob is freed
-// outside the timed region, since the disk thread frees it.
+// before each call, as a save between idle frames comes on a cold cache.
+// The blob is freed outside the timed region, since the disk thread frees
+// it.
 package save_cost
 
 import "base:runtime"
@@ -37,11 +38,11 @@ Kind :: enum {
 }
 
 Sample :: struct {
-	ns:     [dynamic]i64,
-	seal_ns: [dynamic]i64, // filling in the sum, on the disk thread
-	make_ns: [dynamic]i64, // allocating and zeroing it, which writer_make does
-	bytes:  int,
-	allocs: int,
+	ns:      [dynamic]i64,
+	seal_ns: [dynamic]i64,
+	make_ns: [dynamic]i64,
+	bytes:   int,
+	allocs:  int,
 }
 
 main :: proc() {
@@ -82,7 +83,7 @@ main :: proc() {
 		}
 	}
 	sink: u64
-	for run in -1 ..< opt.runs { // run -1 warms up and isn't kept
+	for run in -1 ..< opt.runs {
 		for i in 0 ..< len(sizes) {
 			for k in Kind {
 				time.sleep(time.Duration(opt.gap) * time.Millisecond)
@@ -135,9 +136,7 @@ timed_seal :: proc(blob: []u8, k: Kind) -> i64 {
 	return i64(time.tick_since(start))
 }
 
-// timed_make times allocating and zeroing the file on its own, outside the
-// save's timed region, to show what limits it.
-
+// timed_make times allocating and zeroing a block of n bytes.
 timed_make :: proc(n: int, sink: ^u64) -> i64 {
 	start := time.tick_now()
 	b := make([]u8, n)
@@ -194,8 +193,8 @@ count_allocs :: proc(d: ^app.Data, rows: []app.Row, k: Kind) -> (bytes, allocs: 
 	return
 }
 
-// check decodes the sealed file and fails unless it holds the n rows that
-// went in, so a run can't time work that didn't happen.
+// check decodes the sealed file and exits unless it holds the n rows that
+// went in.
 check :: proc(blob: []u8, n: int, k: Kind) -> u64 {
 	data, _ := mem.alloc_bytes_non_zeroed(len(blob), 16, context.temp_allocator)
 	copy(data, blob)

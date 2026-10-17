@@ -102,9 +102,8 @@ writer_make :: proc(source: Source, id: string, count, text: int, allocator: run
 	return
 }
 
-// file_seal fills in a list or sidebar file's sum. The encode procs leave
-// it out and the disk thread seals the file before it writes, since hashing
-// a 10,000-row list takes milliseconds.
+// file_seal fills in a list or sidebar file's sum, which the encode procs
+// leave out.
 file_seal :: proc(file: []u8) {
 	h := (^File_Header)(raw_data(file))
 	h.sum = hash.fnv64a(file[size_of(File_Header):])
@@ -341,6 +340,7 @@ queue_encode :: proc(head: Queue_Header, rows: []Row, allocator: runtime.Allocat
 	return buf
 }
 
+// queue_seal fills in a queue file's sum, which queue_encode leaves out.
 queue_seal :: proc(file: []u8) {
 	file_seal(file[size_of(Queue_Header):])
 }

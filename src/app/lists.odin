@@ -885,6 +885,12 @@ disk_run :: proc(d: ^Data, job: Job) -> (res: Result, reply: bool) {
 		queue_read(&res, path)
 		return res, true
 	}
+	#partial switch job.op {
+	case .Write_Queue:
+		queue_seal(job.blob)
+	case .Write:
+		file_seal(job.blob)
+	}
 	sync.guard(&d.lists.mutex)
 	if job.auth != sync.atomic_load(&d.auth_gen) {
 		return // that account is gone
@@ -892,10 +898,8 @@ disk_run :: proc(d: ^Data, job: Job) -> (res: Result, reply: bool) {
 	switch job.op {
 	case .Read, .Read_Queue:
 	case .Write_Queue:
-		queue_seal(job.blob)
 		disk_write(dir, path, job.blob)
 	case .Write:
-		file_seal(job.blob)
 		if disk_write(dir, path, job.blob) {
 			disk_evict(dir, LIST_DISK_BUDGET, ".tfl")
 		}

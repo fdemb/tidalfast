@@ -25,6 +25,7 @@ package app
 // A PKCE login asks for HI_RES_LOSSLESS; a device-code login can only get
 // LOSSLESS. Either may come back as DASH (see tidal.resolve_stream).
 
+import "base:intrinsics"
 import "base:runtime"
 import "core:fmt"
 import "core:log"
@@ -1029,12 +1030,9 @@ queue_save :: proc(s: ^State) {
 	if pb.index >= 0 {
 		key = 14695981039346656037
 		ended := pb.status.state == .Ended && pb.status.serial == pb.cur.serial
-		// Each page of the queue's list changes the queue. Writing the whole
-		// queue for each one costs milliseconds a page, so it's written
-		// again once the list has loaded, or stopped on an error.
 		count, loaded := u64(len(pb.entries)), u64(pb.loaded)
 		if v := queue_list(&s.data); v != nil && v.error.len == 0 && !view_complete(v) {
-			count, loaded = 0, max(u64)
+			count, loaded = 0, floor_pow2(loaded)
 		}
 		for v in ([]u64{u64(pb.queue_gen), count, loaded, u64(pb.index), u64(pb.cur.track), u64(pb.paused), u64(pb.status.seek_id), u64(ended)}) {
 			key = (key ~ v) * 1099511628211
@@ -1049,6 +1047,11 @@ queue_save :: proc(s: ^State) {
 		return
 	}
 	disk_push(&s.data, {op = .Write_Queue, blob = queue_file(pb, runtime.heap_allocator())})
+}
+
+@(private = "file")
+floor_pow2 :: proc(n: u64) -> u64 {
+	return 0 if n == 0 else 1 << (63 - intrinsics.count_leading_zeros(n))
 }
 
 // queue_file is the queue as its file, at the current position.
