@@ -221,6 +221,18 @@ search_close :: proc(s: ^State) {
 	sr.fake_counts = {}
 }
 
+// search_forget drops the query, its results and the field's text, for a
+// sign-out: the next account doesn't see this one's search.
+search_forget :: proc(s: ^State) {
+	sr := &s.search
+	search_stop(s)
+	found_free(sr)
+	ui.field_set_text(&sr.field, "")
+	sr.query = {}
+	sr.error = {}
+	sr.browsing = false
+}
+
 // search_leave is for select_playlist: the sidebar's list replaces
 // whatever was browsed.
 search_leave :: proc(s: ^State) -> (was_browsing: bool) {
