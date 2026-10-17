@@ -4,6 +4,8 @@ import "core:encoding/base64"
 import "core:encoding/json"
 import "core:fmt"
 import "core:math"
+import "core:math/rand"
+import "core:slice"
 import "core:sync"
 import "core:testing"
 import "core:thread"
@@ -301,23 +303,74 @@ play_queue :: proc(t: ^testing.T) {
 		{id = 5, album_id = 9, track_num = 4},
 		{id = 6, album_id = 8, track_num = 1},
 	}
-	testing.expect_value(t, audio.queue_next(q, -1), 0)
-	testing.expect_value(t, audio.queue_next(q, 1), 3)
-	testing.expect_value(t, audio.queue_next(q, 5), -1)
-	testing.expect_value(t, audio.queue_previous(q, 3), 1)
-	testing.expect_value(t, audio.queue_previous(q, 0), -1)
+	order := []int{0, 1, 2, 3, 4, 5}
+	testing.expect_value(t, audio.queue_next(q, order, -1), 0)
+	testing.expect_value(t, audio.queue_next(q, order, 1), 3)
+	testing.expect_value(t, audio.queue_next(q, order, 5), -1)
+	testing.expect_value(t, audio.queue_previous(q, order, 3), 1)
+	testing.expect_value(t, audio.queue_previous(q, order, 0), -1)
 	// Previous restarts the track after a few seconds, else goes back.
-	testing.expect_value(t, audio.queue_previous_action(q, 3, 10), 3)
-	testing.expect_value(t, audio.queue_previous_action(q, 3, 1), 1)
-	testing.expect_value(t, audio.queue_previous_action(q, 0, 1), 0)
+	testing.expect_value(t, audio.queue_previous_action(q, order, 3, 10), 3)
+	testing.expect_value(t, audio.queue_previous_action(q, order, 3, 1), 1)
+	testing.expect_value(t, audio.queue_previous_action(q, order, 0, 1), 0)
 	// Album gain when the neighbours are the same album in order.
-	testing.expect_value(t, audio.queue_gain_mode(q, 0), audio.Gain_Mode.Album)
-	testing.expect_value(t, audio.queue_gain_mode(q, 1), audio.Gain_Mode.Album)
-	testing.expect_value(t, audio.queue_gain_mode(q, 3), audio.Gain_Mode.Track) // a hole before it
-	testing.expect_value(t, audio.queue_gain_mode(q, 4), audio.Gain_Mode.Track)
-	testing.expect_value(t, audio.queue_gain_mode(q, 5), audio.Gain_Mode.Track)
+	testing.expect_value(t, audio.queue_gain_mode(q, order, 0), audio.Gain_Mode.Album)
+	testing.expect_value(t, audio.queue_gain_mode(q, order, 1), audio.Gain_Mode.Album)
+	testing.expect_value(t, audio.queue_gain_mode(q, order, 3), audio.Gain_Mode.Track) // a hole before it
+	testing.expect_value(t, audio.queue_gain_mode(q, order, 4), audio.Gain_Mode.Track)
+	testing.expect_value(t, audio.queue_gain_mode(q, order, 5), audio.Gain_Mode.Track)
 	shuffled := []audio.Queue_Entry{{id = 1, album_id = 7, track_num = 3}, {id = 2, album_id = 7, track_num = 1}}
-	testing.expect_value(t, audio.queue_gain_mode(shuffled, 0), audio.Gain_Mode.Track)
+	testing.expect_value(t, audio.queue_gain_mode(shuffled, []int{0, 1}, 0), audio.Gain_Mode.Track)
+}
+
+@(test)
+play_order :: proc(t: ^testing.T) {
+	q := []audio.Queue_Entry {
+		{id = 1, album_id = 7, track_num = 1},
+		{id = 2, album_id = 7, track_num = 2},
+		{id = 0}, // not playable
+		{id = 4, album_id = 7, track_num = 3},
+		{id = 5, album_id = 9, track_num = 4},
+	}
+	order := []int{3, 0, 4, 2, 1}
+	testing.expect_value(t, audio.queue_next(q, order, -1), 3)
+	testing.expect_value(t, audio.queue_next(q, order, 3), 0)
+	testing.expect_value(t, audio.queue_next(q, order, 4), 1) // past the hole
+	testing.expect_value(t, audio.queue_next(q, order, 1), -1)
+	testing.expect_value(t, audio.queue_previous(q, order, 1), 4)
+	testing.expect_value(t, audio.queue_previous(q, order, 3), -1)
+	// Tracks 1 and 2 of album 7 are neighbours in the list but not in
+	// this order, so they get track gain; 3 then 1 aren't one apart.
+	testing.expect_value(t, audio.queue_gain_mode(q, order, 0), audio.Gain_Mode.Track)
+	testing.expect_value(t, audio.queue_gain_mode(q, order, 1), audio.Gain_Mode.Track)
+	testing.expect_value(t, audio.queue_gain_mode(q, []int{0, 1, 2, 3, 4}, 1), audio.Gain_Mode.Album)
+
+	// Repeat all goes round, repeat one stays unless the user skips.
+	testing.expect_value(t, audio.queue_after(q, order, 1, .Off, false), -1)
+	testing.expect_value(t, audio.queue_after(q, order, 1, .All, false), 3)
+	testing.expect_value(t, audio.queue_after(q, order, 4, .One, false), 4)
+	testing.expect_value(t, audio.queue_after(q, order, 4, .One, true), 1)
+	testing.expect_value(t, audio.queue_after(q, order, 1, .One, true), 3)
+	// A queue of one track on repeat all plays it again.
+	one := []audio.Queue_Entry{{id = 9}}
+	testing.expect_value(t, audio.queue_after(one, []int{0}, 0, .All, false), 0)
+	testing.expect_value(t, audio.queue_after(one, []int{0}, 0, .Off, false), -1)
+
+	// queue_order: the head first, then the rest in list order, or every
+	// one of the rest once in some order when shuffled.
+	o := make([]int, 6, context.temp_allocator)
+	audio.queue_order(o, nil, false)
+	testing.expect(t, slice.equal(o, []int{0, 1, 2, 3, 4, 5}))
+	audio.queue_order(o, {4, 1, 4, 9}, false)
+	testing.expect(t, slice.equal(o, []int{4, 1, 0, 2, 3, 5}))
+	r := rand.create(42)
+	gen := rand.default_random_generator(&r)
+	audio.queue_order(o, {2}, true, gen)
+	testing.expect_value(t, o[0], 2)
+	sorted := slice.clone(o, context.temp_allocator)
+	slice.sort(sorted)
+	testing.expect(t, slice.equal(sorted, []int{0, 1, 2, 3, 4, 5}))
+	testing.expect(t, !slice.equal(o, []int{2, 0, 1, 3, 4, 5}))
 }
 
 @(private = "file")

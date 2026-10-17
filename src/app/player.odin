@@ -88,6 +88,7 @@ Playback :: struct {
 	has_arena:       bool,
 	items:           []Queue_Item,
 	entries:         []audio.Queue_Entry,
+	order:           []int, // the items in play order, see queue_reorder
 	loaded:          int, // rows loaded when the snapshot was taken
 	list_key:        u64, // list_key of the list the queue came from
 	view_gen:        u32,
@@ -310,7 +311,17 @@ queue_reset :: proc(pb: ^Playback, n: int) -> runtime.Allocator {
 	a := vmem.arena_allocator(&pb.arena)
 	pb.items = make([]Queue_Item, n, a)
 	pb.entries = make([]audio.Queue_Entry, n, a)
+	pb.order = make([]int, n, a)
+	audio.queue_order(pb.order, nil, false)
 	return a
+}
+
+// queue_reorder puts the queue in list order, or with shuffle on, the
+// items in head and then the rest shuffled.
+@(private = "file")
+queue_reorder :: proc(pb: ^Playback, head: []int) {
+	shuffle := pb.settings.shuffle
+	audio.queue_order(pb.order, head if shuffle else nil, shuffle)
 }
 
 // queue_fill makes queue item i row, its strings copied with a.
@@ -336,6 +347,7 @@ playback_play_row :: proc(s: ^State, i: int) {
 		return
 	}
 	queue_snapshot(s)
+	queue_reorder(&s.playback, {i})
 	s.playback.queue_gen += 1
 	start_item(s, i)
 }
@@ -501,7 +513,7 @@ playback_result :: proc(s: ^State, res: ^Result) {
 		return
 	}
 	info := res.stream
-	mode := audio.queue_gain_mode(pb.entries, t.item)
+	mode := audio.queue_gain_mode(pb.entries, pb.order, t.item)
 	rg := audio.Replay_Gain{info.track_gain, info.track_peak, info.album_gain, info.album_peak}
 	heap := runtime.heap_allocator()
 	source_forget_url(t)
@@ -543,7 +555,9 @@ lossy_message :: proc(codec: string) -> string {
 @(private = "file")
 skip_failed :: proc(s: ^State) {
 	pb := &s.playback
-	n := audio.queue_next(pb.entries, pb.index)
+	// Not round again on repeat: a queue where nothing plays would go on
+	// asking for streams.
+	n := audio.queue_next(pb.entries, pb.order, pb.index)
 	if n < 0 {
 		source_clear(&pb.cur)
 		pb.paused = true
@@ -556,7 +570,7 @@ skip_failed :: proc(s: ^State) {
 
 playback_next :: proc(s: ^State) {
 	pb := &s.playback
-	if n := audio.queue_next(pb.entries, pb.index); n >= 0 {
+	if n := audio.queue_after(pb.entries, pb.order, pb.index, pb.settings.repeat, user = true); n >= 0 {
 		start_item(s, n)
 	}
 }
@@ -566,12 +580,43 @@ playback_previous :: proc(s: ^State) {
 	if pb.index < 0 {
 		return
 	}
-	i := audio.queue_previous_action(pb.entries, pb.index, playback_position(s))
+	i := audio.queue_previous_action(pb.entries, pb.order, pb.index, playback_position(s))
 	if i == pb.index {
 		playback_seek(s, 0)
 	} else {
 		start_item(s, i)
 	}
+}
+
+// playback_set_shuffle turns shuffle on or off. Turning it on shuffles
+// what's after the current track; off goes back to list order from it.
+playback_set_shuffle :: proc(s: ^State, on: bool) {
+	pb := &s.playback
+	pb.settings.shuffle = on
+	settings_queue(&s.data, settings_to_save(pb))
+	if pb.index >= 0 {
+		queue_reorder(pb, {pb.index})
+		next_drop(pb)
+	}
+}
+
+playback_set_repeat :: proc(s: ^State, repeat: audio.Repeat) {
+	pb := &s.playback
+	pb.settings.repeat = repeat
+	settings_queue(&s.data, settings_to_save(pb))
+	next_drop(pb)
+}
+
+// next_drop forgets the preloaded next track after what comes next has
+// changed. The player then asks for the next one again.
+@(private = "file")
+next_drop :: proc(pb: ^Playback) {
+	if pb.next.serial == 0 || pb.status.serial == pb.next.serial {
+		return
+	}
+	source_clear(&pb.next)
+	artwork_free(&pb.next_art)
+	audio.set_next(pb.player, {})
 }
 
 // playback_toggle plays when nothing plays (idle, paused or at the end of
@@ -591,7 +636,7 @@ playback_set_paused :: proc(s: ^State, paused: bool) {
 		return
 	}
 	if !paused && pb.status.state == .Ended && pb.status.serial == pb.cur.serial {
-		if first := audio.queue_next(pb.entries, -1); first >= 0 {
+		if first := audio.queue_next(pb.entries, pb.order, -1); first >= 0 {
 			start_item(s, first)
 		}
 		return
@@ -749,7 +794,7 @@ playback_update :: proc(s: ^State, events: []platform.Event) {
 	}
 	// It wants the track after the current one.
 	if st.want_next && pb.next.serial == 0 && st.serial == pb.cur.serial {
-		if n := audio.queue_next(pb.entries, pb.index); n >= 0 && !next_failed(pb, n) {
+		if n := audio.queue_after(pb.entries, pb.order, pb.index, pb.settings.repeat, user = false); n >= 0 && !next_failed(pb, n) {
 			pb.serial += 1
 			pb.next = {serial = pb.serial, queue = pb.queue_gen, item = n, track = pb.entries[n].id}
 			resolve(s, &pb.next)
@@ -757,7 +802,7 @@ playback_update :: proc(s: ^State, events: []platform.Event) {
 	}
 	// The queue ran out, or the next track wasn't ready in time.
 	if st.state == .Ended && st.serial == pb.cur.serial && st.serial != 0 {
-		if n := audio.queue_next(pb.entries, pb.index); n >= 0 && pb.next.serial == 0 {
+		if n := audio.queue_after(pb.entries, pb.order, pb.index, pb.settings.repeat, user = false); n >= 0 && pb.next.serial == 0 {
 			start_item(s, n)
 		}
 	}
@@ -783,6 +828,7 @@ playback_update :: proc(s: ^State, events: []platform.Event) {
 	// with them.
 	if !pb.fake && pb.index >= 0 && pb.view_gen == s.data.view.gen && pb.loaded != s.data.view.loaded_rows {
 		index := pb.index
+		played := order_played(pb)
 		queue_snapshot(s)
 		pb.index = queue_find(pb, pb.cur.track, index)
 		pb.cur.item = pb.index
@@ -792,10 +838,42 @@ playback_update :: proc(s: ^State, events: []platform.Event) {
 		if pb.next_failed.serial != 0 {
 			pb.next_failed.item = queue_find(pb, pb.next_failed.track, pb.next_failed.item)
 		}
+		head := make([]int, len(played), context.temp_allocator)
+		for p, i in played {
+			head[i] = queue_find(pb, p.track, p.item)
+		}
+		queue_reorder(pb, head)
 	}
 	s.library.playing = playing_row(s)
 	update_now_playing(s)
 	queue_save(s)
+}
+
+@(private = "file")
+Queue_Place :: struct {
+	item:  int,
+	track: i64,
+}
+
+// order_played is the queue's items in play order up to the current one,
+// then the next if it's chosen, by track and item. When pages move items,
+// the order keeps those and shuffles the rest again.
+@(private = "file")
+order_played :: proc(pb: ^Playback) -> []Queue_Place {
+	if !pb.settings.shuffle {
+		return nil
+	}
+	out := make([dynamic]Queue_Place, context.temp_allocator)
+	for i in pb.order {
+		append(&out, Queue_Place{i, pb.entries[i].id})
+		if i == pb.index {
+			break
+		}
+	}
+	if pb.next.serial != 0 {
+		append(&out, Queue_Place{pb.next.item, pb.next.track})
+	}
+	return out[:]
 }
 
 // next_failed says whether queue item i is the next track that failed to
@@ -1024,13 +1102,14 @@ playback_restore :: proc(s: ^State, res: ^Result) {
 	i := int(head.index)
 	at := head.sample
 	if i < 0 || i >= len(pb.entries) || pb.entries[i].id == 0 {
-		i = audio.queue_next(pb.entries, clamp(i, 0, len(pb.entries)) - 1)
+		i = audio.queue_next(pb.entries, pb.order, clamp(i, 0, len(pb.entries)) - 1)
 		at = 0
 	}
 	if i < 0 {
 		queue_reset(pb, 0)
 		return
 	}
+	queue_reorder(pb, {i})
 	start_item(s, i, max(at, 0), paused = true)
 	pb.cur.rate = int(head.rate)
 	log.infof("app: resumed the queue at item %d of %d, %.1f s in", i, len(pb.entries), playback_position(s))

@@ -8,6 +8,7 @@ import "core:fmt"
 import "core:math"
 import "core:strings"
 
+import "../audio"
 import "../render"
 import "../text"
 import "../ui"
@@ -748,6 +749,14 @@ draw_player_bar :: proc(s: ^State, w: f32) {
 		{
 			ui.row("", {}, ui.fill(), ui.px(36))
 			ui.spacer(ui.fill())
+			shuffle := s.playback.settings.shuffle
+			shuffle_sig := toggle_button("shuffle", text.ICON_SHUFFLE, "Shuffle", "On" if shuffle else "Off", shuffle)
+			if shuffle_sig.clicked {
+				playback_set_shuffle(s, !shuffle)
+				ui.data_changed() // this frame drew the old state
+			}
+			ui.tooltip(shuffle_sig, "Shuffle")
+			ui.spacer(ui.px(16))
 			prev := skip_button("prev", false)
 			if prev.clicked {
 				playback_previous(s)
@@ -766,6 +775,19 @@ draw_player_bar :: proc(s: ^State, w: f32) {
 				playback_next(s)
 			}
 			ui.tooltip(next, "Next")
+			ui.spacer(ui.px(16))
+			repeat := s.playback.settings.repeat
+			REPEAT_NAMES := [audio.Repeat]string {
+				.Off = "Off",
+				.All = "All",
+				.One = "One",
+			}
+			repeat_sig := toggle_button("repeat", text.ICON_REPEAT_ONCE if repeat == .One else text.ICON_REPEAT, "Repeat", REPEAT_NAMES[repeat], repeat != .Off)
+			if repeat_sig.clicked {
+				playback_set_repeat(s, audio.Repeat((int(repeat) + 1) % len(audio.Repeat)))
+				ui.data_changed()
+			}
+			ui.tooltip(repeat_sig, "Repeat one" if repeat == .One else "Repeat")
 			ui.spacer(ui.fill())
 		}
 		ui.spacer(ui.px(6))
@@ -873,6 +895,27 @@ skip_button :: proc(id: string, forward: bool) -> ui.Signal {
 	b.text_align = .Center
 	b.radius = 18
 	ui.accessible(b, .Button, "Next" if forward else "Previous")
+	return ui.signal(b)
+}
+
+// toggle_button is a transport button lit while on, with a dot under it.
+toggle_button :: proc(id, icon, name, value: string, on: bool) -> ui.Signal {
+	b := ui.column(id, {.Clickable, .Focusable, .Draw_Hot_Effects, .Draw_Active_Effects}, ui.px(36), ui.px(36))
+	b.radius = 18
+	ui.accessible(b, .Button, name, value)
+	ui.spacer(ui.px(6))
+	ui.text_style(.Icon, 18, ACCENT if on else SECONDARY)
+	glyph := ui.label(icon, ui.fill(), ui.px(20))
+	glyph.text_align = .Center
+	ui.spacer(ui.px(2))
+	{
+		ui.row("", {}, ui.fill(), ui.px(4))
+		ui.spacer(ui.fill())
+		dot := ui.box_make("", {.Draw_Background}, ui.px(4), ui.px(4))
+		dot.background = ACCENT if on else {}
+		dot.radius = 2
+		ui.spacer(ui.fill())
+	}
 	return ui.signal(b)
 }
 
