@@ -353,6 +353,15 @@ queue_decode :: proc(data: []u8, allocator: runtime.Allocator) -> (head: Queue_H
 	if head.format != QUEUE_FORMAT {
 		return {}, nil, .Format
 	}
+	// The header is outside the list's sum. A day at 768 kHz bounds the
+	// position, so rescaling it to another rate can't overflow.
+	if head.rate < 0 || head.rate > 768000 || head.sample < 0 || (head.rate > 0 && head.sample > head.rate * 86400) {
+		return {}, nil, .Damaged
+	}
+	// Without a rate the position can't be placed, so the track starts over.
+	if head.rate == 0 {
+		head.sample = 0
+	}
 	_, rows, err = list_decode(data[size_of(Queue_Header):], .Search, "queue", allocator)
 	return
 }
