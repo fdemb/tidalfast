@@ -312,6 +312,7 @@ worker_main :: proc "c" (arg: rawptr) -> rawptr {
 			jobs.requeue(&d.queue, requeued(job, res), ticket)
 			continue
 		}
+		job_free(&job)
 		jobs.done(&d.queue)
 		d.wake()
 		if queued, _ := jobs.pending(&d.queue); queued == 0 {
@@ -489,7 +490,6 @@ run_job :: proc(d: ^Data, job: Job) -> (res: Result) {
 		if !launch_log_append(d.launch_log_path, p.line) {
 			res.err = .Io
 		}
-		delete(p.line, runtime.heap_allocator())
 	case Save_Settings_Job:
 		if !settings_flush(d) {
 			res.err = .Io

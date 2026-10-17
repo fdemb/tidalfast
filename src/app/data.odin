@@ -520,47 +520,88 @@ push_job :: proc(d: ^Data, job: Job, priority: u8 = PRIORITY_DATA) {
 
 // hold_job keeps a job the queue refused. One held Save_Settings saves the
 // newest settings, so it stands for any later one. When the list is full
-// the oldest Stream, Artwork or Add_Track goes: a playback job's track has
-// most likely moved on. The other kinds come one or two at a time, a flag
-// such as Login.requested or a list's in_flight holding back the next, so
-// they always fit.
+// one goes to make room, see held_victim.
 @(private = "file")
 hold_job :: proc(d: ^Data, job: Job, priority: u8) {
-	held := d.held[:d.held_count]
 	if _, save := job.payload.(Save_Settings_Job); save {
-		for h in held {
+		for h in d.held[:d.held_count] {
 			if _, held_save := h.job.payload.(Save_Settings_Job); held_save {
 				return
 			}
 		}
 	}
 	if d.held_count == len(d.held) {
-		drop := 0
-		oldest: for h, i in held {
-			#partial switch _ in h.job.payload {
-			case Stream_Job, Artwork_Job, Add_Track_Job:
-				drop = i
-				break oldest
-			}
-		}
-		job_free(&d.held[drop].job)
-		copy(d.held[drop:], d.held[drop + 1:])
+		s := container_of(d, State, "data") // the app's Data is always its State's
+		i := held_victim(s)
+		held_drop(s, &d.held[i].job)
+		copy(d.held[i:], d.held[i + 1:])
 		d.held_count -= 1
 	}
 	d.held[d.held_count] = {job, priority}
 	d.held_count += 1
 }
 
-// held_free drops every held job.
+// held_victim is the held job to drop for a new one: one no longer wanted,
+// else the oldest Stream, Artwork or Add_Track, whose track has most likely
+// moved on, else the oldest. The other kinds come one or two at a time, so
+// that last case doesn't happen. For a page it's its list's newest held
+// one, so the list asks again from there and no page after it comes twice.
 @(private = "file")
-held_free :: proc(d: ^Data) {
-	for &h in d.held[:d.held_count] {
-		job_free(&h.job)
+held_victim :: proc(s: ^State) -> int {
+	held := s.data.held[:s.data.held_count]
+	for h, i in held {
+		if !held_wanted(s, h.job) {
+			return i
+		}
 	}
-	d.held_count = 0
+	for h, i in held {
+		#partial switch _ in h.job.payload {
+		case Stream_Job, Artwork_Job, Add_Track_Job:
+			return i
+		}
+	}
+	if oldest, page := held[0].job.payload.(Tracks_Job); page {
+		for i := len(held) - 1; i > 0; i -= 1 {
+			if p, ok := held[i].job.payload.(Tracks_Job); ok && p.view == oldest.view {
+				return i
+			}
+		}
+	}
+	return 0
 }
 
-// job_free frees what a job owns, for a job that won't run.
+// held_drop lets go of a held job that won't be pushed. Its caller counted
+// it as out, so the flag holding back the next one is cleared, a list's
+// page is left for view_request_pages to ask for again, and a search waits
+// to be sent again.
+@(private = "file")
+held_drop :: proc(s: ^State, job: ^Job) {
+	d := &s.data
+	l := &d.login
+	#partial switch p in job.payload {
+	case Login_Start_Job:
+		if l.start_for == p.attempt {
+			l.requested = false
+		}
+	case Login_Wait_Job:
+		l.waiting = false
+	case Playlists_Job:
+		d.sidebar.loading = false
+	case Tracks_Job:
+		if v := track_view(d, p.view); v != nil {
+			v.in_flight -= 1
+			v.next_offset = min(v.next_offset, int(p.offset))
+		}
+	case Search_Job:
+		if p.gen == s.search.gen {
+			s.search.loading = false
+			s.search.due = s.ui.time
+		}
+	}
+	job_free(job)
+}
+
+// job_free frees what a job owns, once it has run for good or won't run.
 job_free :: proc(job: ^Job) {
 	#partial switch &p in job.payload {
 	case Disk_Job:
@@ -574,8 +615,11 @@ job_free :: proc(job: ^Job) {
 
 @(private = "file")
 drop_account_job :: proc(job: ^Job, _: rawptr) -> bool {
-	_, cover := job.payload.(Cover_Job)
-	return !cover
+	if _, cover := job.payload.(Cover_Job); cover {
+		return false
+	}
+	job_free(job)
+	return true
 }
 
 // sign_out ends a login TIDAL no longer accepts. Results of jobs queued
@@ -605,7 +649,10 @@ sign_out :: proc(s: ^State, why: string) {
 account_end :: proc(s: ^State) {
 	d := &s.data
 	sync.atomic_add(&d.auth_gen, 1) // the disk thread reads it
-	held_free(d)
+	for &h in d.held[:d.held_count] {
+		held_drop(s, &h.job)
+	}
+	d.held_count = 0
 	jobs.remove_if(&d.queue, drop_account_job, nil)
 	tidal.session_clear_auth(d.session)
 	d.account = .Signed_Out
@@ -684,7 +731,7 @@ data_retry :: proc(s: ^State) {
 		if held_wanted(s, h.job) {
 			push_job(d, h.job, h.priority)
 		} else {
-			job_free(&h.job)
+			held_drop(s, &h.job)
 		}
 	}
 }
@@ -703,11 +750,9 @@ held_wanted :: proc(s: ^State, job: Job) -> bool {
 	case Restore_Job:
 		return d.account == .Restoring
 	case Login_Start_Job:
-		// Also when the user went on to another login: its answer clears
-		// requested, which holds back the next login's code.
-		return l.requested && l.start_for == p.attempt
+		return d.account == .Signed_Out && l.pkce == .Off && l.error.len == 0 && l.requested && l.start_for == p.attempt
 	case Login_Wait_Job:
-		return l.waiting
+		return d.account == .Signed_Out && l.pkce == .Off && (l.link.device_code.len > 0 || login_has_tokens(d))
 	case Login_Pkce_Job:
 		return d.account == .Signed_Out && l.pkce == .Exchanging
 	case Playlists_Job:
