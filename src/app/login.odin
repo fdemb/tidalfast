@@ -68,9 +68,8 @@ centered_button :: proc(id, label: string, width, height: f32, background, color
 @(private = "file")
 login_card :: proc(s: ^State) {
 	d := &s.data
-	l := &d.login
 	ui.spacer(ui.px(32))
-	if l.pkce == .Off {
+	if _, code := d.login.card.(Login_Code); code {
 		device_card(s)
 	} else {
 		pkce_card(s)
@@ -99,7 +98,8 @@ pkce_card :: proc(s: ^State) {
 	l := &d.login
 	line("Log in to TIDAL", .Bold, 24, 34, TEXT)
 	ui.spacer(ui.px(12))
-	if l.pkce == .Exchanging {
+	paste, ok := &l.card.(Login_Paste)
+	if !ok {
 		line("Logging you in…", .Regular, 14, 20, SECONDARY)
 		return
 	}
@@ -111,7 +111,7 @@ pkce_card :: proc(s: ^State) {
 			pkce_resume(d)
 		}
 		ui.spacer(ui.px(12))
-		line(small_str(&l.pkce_note), .Regular, 12, 18, PLAYBACK_ERROR)
+		line(small_str(&paste.note), .Regular, 12, 18, PLAYBACK_ERROR)
 		return
 	}
 	if l.note.len > 0 {
@@ -146,16 +146,15 @@ pkce_card :: proc(s: ^State) {
 		ui.spacer(ui.px(24))
 	}
 	ui.spacer(ui.px(8))
-	if note := small_str(&l.pkce_note); note != "" {
+	if note := small_str(&paste.note); note != "" {
 		line(note, .Regular, 12, 18, PLAYBACK_ERROR)
 	} else {
 		line(fmt.tprintf("It starts with %s", d.session.config.pkce_uri_redirect), .Regular, 12, 18, DIM)
 	}
 	ui.spacer(ui.fill())
-	if d.relogin {
+	if paste.relogin {
 		if centered_button("relogin_back", "Back to your library", 220, 32, SURFACE_ACTIVE, TEXT) {
-			d.relogin = false
-			l.pkce_note = {}
+			l.card = Login_Paste{}
 		}
 	} else if centered_button("use_code", "Log in with a code instead (AAC only, no lossless)", 410, 32, SURFACE_ACTIVE, SECONDARY) {
 		device_begin(d)
@@ -171,24 +170,24 @@ device_card :: proc(s: ^State) {
 	line("TIDAL streams AAC only to this login, which TIDALfast can't play.", .Regular, 12, 18, DIM)
 	ui.spacer(ui.px(12))
 
-	code := small_str(&l.link.user_code)
+	failed, stopped := &l.code.(Code_Failed)
+	poll, polling := &l.code.(Code_Polling)
 	switch {
-	case l.error.len > 0:
-		line(small_str(&l.error), .Regular, 14, 20, SECONDARY)
+	case stopped:
+		line(small_str(&failed.error), .Regular, 14, 20, SECONDARY)
 		ui.spacer(ui.px(16))
 		if centered_button("retry", "Try again", 160, 40, SURFACE_ACTIVE, TEXT) {
-			l.error = {}
-			request_login_code(d)
+			code_login_next(d)
 		}
-	case code != "":
+	case polling && poll.link.user_code.len > 0:
 		line("On your phone or computer, go to", .Regular, 14, 20, SECONDARY)
-		line(small_str(&l.link.uri), .Semibold, 15, 22, ACCENT)
+		line(small_str(&poll.link.uri), .Semibold, 15, 22, ACCENT)
 		line("and enter this code:", .Regular, 14, 20, SECONDARY)
 		ui.spacer(ui.px(10))
-		line(code, .Bold, 40, 52, TEXT)
+		line(small_str(&poll.link.user_code), .Bold, 40, 52, TEXT)
 		ui.spacer(ui.px(18))
 		if centered_button("open_link", "Open in your browser", 240, 40, ACCENT, PANEL) {
-			os_services.open_url(small_str(&l.link.uri_full))
+			os_services.open_url(small_str(&poll.link.uri_full))
 		}
 		ui.spacer(ui.px(18))
 		if l.note.len > 0 {
@@ -270,22 +269,15 @@ pkce_show :: proc(d: ^Data) {
 	l := &d.login
 	pkce_prepare(d)
 	login_next_attempt(d)
-	l.pkce = .Paste
-	l.pkce_note = {}
+	l.card = Login_Paste{}
 	l.focus_field = true
 }
 
-// device_begin switches to the device-code login.
+// device_begin switches to the device-code login, where it left off.
 device_begin :: proc(d: ^Data) {
-	l := &d.login
-	l.pkce = .Off
-	l.pkce_note = {}
+	d.login.card = Login_Code{}
 	login_next_attempt(d)
-	if l.link.device_code.len > 0 {
-		request_login_poll(d)
-	} else {
-		request_login_code(d)
-	}
+	code_login_next(d)
 }
 
 // relogin_begin shows the PKCE login over a signed-in device-code login.
@@ -297,9 +289,9 @@ relogin_begin :: proc(d: ^Data) {
 
 // relogin_show is relogin_begin without the browser.
 relogin_show :: proc(d: ^Data) {
-	d.relogin = true
 	d.login = {}
 	pkce_show(d)
+	d.login.card = Login_Paste{relogin = true}
 }
 
 // pkce_check validates a pasted redirect address. It returns the address
@@ -326,28 +318,29 @@ pkce_check :: proc(text: string, redirect_uri: string) -> (url: string, problem:
 }
 
 // pkce_submit checks a pasted redirect address and sends it to a worker,
-// which trades its code for tokens. Over a signed-in account (relogin),
-// that account ends first, keeping its Keychain item until the new login
-// replaces it.
+// which trades its code for tokens, if the card waits for one. Over a
+// signed-in account (relogin), that account ends first, keeping its
+// Keychain item until the new login replaces it.
 pkce_submit :: proc(s: ^State, text: string) {
 	d := &s.data
 	l := &d.login
+	paste, ok := &l.card.(Login_Paste)
+	if !ok {
+		return
+	}
 	url, problem := pkce_check(text, d.session.config.pkce_uri_redirect)
 	if problem != "" {
-		l.pkce = .Paste
-		l.pkce_note = small(problem)
+		paste.note = small(problem)
 		return
 	}
 	if d.account == .Signed_In {
 		account_end(s)
-		d.relogin = false
 	}
 	pkce_prepare(d)
 	sync.lock(&d.pkce_mutex)
 	d.pkce_len = copy(d.pkce_redirect[:], url)
 	sync.unlock(&d.pkce_mutex)
-	l.pkce = .Exchanging
-	l.pkce_note = {}
+	l.card = Login_Exchanging{}
 	push_job(d, {payload = Login_Pkce_Job{attempt = d.login_attempt}})
 }
 
@@ -361,9 +354,7 @@ pkce_has_tokens :: proc(d: ^Data) -> bool {
 // Login_Pkce job sees them and loads the account instead of trading the
 // spent code again.
 pkce_resume :: proc(d: ^Data) {
-	l := &d.login
-	l.pkce = .Exchanging
-	l.pkce_note = {}
+	d.login.card = Login_Exchanging{}
 	push_job(d, {payload = Login_Pkce_Job{attempt = d.login_attempt}})
 }
 
@@ -375,8 +366,7 @@ pkce_done :: proc(d: ^Data, res: ^Result, failed: bool) {
 		signed_in(d)
 		return
 	}
-	l.pkce = .Paste
-	l.pkce_note = pkce_failure(res)
+	l.card = Login_Paste{note = pkce_failure(res)}
 	if pkce_has_tokens(d) {
 		return // "Try again" finishes with the tokens
 	}
