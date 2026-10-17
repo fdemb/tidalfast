@@ -718,13 +718,8 @@ playback_playing :: proc(s: ^State) -> bool {
 	return pb.index >= 0 && !pb.paused && !ended
 }
 
-// playback_update runs once a frame after data_update: media commands,
-// the player's status, the queue moving on, and Now Playing.
-playback_update :: proc(s: ^State, events: []platform.Event) {
-	pb := &s.playback
-	if pb.player == nil {
-		return
-	}
+// playback_media runs the media commands among events.
+playback_media :: proc(s: ^State, events: []platform.Event) {
 	for e in events {
 		if e.kind != .Media {
 			continue
@@ -745,8 +740,13 @@ playback_update :: proc(s: ^State, events: []platform.Event) {
 			playback_seek(s, f64(e.dx))
 		}
 	}
+}
 
-	pb.status = audio.status(pb.player)
+// playback_observe takes in the player's status: it keeps the device
+// change on disk, settles seeks, and moves the queue on.
+playback_observe :: proc(s: ^State, status: audio.Status) {
+	pb := &s.playback
+	pb.status = status
 	st := &pb.status
 	// Keep what bit-perfect output changed on the device on disk while it
 	// lasts, so a start after a crash can put it back.
@@ -802,6 +802,17 @@ playback_update :: proc(s: ^State, events: []platform.Event) {
 			pb.message = small(fmt.tprintf("Couldn't play %s: %s", pb.items[pb.cur.item].title, audio.error_text(&e)))
 		}
 	}
+}
+
+// playback_update runs once a frame after data_update: media commands,
+// the player's status, the queue moving on, and Now Playing.
+playback_update :: proc(s: ^State, events: []platform.Event) {
+	pb := &s.playback
+	if pb.player == nil {
+		return
+	}
+	playback_media(s, events)
+	playback_observe(s, audio.status(pb.player))
 
 	// Keep the queue in step with its list while pages arrive, whether or
 	// not the list is still open. A page that came back short moves the
