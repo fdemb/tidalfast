@@ -358,11 +358,11 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input, shell: ^platfor
 
 	// Backtick toggles the frame-time overlay. Cmd-1, 2 and 3 switch between
 	// the library and the phase 2 and phase 1 test screens.
-	if ui.key_pressed(.Grave) {
+	if ui.take_key(.Grave) {
 		s.show_overlay = !s.show_overlay
 	}
 	for key, screen in ([Screen]platform.Key{.Library = .Digit_1, .Text = .Digit_2, .Shapes = .Digit_3}) {
-		if ui.key_pressed(key, {ui.PRIMARY}) {
+		if ui.take_key(key, {ui.PRIMARY}) {
 			s.screen = screen
 		}
 	}
