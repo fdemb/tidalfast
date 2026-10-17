@@ -14,6 +14,7 @@ import "core:log"
 import "core:math"
 import vmem "core:mem/virtual"
 import "core:os"
+import "core:reflect"
 import "core:strings"
 import "core:sync"
 import "core:sys/posix"
@@ -518,16 +519,16 @@ push_job :: proc(d: ^Data, job: Job, priority: u8 = PRIORITY_DATA) {
 	}
 }
 
-// hold_job keeps a job the queue refused. One held Save_Settings saves the
-// newest settings, so it stands for any later one. When the list is full
-// one goes to make room, see held_victim.
+// hold_job keeps a job the queue refused. A job that asks for what a held
+// one does takes its place, so its caller's flag stays set. When the list
+// is full one goes to make room, see held_victim.
 @(private = "file")
 hold_job :: proc(d: ^Data, job: Job, priority: u8) {
-	if _, save := job.payload.(Save_Settings_Job); save {
-		for h in d.held[:d.held_count] {
-			if _, held_save := h.job.payload.(Save_Settings_Job); held_save {
-				return
-			}
+	for &h in d.held[:d.held_count] {
+		if same_request(h.job, job) {
+			job_free(&h.job)
+			h = {job, priority}
+			return
 		}
 	}
 	if d.held_count == len(d.held) {
@@ -540,10 +541,26 @@ hold_job :: proc(d: ^Data, job: Job, priority: u8) {
 	d.held_count += 1
 }
 
+// same_request says whether two jobs ask for the same thing. The kinds that
+// wait behind a flag or are sent one at a time each ask for one thing, and
+// an Artwork asks for its track's serial. A Stream's serial and a page's
+// offset are never asked for twice, and every add is its own.
+@(private = "file")
+same_request :: proc(held, job: Job) -> bool {
+	#partial switch p in job.payload {
+	case Restore_Job, Login_Start_Job, Login_Wait_Job, Login_Pkce_Job, Playlists_Job, Search_Job, Save_Settings_Job:
+		return reflect.union_variant_typeid(held.payload) == reflect.union_variant_typeid(job.payload)
+	case Artwork_Job:
+		h, art := held.payload.(Artwork_Job)
+		return art && h.serial == p.serial
+	}
+	return false
+}
+
 // held_victim is the held job to drop for a new one: one no longer wanted,
 // else the oldest Stream, Artwork or Add_Track, whose track has most likely
-// moved on. The other kinds each wait behind a flag or a list, so there are
-// never enough of them to fill the list.
+// moved on. hold_job keeps one of each other kind and view_pages one page
+// per list, so they never fill the list.
 @(private = "file")
 held_victim :: proc(d: ^Data) -> int {
 	held := d.held[:d.held_count]
@@ -605,6 +622,16 @@ held_remove_if :: proc(d: ^Data, pred: proc(job: ^Job, data: rawptr) -> bool, da
 page_of :: proc(job: ^Job, gen: rawptr) -> bool {
 	p, page := job.payload.(Tracks_Job)
 	return page && p.view == (^u32)(gen)^
+}
+
+@(private = "file")
+page_held :: proc(d: ^Data, gen: u32) -> bool {
+	for h in d.held[:d.held_count] {
+		if p, page := h.job.payload.(Tracks_Job); page && p.view == gen {
+			return true
+		}
+	}
+	return false
 }
 
 // job_free frees what a job owns, once it has run for good or won't run.
@@ -727,7 +754,8 @@ request_playlists :: proc(d: ^Data) {
 }
 
 // data_retry pushes again the jobs the queue refused, if they're still
-// wanted.
+// wanted. A list's later pages wait behind its held one, so they're asked
+// for once it's out.
 data_retry :: proc(d: ^Data) {
 	n := d.held_count
 	if n == 0 {
@@ -735,12 +763,18 @@ data_retry :: proc(d: ^Data) {
 	}
 	held := d.held
 	d.held_count = 0
+	pages := false
 	for &h in held[:n] {
+		_, page := h.job.payload.(Tracks_Job)
+		pages ||= page
 		if held_wanted(d, h.job) {
 			push_job(d, h.job, h.priority)
 		} else {
 			held_drop(d, &h.job)
 		}
+	}
+	if pages {
+		view_request_pages(d)
 	}
 }
 
@@ -1297,8 +1331,11 @@ view_request_pages :: proc(d: ^Data) {
 	view_pages(d, &d.queued)
 }
 
+// view_pages asks for v's next pages. It stops at a held one, so no page
+// goes out ahead of an earlier one, and a page that ends the list leaves
+// only later ones held.
 view_pages :: proc(d: ^Data, v: ^Track_View) {
-	for v.source != .None && !v.done && !v.reading && v.in_flight < PAGES_IN_FLIGHT && (v.next_offset < v.hint || v.in_flight == 0) {
+	for v.source != .None && !v.done && !v.reading && v.in_flight < PAGES_IN_FLIGHT && (v.next_offset < v.hint || v.in_flight == 0) && !page_held(d, v.gen) {
 		limit := PAGE_FIRST if v.next_offset == 0 else PAGE_SIZE
 		push_job(d, {payload = Tracks_Job{view = v.gen, source = v.source, id = v.id, offset = i32(v.next_offset), limit = i32(limit)}})
 		v.next_offset += limit

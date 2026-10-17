@@ -473,7 +473,7 @@ held_jobs_keep_what_waits :: proc(t: ^testing.T) {
 	}
 	testing.expect_value(t, pages, 2)
 	testing.expect_value(t, playlists, 1)
-	testing.expect_value(t, len(adds), app.HELD_JOBS - 3)
+	testing.expect_value(t, len(adds), app.HELD_JOBS - 2)
 	testing.expect(t, slice.contains(adds[:], 19) && !slice.contains(adds[:], 0), "the oldest adds went")
 }
 
