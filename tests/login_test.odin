@@ -306,11 +306,19 @@ data_state_free :: proc(s: ^app.State) {
 	free(s)
 }
 
-// test_keychain is d's keychain, made in memory if it has none, so tests
-// never touch the OS Keychain.
+// test_keychain is d's keychain, made in memory if it has none. An OS
+// Keychain item other than a throwaway tidalfast-test-* one stops the
+// test, so no test can sign in or out on the user's login.
 test_keychain :: proc(d: ^app.Data) -> ^app.Keychain {
-	if d.keychain == nil {
+	switch &k in d.keychain {
+	case nil:
 		d.keychain = new(app.Memory_Keychain, runtime.heap_allocator())
+	case app.Os_Keychain:
+		service := app.small_str(&k.service)
+		if !strings.has_prefix(service, "tidalfast-test-") {
+			fmt.panicf("a test reached the Keychain item of service %q", service)
+		}
+	case ^app.Memory_Keychain:
 	}
 	return &d.keychain
 }
@@ -318,7 +326,7 @@ test_keychain :: proc(d: ^app.Data) -> ^app.Keychain {
 // keychain_auth is the login the keychain holds, read the way a launch
 // reads it, or false for none.
 keychain_auth :: proc(d: ^app.Data) -> (a: tidal.Auth, ok: bool) {
-	data, status := app.keychain_get(&d.keychain, context.temp_allocator)
+	data, status := app.keychain_get(test_keychain(d), context.temp_allocator)
 	if status != os_services.SECRET_OK {
 		return
 	}
@@ -506,6 +514,43 @@ auth_failures_sign_out_once :: proc(t: ^testing.T) {
 	testing.expect(t, kept)
 	testing.expect_value(t, a.access_token, "device-access")
 	testing.expect_value(t, tidal.session_auth(d.session, context.temp_allocator).access_token, "device-access")
+}
+
+// A token refresh that got its tokens before the account ended, and saves
+// them after, leaves the keychain as the account left it.
+@(test)
+refresh_after_the_account_ended_is_not_saved :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := mock_data_state(&m)
+	defer data_state_free(s)
+	d := &s.data
+	sign_in(s)
+	data_jobs(d)
+	m.polls = {"ok"}
+
+	// Saves wait for this lock, so the refresh stops between reading its
+	// tokens and saving them.
+	sync.mutex_lock(&d.keychain_mutex)
+	refresh := thread.create_and_start_with_poly_data(d.session, proc(s: ^tidal.Session) {
+		tidal.token_refresh(s, "r")
+	})
+	start := time.tick_now()
+	for tidal.session_auth(d.session, context.temp_allocator).access_token != "device-access" && time.tick_since(start) < 5 * time.Second {
+		time.sleep(10 * time.Millisecond)
+	}
+	time.sleep(100 * time.Millisecond)
+	app.account_end(s)
+	sync.mutex_unlock(&d.keychain_mutex)
+	thread.join(refresh)
+	thread.destroy(refresh)
+
+	testing.expect_value(t, m.poll_count, 1)
+	a, saved := keychain_auth(d)
+	testing.expect(t, saved)
+	testing.expect_value(t, a.access_token, TEST_LOGIN.access_token)
+	testing.expect_value(t, a.refresh_token, TEST_LOGIN.refresh_token)
 }
 
 // data_jobs empties the queue and returns the jobs in it but covers.
@@ -1366,6 +1411,10 @@ login_resumes_with_tokens_after_the_code_expired :: proc(t: ^testing.T) {
 	testing.expect_value(t, m.poll_count, 1)
 	testing.expect(t, !app.show_login(s))
 	testing.expect_value(t, tidal.session_auth(d.session, context.temp_allocator).user_id, 123)
+	a, saved := keychain_auth(d)
+	testing.expect(t, saved, "the login is saved")
+	testing.expect_value(t, a.access_token, "device-access")
+	testing.expect_value(t, a.user_id, 123)
 }
 
 // A reload after the approval, before the session loaded, keeps the tokens,
@@ -1693,6 +1742,11 @@ pkce_retry_keeps_the_tokens :: proc(t: ^testing.T) {
 		testing.expect_value(t, m.poll_count, 1)
 		testing.expect_value(t, mock_count(&m, "GET /sessions"), 2)
 		testing.expect(t, tidal.session_is_pkce(d.session))
+		a, saved := keychain_auth(d)
+		testing.expect(t, saved, "the login is saved")
+		testing.expect(t, a.is_pkce)
+		testing.expect_value(t, a.access_token, "device-access")
+		testing.expect_value(t, a.user_id, 123)
 
 		data_state_free(s)
 		mock_stop(&m)
