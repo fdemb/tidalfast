@@ -8,6 +8,16 @@ import "core:time"
 
 import "../render"
 
+foreign import libc "system:System"
+
+@(default_calling_convention = "c")
+foreign libc {
+	proc_pid_rusage :: proc(pid: i32, flavor: i32, buffer: rawptr) -> i32 ---
+	// Through libc rather than intrinsics.syscall, whose registers an
+	// optimized build trusts across the call: that crashed.
+	syscall :: proc(number: i32, #c_vararg args: ..any) -> i32 ---
+}
+
 // process_start_ns reads when the kernel started this process, from
 // kinfo_proc's p_starttime, a timeval at offset 0.
 process_start_ns :: proc() -> i64 {
@@ -42,4 +52,34 @@ process_memory :: proc "contextless" (r: ^render.Renderer) -> Process_Memory {
 	}
 	pm.gpu = render.gpu_allocated(r)
 	return pm
+}
+
+// process_counters reads the instructions and cycles every thread of this
+// process has run so far, dyld included, from proc_pid_rusage's
+// rusage_info_v4. Load, clock speed and heat barely move them, unlike
+// times. Safe from any thread.
+process_counters :: proc "contextless" () -> Counters {
+	RUSAGE_INFO_V4 :: 4
+	info: [296]u8 // struct rusage_info_v4
+	if proc_pid_rusage(i32(posix.getpid()), RUSAGE_INFO_V4, &info) != 0 {
+		return {}
+	}
+	return {
+		instructions = intrinsics.unaligned_load((^u64)(&info[248])),
+		cycles       = intrinsics.unaligned_load((^u64)(&info[256])),
+	}
+}
+
+// thread_counters is process_counters for the calling thread alone, from
+// the thread_selfcounts system call. The UI thread's count at a mark leaves
+// out how far the workers and the font loader happened to get. The call
+// isn't public API, so a kernel without it gives zeros.
+thread_counters :: proc "contextless" () -> Counters {
+	SYS_THREAD_SELFCOUNTS :: 186
+	THSC_CPI :: 1 // instructions, then cycles
+	c: [2]u64
+	if syscall(SYS_THREAD_SELFCOUNTS, i32(THSC_CPI), rawptr(&c), uint(size_of(c))) != 0 {
+		return {}
+	}
+	return {instructions = c[0], cycles = c[1]}
 }

@@ -111,3 +111,14 @@ status_kb :: proc "contextless" (text, name: string) -> int {
 	}
 	return 0
 }
+
+// process_counters and thread_counters have nothing on Linux yet:
+// perf_event_open counters would have to be opened before the shell starts
+// its threads.
+process_counters :: proc "contextless" () -> Counters {
+	return {}
+}
+
+thread_counters :: proc "contextless" () -> Counters {
+	return {}
+}

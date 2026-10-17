@@ -40,3 +40,12 @@ machine :: proc() -> Machine {
 		os_build = str("kern.osversion"),
 	}
 }
+
+// launch_log_default is where the app writes its launch log: the
+// TIDALFAST_LAUNCH_LOG it would read, else next to its settings.
+launch_log_default :: proc() -> string {
+	if p := os.get_env("TIDALFAST_LAUNCH_LOG", context.allocator); p != "" && p != "off" {
+		return p
+	}
+	return join(os.get_env("HOME", context.allocator), "Library", "Application Support", "tidalfast", "launches.jsonl")
+}

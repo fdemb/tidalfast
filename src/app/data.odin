@@ -165,6 +165,7 @@ Data :: struct {
 	// The settings file and the newest settings for it, see settings_queue.
 	// The path is Data's own copy, freed after the workers stop.
 	settings_path:    string, // heap
+	launch_log_path:  string, // heap, "" for no launch log
 	settings_mutex:   sync.Mutex, // guards settings_latest and settings_gen
 	settings_latest:  Settings,
 	settings_gen:     u64,
@@ -270,6 +271,8 @@ data_shutdown :: proc(s: ^State) {
 	delete(d.saved_auth, runtime.heap_allocator())
 	delete(d.settings_path, runtime.heap_allocator())
 	d.settings_path = ""
+	delete(d.launch_log_path, runtime.heap_allocator())
+	d.launch_log_path = ""
 	sidebar_free(d)
 	lists_shutdown(d)
 	if d.view.has_arena {
@@ -783,6 +786,7 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 		if failed {
 			d.message = res.message
 		}
+	case .Launch_Log:
 	case .Playlists:
 		d.sidebar.loading = false
 		if failed {
