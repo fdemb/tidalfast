@@ -201,7 +201,7 @@ settings_set :: proc(s: ^State, st: Settings) {
 // settings_to_save is s.settings as the file should have them.
 settings_to_save :: proc(s: ^State) -> Settings {
 	st := s.settings
-	if v, ok := s.volume_file.?; ok {
+	if v, ok := s.volume_before_override.?; ok {
 		st.volume = v
 	}
 	return st

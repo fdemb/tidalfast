@@ -139,7 +139,7 @@ playback_start :: proc(s: ^State, shell: ^platform.Shell) {
 	pb.null_output = os.get_env("TIDALFAST_AUDIO_NULL", context.temp_allocator) != ""
 	s.data.launch_log_path = launch_log_path(runtime.heap_allocator())
 	if v, ok := strconv.parse_f32(os.get_env("TIDALFAST_VOLUME", context.temp_allocator)); ok {
-		s.volume_file = s.settings.volume
+		s.volume_before_override = s.settings.volume
 		s.settings.volume = clamp(v, 0, 1)
 	}
 	when !audio.BIT_PERFECT {
@@ -667,7 +667,7 @@ playback_set_volume :: proc(s: ^State, v: f32, save: bool) {
 		pb.volume_sent = v
 	}
 	if save {
-		s.volume_file = nil
+		s.volume_before_override = nil
 		settings_queue(&s.data, s.settings)
 	}
 }

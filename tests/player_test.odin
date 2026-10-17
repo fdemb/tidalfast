@@ -151,10 +151,8 @@ fake_player_state :: proc(rows: []app.Row) -> ^app.State {
 	return s
 }
 
-// toggle sends the remote's toggle command, without a status from the
-// player.
 @(private = "file")
-toggle :: proc(s: ^app.State) {
+toggle_no_status :: proc(s: ^app.State) {
 	app.playback_media(s, {{kind = .Media, media = .Toggle}})
 }
 
@@ -193,12 +191,12 @@ toggle_plays_from_idle_and_the_end :: proc(t: ^testing.T) {
 	defer app.playback_shutdown(s)
 	pb := &s.playback
 
-	toggle(s)
+	toggle_no_status(s)
 	testing.expect_value(t, pb.index, 0)
 	testing.expect(t, app.playback_playing(s))
-	toggle(s)
+	toggle_no_status(s)
 	testing.expect(t, !app.playback_playing(s))
-	toggle(s)
+	toggle_no_status(s)
 	testing.expect(t, app.playback_playing(s))
 
 	// The last entry of the queue, played to its end.
@@ -209,7 +207,7 @@ toggle_plays_from_idle_and_the_end :: proc(t: ^testing.T) {
 	testing.expect_value(t, pb.index, 1)
 	testing.expect(t, !app.playback_playing(s))
 
-	toggle(s)
+	toggle_no_status(s)
 	testing.expect_value(t, pb.index, 0)
 	testing.expect(t, app.playback_playing(s))
 	testing.expect(t, pb.cur.serial != last && pb.cur.resolved, "the first track isn't sent to the player again")
@@ -267,8 +265,7 @@ reload_keeps_a_pending_seek :: proc(t: ^testing.T) {
 	app.playback_reload(s, &shell)
 	testing.expect_value(t, pb.cur.at, i64(20 * 44100))
 
-	// The new player reports seek id 0: its ids start again.
-	app.playback_observe(s, {serial = one, sample = 20 * 44100, rate = 44100, state = .Playing})
+	app.playback_observe(s, {serial = one, seek_id = 0, sample = 20 * 44100, rate = 44100, state = .Playing})
 	at := app.playback_position(s)
 	testing.expectf(t, at >= 20 && at < 21, "after the reload the player is at %v s, not the seek target", at)
 	app.playback_observe(s, {serial = one, sample = 20 * 44100 + 13230, rate = 44100, state = .Playing})

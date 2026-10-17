@@ -72,10 +72,8 @@ State :: struct {
 	ui:           ui.State,
 	library:      Library,
 	data:         Data,
-	settings:     Settings, // see settings.odin
-	// The file's volume while TIDALFAST_VOLUME stands in for it, so the
-	// override isn't saved unless the slider moves.
-	volume_file:  Maybe(f32),
+	settings:     Settings,
+	volume_before_override: Maybe(f32),
 	playback:     Playback,
 	search:       Search,
 	pending:      Pending, // what the frame being built asked for, done after it
@@ -170,10 +168,6 @@ app_shutdown :: proc "c" (m: ^platform.Memory) {
 		posix.close(posix.FD(s.spall_ctx.fd))
 	}
 	measure_unload(s)
-	// The workers and the disk thread drop what's queued when they stop,
-	// so the pending settings and the last position are written here,
-	// after. The results queue stops first: a disk thread blocked on a
-	// full one would never be joined.
 	workers_stop(&s.data)
 	if !settings_flush(&s.data) {
 		log.errorf("app: couldn't save the settings to %s", s.data.settings_path)
