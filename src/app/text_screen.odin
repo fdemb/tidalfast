@@ -81,10 +81,10 @@ draw_list :: proc(s: ^State, list: render.Rect) {
 
 	max_offset := max(f32(ROW_COUNT * ROW_H) - list.h, 0)
 	if s.bench.running && !s.bench.ui {
-		s.scroll.y = -bench_offset(s, list.h)
+		s.dev.scroll.y = -bench_offset(s, list.h)
 	}
-	s.scroll.y = clamp(s.scroll.y, -max_offset, 0)
-	offset := -s.scroll.y
+	s.dev.scroll.y = clamp(s.dev.scroll.y, -max_offset, 0)
+	offset := -s.dev.scroll.y
 
 	title_w: f32 = 280
 	artist_w: f32 = 190

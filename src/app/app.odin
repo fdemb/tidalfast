@@ -32,7 +32,7 @@ import "../ui"
 
 CLEAR_COLOR :: render.Color{0.063, 0.063, 0.063, 1}
 
-STATE_VERSION :: 22
+STATE_VERSION :: 23
 
 FRAME_HISTORY :: 120
 
@@ -60,10 +60,6 @@ State :: struct {
 	renderer:     render.Renderer,
 	text:         text.State,
 	rows:         []Row,
-	screen:       Screen,
-	checker:      render.Texture,
-	half_white:   render.Texture, // RGBA8, one texel {128, 128, 128, 128}
-	half_cover:   render.Texture, // R8, one texel 128
 	last_stats:   render.Stats,
 	frame_count:  u64,
 	frame_ms:     [FRAME_HISTORY]f32,
@@ -81,11 +77,9 @@ State :: struct {
 	pending:      Pending, // what the frame being built asked for, done after it
 	history:      History,
 	access_sent:  u64, // hash of the accessibility tree the shell has
-	scroll:       [2]f32, // the test screens' scroll offset
 	bench:        Bench,
 	measure:      Measure,
-	slide_start:  f64,
-	sliding:      bool,
+	dev:          Dev,
 	profiling:    bool,
 	spall_ctx:    spall.Context,
 	spall_buf:    spall.Buffer,
@@ -420,17 +414,17 @@ start :: proc(s: ^State, shell: ^platform.Shell) {
 	switch bench {
 	case "", "covers":
 	case "text":
-		s.bench.running = true
-		s.screen = .Text
+		when DEV {
+			s.bench.running = true
+			s.dev.screen = .Text
+		} else {
+			log.warn("app: TIDALFAST_BENCH=text is ignored in release builds")
+		}
 	case:
 		s.bench.running = true
 		s.bench.ui = true
 	}
-	s.checker = make_checker(&s.renderer)
-	s.half_white = render.texture_create(&s.renderer, 1, 1, .RGBA8)
-	render.texture_update(&s.renderer, s.half_white, {128, 128, 128, 128}, 0, 0, 1, 1)
-	s.half_cover = render.texture_create(&s.renderer, 1, 1, .R8)
-	render.texture_update(&s.renderer, s.half_cover, {128}, 0, 0, 1, 1)
+	dev_start(s)
 	log.infof("app: started, clear colour %v", CLEAR_COLOR)
 	measure_mark(s, .Init)
 }
@@ -447,14 +441,6 @@ prof_end :: proc(s: ^State, _: string, _ := #caller_location) {
 		spall._buffer_end(&s.spall_ctx, &s.spall_buf)
 	}
 }
-
-Screen :: enum u8 {
-	Library,
-	Text,
-	Shapes,
-}
-
-SLIDE_SECONDS :: 0.6
 
 update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input, shell: ^platform.Shell) -> platform.Frame_Result {
 	events := input.events[:input.event_count]
@@ -477,56 +463,23 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input, shell: ^platfor
 	playback_update(s, events)
 	s.ui.scrollbars = s.settings.scrollbars
 
-	// Backtick toggles the frame-time overlay. Cmd-1, 2 and 3 switch between
-	// the library and the phase 2 and phase 1 test screens.
+	// Backtick toggles the frame-time overlay.
 	if ui.take_key(.Grave) {
 		s.show_overlay = !s.show_overlay
 	}
-	for key, screen in ([Screen]platform.Key{.Library = .Digit_1, .Text = .Digit_2, .Shapes = .Digit_3}) {
-		if ui.take_key(key, {ui.PRIMARY}) {
-			s.screen = screen
-		}
-	}
-	ui_input := &s.ui.input
-	if s.screen == .Shapes && .Left in ui_input.pressed {
-		s.slide_start = input.time
-		s.sliding = true
-	}
-	s.scroll += ui_input.scroll
+	dev_input(s, input.time)
 
-	switch s.screen {
-	case .Library:
+	if !dev_draw_screen(s, w, h) {
 		if show_login(s) {
 			draw_login(s)
 		} else {
 			draw_library(s, w, h)
 		}
-	case .Text:
-		draw_text_screen(s, w, h)
-	case .Shapes:
-		draw_test_screen(s, w, h)
 	}
 	animating := ui.end_frame()
 	shell_update(s, shell)
 	covers_schedule(s)
-
-	if s.sliding {
-		t := f32((input.time - s.slide_start) / SLIDE_SECONDS)
-		if t >= 1 {
-			s.sliding = false
-		} else {
-			ease := 1 - (1 - t) * (1 - t)
-			box := render.Rect{24 + ease * (w - 88), h - 52, 40, 40}
-			render.push_shadow(r, box, 20, 12)
-			render.push_rect(r, box, {0.95, 0.80, 0.30, 1}, 20)
-		}
-	}
-
-	if s.screen != .Library && ui_input.mouse_inside {
-		size: f32 = 14 if ui.mouse_down(ui_input^) else 10
-		m := ui_input.mouse
-		render.push_rect(r, {m.x - size / 2, m.y - size / 2, size, size}, {1, 1, 1, 0.8}, size / 2)
-	}
+	dev_draw_over(s, input.time, w, h)
 
 	if s.show_overlay {
 		draw_frame_overlay(s, w)
@@ -545,97 +498,7 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input, shell: ^platfor
 		}
 		s.last_stats = r.stats
 	}
-	return {animating = b32(animating || acted || s.sliding || s.text.needs_redraw), wake_after = ui.wake_after(&s.ui)}
-}
-
-// draw_test_screen exercises the renderer: a grid of shadowed gradient cards
-// with assorted radii and borders, a scrolling clipped list, and textured
-// quads sampled with mipmaps, tinted, rounded and unfiltered.
-draw_test_screen :: proc(s: ^State, w, h: f32) {
-	r := &s.renderer
-	render.push_gradient(r, {0, 0, w, h}, CLEAR_COLOR, {0.04, 0.04, 0.05, 1})
-
-	COLS :: 14
-	ROWS :: 13
-	CARD :: 36
-	STEP :: 46
-	radii := [5]f32{0, 4, 8, 12, 18}
-	for i in 0 ..< COLS * ROWS {
-		rect := render.Rect{24 + f32(i % COLS) * STEP, 24 + f32(i / COLS) * STEP, CARD, CARD}
-		hue := f32(i) * 0.618
-		style := render.Style{
-			colors = {
-				.Top_Left = hsv(hue, 0.6, 0.95),
-				.Top_Right = hsv(hue, 0.6, 0.95),
-				.Bottom_Left = hsv(hue + 0.08, 0.75, 0.55),
-				.Bottom_Right = hsv(hue + 0.08, 0.75, 0.55),
-			},
-			radii = render.corners(radii[i % 5]),
-		}
-		if i % 7 == 3 {
-			style.radii = {.Top_Left = 18, .Top_Right = 2, .Bottom_Left = 2, .Bottom_Right = 18}
-		}
-		if i % 5 == 2 {
-			for c in render.Corner {
-				style.colors[c] = hsv(hue + f32(c) * 0.25, 0.7, 0.9)
-			}
-		}
-		render.push_shadow(r, rect, style.radii[.Top_Left], 10, {0, 3}, 0, {0, 0, 0, 0.6})
-		render.push(r, rect, style)
-		if i % 3 == 0 {
-			ring := style
-			ring.colors = render.corners(render.Color{1, 1, 1, 0.85})
-			ring.border = 1
-			render.push(r, rect, ring)
-		}
-	}
-
-	// A panel whose list scrolls with the wheel and is clipped to the panel.
-	panel := render.Rect{700, 130, 376, 270}
-	render.push_shadow(r, panel, 12, 24, {0, 8}, 0, {0, 0, 0, 0.7})
-	render.push_rect(r, panel, {0.16, 0.17, 0.20, 1}, 12)
-	render.push_rect(r, panel, {1, 1, 1, 0.12}, 12, 1)
-	render.push_clip(r, {panel.x + 8, panel.y + 8, panel.w - 16, panel.h - 16})
-	for i in 0 ..< 30 {
-		row := render.Rect{panel.x + 16, panel.y + 16 + f32(i) * 34 + s.scroll.y, 200 + f32(i % 4) * 90, 26}
-		render.push_shadow(r, row, 13, 8, {0, 2})
-		render.push_gradient(r, row, hsv(f32(i) * 0.05, 0.5, 0.9), hsv(f32(i) * 0.05 + 0.15, 0.7, 0.6), true, 13)
-	}
-	render.push_shadow(r, {panel.x + panel.w - 70, panel.y + 150, 120, 120}, 60, 30, {}, 0, {0.3, 0.6, 1, 0.9})
-	render.pop_clip(r)
-
-	// Textured quads.
-	big := render.Rect{716, 430, 160, 160}
-	render.push_shadow(r, big, 20, 20, {0, 6})
-	render.push_image(r, big, s.checker, radius = 20)
-	render.push_image(r, {900, 430, 20, 20}, s.checker) // minified: mips blend the checks
-	render.push_image(r, {960, 430, 100, 100}, s.checker, src = {0, 0, 64, 64}, tint = {1, 0.6, 0.6, 1}, radius = 50)
-	render.push_image(r, {900, 550, 40, 40}, s.checker, src = {0, 0, 32, 32}, nearest = true)
-	render.push_rect(r, {960, 550, 100, 40}, {1, 1, 1, 1}, 8, 2)
-
-	// 50% white over black three ways: a premultiplied sRGB texel, R8
-	// coverage and a solid colour. All three should come out the same grey.
-	strip := render.Rect{716, 610, 120, 40}
-	render.push_rect(r, strip, {0, 0, 0, 1})
-	render.push_image(r, {strip.x + 5, strip.y + 5, 30, 30}, s.half_white)
-	render.push_image(r, {strip.x + 45, strip.y + 5, 30, 30}, s.half_cover)
-	render.push_rect(r, {strip.x + 85, strip.y + 5, 30, 30}, {1, 1, 1, 128.0 / 255})
-}
-
-// make_checker makes a 256x256 checkerboard with mipmaps.
-make_checker :: proc(r: ^render.Renderer) -> render.Texture {
-	SIZE :: 256
-	CELL :: 16
-	pixels := make([]u8, SIZE * SIZE * 4, context.temp_allocator)
-	for y in 0 ..< SIZE {
-		for x in 0 ..< SIZE {
-			c := [4]u8{242, 140, 40, 255} if (x / CELL + y / CELL) % 2 == 0 else [4]u8{240, 240, 240, 255}
-			copy(pixels[(y * SIZE + x) * 4:], c[:])
-		}
-	}
-	t := render.texture_create(r, SIZE, SIZE, .RGBA8, mipmapped = true)
-	render.texture_update(r, t, pixels, 0, 0, SIZE, SIZE)
-	return t
+	return {animating = b32(animating || acted || s.dev.sliding || s.text.needs_redraw), wake_after = ui.wake_after(&s.ui)}
 }
 
 // hsv returns an opaque sRGB colour. Hue wraps, so any value works.
