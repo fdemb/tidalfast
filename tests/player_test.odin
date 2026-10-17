@@ -7,6 +7,7 @@ import "core:time"
 import app "../src/app"
 import "../src/audio"
 import "../src/platform"
+import "../src/tidal"
 
 // What the app last sent to Now Playing, copied as the shell would.
 @(private = "file")
@@ -326,4 +327,37 @@ seek_before_resolve_moves_the_position :: proc(t: ^testing.T) {
 	app.playback_update(s, nil)
 	at := app.playback_position(s)
 	testing.expectf(t, at >= 10 && at < 11, "after a seek to 10 s the position is %v s", at)
+}
+
+// The current track's stream fails in a way that stops the queue: a lossy
+// stream, or the last track. The player bar shows paused, and the player
+// must stop too, not go on playing the placeholder's silence.
+@(test)
+failed_track_stops_the_player :: proc(t: ^testing.T) {
+	Case :: struct {
+		name: string,
+		rows: []app.Row,
+		err:  tidal.Error_Kind,
+	}
+	cases := []Case {
+		{"lossy", {{title = "One", seconds = 300, id = 101}, {title = "Two", seconds = 300, id = 102}}, .Lossy_Stream},
+		{"last track", {{title = "One", seconds = 300, id = 101}}, .Stream_Not_Available},
+	}
+	for c in cases {
+		s := restored_player_state(c.rows, 0, 44100)
+		pb := &s.playback
+		app.playback_set_paused(s, false)
+		testing.expect(t, app.playback_playing(s), c.name)
+		testing.expect(t, wait_until(s, proc(s: ^app.State) -> bool {return s.playback.status.serial == s.playback.cur.serial && s.playback.status.state == .Playing}), c.name)
+
+		res := app.Result {
+			job = {kind = .Stream, view = u32(pb.cur.serial)},
+			err = c.err,
+		}
+		app.playback_result(s, &res)
+		testing.expect(t, pb.paused, c.name)
+		testing.expectf(t, wait_until(s, proc(s: ^app.State) -> bool {return s.playback.status.state != .Playing}), "%s: the player still plays", c.name)
+		app.playback_shutdown(s)
+		free(s)
+	}
 }

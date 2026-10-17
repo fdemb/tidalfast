@@ -837,3 +837,43 @@ small_cuts_at_a_character :: proc(t: ^testing.T) {
 		testing.expect_value(t, len(got), c.want)
 	}
 }
+
+// Signing out forgets the places visited and the search, so the next
+// account's Back doesn't go to this one's lists.
+@(test)
+sign_out_forgets_history_and_search :: proc(t: ^testing.T) {
+	arena: vmem.Arena
+	_ = vmem.arena_init_growing(&arena)
+	defer vmem.arena_destroy(&arena)
+	context.allocator = vmem.arena_allocator(&arena)
+	s := library_state(false)
+	defer library_state_free(s)
+	app.session_open(&s.data)
+	sr := &s.search
+	open_test_list(s)
+	f: Frame
+	library_frame(t, s, &f)
+	library_frame(t, s, &f)
+	go_to_first_album(t, s, &f)
+	library_frame(t, s, &f, key(.F, {ui.PRIMARY}))
+	library_frame(t, s, &f, type_text(&f, "abc"))
+	library_frame(t, s, &f, key(.Return))
+	res := app.Result {
+		job   = {kind = .Search, view = sr.gen, id = app.small("abc")},
+		rows  = []app.Row{{title = "Found song", artist = "Someone", id = 1}},
+		found = {albums = []app.Found{{id = 5, name = "An album"}}},
+	}
+	app.search_result(s, &res)
+	library_frame(t, s, &f)
+	testing.expect(t, enabled(s, "Back"))
+
+	app.account_end(s)
+	s.data.account = .Signed_In
+	library_frame(t, s, &f)
+	testing.expect(t, !enabled(s, "Back"))
+	testing.expect(t, !enabled(s, "Forward"))
+	testing.expect(t, !app.search_showing(s))
+	testing.expect_value(t, ui.field_text(&sr.field), "")
+	testing.expect_value(t, app.small_str(&sr.query), "")
+	testing.expect_value(t, len(sr.found.albums), 0)
+}
