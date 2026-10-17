@@ -15,7 +15,9 @@ defer tidal.session_destroy(s)
 if err := tidal.session_load_file(s, "session.json"); err != nil {
 	link, _ := tidal.login_device_start(s)
 	show_code(link.verification_uri_complete) // your UI
-	tidal.login_device_wait(s, &link, cancel = &cancel_flag) or_return
+	// Another attempt number, set from any thread, stops the wait.
+	tidal.session_set_login_attempt(s, attempt)
+	tidal.login_device_wait(s, &link, attempt = attempt) or_return
 	tidal.session_save_file(s, "session.json")
 }
 
@@ -30,7 +32,7 @@ What a UI needs to know:
 - **Errors.** Procs return `tidal.Error`, a union that is nil on success, so `or_return` works. Check the kind with `error_kind(err)` or `is_error(err, .Object_Not_Found)`. Errors own no memory; `error_detail(&e)` reads the server's message from an inline buffer, and `e.sub_status` holds TIDAL's numeric `subStatus`. The detail is server text and may hold a signed URL, so it's for the screen only. For a log line use `error_summary(err)`: the kind, the HTTP status and the `subStatus`, and a codec only if `codec_name` knows it. The library's own `log` calls follow the same rule.
 - **Threads.** Calls block on the network, so run them off the UI thread. A `Session` can be shared between threads: token refresh happens once even when several requests hit an expired token, and the rate-limit backoff state is shared. Each thread needs its own result allocator, or a thread-safe one.
 - **Saved logins.** `session_auth` copies the login state out; `session_restore` puts it back without a request, so an app can keep it somewhere safe (TIDALfast uses the Keychain). Set `Session.on_auth_change` to hear about new tokens after a login or refresh. TIDAL may rotate the refresh token on refresh, so save every time it's called. It runs on the thread that refreshed, one call at a time.
-- **Stopping.** `session_abort(s, true)` makes requests in flight and new ones fail with `.Cancelled`, and stops `login_device_wait`.
+- **Stopping.** `session_abort(s, true)` makes requests in flight and new ones fail with `.Cancelled`, and stops `login_device_wait`. To stop one wait and leave the session alone, pass the wait an `attempt` and call `session_set_login_attempt` with another number. Between polls the wait returns `.Cancelled` within 100 ms, and it drops tokens that a poll in flight gets after the change.
 - **Signing out.** `session_clear_auth` forgets the tokens, session id and user. Requests, refreshes and device logins that started before it fail with `.Cancelled`, in flight or not, and a refresh that finishes anyway doesn't store its tokens. `Auth.epoch` and `session_epoch` say which login a copy of the state came from.
 - **Rate limits.** After a 429 or an anti-abuse 403 the session refuses every request with `.Backing_Off` until `Retry-After` has passed (60 s or 30 minutes without one). That covers the OAuth endpoints too: device login, polling and token refresh. A rate-limited refresh fails with `.Too_Many_Requests`, not `.Authentication`, so only TIDAL turning down the refresh token looks like a lost login. `backoff_state` and `backoff_restore` carry a running backoff over to a new session.
 - **Refresh failures.** A refresh fails with `.Authentication` only when TIDAL answers 400 or 401 with the OAuth error `invalid_grant`. Every other failure, unreachable network included, is `.Refresh_Failed` and keeps the tokens, so the caller can try again later. Say a request's token had expired and its refresh failed that way. If TIDAL then answers the request with a 401 that doesn't mention the expiry, the request returns the `.Refresh_Failed` error, not the 401.
@@ -40,7 +42,7 @@ What a UI needs to know:
 
 | Area | Procs |
 | --- | --- |
-| Session | `session_create`, `session_destroy`, `session_auth`, `session_restore`, `session_clear_auth`, `session_abort`, `backoff_remaining`, `backoff_state`, `backoff_restore`, `session_user`, `session_set_quality`, `session_client_enable_hires`, `check_login` |
+| Session | `session_create`, `session_destroy`, `session_auth`, `session_restore`, `session_clear_auth`, `session_abort`, `session_set_login_attempt`, `backoff_remaining`, `backoff_state`, `backoff_restore`, `session_user`, `session_set_quality`, `session_client_enable_hires`, `check_login` |
 | Login | `login_device_start`, `login_device_wait`, `login_oauth_simple`, `pkce_login_url`, `login_pkce_complete`, `login_pkce`, `load_oauth_session`, `load_session`, `token_refresh` |
 | Session file | `login_session_file`, `session_save_file`, `session_load_file` |
 | Tracks and videos | `track_get`, `track_stream`, `track_url`, `track_lyrics`, `track_radio`, `track_radio_mix`, `video_get`, `video_url` |
