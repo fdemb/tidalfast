@@ -67,8 +67,7 @@ Login_Card :: union #no_nil {
 
 // Login_Paste is the PKCE login waiting for the redirect address.
 Login_Paste :: struct {
-	note:    Small, // why the last paste didn't work
-	relogin: bool, // over a signed-in account, see relogin_show
+	note: Small, // why the last paste didn't work
 }
 
 // Login_Exchanging is the PKCE login with its Login_Pkce job out.
@@ -197,6 +196,7 @@ Data :: struct {
 	// only AAC. The library says so until the user hides the notice.
 	device_login:   bool,
 	notice_hidden:  bool,
+	relogin:        bool, // the login screen shows over a signed-in account
 	// The settings file and the newest settings for it, see settings_queue.
 	// The path is Data's own copy, freed after the workers stop.
 	settings_path:    string, // heap, "" for none
@@ -849,6 +849,7 @@ account_end :: proc(s: ^State) {
 	tidal.session_clear_auth(d.session)
 	d.account = .Signed_Out
 	d.device_login = false
+	d.relogin = false
 	sidebar_free(d)
 	view_close(d)
 	queued_drop(d)
@@ -1625,8 +1626,7 @@ list_row :: proc(v: ^Track_View, i: int) -> ^Row {
 
 // show_login says whether the library screen should be the login screen.
 show_login :: proc(s: ^State) -> bool {
-	paste, _ := s.data.login.card.(Login_Paste)
-	return s.data.account == .Signed_Out || (s.data.account == .Signed_In && paste.relogin)
+	return s.data.account == .Signed_Out || (s.data.account == .Signed_In && s.data.relogin)
 }
 
 // signed_in starts loading a login's account. The login screen starts

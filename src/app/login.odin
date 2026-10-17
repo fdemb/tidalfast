@@ -152,8 +152,9 @@ pkce_card :: proc(s: ^State) {
 		line(fmt.tprintf("It starts with %s", d.session.config.pkce_uri_redirect), .Regular, 12, 18, DIM)
 	}
 	ui.spacer(ui.fill())
-	if paste.relogin {
+	if d.relogin {
 		if centered_button("relogin_back", "Back to your library", 220, 32, SURFACE_ACTIVE, TEXT) {
+			d.relogin = false
 			l.card = Login_Paste{}
 		}
 	} else if centered_button("use_code", "Log in with a code instead (AAC only, no lossless)", 410, 32, SURFACE_ACTIVE, SECONDARY) {
@@ -289,9 +290,9 @@ relogin_begin :: proc(d: ^Data) {
 
 // relogin_show is relogin_begin without the browser.
 relogin_show :: proc(d: ^Data) {
+	d.relogin = true
 	d.login = {}
 	pkce_show(d)
-	d.login.card = Login_Paste{relogin = true}
 }
 
 // pkce_check validates a pasted redirect address. It returns the address
