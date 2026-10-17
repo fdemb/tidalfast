@@ -201,7 +201,7 @@ measure_frame :: proc(s: ^State) {
 		return
 	}
 	measure_mark(s, .First_Frame)
-	if s.screen == .Library && !show_login(s) && (s.data.fake || (s.data.sidebar.loaded && len(s.data.sidebar.items) > 0)) {
+	if s.dev.screen == .Library && !show_login(s) && (s.data.fake || (s.data.sidebar.loaded && len(s.data.sidebar.items) > 0)) {
 		measure_mark(s, .Library)
 		if m.rows > 0 && m.covers_ready == m.covers {
 			measure_mark(s, .Tracks)
