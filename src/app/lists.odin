@@ -885,6 +885,12 @@ disk_run :: proc(d: ^Data, job: Job) -> (res: Result, reply: bool) {
 		queue_read(&res, path)
 		return res, true
 	}
+	#partial switch job.op {
+	case .Write_Queue:
+		queue_seal(job.blob)
+	case .Write:
+		file_seal(job.blob)
+	}
 	sync.guard(&d.lists.mutex)
 	if job.auth != sync.atomic_load(&d.auth_gen) {
 		return // that account is gone
@@ -943,6 +949,7 @@ queue_write_now :: proc(d: ^Data, blob: []u8) {
 	if !disk_on(d) {
 		return
 	}
+	queue_seal(blob)
 	dir := disk_dir(d.lists.root, d.lists.user, context.temp_allocator)
 	sync.guard(&d.lists.mutex)
 	disk_write(dir, queue_path(dir, context.temp_allocator), blob)

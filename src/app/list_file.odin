@@ -102,14 +102,14 @@ writer_make :: proc(source: Source, id: string, count, text: int, allocator: run
 	return
 }
 
-@(private = "file")
-writer_finish :: proc(w: ^File_Writer) -> []u8 {
-	h := (^File_Header)(raw_data(w.buf))
-	h.sum = hash.fnv64a(w.buf[size_of(File_Header):])
-	return w.whole
+// file_seal fills in a list or sidebar file's sum, which the encode procs
+// leave out.
+file_seal :: proc(file: []u8) {
+	h := (^File_Header)(raw_data(file))
+	h.sum = hash.fnv64a(file[size_of(File_Header):])
 }
 
-// list_encode is a done list as a file.
+// list_encode is a done list as a file, without its sum (see file_seal).
 list_encode :: proc(v: ^Track_View, allocator: runtime.Allocator) -> []u8 {
 	n := min(v.count, len(v.rows))
 	return rows_encode(v.source, small_str(&v.id), v.rows[:n], v.fetched, v.version, i64(v.hint), allocator)
@@ -137,10 +137,10 @@ rows_encode :: proc(source: Source, id: string, rows: []Row, fetched: i64, versi
 			album_id = r.album_id,
 		}
 	}
-	return writer_finish(&w)
+	return w.whole
 }
 
-// sidebar_encode is the sidebar as a file.
+// sidebar_encode is the sidebar as a file, without its sum.
 sidebar_encode :: proc(sb: ^Sidebar, fetched: i64, allocator: runtime.Allocator) -> []u8 {
 	text := 0
 	for it in sb.items {
@@ -157,7 +157,7 @@ sidebar_encode :: proc(sb: ^Sidebar, fetched: i64, allocator: runtime.Allocator)
 			updated = it.updated,
 		}
 	}
-	return writer_finish(&w)
+	return w.whole
 }
 
 // file_check validates a file read whole into data, which must be 8-byte
@@ -330,7 +330,7 @@ Queue_Header :: struct {
 
 #assert(size_of(Queue_Header) % 16 == 0)
 
-// queue_encode is a queue file of rows.
+// queue_encode is a queue file of rows, without its sum (see queue_seal).
 queue_encode :: proc(head: Queue_Header, rows: []Row, allocator: runtime.Allocator) -> []u8 {
 	buf := rows_encode(.Search, "queue", rows, 0, {}, i64(len(rows)), allocator, size_of(Queue_Header))
 	h := (^Queue_Header)(raw_data(buf))
@@ -338,6 +338,11 @@ queue_encode :: proc(head: Queue_Header, rows: []Row, allocator: runtime.Allocat
 	h.magic = QUEUE_MAGIC
 	h.format = QUEUE_FORMAT
 	return buf
+}
+
+// queue_seal fills in a queue file's sum, which queue_encode leaves out.
+queue_seal :: proc(file: []u8) {
+	file_seal(file[size_of(Queue_Header):])
 }
 
 // queue_decode reads a queue file read whole into data, 16-byte aligned.
