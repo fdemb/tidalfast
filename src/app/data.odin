@@ -211,6 +211,8 @@ data_start :: proc(s: ^State, shell: ^platform.Shell) {
 		log.warn("app: TIDALFAST_API or TIDALFAST_KEYCHAIN is set but there's no mock URL to use, showing the fake data instead of TIDAL")
 		d.fake = true
 	}
+	d.settings_path = settings_default_path(runtime.heap_allocator())
+	s.settings, _ = settings_load(d.settings_path)
 	if d.fake {
 		d.account = .Fake
 		return
