@@ -31,7 +31,7 @@ XDG_RUNTIME_DIR=/tmp/xdg WAYLAND_DISPLAY=wl-test TIDALFAST_FAKE=1 TIDALFAST_AUDI
     TIDALFAST_CAPTURE=/tmp/frame.tga TIDALFAST_SHELL_TEST="2:size=820,600;3:capture=/tmp/narrow.tga;4:quit" ./build/tidalfast
 ```
 
-The keychain tests need a Secret Service. Run them inside a private D-Bus session with a throwaway keyring, so they never touch yours:
+One test, `keychain_round_trip`, needs a Secret Service. The login tests keep the login in memory. Run the tests inside a private D-Bus session with a throwaway keyring, so that test never touches yours:
 
 ```
 dbus-run-session -- sh -c 'export HOME=$(mktemp -d); eval "$(echo x | gnome-keyring-daemon --unlock --components=secrets)"; odin test tests'
