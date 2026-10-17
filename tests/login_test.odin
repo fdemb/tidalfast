@@ -573,54 +573,60 @@ held_login_code_follows_the_login_shown :: proc(t: ^testing.T) {
 	testing.expect_value(t, app.small_str(&d.login.link.user_code), "ABCDE")
 }
 
-// When the hold list is full of jobs that are all still wanted, the oldest
-// goes, and what it was for can ask again: the code login gets a code, and
-// a list asks for its page again and loads in full.
+// A full hold list makes room from a job no longer wanted before any add,
+// and going back to the code login asks for a code again.
 @(test)
-evicted_held_jobs_are_asked_for_again :: proc(t: ^testing.T) {
+full_hold_list_drops_unwanted_jobs_first :: proc(t: ^testing.T) {
 	s := data_state()
 	defer data_state_free(s)
 	d := &s.data
 	d.account = .Signed_Out
 	d.login.pkce = .Off
 	fill_with_covers(d)
-	hold_covers :: proc(d: ^app.Data, n: int) {
-		for _ in 0 ..< n {
-			app.push_job(d, {payload = app.Cover_Job{}}, app.PRIORITY_COVER)
-		}
-	}
 
 	app.request_login_code(d)
-	hold_covers(d, app.HELD_JOBS)
+	for track in 0 ..< app.HELD_JOBS - 1 {
+		app.push_job(d, {payload = app.Add_Track_Job{track = i64(track), source = .Liked}})
+	}
 	app.pkce_show(d)
+	app.push_job(d, {payload = app.Add_Track_Job{track = app.HELD_JOBS - 1, source = .Liked}})
 	app.device_begin(d)
 	free_slots(d, app.HELD_JOBS + 1)
 	app.data_retry(d)
-	testing.expect_value(t, login_starts(t, s), 1)
-
-	d.account = .Signed_In
-	fill_with_covers(d)
-	app.view_open(d, .Playlist, "pl", "pl", "", 300)
-	hold_covers(d, app.HELD_JOBS - 1)
-	free_slots(d, app.HELD_JOBS + 1)
-	app.data_retry(d)
-	v := &d.view
-	for page := 0; page < 10; page += 1 {
-		served := 0
-		for job in data_jobs(d) {
-			p := job.payload.(app.Tracks_Job) or_continue
-			res := app.Result{job = job, rows = fake_rows(min(int(p.limit), 300 - int(p.offset))), total = 300}
-			app.handle_result(s, &res, 0)
-			served += 1
-		}
-		if served == 0 {
-			break
+	adds := make([dynamic]i64, context.temp_allocator)
+	starts := 0
+	for job in data_jobs(d) {
+		#partial switch p in job.payload {
+		case app.Add_Track_Job:
+			append(&adds, p.track)
+		case app.Login_Start_Job:
+			testing.expect_value(t, p.attempt, d.login_attempt)
+			starts += 1
 		}
 	}
-	testing.expect(t, v.done, "the list ended")
-	testing.expect_value(t, v.in_flight, 0)
-	testing.expect_value(t, v.loaded_rows, 300)
+	testing.expect_value(t, starts, 1)
+	testing.expect_value(t, len(adds), app.HELD_JOBS - 1)
+	testing.expect(t, !slice.contains(adds[:], 0) && slice.contains(adds[:], 1), "the new code's room came from the oldest add")
+	testing.expect(t, slice.contains(adds[:], app.HELD_JOBS - 1), "the unwanted code made room for the last add")
 }
+
+// Jobs that wait behind a flag or a list are never pushed out of the hold
+// list: nothing would ask for a lost Restore or settings save again.
+@(test)
+full_hold_list_never_drops_a_waiting_job :: proc(t: ^testing.T) {
+	s := data_state()
+	testing.cleanup(t, proc(s: rawptr) {data_state_free((^app.State)(s))}, s)
+	d := &s.data
+	d.account = .Signed_In
+	fill_with_covers(d)
+	for _ in 0 ..< app.HELD_JOBS {
+		app.push_job(d, {payload = app.Cover_Job{}}, app.PRIORITY_COVER)
+	}
+	testing.expect_assert(t, "the hold list is full of jobs that wait behind a flag")
+	app.request_playlists(d)
+	testing.fail_now(t, "a full hold list of waiting jobs pushed one out")
+}
+
 
 @(private = "file")
 fake_rows :: proc(n: int) -> []app.Row {

@@ -542,9 +542,8 @@ hold_job :: proc(d: ^Data, job: Job, priority: u8) {
 
 // held_victim is the held job to drop for a new one: one no longer wanted,
 // else the oldest Stream, Artwork or Add_Track, whose track has most likely
-// moved on, else the oldest. The other kinds come one or two at a time, so
-// that last case doesn't happen. For a page it's its list's newest held
-// one, so the list asks again from there and no page after it comes twice.
+// moved on. The other kinds each wait behind a flag or a list, so there are
+// never enough of them to fill the list.
 @(private = "file")
 held_victim :: proc(d: ^Data) -> int {
 	held := d.held[:d.held_count]
@@ -559,19 +558,14 @@ held_victim :: proc(d: ^Data) -> int {
 			return i
 		}
 	}
-	if oldest, page := held[0].job.payload.(Tracks_Job); page {
-		for i := len(held) - 1; i > 0; i -= 1 {
-			if p, ok := held[i].job.payload.(Tracks_Job); ok && p.view == oldest.view {
-				return i
-			}
-		}
+	when ODIN_DEBUG || ODIN_TEST {
+		panic("the hold list is full of jobs that wait behind a flag")
 	}
 	return 0
 }
 
 // held_drop lets go of a held job that won't be pushed. Its caller counted
-// it as out, so the flag holding back the next one is cleared, and a list's
-// page is left for view_request_pages to ask for again.
+// it as out, so the flag holding back the next one is cleared.
 @(private = "file")
 held_drop :: proc(d: ^Data, job: ^Job) {
 	l := &d.login
@@ -584,11 +578,6 @@ held_drop :: proc(d: ^Data, job: ^Job) {
 		l.waiting = false
 	case Playlists_Job:
 		d.sidebar.loading = false
-	case Tracks_Job:
-		if v := track_view(d, p.view); v != nil {
-			v.in_flight -= 1
-			v.next_offset = min(v.next_offset, int(p.offset))
-		}
 	}
 	job_free(job)
 }
