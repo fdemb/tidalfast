@@ -269,10 +269,9 @@ SLOW_DOWN_STEP :: 5
 
 // login_device_wait polls TIDAL until the user approves the device code,
 // then logs in. With until_expiry = false it checks once. Blocks; run it on
-// a worker thread in a UI. Setting cancel^ to true (atomically) stops it.
-// With attempt, it stops once the session's login attempt is another (see
-// session_set_login_attempt), and tokens that arrive after that are
-// dropped.
+// a worker thread in a UI. With attempt, it stops once the session's login
+// attempt is another (see session_set_login_attempt), and tokens that
+// arrive after that are dropped.
 //
 // It waits link.interval seconds between polls and adds SLOW_DOWN_STEP to
 // link.interval when TIDAL asks it to slow down, so a caller that polls
@@ -280,7 +279,7 @@ SLOW_DOWN_STEP :: 5
 // code expired, .Authentication if the user denied it, a rate limit as
 // .Too_Many_Requests or .Abuse_Detected (with the backoff started), a 5xx or
 // a 408 as .Http, and transport errors as they come.
-login_device_wait :: proc(s: ^Session, link: ^Link_Login, until_expiry := true, cancel: ^bool = nil, attempt: Maybe(u64) = nil) -> (err: Error) {
+login_device_wait :: proc(s: ^Session, link: ^Link_Login, until_expiry := true, attempt: Maybe(u64) = nil) -> (err: Error) {
 	scratch_begin(context.allocator)
 	epoch := session_epoch(s)
 	expiry := link.expires_in if until_expiry else 1
@@ -325,7 +324,7 @@ login_device_wait :: proc(s: ^Session, link: ^Link_Login, until_expiry := true, 
 			if a, ok := attempt.?; ok {
 				superseded = a != session_login_attempt(s)
 			}
-			if (cancel != nil && sync.atomic_load(cancel)) || sync.atomic_load(&s.abort) || session_epoch(s) != epoch || superseded {
+			if sync.atomic_load(&s.abort) || session_epoch(s) != epoch || superseded {
 				return make_error(.Cancelled, "Login cancelled")
 			}
 			time.sleep(100 * time.Millisecond)

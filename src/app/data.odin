@@ -45,29 +45,64 @@ Account :: enum u8 {
 	Signed_In,
 }
 
-// Pkce_Step is where the login screen is. The PKCE login is the main one,
-// so it's the zero value.
-Pkce_Step :: enum u8 {
-	Paste, // the PKCE login: waiting for the redirect address
-	Exchanging, // a Login_Pkce job is out
-	Off, // the device-code login shows
-}
-
+// Login is the login screen: the card it shows, and how far the
+// device-code login got. That one keeps its step while the PKCE card
+// shows, so going back to it polls the same code, or waits for the job
+// still out before it asks for another.
 Login :: struct {
-	pkce:        Pkce_Step,
-	pkce_note:   Small, // why the last paste didn't work
+	card:        Login_Card,
+	code:        Code_Step,
 	field:       ui.Text_Field, // the pasted redirect address
 	focus_field: bool, // the field takes the focus next frame
-	link:        Login_Link,
-	requested:   bool, // a Login_Start job is out
-	start_for:   u32, // the login attempt that Login_Start is for
-	waiting:     bool, // a Login_Wait job is out
-	error:       Small, // the login stopped; the screen offers "Try again"
 	note:        Small, // shown on the card while the login goes on
-	deadline:    time.Tick, // when the code expires
-	poll_at:     time.Tick, // the next Login_Wait polls no sooner
-	poll_once:   bool, // it checks once whether TIDAL can be reached again
-	retries:     int, // polls in a row that couldn't reach TIDAL
+}
+
+// Login_Card is the card on the login screen. The PKCE login is the main
+// one, so it's the zero value.
+Login_Card :: union #no_nil {
+	Login_Paste,
+	Login_Exchanging,
+	Login_Code,
+}
+
+// Login_Paste is the PKCE login waiting for the redirect address.
+Login_Paste :: struct {
+	note: Small, // why the last paste didn't work
+}
+
+// Login_Exchanging is the PKCE login with its Login_Pkce job out.
+Login_Exchanging :: struct {}
+
+// Login_Code is the device-code login, see Login.code.
+Login_Code :: struct {}
+
+// Code_Step is how far the device-code login got. nil before it asks for a
+// code.
+Code_Step :: union {
+	Code_Asked,
+	Code_Polling,
+	Code_Failed,
+}
+
+// Code_Asked has a Login_Start job out.
+Code_Asked :: struct {
+	attempt: u32, // the login attempt it's for
+}
+
+// Code_Polling waits for the user to approve the code on screen. A login
+// that has its tokens polls with no code, to load the session with them.
+Code_Polling :: struct {
+	link:     Login_Link,
+	deadline: time.Tick, // when the code expires
+	poll_at:  time.Tick, // the next Login_Wait polls no sooner
+	once:     bool, // it checks once whether TIDAL can be reached again
+	retries:  int, // polls in a row that couldn't reach TIDAL
+	out:      bool, // a Login_Wait job is out
+}
+
+// Code_Failed is a stopped login; the card offers "Try again".
+Code_Failed :: struct {
+	error: Small,
 }
 
 Sidebar :: struct {
@@ -152,7 +187,6 @@ Data :: struct {
 	pkce_mutex:     sync.Mutex,
 	pkce_redirect:  [PKCE_REDIRECT_MAX]u8,
 	pkce_len:       int,
-	device_cancel:  bool, // stops a device-code poll once the PKCE login takes over (atomic)
 	// Goes up when a login starts or the user switches between the device
 	// and hi-res logins. Login jobs carry it (their attempt) and the session
 	// drops tokens from an older one, so a late answer to an abandoned login
@@ -712,11 +746,13 @@ held_drop :: proc(d: ^Data, job: ^Job) {
 	l := &d.login
 	#partial switch p in job.payload {
 	case Login_Start_Job:
-		if l.start_for == p.attempt {
-			l.requested = false
+		if asked, ok := l.code.(Code_Asked); ok && asked.attempt == p.attempt {
+			l.code = nil
 		}
 	case Login_Wait_Job:
-		l.waiting = false
+		if poll, ok := &l.code.(Code_Polling); ok {
+			poll.out = false
+		}
 	case Playlists_Job:
 		d.sidebar.loading = false
 	}
@@ -794,7 +830,6 @@ sign_out :: proc(s: ^State, why: string) {
 	d.login = {
 		note = small(why),
 	}
-	d.relogin = false
 	login_next_attempt(d)
 	pkce_prepare(d)
 }
@@ -814,6 +849,7 @@ account_end :: proc(s: ^State) {
 	tidal.session_clear_auth(d.session)
 	d.account = .Signed_Out
 	d.device_login = false
+	d.relogin = false
 	sidebar_free(d)
 	view_close(d)
 	queued_drop(d)
@@ -824,22 +860,35 @@ account_end :: proc(s: ^State) {
 	s.library.playlist = 0
 }
 
-// request_login_code starts a device login. If an approved login still
-// has its tokens, as after a failure loading the session, it loads the
-// session with them instead: the code is spent, and the user approved.
-request_login_code :: proc(d: ^Data) {
-	if d.login.requested || d.login.waiting {
+// code_login_next asks for what the device login waits on, unless its job
+// is out: the poll for the code on screen, or a new code. If an approved
+// login still has its tokens, as after a failure loading the session, it
+// loads the session with them instead: the code is spent, and the user
+// approved.
+code_login_next :: proc(d: ^Data) {
+	l := &d.login
+	#partial switch c in l.code {
+	case Code_Asked:
 		return
+	case Code_Polling:
+		if c.out {
+			return
+		}
+		if c.link.device_code.len > 0 {
+			request_login_poll(d)
+			return
+		}
 	}
 	if login_has_tokens(d) {
-		d.login.note = small("Loading your account…")
+		if _, polling := l.code.(Code_Polling); !polling {
+			l.code = Code_Polling{}
+		}
+		l.note = small("Loading your account…")
 		request_login_poll(d)
 		return
 	}
-	sync.atomic_store(&d.device_cancel, false)
 	push_job(d, {payload = Login_Start_Job{attempt = d.login_attempt}})
-	d.login.requested = true
-	d.login.start_for = d.login_attempt
+	l.code = Code_Asked{d.login_attempt}
 }
 
 // login_has_tokens says whether the device login got its tokens but hasn't
@@ -850,14 +899,15 @@ login_has_tokens :: proc(d: ^Data) -> bool {
 	return a.access_token != "" && a.user_id == 0
 }
 
-// request_login_poll queues the poll for the code on screen.
+// request_login_poll queues the poll for the code on screen, or with no
+// code, the one that loads the session with the login's tokens.
 request_login_poll :: proc(d: ^Data) {
-	l := &d.login
-	if l.waiting {
+	p := &d.login.code.(Code_Polling)
+	if p.out {
 		return
 	}
-	l.waiting = true
-	push_job(d, {payload = Login_Wait_Job{attempt = d.login_attempt, device_code = l.link.device_code, interval = l.link.interval, deadline = l.deadline, not_before = l.poll_at, once = l.poll_once}})
+	p.out = true
+	push_job(d, {payload = Login_Wait_Job{attempt = d.login_attempt, device_code = p.link.device_code, interval = p.link.interval, deadline = p.deadline, not_before = p.poll_at, once = p.once}})
 }
 
 // login_next_attempt starts a new login attempt. Tokens that arrive for an
@@ -911,15 +961,19 @@ held_wanted :: proc(d: ^Data, job: Job) -> bool {
 	if job.auth != d.auth_gen {
 		return false
 	}
+	_, code_shown := l.card.(Login_Code)
 	#partial switch p in job.payload {
 	case Restore_Job:
 		return d.account == .Restoring
 	case Login_Start_Job:
-		return d.account == .Signed_Out && l.pkce == .Off && l.error.len == 0 && l.requested && l.start_for == p.attempt
+		asked, ok := l.code.(Code_Asked)
+		return code_shown && ok && asked.attempt == p.attempt
 	case Login_Wait_Job:
-		return d.account == .Signed_Out && l.pkce == .Off && (l.link.device_code.len > 0 || login_has_tokens(d))
+		_, polling := l.code.(Code_Polling)
+		return code_shown && polling
 	case Login_Pkce_Job:
-		return d.account == .Signed_Out && l.pkce == .Exchanging
+		_, exchanging := l.card.(Login_Exchanging)
+		return exchanging
 	case Playlists_Job:
 		return d.account == .Signed_In
 	case Tracks_Job:
@@ -1009,29 +1063,26 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 		if p.attempt != d.login_attempt {
 			// The user went on to another login. If that's the device login
 			// again, it waited for this answer to ask for a code of its own.
-			// A Login_Start from before d.login was reset is no one's.
-			if !l.requested || l.start_for != p.attempt {
-				return
-			}
-			l.requested = false
-			if d.account == .Signed_Out && l.pkce == .Off && l.error.len == 0 {
-				request_login_code(d)
+			// A Login_Start from before the login started over is no one's.
+			if asked, ok := l.code.(Code_Asked); ok && asked.attempt == p.attempt {
+				l.code = nil
+				if _, shown := l.card.(Login_Code); shown {
+					code_login_next(d)
+				}
 			}
 			return
 		}
-		l.requested = false
 		if failed {
 			l^ = {
-				pkce  = .Off,
-				error = login_error(err, res.message),
+				card = Login_Code{},
+				code = Code_Failed{login_error(err, res.message)},
 			}
 			return
 		}
 		l^ = {
-			pkce     = .Off,
-			link     = res.link,
-			note     = l.note,
-			deadline = time.tick_add(time.tick_now(), time.Duration(f64(res.link.expires) * f64(time.Second))),
+			card = Login_Code{},
+			code = Code_Polling{link = res.link, deadline = time.tick_add(time.tick_now(), time.Duration(f64(res.link.expires) * f64(time.Second)))},
+			note = l.note,
 		}
 		request_login_poll(d)
 	case Login_Wait_Job:
@@ -1039,18 +1090,13 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 			// The user went on to another login. If that's the device login
 			// again, its poll waited for this one to end.
 			l := &d.login
-			l.waiting = false
-			if d.account == .Signed_Out && l.pkce == .Off && l.error.len == 0 {
-				if l.link.device_code.len > 0 {
-					request_login_poll(d)
-				} else {
-					request_login_code(d)
+			if poll, ok := &l.code.(Code_Polling); ok {
+				poll.out = false
+				if _, shown := l.card.(Login_Code); shown {
+					code_login_next(d)
 				}
 			}
 			return
-		}
-		if d.account == .Signed_In {
-			return // the hi-res login finished first
 		}
 		login_wait_done(d, res, p, err, failed)
 	case Login_Pkce_Job:
@@ -1146,50 +1192,50 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 @(private = "file")
 login_wait_done :: proc(d: ^Data, res: ^Result, job: Login_Wait_Job, err: tidal.Error_Kind, failed: bool) {
 	l := &d.login
-	l.waiting = false
-	if res.link.interval > 0 {
-		l.link.interval = res.link.interval
+	poll, polling := &l.code.(Code_Polling)
+	if !polling {
+		return // the login started over
 	}
-	if failed && err == .Cancelled && l.pkce != .Off {
-		return // the hi-res login stopped it; going back polls again
+	poll.out = false
+	if res.link.interval > 0 {
+		poll.link.interval = res.link.interval
 	}
 	if !failed {
-		d.login = {}
 		signed_in(d)
 		return
 	}
-	expired := time.tick_diff(time.tick_now(), l.deadline) <= 0 && !login_has_tokens(d)
+	expired := time.tick_diff(time.tick_now(), poll.deadline) <= 0 && !login_has_tokens(d)
 	#partial switch err {
 	case .Timeout:
 		if job.once && !expired {
 			// TIDAL answered the check, which counts as a poll.
 			l.note = {}
-			l.retries = 0
-			l.poll_at = time.tick_add(time.tick_now(), time.Duration(f64(l.link.interval) * f64(time.Second)))
-			l.poll_once = false
+			poll.retries = 0
+			poll.poll_at = time.tick_add(time.tick_now(), time.Duration(f64(poll.link.interval) * f64(time.Second)))
+			poll.once = false
 			request_login_poll(d)
 			return
 		}
 		d.login = {
-			pkce = .Off,
+			card = Login_Code{},
 			note = small("The code expired. Here's a new one."),
 		}
-		request_login_code(d)
+		code_login_next(d)
 	case .Network:
 		if expired {
 			d.login = {
-				pkce = .Off,
+				card = Login_Code{},
 				note = small("The code expired. Here's a new one."),
 			}
-			request_login_code(d)
+			code_login_next(d)
 			return
 		}
-		l.retries += 1
+		poll.retries += 1
 		// The poll may have reached TIDAL, so the next one waits at least
 		// the interval.
-		wait := max(min(1 << uint(min(l.retries, 5)), LOGIN_RETRY_MAX), int(math.ceil(l.link.interval)))
-		l.poll_at = time.tick_add(time.tick_now(), time.Duration(wait) * time.Second)
-		l.poll_once = true
+		wait := max(min(1 << uint(min(poll.retries, 5)), LOGIN_RETRY_MAX), int(math.ceil(poll.link.interval)))
+		poll.poll_at = time.tick_add(time.tick_now(), time.Duration(wait) * time.Second)
+		poll.once = true
 		l.note = small(fmt.tprintf("Can't reach TIDAL. Trying again in %d s.", wait))
 		request_login_poll(d)
 	case:
@@ -1198,8 +1244,8 @@ login_wait_done :: proc(d: ^Data, res: ^Result, job: Login_Wait_Job, err: tidal.
 			tidal.session_clear_auth(d.session)
 		}
 		d.login = {
-			pkce  = .Off,
-			error = login_error(err, res.message),
+			card = Login_Code{},
+			code = Code_Failed{login_error(err, res.message)},
 		}
 	}
 }
@@ -1583,11 +1629,12 @@ show_login :: proc(s: ^State) -> bool {
 	return s.data.account == .Signed_Out || (s.data.account == .Signed_In && s.data.relogin)
 }
 
-// signed_in starts loading a login's account. A login from the device-code
-// client gets the notice that it only streams AAC.
+// signed_in starts loading a login's account. The login screen starts
+// over, and a login from the device-code client gets the notice that it
+// only streams AAC.
 signed_in :: proc(d: ^Data) {
 	d.account = .Signed_In
-	d.relogin = false
+	d.login = {}
 	d.device_login = !tidal.session_is_pkce(d.session)
 	d.notice_hidden = false
 	lists_signed_in(d, tidal.session_auth(d.session, context.temp_allocator).user_id)

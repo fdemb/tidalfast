@@ -248,6 +248,59 @@ device_login_notice :: proc(t: ^testing.T) {
 	testing.expect(t, ok && saved.is_pkce)
 }
 
+// Over a signed-in device-code login, "Log in with TIDAL" on the login
+// screen opens the login page again and keeps the paste form. A failed
+// exchange ends the account and leaves the form with its note; a good one
+// replaces the saved login.
+@(test)
+relogin_keeps_the_paste_form :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := login_state(&m)
+	defer login_state_free(s)
+	d := &s.data
+	redirect := fmt.tprintf("%sandroid/login/auth", m.base_url)
+	m.polls = {"ok"}
+	show_code(t, s, interval = 0.2)
+	testing.expect_value(t, run_queued(s, app.Login_Wait_Job), 1)
+
+	app.relogin_show(d)
+	// "Log in with TIDAL" on the login screen, without the browser.
+	app.pkce_show(d)
+	screen := login_screen(t, s)
+	testing.expect(t, shows(screen, "Paste the address here"), screen)
+	testing.expect(t, shows(screen, "Back to your library"), screen)
+
+	app.pkce_submit(s, fmt.tprintf("%s?code=bad", redirect))
+	kinds, queued := queued_kinds(d)
+	expect_kinds(t, kinds, app.Login_Pkce_Job)
+	m.polls = {"denied"}
+	m.poll_count = 0
+	{
+		// tidal logs TIDAL's refusal as an error, which fails a test.
+		context.logger = log.nil_logger()
+		run_now(s, queued[0])
+	}
+	screen = login_screen(t, s)
+	testing.expect(t, shows(screen, "TIDAL didn't take this address. Log in with TIDAL again."), screen)
+	testing.expect(t, shows(screen, "Paste the address here"), screen)
+	testing.expect(t, !shows(screen, "Back to your library"), screen)
+	saved, ok := keychain_auth(d)
+	testing.expect(t, ok && !saved.is_pkce, "the device login stays saved until the new one replaces it")
+
+	app.pkce_show(d)
+	app.pkce_submit(s, fmt.tprintf("%s?code=good", redirect))
+	kinds, queued = queued_kinds(d)
+	expect_kinds(t, kinds, app.Login_Pkce_Job)
+	m.polls = {"ok"}
+	m.poll_count = 0
+	run_now(s, queued[0])
+	testing.expect(t, !app.show_login(s), "the library shows")
+	saved, ok = keychain_auth(d)
+	testing.expect(t, ok && saved.is_pkce, "the PKCE login is saved")
+}
+
 // A stream that comes as AAC says so in the player bar and stops there:
 // every track would come the same way. Other failures skip on.
 @(test)

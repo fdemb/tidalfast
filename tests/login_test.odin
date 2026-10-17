@@ -199,6 +199,37 @@ device_wait_honours_interval_and_slow_down :: proc(t: ^testing.T) {
 	testing.expect_value(t, m.poll_count, 1)
 }
 
+// A device wait between polls stops as soon as another login attempt
+// starts, and polls no more.
+@(test)
+device_wait_stops_with_its_attempt :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := oauth_session(&m)
+	defer tidal.session_destroy(s)
+	s.config.api_oauth2_token = fmt.tprintf("%sdevice_token", m.base_url)
+	tidal.session_set_login_attempt(s, 1)
+
+	worker := thread.create_and_start_with_poly_data(s, proc(s: ^tidal.Session) {
+		time.sleep(300 * time.Millisecond)
+		tidal.session_set_login_attempt(s, 2)
+	})
+	link := tidal.Link_Login {
+		device_code = "dc",
+		interval    = 2,
+		expires_in  = 3,
+	}
+	start := time.tick_now()
+	err := tidal.login_device_wait(s, &link, until_expiry = true, attempt = 1)
+	took := time.duration_seconds(time.tick_since(start))
+	thread.join(worker)
+	thread.destroy(worker)
+	testing.expect(t, tidal.is_error(err, .Cancelled), fmt.tprint(err))
+	testing.expect(t, took < 1, fmt.tprint(took))
+	testing.expect_value(t, m.poll_count, 1)
+}
+
 @(test)
 clear_auth_cancels_requests_in_flight :: proc(t: ^testing.T) {
 	m: Mock
@@ -782,6 +813,31 @@ show_code :: proc(t: ^testing.T, s: ^app.State, interval: f32 = 1, expires: f32 
 	testing.expect(t, shows(login_screen(t, s, loc = loc), "ABCDE"), "the code shows", loc = loc)
 }
 
+// A code that expired is replaced, whether a poll found it expired or it
+// ran out while TIDAL couldn't be reached. The card says so and asks TIDAL
+// for a new one.
+@(test)
+expired_code_is_replaced :: proc(t: ^testing.T) {
+	for kind in ([]tidal.Error_Kind{.Timeout, .Network}) {
+		s := data_state()
+		show_code(t, s, expires = 0)
+		polls := data_jobs(&s.data)
+		if testing.expect_value(t, len(polls), 1) {
+			res := app.Result{job = polls[0], err = kind}
+			app.handle_result(s, &res, 0)
+			screen := login_screen(t, s)
+			testing.expect(t, shows(screen, "The code expired. Here's a new one."), screen)
+			testing.expect(t, !shows(screen, "ABCDE"), screen)
+			starts := data_jobs(&s.data)
+			if testing.expectf(t, len(starts) == 1, "%v: queued %v", kind, starts) {
+				_, start := starts[0].payload.(app.Login_Start_Job)
+				testing.expectf(t, start, "%v asks for a new code: %v", kind, starts[0].payload)
+			}
+		}
+		data_state_free(s)
+	}
+}
+
 // A code the queue refused isn't asked for once the user has moved on to
 // the PKCE login, and going back to the code login asks for one code.
 @(test)
@@ -801,6 +857,68 @@ held_login_code_follows_the_login_shown :: proc(t: ^testing.T) {
 	app.device_begin(d)
 	testing.expect_value(t, login_starts(s), 1)
 	testing.expect(t, shows(login_screen(t, s), "ABCDE"))
+}
+
+// After a failed code login, going to the PKCE login and back asks TIDAL
+// for a new code and says so, not the old error, whether the queue takes
+// the ask at once or holds it for room.
+@(test)
+code_login_after_a_failure_asks_again :: proc(t: ^testing.T) {
+	FAILED :: "Can't reach TIDAL. Check your connection."
+	for full in ([]bool{false, true}) {
+		s := data_state()
+		d := &s.data
+		launch_signed_out(s)
+		app.device_begin(d)
+		starts := data_jobs(d)
+		if testing.expect_value(t, len(starts), 1) {
+			res := app.Result{job = starts[0], err = .Network}
+			app.handle_result(s, &res, 0)
+		}
+		testing.expect(t, shows(login_screen(t, s), FAILED))
+
+		app.pkce_show(d)
+		if full {
+			fill_with_covers(d)
+		}
+		app.device_begin(d)
+		if full {
+			free_slots(d, 4)
+			app.data_retry(d)
+		}
+		screen := login_screen(t, s)
+		testing.expectf(t, shows(screen, "Getting a code from TIDAL…"), "full queue %v: %s", full, screen)
+		testing.expectf(t, !shows(screen, FAILED), "full queue %v: %s", full, screen)
+		testing.expectf(t, login_starts(s) == 1, "full queue %v: one code asked for", full)
+		screen = login_screen(t, s)
+		testing.expectf(t, shows(screen, "ABCDE"), "full queue %v: %s", full, screen)
+		data_state_free(s)
+	}
+}
+
+// A pasted address does nothing unless the paste form shows: not on the
+// code login's card, and not a second time while the first is exchanged.
+@(test)
+pkce_submit_needs_the_paste_form :: proc(t: ^testing.T) {
+	s := data_state()
+	defer data_state_free(s)
+	d := &s.data
+	URL :: "https://tidal.com/android/login/auth?code=c"
+	show_code(t, s)
+	data_jobs(d)
+	app.pkce_submit(s, URL)
+	testing.expect_value(t, len(data_jobs(d)), 0)
+	testing.expect(t, shows(login_screen(t, s), "ABCDE"))
+
+	app.pkce_show(d)
+	app.pkce_submit(s, URL)
+	app.pkce_submit(s, URL)
+	queued := data_jobs(d)
+	testing.expect_value(t, len(queued), 1)
+	for job in queued {
+		_, pkce := job.payload.(app.Login_Pkce_Job)
+		testing.expectf(t, pkce, "queued %v", job.payload)
+	}
 }
 
 // A full hold list makes room from a job no longer wanted before any add,
