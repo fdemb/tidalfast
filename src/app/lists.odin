@@ -945,6 +945,7 @@ queue_read :: proc(res: ^Result, path: string) {
 // queue_write_now writes the play queue's file on this thread, after the
 // disk thread has stopped.
 queue_write_now :: proc(d: ^Data, blob: []u8) {
+	assert(!d.lists.running, "the disk thread could write an older queue after this one")
 	if !disk_on(d) {
 		return
 	}

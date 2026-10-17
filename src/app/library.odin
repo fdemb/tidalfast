@@ -749,7 +749,7 @@ draw_player_bar :: proc(s: ^State, w: f32) {
 		{
 			ui.row("", {}, ui.fill(), ui.px(36))
 			ui.spacer(ui.fill())
-			shuffle := s.playback.settings.shuffle
+			shuffle := s.settings.shuffle
 			shuffle_sig := toggle_button("shuffle", text.ICON_SHUFFLE, "Shuffle", "On" if shuffle else "Off", shuffle)
 			if shuffle_sig.clicked {
 				playback_set_shuffle(s, !shuffle)
@@ -776,7 +776,7 @@ draw_player_bar :: proc(s: ^State, w: f32) {
 			}
 			ui.tooltip(next, "Next")
 			ui.spacer(ui.px(16))
-			repeat := s.playback.settings.repeat
+			repeat := s.settings.repeat
 			REPEAT_NAMES := [audio.Repeat]string {
 				.Off = "Off",
 				.All = "All",
@@ -923,7 +923,7 @@ toggle_button :: proc(id, icon, name, value: string, on: bool) -> ui.Signal {
 // press and release in one frame still counts, at the release.
 draw_volume :: proc(s: ^State, width: f32) {
 	slider := ui.column("volume", {.Clickable}, ui.px(width), ui.fill())
-	ui.accessible(slider, .Slider, "Volume", fmt.tprintf("%d%%", int(math.round(s.playback.settings.volume * 100))))
+	ui.accessible(slider, .Slider, "Volume", fmt.tprintf("%d%%", int(math.round(s.settings.volume * 100))))
 	sig := ui.signal(slider)
 	if (sig.held || sig.released) && slider.rect.w > 0 {
 		playback_set_volume(s, clamp((sig.mouse.x - slider.rect.x) / slider.rect.w, 0, 1), sig.released)
@@ -933,7 +933,7 @@ draw_volume :: proc(s: ^State, width: f32) {
 		track := ui.row("", {.Draw_Background}, ui.fill(), ui.px(4))
 		track.background = SURFACE_ACTIVE
 		track.radius = 2
-		level := ui.box_make("", {.Draw_Background}, ui.pct(s.playback.settings.volume, 1), ui.fill())
+		level := ui.box_make("", {.Draw_Background}, ui.pct(s.settings.volume, 1), ui.fill())
 		level.background = mix(SECONDARY, ACCENT, max(slider.hot_t, slider.active_t))
 		level.radius = 2
 	}
