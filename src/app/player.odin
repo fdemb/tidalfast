@@ -616,6 +616,10 @@ playback_seek :: proc(s: ^State, seconds: f64) {
 	sample := i64(at * f64(rate))
 	if !pb.cur.resolved {
 		pb.cur.at = sample
+		// The silent placeholder holds the position status reports.
+		if !pb.fake {
+			audio.play(pb.player, {serial = pb.cur.serial}, sample, pb.paused)
+		}
 		return
 	}
 	if pb.status.state == .Ended && pb.status.serial == pb.cur.serial {

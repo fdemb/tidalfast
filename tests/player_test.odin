@@ -307,3 +307,19 @@ restored_queue_stays_paused_past_a_failure :: proc(t: ^testing.T) {
 	testing.expect(t, s.playback.status.state != .Playing, "the player plays the next track's placeholder")
 }
 
+// A seek before the restored track's stream resolves moves the position
+// shown, and the one saved, from where the file had it.
+@(test)
+seek_before_resolve_moves_the_position :: proc(t: ^testing.T) {
+	rows := []app.Row{{title = "One", seconds = 300, id = 101}}
+	s := restored_player_state(rows, 100 * 44100, 44100)
+	defer free(s)
+	defer app.playback_shutdown(s)
+	testing.expect(t, wait_until(s, proc(s: ^app.State) -> bool {return s.playback.status.serial == s.playback.cur.serial}))
+
+	app.playback_seek(s, 10)
+	time.sleep(100 * time.Millisecond)
+	app.playback_update(s, nil)
+	at := app.playback_position(s)
+	testing.expectf(t, at >= 10 && at < 11, "after a seek to 10 s the position is %v s", at)
+}
