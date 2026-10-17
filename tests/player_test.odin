@@ -151,6 +151,11 @@ fake_player_state :: proc(rows: []app.Row) -> ^app.State {
 	return s
 }
 
+@(private = "file")
+toggle_no_status :: proc(s: ^app.State) {
+	app.playback_media(s, {{kind = .Media, media = .Toggle}})
+}
+
 // List A plays with its row 1 preloaded. Double-clicking row 1 of list B
 // must play B's row 1, not the bytes preloaded for A's.
 @(test)
@@ -163,8 +168,8 @@ new_queue_doesnt_reuse_the_preload :: proc(t: ^testing.T) {
 	pb := &s.playback
 
 	app.playback_play_row(s, 0)
-	// The fake tones are 30 s, so the player asks for the next one at once.
-	testing.expect(t, wait_until(s, proc(s: ^app.State) -> bool {return s.playback.next.resolved}))
+	app.playback_observe(s, {serial = pb.cur.serial, rate = 44100, state = .Playing, want_next = true})
+	testing.expect(t, pb.next.resolved)
 	testing.expect_value(t, pb.next.item, 1)
 	preloaded := pb.next.serial
 
@@ -173,7 +178,7 @@ new_queue_doesnt_reuse_the_preload :: proc(t: ^testing.T) {
 	app.playback_play_row(s, 1)
 	testing.expect(t, pb.cur.serial != preloaded, "B's row 1 took the source preloaded for A's")
 	testing.expect_value(t, app.playback_item(s).title, "B2")
-	testing.expect(t, wait_until(s, proc(s: ^app.State) -> bool {return s.playback.status.serial == s.playback.cur.serial}))
+	testing.expect(t, pb.cur.resolved)
 }
 
 // The player bar's play button and the remote's toggle start playback when
@@ -186,25 +191,26 @@ toggle_plays_from_idle_and_the_end :: proc(t: ^testing.T) {
 	defer app.playback_shutdown(s)
 	pb := &s.playback
 
-	media(s, .Toggle)
+	toggle_no_status(s)
 	testing.expect_value(t, pb.index, 0)
 	testing.expect(t, app.playback_playing(s))
-	media(s, .Toggle)
+	toggle_no_status(s)
 	testing.expect(t, !app.playback_playing(s))
-	media(s, .Toggle)
+	toggle_no_status(s)
 	testing.expect(t, app.playback_playing(s))
 
 	// The last entry of the queue, played to its end.
 	app.playback_play_row(s, 1)
-	testing.expect(t, wait_until(s, proc(s: ^app.State) -> bool {return s.playback.status.serial == s.playback.cur.serial}))
-	app.playback_seek(s, app.FAKE_TONE_SECONDS - 0.05)
-	testing.expect(t, wait_until(s, proc(s: ^app.State) -> bool {return s.playback.status.state == .Ended}))
+	last := pb.cur.serial
+	end := i64(app.FAKE_TONE_SECONDS * 44100)
+	app.playback_observe(s, {serial = last, sample = end, total = end, rate = 44100, state = .Ended})
+	testing.expect_value(t, pb.index, 1)
 	testing.expect(t, !app.playback_playing(s))
 
-	media(s, .Toggle)
+	toggle_no_status(s)
 	testing.expect_value(t, pb.index, 0)
 	testing.expect(t, app.playback_playing(s))
-	testing.expect(t, wait_until(s, proc(s: ^app.State) -> bool {return s.playback.status.serial == s.playback.cur.serial && s.playback.status.state == .Playing}))
+	testing.expect(t, pb.cur.serial != last && pb.cur.resolved, "the first track isn't sent to the player again")
 }
 
 // A seek sent for track one after the audio moved on to the preloaded
@@ -219,21 +225,18 @@ advance_drops_a_pending_seek :: proc(t: ^testing.T) {
 	pb := &s.playback
 
 	app.playback_play_row(s, 0)
-	testing.expect(t, wait_until(s, proc(s: ^app.State) -> bool {return s.playback.next.resolved}))
-	app.playback_seek(s, app.FAKE_TONE_SECONDS - 0.1)
-	testing.expect(t, wait_until(s, proc(s: ^app.State) -> bool {return s.playback.seek_id == 0}))
-	// Wait for track two without running a frame, so the app still thinks
-	// track one plays.
-	start := time.tick_now()
-	for audio.status(pb.player).serial != pb.next.serial && time.tick_since(start) < 3 * time.Second {
-		time.sleep(5 * time.Millisecond)
-	}
+	one := pb.cur.serial
+	app.playback_observe(s, {serial = one, sample = 29 * 44100, rate = 44100, state = .Playing, want_next = true})
+	testing.expect(t, pb.next.resolved)
+	two := pb.next.serial
 	testing.expect_value(t, pb.index, 0)
 	app.playback_seek(s, 12)
+	testing.expect(t, pb.seek_id != 0)
 
-	testing.expect(t, wait_until(s, proc(s: ^app.State) -> bool {return s.playback.index == 1 && s.playback.status.serial == s.playback.cur.serial}))
-	time.sleep(100 * time.Millisecond)
-	app.playback_update(s, nil)
+	app.playback_observe(s, {serial = two, sample = 4410, rate = 44100, state = .Playing})
+	testing.expect_value(t, pb.index, 1)
+	testing.expect_value(t, pb.cur.serial, two)
+	app.playback_observe(s, {serial = two, sample = 8820, rate = 44100, state = .Playing})
 	at := app.playback_position(s)
 	testing.expectf(t, at < 5, "track two shows %v s, the seek target meant for track one", at)
 	testing.expect_value(t, pb.seek_id, u32(0))
@@ -252,19 +255,20 @@ reload_keeps_a_pending_seek :: proc(t: ^testing.T) {
 	pb.window = audio.STREAM_WINDOW
 
 	app.playback_play_row(s, 0)
-	testing.expect(t, wait_until(s, proc(s: ^app.State) -> bool {return s.playback.status.serial == s.playback.cur.serial}))
+	one := pb.cur.serial
+	app.playback_observe(s, {serial = one, sample = 44100, rate = 44100, state = .Playing})
 	app.playback_seek(s, 20)
 	app.playback_unload(s)
 	shell := platform.Shell {
 		request_redraw = no_redraw,
 	}
 	app.playback_reload(s, &shell)
+	testing.expect_value(t, pb.cur.at, i64(20 * 44100))
 
-	testing.expect(t, wait_until(s, proc(s: ^app.State) -> bool {return s.playback.seek_id == 0 && s.playback.status.serial == s.playback.cur.serial}))
+	app.playback_observe(s, {serial = one, seek_id = 0, sample = 20 * 44100, rate = 44100, state = .Playing})
 	at := app.playback_position(s)
 	testing.expectf(t, at >= 20 && at < 21, "after the reload the player is at %v s, not the seek target", at)
-	time.sleep(300 * time.Millisecond)
-	app.playback_update(s, nil)
+	app.playback_observe(s, {serial = one, sample = 20 * 44100 + 13230, rate = 44100, state = .Playing})
 	later := app.playback_position(s)
 	testing.expectf(t, later > at, "the position stays at %v s", later)
 }

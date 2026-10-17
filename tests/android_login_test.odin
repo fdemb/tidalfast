@@ -47,6 +47,7 @@ login_state :: proc() -> ^app.State {
 login_state_free :: proc(s: ^app.State) {
 	os_services.secret_delete(app.keychain_service(&s.data), app.KEYCHAIN_ACCOUNT)
 	if s.playback.player != nil {
+		app.workers_stop(&s.data)
 		app.playback_shutdown(s)
 	}
 	app.data_shutdown(s)

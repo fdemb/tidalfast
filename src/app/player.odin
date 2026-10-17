@@ -80,8 +80,6 @@ Playback :: struct {
 	capture:         Small, // TIDALFAST_AUDIO_CAPTURE, for the first player only
 	window:          int, // TIDALFAST_AUDIO_WINDOW_KB, in bytes
 	null_output:     bool, // TIDALFAST_AUDIO_NULL: play to miniaudio's silent null device
-	settings:        Settings, // bit-perfect and hog mode, see settings.odin
-	settings_path:   string, // heap
 
 	// The queue: a snapshot of a list, strings in arena.
 	arena:           vmem.Arena,
@@ -112,9 +110,6 @@ Playback :: struct {
 	dragging:        bool, // the progress bar is held: show the drag position
 	drag_seconds:    f64,
 	volume_sent:     f32,
-	// The file's volume while TIDALFAST_VOLUME stands in for it, so the
-	// override isn't saved unless the slider moves.
-	volume_file:     Maybe(f32),
 	message:         Small,
 	error_seen:      u64,
 
@@ -142,26 +137,23 @@ playback_start :: proc(s: ^State, shell: ^platform.Shell) {
 		pb.window = kb << 10
 	}
 	pb.null_output = os.get_env("TIDALFAST_AUDIO_NULL", context.temp_allocator) != ""
-	pb.settings_path = settings_default_path(runtime.heap_allocator())
-	s.data.settings_path = strings.clone(pb.settings_path, runtime.heap_allocator())
 	s.data.launch_log_path = launch_log_path(runtime.heap_allocator())
-	pb.settings, _ = settings_load(pb.settings_path)
 	if v, ok := strconv.parse_f32(os.get_env("TIDALFAST_VOLUME", context.temp_allocator)); ok {
-		pb.volume_file = pb.settings.volume
-		pb.settings.volume = clamp(v, 0, 1)
+		s.volume_before_override = s.settings.volume
+		s.settings.volume = clamp(v, 0, 1)
 	}
 	when !audio.BIT_PERFECT {
-		pb.settings.bit_perfect, pb.settings.hog = false, false
+		s.settings.bit_perfect, s.settings.hog = false, false
 	}
 	// The app died with a device switched to a track's rate. Put it back
 	// before anything plays.
-	if pb.settings.device.rate != 0 {
-		audio.device_change_undo(&pb.settings.device)
-		pb.settings.device = {}
-		settings_queue(&s.data, settings_to_save(pb))
+	if s.settings.device.rate != 0 {
+		audio.device_change_undo(&s.settings.device)
+		s.settings.device = {}
+		settings_queue(&s.data, settings_to_save(s))
 	}
-	pb.player = audio.create(shell.request_redraw, pb.settings.volume, small_str(&pb.capture), pb.window, pb.null_output, output_of(pb.settings))
-	pb.volume_sent = pb.settings.volume
+	pb.player = audio.create(shell.request_redraw, s.settings.volume, small_str(&pb.capture), pb.window, pb.null_output, output_of(s.settings))
+	pb.volume_sent = s.settings.volume
 }
 
 playback_unload :: proc(s: ^State) {
@@ -181,7 +173,7 @@ playback_unload :: proc(s: ^State) {
 playback_reload :: proc(s: ^State, shell: ^platform.Shell) {
 	pb := &s.playback
 	pb.set_now_playing = shell.set_now_playing
-	pb.player = audio.create(shell.request_redraw, pb.settings.volume, window = pb.window, null_output = pb.null_output, output = output_of(pb.settings))
+	pb.player = audio.create(shell.request_redraw, s.settings.volume, window = pb.window, null_output = pb.null_output, output = output_of(s.settings))
 	// The new player's seek ids start again; a pending seek is in resume_sample.
 	pb.seek_id = 0
 	if pb.cur.resolved {
@@ -196,14 +188,6 @@ playback_reload :: proc(s: ^State, shell: ^platform.Shell) {
 
 playback_shutdown :: proc(s: ^State) {
 	pb := &s.playback
-	// The workers and the disk thread drop what's queued when they stop,
-	// so pending settings and the last position are written here, after.
-	// The results queue stops first: a disk thread blocked on a full one
-	// would never be joined.
-	workers_stop(&s.data)
-	if !settings_flush(&s.data) {
-		log.errorf("app: couldn't save the settings to %s", s.data.settings_path)
-	}
 	if pb.player != nil && pb.index >= 0 && disk_on(&s.data) {
 		pb.status = audio.status(pb.player)
 		queue_write_now(&s.data, queue_file(pb, context.temp_allocator))
@@ -211,9 +195,9 @@ playback_shutdown :: proc(s: ^State) {
 	audio.destroy(pb.player)
 	pb.player = nil
 	// destroy put the device back.
-	if pb.settings.device.rate != 0 {
-		pb.settings.device = {}
-		settings_queue(&s.data, settings_to_save(pb), now = true)
+	if s.settings.device.rate != 0 {
+		s.settings.device = {}
+		settings_queue(&s.data, settings_to_save(s), now = true)
 	}
 	if pb.set_now_playing != nil {
 		none: platform.Now_Playing
@@ -227,8 +211,6 @@ playback_shutdown :: proc(s: ^State) {
 	}
 	artwork_free(&pb.art)
 	artwork_free(&pb.next_art)
-	delete(pb.settings_path, runtime.heap_allocator())
-	pb.settings_path = ""
 }
 
 @(private = "file")
@@ -319,9 +301,9 @@ queue_reset :: proc(pb: ^Playback, n: int) -> runtime.Allocator {
 // queue_reorder puts the queue in list order, or with shuffle on, the
 // items in head and then the rest shuffled.
 @(private = "file")
-queue_reorder :: proc(pb: ^Playback, head: []int) {
-	shuffle := pb.settings.shuffle
-	audio.queue_order(pb.order, head if shuffle else nil, shuffle)
+queue_reorder :: proc(s: ^State, head: []int) {
+	shuffle := s.settings.shuffle
+	audio.queue_order(s.playback.order, head if shuffle else nil, shuffle)
 }
 
 // queue_fill makes queue item i row, its strings copied with a.
@@ -348,7 +330,7 @@ playback_play_row :: proc(s: ^State, i: int) {
 	}
 	queue_snapshot(s, &s.data.view)
 	s.playback.list_key = list_key(s)
-	queue_reorder(&s.playback, {i})
+	queue_reorder(s, {i})
 	s.playback.queue_gen += 1
 	start_item(s, i)
 }
@@ -373,10 +355,7 @@ playback_stop :: proc(s: ^State) {
 		capture         = pb.capture,
 		window          = pb.window,
 		null_output     = pb.null_output,
-		settings        = pb.settings,
-		settings_path   = pb.settings_path,
 		volume_sent     = pb.volume_sent,
-		volume_file     = pb.volume_file,
 		serial          = pb.serial,
 		queue_gen       = pb.queue_gen,
 		save_key        = pb.save_key,
@@ -571,7 +550,7 @@ skip_failed :: proc(s: ^State) {
 
 playback_next :: proc(s: ^State) {
 	pb := &s.playback
-	if n := audio.queue_after(pb.entries, pb.order, pb.index, pb.settings.repeat, user = true); n >= 0 {
+	if n := audio.queue_after(pb.entries, pb.order, pb.index, s.settings.repeat, user = true); n >= 0 {
 		start_item(s, n)
 	}
 }
@@ -593,18 +572,18 @@ playback_previous :: proc(s: ^State) {
 // what's after the current track; off goes back to list order from it.
 playback_set_shuffle :: proc(s: ^State, on: bool) {
 	pb := &s.playback
-	pb.settings.shuffle = on
-	settings_queue(&s.data, settings_to_save(pb))
+	s.settings.shuffle = on
+	settings_queue(&s.data, settings_to_save(s))
 	if pb.index >= 0 {
-		queue_reorder(pb, {pb.index})
+		queue_reorder(s, {pb.index})
 		next_drop(pb)
 	}
 }
 
 playback_set_repeat :: proc(s: ^State, repeat: audio.Repeat) {
 	pb := &s.playback
-	pb.settings.repeat = repeat
-	settings_queue(&s.data, settings_to_save(pb))
+	s.settings.repeat = repeat
+	settings_queue(&s.data, settings_to_save(s))
 	next_drop(pb)
 }
 
@@ -682,14 +661,14 @@ playback_seek :: proc(s: ^State, seconds: f64) {
 // at the end of a drag.
 playback_set_volume :: proc(s: ^State, v: f32, save: bool) {
 	pb := &s.playback
-	pb.settings.volume = v
+	s.settings.volume = v
 	if pb.player != nil && v != pb.volume_sent {
 		audio.set_volume(pb.player, v)
 		pb.volume_sent = v
 	}
 	if save {
-		pb.volume_file = nil
-		settings_queue(&s.data, pb.settings)
+		s.volume_before_override = nil
+		settings_queue(&s.data, s.settings)
 	}
 }
 
@@ -739,13 +718,8 @@ playback_playing :: proc(s: ^State) -> bool {
 	return pb.index >= 0 && !pb.paused && !ended
 }
 
-// playback_update runs once a frame after data_update: media commands,
-// the player's status, the queue moving on, and Now Playing.
-playback_update :: proc(s: ^State, events: []platform.Event) {
-	pb := &s.playback
-	if pb.player == nil {
-		return
-	}
+// playback_media runs the media commands among events.
+playback_media :: proc(s: ^State, events: []platform.Event) {
 	for e in events {
 		if e.kind != .Media {
 			continue
@@ -766,14 +740,19 @@ playback_update :: proc(s: ^State, events: []platform.Event) {
 			playback_seek(s, f64(e.dx))
 		}
 	}
+}
 
-	pb.status = audio.status(pb.player)
+// playback_observe takes in the player's status: it keeps the device
+// change on disk, settles seeks, and moves the queue on.
+playback_observe :: proc(s: ^State, status: audio.Status) {
+	pb := &s.playback
+	pb.status = status
 	st := &pb.status
 	// Keep what bit-perfect output changed on the device on disk while it
 	// lasts, so a start after a crash can put it back.
-	if st.change != pb.settings.device {
-		pb.settings.device = st.change
-		settings_queue(&s.data, settings_to_save(pb))
+	if st.change != s.settings.device {
+		s.settings.device = st.change
+		settings_queue(&s.data, settings_to_save(s))
 	}
 	if pb.seek_id != 0 && (pb.seek_serial != pb.cur.serial || (st.serial == pb.cur.serial && st.seek_id >= pb.seek_id)) {
 		pb.seek_id = 0
@@ -795,7 +774,7 @@ playback_update :: proc(s: ^State, events: []platform.Event) {
 	}
 	// It wants the track after the current one.
 	if st.want_next && pb.next.serial == 0 && st.serial == pb.cur.serial {
-		if n := audio.queue_after(pb.entries, pb.order, pb.index, pb.settings.repeat, user = false); n >= 0 && !next_failed(pb, n) {
+		if n := audio.queue_after(pb.entries, pb.order, pb.index, s.settings.repeat, user = false); n >= 0 && !next_failed(pb, n) {
 			pb.serial += 1
 			pb.next = {serial = pb.serial, queue = pb.queue_gen, item = n, track = pb.entries[n].id}
 			resolve(s, &pb.next)
@@ -803,7 +782,7 @@ playback_update :: proc(s: ^State, events: []platform.Event) {
 	}
 	// The queue ran out, or the next track wasn't ready in time.
 	if st.state == .Ended && st.serial == pb.cur.serial && st.serial != 0 {
-		if n := audio.queue_after(pb.entries, pb.order, pb.index, pb.settings.repeat, user = false); n >= 0 && pb.next.serial == 0 {
+		if n := audio.queue_after(pb.entries, pb.order, pb.index, s.settings.repeat, user = false); n >= 0 && pb.next.serial == 0 {
 			start_item(s, n)
 		}
 	}
@@ -823,6 +802,17 @@ playback_update :: proc(s: ^State, events: []platform.Event) {
 			pb.message = small(fmt.tprintf("Couldn't play %s: %s", pb.items[pb.cur.item].title, audio.error_text(&e)))
 		}
 	}
+}
+
+// playback_update runs once a frame after data_update: media commands,
+// the player's status, the queue moving on, and Now Playing.
+playback_update :: proc(s: ^State, events: []platform.Event) {
+	pb := &s.playback
+	if pb.player == nil {
+		return
+	}
+	playback_media(s, events)
+	playback_observe(s, audio.status(pb.player))
 
 	// Keep the queue in step with its list while pages arrive, whether or
 	// not the list is still open. A page that came back short moves the
@@ -830,7 +820,7 @@ playback_update :: proc(s: ^State, events: []platform.Event) {
 	d := &s.data
 	if v := queue_list(d); !pb.fake && pb.index >= 0 && v != nil && pb.loaded != v.loaded_rows {
 		index := pb.index
-		played := order_played(pb)
+		played := order_played(s)
 		queue_snapshot(s, v)
 		pb.index = queue_find(pb, pb.cur.track, index)
 		pb.cur.item = pb.index
@@ -844,7 +834,7 @@ playback_update :: proc(s: ^State, events: []platform.Event) {
 		for p, i in played {
 			head[i] = queue_find(pb, p.track, p.item)
 		}
-		queue_reorder(pb, head)
+		queue_reorder(s, head)
 	}
 	if q := &d.queued; q.source != .None && (q.gen != d.queue_view || q.done && q.in_flight == 0 && (pb.index < 0 || pb.loaded == q.loaded_rows)) {
 		queued_drop(d)
@@ -864,10 +854,11 @@ Queue_Place :: struct {
 // then the next if it's chosen, by track and item. When pages move items,
 // the order keeps those and shuffles the rest again.
 @(private = "file")
-order_played :: proc(pb: ^Playback) -> []Queue_Place {
-	if !pb.settings.shuffle {
+order_played :: proc(s: ^State) -> []Queue_Place {
+	if !s.settings.shuffle {
 		return nil
 	}
+	pb := &s.playback
 	out := make([dynamic]Queue_Place, context.temp_allocator)
 	for i in pb.order {
 		append(&out, Queue_Place{i, pb.entries[i].id})
@@ -1114,7 +1105,7 @@ playback_restore :: proc(s: ^State, res: ^Result) {
 		queue_reset(pb, 0)
 		return
 	}
-	queue_reorder(pb, {i})
+	queue_reorder(s, {i})
 	start_item(s, i, max(at, 0), paused = true)
 	pb.cur.rate = int(head.rate)
 	log.infof("app: resumed the queue at item %d of %d, %.1f s in", i, len(pb.entries), playback_position(s))

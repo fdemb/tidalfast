@@ -189,20 +189,19 @@ settings_flush :: proc(d: ^Data) -> bool {
 	return true
 }
 
-// playback_set_settings applies st to the player and saves it.
-playback_set_settings :: proc(s: ^State, st: Settings) {
-	pb := &s.playback
-	pb.settings = st
-	if pb.player != nil {
-		audio.set_output(pb.player, output_of(st))
+// settings_set applies st to the player and saves it.
+settings_set :: proc(s: ^State, st: Settings) {
+	s.settings = st
+	if s.playback.player != nil {
+		audio.set_output(s.playback.player, output_of(st))
 	}
-	settings_queue(&s.data, settings_to_save(pb))
+	settings_queue(&s.data, settings_to_save(s))
 }
 
-// settings_to_save is pb.settings as the file should have them.
-settings_to_save :: proc(pb: ^Playback) -> Settings {
-	st := pb.settings
-	if v, ok := pb.volume_file.?; ok {
+// settings_to_save is s.settings as the file should have them.
+settings_to_save :: proc(s: ^State) -> Settings {
+	st := s.settings
+	if v, ok := s.volume_before_override.?; ok {
 		st.volume = v
 	}
 	return st
@@ -220,7 +219,7 @@ draw_output_button :: proc(s: ^State) {
 	dev := pb.status.device
 	label := "Output"
 	color := SECONDARY
-	if pb.settings.bit_perfect {
+	if s.settings.bit_perfect {
 		label = "Bit-perfect"
 		if dev.bit_perfect && pb.status.bits > 0 {
 			label = fmt.tprintf("%d/%s", pb.status.bits, khz(dev.rate))
@@ -233,16 +232,16 @@ draw_output_button :: proc(s: ^State) {
 	if ui.menu("output_menu", 300) {
 		ui.text_style(.Regular, 13, TEXT)
 		when audio.BIT_PERFECT {
-			st := pb.settings
+			st := s.settings
 			if ui.menu_item(fmt.tprintf("%s Bit-perfect output###bit_perfect", "✓" if st.bit_perfect else "   ")).clicked {
 				st.bit_perfect = !st.bit_perfect
-				playback_set_settings(s, st)
+				settings_set(s, st)
 				ui.close_menu()
 			}
 			if st.bit_perfect {
 				if ui.menu_item(fmt.tprintf("%s Hog mode###hog", "✓" if st.hog else "   ")).clicked {
 					st.hog = !st.hog
-					playback_set_settings(s, st)
+					settings_set(s, st)
 					ui.close_menu()
 				}
 			}
@@ -279,7 +278,7 @@ output_description :: proc(s: ^State) -> string {
 	pb := &s.playback
 	dev := pb.status.device
 	switch {
-	case !pb.settings.bit_perfect:
+	case !s.settings.bit_perfect:
 		return "System mixer"
 	case dev.rate == 0:
 		return "Bit-perfect"
@@ -304,19 +303,18 @@ draw_settings_button :: proc(s: ^State) {
 	}
 
 	if ui.menu("settings_menu") {
-		pb := &s.playback
 		ui.text_style(.Regular, 11, DIM)
 		heading := ui.label("Scrollbars", ui.fill(), ui.px(24))
 		heading.text_pad = 14
 		ui.text_style(.Regular, 13, TEXT)
 		for mode in ui.Scrollbars {
-			on := pb.settings.scrollbars == mode
+			on := s.settings.scrollbars == mode
 			name := fmt.tprint(mode)
 			item := ui.menu_item(fmt.tprintf("%s %s###scrollbars_%s", "✓" if on else "   ", name, name))
 			ui.accessible(item.box, .Menu_Item, name, selected = on)
 			if item.clicked {
-				pb.settings.scrollbars = mode
-				settings_queue(&s.data, settings_to_save(pb))
+				s.settings.scrollbars = mode
+				settings_queue(&s.data, settings_to_save(s))
 			}
 		}
 	}

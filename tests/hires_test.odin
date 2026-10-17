@@ -1190,29 +1190,6 @@ settings_saves_in_order :: proc(t: ^testing.T) {
 	}
 }
 
-// The settings path the workers save to belongs to Data, so it outlives
-// playback_shutdown.
-@(test)
-settings_path_outlives_playback :: proc(t: ^testing.T) {
-	dir := fmt.tprintf("%s/tidalfast-settings-order-%d", temp_base(), time.now()._nsec)
-	defer os.remove_all(dir)
-	path := fmt.tprintf("%s/settings.json", dir)
-	s := new(app.State)
-	defer free(s)
-	// As playback_start makes them.
-	s.playback.settings_path = strings.clone(path, runtime.heap_allocator())
-	s.data.settings_path = strings.clone(path, runtime.heap_allocator())
-	app.playback_shutdown(s)
-	testing.expect_value(t, s.data.settings_path, path)
-	// A Save_Settings job still queued at this point writes to the path.
-	app.settings_queue(&s.data, {bit_perfect = true})
-	st, ok := app.settings_load(path)
-	testing.expect(t, ok)
-	testing.expect_value(t, st, app.Settings{bit_perfect = true})
-	app.data_shutdown(s)
-	testing.expect_value(t, s.data.settings_path, "")
-}
-
 // A record for a device that isn't there is left alone.
 @(test)
 device_change_undo_needs_the_device :: proc(t: ^testing.T) {
@@ -1255,7 +1232,7 @@ output_menu_says_why :: proc(t: ^testing.T) {
 	s := new(app.State)
 	defer free(s)
 	pb := &s.playback
-	pb.settings.bit_perfect = true
+	s.settings.bit_perfect = true
 	pb.status.rate = 96000
 	pb.status.device = {rate = 96000, bits = 32, float = true}
 	pb.status.device.reason_len = copy(pb.status.device.reason[:], "no 24-bit format at 96 kHz")
