@@ -63,6 +63,6 @@ The app draws only on input, worker results or a running animation. After any ch
 - Commits: conventional, lowercase, a subject line only, no body, no Co-Authored-By.
 - Code: plain handmade Odin, procedures and structs, comments only where they say something the code doesn't.
 - Docs and comments: plain direct English, sentence-case headings, no em dashes.
-- `shell/platform.h` and `src/platform/platform.odin` are one ABI. Change both, keep their size checks, and bump the ABI version together.
-- Bump `STATE_VERSION` in `src/app/app.odin` when a reload must not reuse old state. The size check catches most layout changes, but not all.
+- `shell/platform.h` and `src/platform/platform.odin` are one ABI. Change both, keep their size checks, and bump the ABI version together. `tests/abi_test.odin` compares every field's offset across the two; add a new shared struct to its list.
+- A reload resets `State` when its layout changes (`state_version` in `src/app/app.odin` hashes it). Bump `STATE_VERSION` when a reload must not reuse old state for another reason, such as a field whose meaning changed.
 - Prove a bug fix with a test that fails on the commit before it.

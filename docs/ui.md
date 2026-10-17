@@ -30,7 +30,7 @@ A release can go missing, as when the mouse comes up in another app after the wi
 
 A clickable box also counts as hovering while its clickable child is hot, so a row stays lit under its own "more" button.
 
-Keyboard: Tab and Shift-Tab move the focus through focusable boxes in drawing order, starting at the first or last when nothing has it. Up and Down move it among focusable boxes with the same keyed parent. Enter and Space click the focused box (`Signal.keyboard` says it came from a key). Escape cancels a drag, or else closes the menu, or else drops the focus. When the keyboard moves the focus, the nearest scroll view around the focused box scrolls the least it takes to show it. A press moves the focus to the box clicked, or its nearest focusable ancestor. Keys the UI doesn't use wait in a list for `ui.key_pressed(code, modifiers)`. Focus from the keyboard draws a ring; focus from a click doesn't.
+Keyboard: Tab and Shift-Tab move the focus through focusable boxes in drawing order, starting at the first or last when nothing has it. Up and Down move it among focusable boxes with the same keyed parent. Enter and Space click the focused box (`Signal.keyboard` says it came from a key). Escape cancels a drag, or else closes the menu, or else drops the focus. When the keyboard moves the focus, the nearest scroll view around the focused box scrolls the least it takes to show it. A press moves the focus to the box clicked, or its nearest focusable ancestor. Keys the UI doesn't use wait in a list for `ui.take_key(code, modifiers)`. Focus from the keyboard draws a ring; focus from a click doesn't.
 
 ## Scrolling
 
