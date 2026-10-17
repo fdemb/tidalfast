@@ -892,8 +892,10 @@ disk_run :: proc(d: ^Data, job: Job) -> (res: Result, reply: bool) {
 	switch job.op {
 	case .Read, .Read_Queue:
 	case .Write_Queue:
+		queue_seal(job.blob)
 		disk_write(dir, path, job.blob)
 	case .Write:
+		file_seal(job.blob)
 		if disk_write(dir, path, job.blob) {
 			disk_evict(dir, LIST_DISK_BUDGET, ".tfl")
 		}
@@ -942,6 +944,7 @@ queue_write_now :: proc(d: ^Data, blob: []u8) {
 	if !disk_on(d) {
 		return
 	}
+	queue_seal(blob)
 	dir := disk_dir(d.lists.root, d.lists.user, context.temp_allocator)
 	sync.guard(&d.lists.mutex)
 	disk_write(dir, queue_path(dir, context.temp_allocator), blob)

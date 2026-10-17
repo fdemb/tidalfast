@@ -1,5 +1,6 @@
 // Times what one list save and one queue save cost the UI thread: encoding
-// the file that list_save and queue_save hand to the disk thread.
+// the file that list_save and queue_save hand to the disk thread. The disk
+// thread's part, filling in the file's sum, is timed on its own.
 //
 //     odin run tools/save_cost -o:speed
 //     odin run tools/save_cost -o:speed -- -runs=15 -sizes=300,3000,10000
@@ -37,7 +38,7 @@ Kind :: enum {
 
 Sample :: struct {
 	ns:     [dynamic]i64,
-	sum_ns: [dynamic]i64, // hashing the file, which writer_finish does
+	seal_ns: [dynamic]i64, // filling in the sum, on the disk thread
 	make_ns: [dynamic]i64, // allocating and zeroing it, which writer_make does
 	bytes:  int,
 	allocs: int,
@@ -86,21 +87,21 @@ main :: proc() {
 			for k in Kind {
 				time.sleep(time.Duration(opt.gap) * time.Millisecond)
 				blob, ns := timed_save(&views[i], rows[i], k)
+				seal_ns := timed_seal(blob, k)
 				sink += check(blob, sizes[i], k)
-				sum_ns := timed_sum(blob, &sink)
 				delete(blob, runtime.heap_allocator())
 				free_all(context.temp_allocator)
 				make_ns := timed_make(samples[i][k].bytes, &sink)
 				if run >= 0 {
 					append(&samples[i][k].ns, ns)
-					append(&samples[i][k].sum_ns, sum_ns)
+					append(&samples[i][k].seal_ns, seal_ns)
 					append(&samples[i][k].make_ns, make_ns)
 				}
 			}
 		}
 	}
 
-	fmt.printfln("%-6s %6s %10s %10s %10s %10s %10s %10s %7s", "kind", "rows", "median ms", "min ms", "max ms", "fnv ms", "make ms", "bytes", "allocs")
+	fmt.printfln("%-6s %6s %10s %10s %10s %10s %10s %10s %7s", "kind", "rows", "median ms", "min ms", "max ms", "seal ms", "make ms", "bytes", "allocs")
 	for n, i in sizes {
 		for k in Kind {
 			s := &samples[i][k]
@@ -112,7 +113,7 @@ main :: proc() {
 				ms(s.ns[len(s.ns) / 2]),
 				ms(s.ns[0]),
 				ms(s.ns[len(s.ns) - 1]),
-				ms(median(s.sum_ns[:])),
+				ms(median(s.seal_ns[:])),
 				ms(median(s.make_ns[:])),
 				fmt.tprint(s.bytes),
 				fmt.tprint(s.allocs),
@@ -122,13 +123,20 @@ main :: proc() {
 	fmt.printfln("%d timed calls per row, %d ms apart, all files read back (%x)", opt.runs, opt.gap, sink & 0xffff)
 }
 
-// timed_sum and timed_make time two parts of a save on their own, outside
-// its timed region, to show what limits it.
-timed_sum :: proc(blob: []u8, sink: ^u64) -> i64 {
+// timed_seal times the disk thread's part of a save.
+timed_seal :: proc(blob: []u8, k: Kind) -> i64 {
 	start := time.tick_now()
-	sink^ += hash.fnv64a(blob)
+	switch k {
+	case .List:
+		app.file_seal(blob)
+	case .Queue:
+		app.queue_seal(blob)
+	}
 	return i64(time.tick_since(start))
 }
+
+// timed_make times allocating and zeroing the file on its own, outside the
+// save's timed region, to show what limits it.
 
 timed_make :: proc(n: int, sink: ^u64) -> i64 {
 	start := time.tick_now()
@@ -186,8 +194,8 @@ count_allocs :: proc(d: ^app.Data, rows: []app.Row, k: Kind) -> (bytes, allocs: 
 	return
 }
 
-// check decodes the file and fails unless it holds the n rows that went
-// in, so a run can't time work that didn't happen.
+// check decodes the sealed file and fails unless it holds the n rows that
+// went in, so a run can't time work that didn't happen.
 check :: proc(blob: []u8, n: int, k: Kind) -> u64 {
 	data, _ := mem.alloc_bytes_non_zeroed(len(blob), 16, context.temp_allocator)
 	copy(data, blob)

@@ -173,6 +173,7 @@ list_file_round_trip :: proc(t: ^testing.T) {
 	d.view.fetched = 1760000000
 
 	file := app.list_encode(&d.view, context.temp_allocator)
+	app.file_seal(file)
 	data, _ := mem.alloc_bytes_non_zeroed(len(file), 16, context.temp_allocator)
 	copy(data, file)
 	h, back, err := app.list_decode(data, .Playlist, "uuid-1", context.temp_allocator)
@@ -212,6 +213,7 @@ list_file_round_trip :: proc(t: ^testing.T) {
 	app.view_open(d, .Playlist, "uuid-1", "Name", "", 1)
 	app.view_add_rows(&d.view, 0, 1, long, 1)
 	file = app.list_encode(&d.view, context.temp_allocator)
+	app.file_seal(file)
 	data, _ = mem.alloc_bytes_non_zeroed(len(file), 16, context.temp_allocator)
 	copy(data, file)
 	_, _, err = app.list_decode(data, .Playlist, "uuid-1", context.temp_allocator)
@@ -225,6 +227,7 @@ list_file_round_trip :: proc(t: ^testing.T) {
 		liked_newest = 77,
 	}
 	sfile := app.sidebar_encode(&sb, 5, context.temp_allocator)
+	app.file_seal(sfile)
 	sdata, _ := mem.alloc_bytes_non_zeroed(len(sfile), 16, context.temp_allocator)
 	copy(sdata, sfile)
 	sh, items, serr := app.sidebar_decode(sdata, context.temp_allocator)
@@ -598,10 +601,43 @@ queue_file_is_written_once_its_list_loads :: proc(t: ^testing.T) {
 	testing.expect_value(t, writes, 2)
 	aligned, _ := mem.alloc_bytes_non_zeroed(len(last), 16, context.temp_allocator)
 	copy(aligned, last)
+	app.queue_seal(aligned)
 	_, got, err := app.queue_decode(aligned, context.temp_allocator)
 	testing.expect_value(t, err, app.File_Error.None)
 	if testing.expect_value(t, len(got), 300) {
 		testing.expect_value(t, got[299].id, 1299)
+	}
+}
+
+// The queue's file written at quit, on the app's thread after the disk
+// thread stopped, reads back whole.
+@(test)
+queue_file_written_at_quit_reads_back :: proc(t: ^testing.T) {
+	dir := cache_dir("queue-quit")
+	defer delete(dir, runtime.heap_allocator())
+	defer os.remove_all(dir)
+	s := cache_state(dir)
+	defer cache_state_free(s)
+	s.playback.player = audio.create(no_wake, 0, null_output = true)
+	sidebar(s, updated = 1, count = 300)
+	serve(s, rows_of(LIKED_IDS))
+	app.select_playlist(s, 2)
+	run_disk(s)
+	serve(s, rows_of(ids_from(1000, 1300)))
+	app.playback_play_row(s, 7)
+	app.playback_update(s, nil)
+	jobs.remove_if(&s.data.lists.queue, proc(job: ^app.Job, _: rawptr) -> bool {
+		delete(job.blob, runtime.heap_allocator())
+		return true
+	}, nil)
+	app.playback_shutdown(s)
+
+	res, _ := app.disk_run(&s.data, {op = .Read_Queue, key = 7})
+	defer app.result_free(&res)
+	testing.expect(t, res.hit, "the queue's file reads back")
+	testing.expect_value(t, res.queue.index, 7)
+	if testing.expect_value(t, len(res.rows), 300) {
+		testing.expect_value(t, res.rows[299].id, 1299)
 	}
 }
 
@@ -928,6 +964,7 @@ empty_lists_go_to_disk :: proc(t: ^testing.T) {
 	defer app.view_close(d)
 	d.view.fetched = 1760000000
 	file := app.list_encode(&d.view, context.temp_allocator)
+	app.file_seal(file)
 	data, _ := mem.alloc_bytes_non_zeroed(len(file), 16, context.temp_allocator)
 	copy(data, file)
 	h, rows, err := app.list_decode(data, .Liked, "", context.temp_allocator)
@@ -937,6 +974,7 @@ empty_lists_go_to_disk :: proc(t: ^testing.T) {
 
 	sb := app.Sidebar{}
 	sfile := app.sidebar_encode(&sb, 5, context.temp_allocator)
+	app.file_seal(sfile)
 	sdata, _ := mem.alloc_bytes_non_zeroed(len(sfile), 16, context.temp_allocator)
 	copy(sdata, sfile)
 	_, items, serr := app.sidebar_decode(sdata, context.temp_allocator)
@@ -1034,6 +1072,7 @@ queue_file_round_trip :: proc(t: ^testing.T) {
 		{title = "Army of Me", artist = "Björk", album = "Post", seconds = 234, id = 103, album_id = 12, track = 1},
 	}
 	data := app.queue_encode({index = 1, sample = 441000, rate = 44100, list_key = 0xabc}, rows, context.temp_allocator)
+	app.queue_seal(data)
 	aligned, _ := mem.alloc_bytes_non_zeroed(len(data), 16, context.temp_allocator)
 	copy(aligned, data)
 
@@ -1072,12 +1111,14 @@ queue_file_round_trip :: proc(t: ^testing.T) {
 	bad := []app.Queue_Header{{index = 1, sample = -1, rate = 44100}, {index = 1, sample = 441000, rate = 10_000_000}, {index = 1, sample = 44100 * 86400 + 1, rate = 44100}}
 	for h in bad {
 		data = app.queue_encode(h, rows, context.temp_allocator)
+		app.queue_seal(data)
 		aligned, _ = mem.alloc_bytes_non_zeroed(len(data), 16, context.temp_allocator)
 		copy(aligned, data)
 		_, _, err = app.queue_decode(aligned, context.temp_allocator)
 		testing.expect_value(t, err, app.File_Error.Damaged)
 	}
 	data = app.queue_encode({index = 1, sample = 441000}, rows, context.temp_allocator)
+	app.queue_seal(data)
 	aligned, _ = mem.alloc_bytes_non_zeroed(len(data), 16, context.temp_allocator)
 	copy(aligned, data)
 	head, _, err = app.queue_decode(aligned, context.temp_allocator)
