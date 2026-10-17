@@ -44,7 +44,7 @@ dev_input :: proc(s: ^State, time: f64) {
 		return
 	}
 	for key, screen in ([Screen]platform.Key{.Library = .Digit_1, .Text = .Digit_2, .Shapes = .Digit_3}) {
-		if ui.key_pressed(key, {ui.PRIMARY}) {
+		if ui.take_key(key, {ui.PRIMARY}) {
 			s.dev.screen = screen
 		}
 	}

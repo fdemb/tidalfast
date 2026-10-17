@@ -384,17 +384,17 @@ table_keys :: proc(s: ^State, list: ^ui.Box) {
 	sel := lib.selected
 	moved := true
 	switch {
-	case ui.key_pressed(.Down):
+	case ui.take_key(.Down):
 		sel += 1
-	case ui.key_pressed(.Up):
+	case ui.take_key(.Up):
 		sel = sel - 1 if sel >= 0 else 0
-	case ui.key_pressed(.Page_Down):
+	case ui.take_key(.Page_Down):
 		sel += page
-	case ui.key_pressed(.Page_Up):
+	case ui.take_key(.Page_Up):
 		sel -= page
-	case ui.key_pressed(.Home):
+	case ui.take_key(.Home):
 		sel = 0
-	case ui.key_pressed(.End):
+	case ui.take_key(.End):
 		sel = view_count(s) - 1
 	case:
 		moved = false

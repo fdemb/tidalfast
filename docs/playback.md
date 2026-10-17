@@ -77,7 +77,7 @@ The slowest in both is a seek to 18.7 s in a 20 s track, which needed a second p
 
 `MPRemoteCommandCenter` and `MPNowPlayingInfoCenter` are Obj-C classes, and Odin dev-2026-10 crashes compiling Obj-C method calls, so both live in `shell/shell.m`. The shell enables play, pause, toggle, next, previous and `changePlaybackPosition`, and turns each command into an `EVENT_MEDIA` event: `media` is the `Media_Command`, `dx` the position for a seek. The app handles them in `playback_update`, the same way as the player bar's buttons.
 
-The app calls `Shell.set_now_playing` with the title, artist, album, duration, elapsed time, state and the cover as RGBA pixels, which an `Artwork` job fetches at 640x640. It calls it only when one of those changes, since macOS moves the elapsed time along by itself from the playback rate. The shell copies everything before it returns and rebuilds the artwork only when `artwork_key` changes. Now Playing came with platform ABI version 2; text input and accessibility made it version 3 (see [Text input](text-input.md)). Every struct the two sides share has a size check on both sides.
+The app calls `Shell.set_now_playing` with the title, artist, album, duration, elapsed time, state and the cover as RGBA pixels, which an `Artwork` job fetches at 640x640. It calls it only when one of those changes, since macOS moves the elapsed time along by itself from the playback rate. The shell copies everything before it returns and rebuilds the artwork only when `artwork_key` changes. Now Playing came with platform ABI version 2; text input and accessibility made it version 3 (see [Text input](text-input.md)). Every struct the two sides share has a size check on both sides, and `tests/abi_test.odin` compiles the header and compares each field's offset with the Odin struct's.
 
 ## Hot reload
 
@@ -99,7 +99,7 @@ A seek finds the segment whose start is at or before the target (`dash_segment_i
 
 ## Bit-perfect output
 
-Off, miniaudio plays at the track's rate into an AudioUnit, and CoreAudio converts to whatever rate the device runs at and mixes with other apps. On, `src/audio/coreaudio.odin` takes the device itself through the CoreAudio HAL, which is a C API (`AudioObjectGetPropertyData`, `AudioObjectSetPropertyData`, `AudioDeviceCreateIOProcID`, `AudioDeviceStart`), declared by hand in Odin:
+Off, miniaudio plays at the track's rate into an AudioUnit, and CoreAudio converts to whatever rate the device runs at and mixes with other apps. On, `src/audio/coreaudio_darwin.odin` takes the device itself through the CoreAudio HAL, which is a C API (`AudioObjectGetPropertyData`, `AudioObjectSetPropertyData`, `AudioDeviceCreateIOProcID`, `AudioDeviceStart`), declared by hand in Odin:
 
 1. At the first track, it remembers the device's nominal rate and its output stream's physical format, to restore them.
 2. With hog mode on, it takes `kAudioDevicePropertyHogMode`. Setting that property toggles it, whatever the value, so it's set only when nobody holds it and released only when this process does.

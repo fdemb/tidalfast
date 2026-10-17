@@ -6,9 +6,11 @@
 // package, procedure pointers and anything allocated by the dylib's own
 // runtime. So State holds plain data only. Allocators carry a procedure
 // pointer, so they are rebuilt from the arenas on every call instead of being
-// stored. If State changes layout, bump STATE_VERSION. On a size or version
-// mismatch the new code calls the old code's release proc from the header,
-// then resets State. State from a build without this header (no magic) is
+// stored. The header's version is STATE_VERSION mixed with a hash of State's
+// layout (state_version), so a moved or retyped field resets State by
+// itself. Bump STATE_VERSION when a reload must not reuse old state for
+// another reason. On a size or version mismatch the new code calls the old
+// code's release proc from the header, then resets State. State from a build without this header (no magic) is
 // reset without calling anything.
 package app
 
@@ -116,8 +118,8 @@ app_reload :: proc "c" (m: ^platform.Memory, shell: ^platform.Shell) {
 		start(s, shell)
 		return
 	}
-	if s.version != STATE_VERSION || s.size != size_of(State) {
-		log.warnf("app: state changed (version %d, %d bytes) -> (version %d, %d bytes), resetting", s.version, s.size, STATE_VERSION, size_of(State))
+	if version := state_version(); s.version != version || s.size != size_of(State) {
+		log.warnf("app: state changed (version %x, %d bytes) -> (version %x, %d bytes), resetting", s.version, s.size, version, size_of(State))
 		if s.release != nil {
 			s.release(m)
 		}
@@ -218,13 +220,132 @@ state_reset :: proc(m: ^platform.Memory) -> ^State {
 	}
 	s := (^State)(m.persistent)
 	s.magic = STATE_MAGIC
-	s.version = STATE_VERSION
+	s.version = state_version()
 	s.size = size_of(State)
 	s.release = app_shutdown
 	used := mem.align_forward_int(size_of(State), 64)
 	mem.arena_init(&s.arena, m.persistent[used:m.persistent_size])
 	mem.arena_init(&s.frame_arena, m.frame[:m.frame_size])
 	return s
+}
+
+// state_version is STATE_VERSION and State's layout in one number: every
+// field's name, offset and type, through nested structs and arrays and what
+// pointers and slices point to, since that is in the persistent arena too.
+// The size check alone misses a field that moved and kept the size.
+state_version :: proc() -> u32 {
+	h := hash_add(layout_hash(type_info_of(State)), STATE_VERSION)
+	return u32(h ~ (h >> 32))
+}
+
+// layout_hash is the hash of ti's layout that state_version uses.
+layout_hash :: proc(ti: ^runtime.Type_Info) -> u64 {
+	seen := make(map[^runtime.Type_Info]bool, runtime.heap_allocator())
+	defer delete(seen)
+	return hash_type(14695981039346656037, ti, &seen)
+}
+
+@(private = "file")
+hash_add :: proc(h: u64, v: $T) -> u64 {
+	h, v := h, v
+	for b in mem.ptr_to_bytes(&v) {
+		h = (h ~ u64(b)) * 1099511628211
+	}
+	return h
+}
+
+@(private = "file")
+hash_string :: proc(h: u64, s: string) -> u64 {
+	h := h
+	h = hash_add(h, len(s))
+	for b in transmute([]u8)s {
+		h = (h ~ u64(b)) * 1099511628211
+	}
+	return h
+}
+
+@(private = "file")
+hash_type :: proc(h: u64, ti: ^runtime.Type_Info, seen: ^map[^runtime.Type_Info]bool) -> u64 {
+	if ti == nil {
+		return hash_add(h, u8(0))
+	}
+	h := h
+	h = hash_add(h, ti.size)
+	h = hash_add(h, ti.align)
+	switch v in ti.variant {
+	case runtime.Type_Info_Named:
+		h = hash_string(h, v.name)
+		if ti in seen {
+			return h
+		}
+		seen[ti] = true
+		h = hash_type(h, v.base, seen)
+	case runtime.Type_Info_Integer:
+		h = hash_add(h, u8(1))
+		h = hash_add(h, v.signed)
+	case runtime.Type_Info_Float:
+		h = hash_add(h, u8(2))
+	case runtime.Type_Info_Boolean:
+		h = hash_add(h, u8(3))
+	case runtime.Type_Info_String:
+		h = hash_add(h, u8(4))
+		h = hash_add(h, v.is_cstring)
+	case runtime.Type_Info_Pointer:
+		h = hash_type(hash_add(h, u8(5)), v.elem, seen)
+	case runtime.Type_Info_Multi_Pointer:
+		h = hash_type(hash_add(h, u8(6)), v.elem, seen)
+	case runtime.Type_Info_Procedure:
+		h = hash_add(h, u8(7))
+	case runtime.Type_Info_Array:
+		h = hash_add(hash_add(h, u8(8)), v.count)
+		h = hash_type(h, v.elem, seen)
+	case runtime.Type_Info_Enumerated_Array:
+		h = hash_add(hash_add(h, u8(9)), v.count)
+		h = hash_type(h, v.elem, seen)
+		h = hash_type(h, v.index, seen)
+	case runtime.Type_Info_Dynamic_Array:
+		h = hash_type(hash_add(h, u8(10)), v.elem, seen)
+	case runtime.Type_Info_Slice:
+		h = hash_type(hash_add(h, u8(11)), v.elem, seen)
+	case runtime.Type_Info_Struct:
+		h = hash_add(hash_add(h, u8(12)), v.field_count)
+		for i in 0 ..< int(v.field_count) {
+			h = hash_string(h, v.names[i])
+			h = hash_add(h, v.offsets[i])
+			h = hash_type(h, v.types[i], seen)
+		}
+	case runtime.Type_Info_Union:
+		h = hash_add(hash_add(h, u8(13)), v.tag_offset)
+		for t in v.variants {
+			h = hash_type(h, t, seen)
+		}
+	case runtime.Type_Info_Enum:
+		h = hash_type(hash_add(h, u8(14)), v.base, seen)
+	case runtime.Type_Info_Map:
+		h = hash_type(hash_add(h, u8(15)), v.key, seen)
+		h = hash_type(h, v.value, seen)
+	case runtime.Type_Info_Bit_Set:
+		h = hash_add(hash_add(h, u8(16)), v.lower)
+		h = hash_type(h, v.underlying, seen)
+	case runtime.Type_Info_Simd_Vector:
+		h = hash_type(hash_add(hash_add(h, u8(17)), v.count), v.elem, seen)
+	case runtime.Type_Info_Matrix:
+		h = hash_add(hash_add(hash_add(h, u8(18)), v.row_count), v.column_count)
+		h = hash_type(h, v.elem, seen)
+	case runtime.Type_Info_Bit_Field:
+		h = hash_add(hash_add(h, u8(19)), v.field_count)
+		for i in 0 ..< v.field_count {
+			h = hash_string(h, v.names[i])
+			h = hash_add(hash_add(h, v.bit_offsets[i]), v.bit_sizes[i])
+			h = hash_type(h, v.types[i], seen)
+		}
+	case runtime.Type_Info_Fixed_Capacity_Dynamic_Array:
+		h = hash_add(hash_add(h, u8(20)), v.capacity)
+		h = hash_type(h, v.elem, seen)
+	case runtime.Type_Info_Rune, runtime.Type_Info_Complex, runtime.Type_Info_Quaternion, runtime.Type_Info_Any, runtime.Type_Info_Type_Id, runtime.Type_Info_Parameters, runtime.Type_Info_Soa_Pointer:
+		h = hash_add(h, u8(21))
+	}
+	return h
 }
 
 app_context :: proc(s: ^State) -> runtime.Context {
@@ -343,7 +464,7 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input, shell: ^platfor
 	s.ui.scrollbars = s.settings.scrollbars
 
 	// Backtick toggles the frame-time overlay.
-	if ui.key_pressed(.Grave) {
+	if ui.take_key(.Grave) {
 		s.show_overlay = !s.show_overlay
 	}
 	dev_input(s, input.time)
