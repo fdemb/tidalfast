@@ -56,6 +56,12 @@ cmd_build() {
 
 alive() { [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null; }
 
+# loopback_url says whether $1 is an http URL on this machine, as mock_tidal
+# prints it. An empty one would send the app to real TIDAL on older builds.
+loopback_url() {
+	[[ ${1:-} =~ ^http://(127\.0\.0\.1|localhost|\[::1\])(:[0-9]+)?(/.*)?$ ]]
+}
+
 # ours says whether pid is a process started from $BIN.
 ours() {
 	alive "$1" && ps -o command= -p "$1" | grep -q "^$BIN/"
@@ -79,8 +85,12 @@ cmd_doctor() {
 	if ours "$app"; then echo "BUSY app $app from an earlier run is still up: run verify.sh cleanup"; ok=0; fi
 	mock=$(cat "$STATE/mock.pid" 2>/dev/null)
 	if [ -n "$mock" ]; then
-		if ours "$mock" && curl -s -o /dev/null -m 2 "$(cat "$STATE/mock.url")/"; then
-			echo "ok   mock $mock at $(cat "$STATE/mock.url")"
+		url=$(cat "$STATE/mock.url" 2>/dev/null)
+		if ! loopback_url "$url"; then
+			echo "FAIL mock.url is empty or not a loopback http URL: run verify.sh mock-stop, then mock-start"
+			ok=0
+		elif ours "$mock" && curl -s -o /dev/null -m 2 "$url/"; then
+			echo "ok   mock $mock at $url"
 		else
 			echo "FAIL mock $mock recorded but not answering: run verify.sh mock-stop"
 			ok=0
@@ -160,6 +170,7 @@ cmd_run() {
 	mock)
 		url=$(cat "$STATE/mock.url" 2>/dev/null)
 		ours "$(cat "$STATE/mock.pid" 2>/dev/null)" || die "no mock running: run verify.sh mock-start"
+		loopback_url "$url" || die "mock.url is empty or not a loopback http URL: run verify.sh mock-stop, then mock-start"
 		keychain=$(cat "$STATE/keychain" 2>/dev/null)
 		if [ -z "$keychain" ]; then
 			keychain="tidalfast-verify-$(openssl rand -hex 4)"
