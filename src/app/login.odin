@@ -270,7 +270,6 @@ pkce_show :: proc(d: ^Data) {
 	l := &d.login
 	pkce_prepare(d)
 	login_next_attempt(d)
-	sync.atomic_store(&d.device_cancel, true)
 	l.pkce = .Paste
 	l.pkce_note = {}
 	l.focus_field = true
@@ -282,7 +281,6 @@ device_begin :: proc(d: ^Data) {
 	l.pkce = .Off
 	l.pkce_note = {}
 	login_next_attempt(d)
-	sync.atomic_store(&d.device_cancel, false)
 	if l.link.device_code.len > 0 {
 		request_login_poll(d)
 	} else {
@@ -348,7 +346,6 @@ pkce_submit :: proc(s: ^State, text: string) {
 	sync.lock(&d.pkce_mutex)
 	d.pkce_len = copy(d.pkce_redirect[:], url)
 	sync.unlock(&d.pkce_mutex)
-	sync.atomic_store(&d.device_cancel, true)
 	l.pkce = .Exchanging
 	l.pkce_note = {}
 	push_job(d, {payload = Login_Pkce_Job{attempt = d.login_attempt}})

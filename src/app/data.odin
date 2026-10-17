@@ -152,7 +152,6 @@ Data :: struct {
 	pkce_mutex:     sync.Mutex,
 	pkce_redirect:  [PKCE_REDIRECT_MAX]u8,
 	pkce_len:       int,
-	device_cancel:  bool, // stops a device-code poll once the PKCE login takes over (atomic)
 	// Goes up when a login starts or the user switches between the device
 	// and hi-res logins. Login jobs carry it (their attempt) and the session
 	// drops tokens from an older one, so a late answer to an abandoned login
@@ -836,7 +835,6 @@ request_login_code :: proc(d: ^Data) {
 		request_login_poll(d)
 		return
 	}
-	sync.atomic_store(&d.device_cancel, false)
 	push_job(d, {payload = Login_Start_Job{attempt = d.login_attempt}})
 	d.login.requested = true
 	d.login.start_for = d.login_attempt
@@ -1149,9 +1147,6 @@ login_wait_done :: proc(d: ^Data, res: ^Result, job: Login_Wait_Job, err: tidal.
 	l.waiting = false
 	if res.link.interval > 0 {
 		l.link.interval = res.link.interval
-	}
-	if failed && err == .Cancelled && l.pkce != .Off {
-		return // the hi-res login stopped it; going back polls again
 	}
 	if !failed {
 		d.login = {}

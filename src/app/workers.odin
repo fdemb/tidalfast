@@ -643,7 +643,7 @@ run_login_wait :: proc(d: ^Data, job: Login_Wait_Job, res: ^Result) {
 		interval    = f64(job.interval),
 		expires_in  = left,
 	}
-	err := tidal.login_device_wait(s, &link, until_expiry = !job.once, cancel = &d.device_cancel, attempt = attempt)
+	err := tidal.login_device_wait(s, &link, until_expiry = !job.once, attempt = attempt)
 	res.link.interval = f32(link.interval)
 	if err != nil {
 		fail_login(res, err)
