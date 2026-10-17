@@ -5,6 +5,8 @@ import "core:crypto"
 import "core:fmt"
 import "core:os"
 import "core:slice"
+import "core:strings"
+import "core:sync"
 import "core:testing"
 import "core:thread"
 import "core:time"
@@ -493,9 +495,13 @@ api_override_only_for_loopback :: proc(t: ^testing.T) {
 	}
 }
 
-// The only test that sets an environment variable, which is process-wide.
+// Held by the tests that set environment variables, which are process-wide.
+@(private = "file")
+env_mutex: sync.Mutex
+
 @(test)
 api_override_debug_only :: proc(t: ^testing.T) {
+	sync.guard(&env_mutex)
 	os.set_env("TIDALFAST_API", "http://127.0.0.1:8787")
 	defer os.unset_env("TIDALFAST_API")
 	when ODIN_DEBUG {
@@ -504,6 +510,89 @@ api_override_debug_only :: proc(t: ^testing.T) {
 		testing.expect_value(t, app.api_override(), "")
 	} else {
 		testing.expect_value(t, app.api_override(), "")
+	}
+}
+
+// A run that asks for the mock, with TIDALFAST_KEYCHAIN or TIDALFAST_API,
+// but has no mock URL the app takes never falls back to the user's login:
+// no session to reach TIDAL with, no Keychain read queued, not the real
+// item or list cache. d.running is set before data_start so that no worker
+// can start and read the Keychain if it does fall back.
+@(test)
+mock_run_without_mock_url_keeps_off_tidal :: proc(t: ^testing.T) {
+	sync.guard(&env_mutex)
+	NAMES :: [?]string{"TIDALFAST_API", "TIDALFAST_KEYCHAIN", "TIDALFAST_FAKE", "TIDALFAST_BENCH"}
+	saved: [len(NAMES)]Maybe(string)
+	for name, i in NAMES {
+		if value, found := os.lookup_env(name, context.temp_allocator); found {
+			saved[i] = value
+		}
+	}
+	defer for name, i in NAMES {
+		env_put(name, saved[i])
+	}
+	os.unset_env("TIDALFAST_FAKE")
+	os.unset_env("TIDALFAST_BENCH")
+	real_cache := app.lists_root(false)
+	defer delete(real_cache, runtime.heap_allocator())
+	keychain := test_keychain_service()
+
+	Case :: struct {
+		api, keychain: Maybe(string),
+		service:       string, // the Keychain item the login is read from, "" for none
+	}
+	cases := make([dynamic]Case, context.temp_allocator)
+	append(
+		&cases,
+		Case{keychain = keychain},
+		Case{keychain = keychain, api = ""},
+		Case{keychain = keychain, api = "http://example.com"},
+		Case{keychain = keychain, api = strings.concatenate({"http://127.0.0.1:1/", strings.repeat("x", 300, context.temp_allocator)}, context.temp_allocator)},
+		Case{api = ""},
+		Case{service = app.KEYCHAIN_SERVICE},
+	)
+	when ODIN_DEBUG {
+		append(&cases, Case{api = "http://127.0.0.1:8787", keychain = keychain, service = keychain})
+	}
+	for c in cases {
+		env_put("TIDALFAST_API", c.api)
+		env_put("TIDALFAST_KEYCHAIN", c.keychain)
+		s := new(app.State)
+		d := &s.data
+		d.running = true
+		shell := platform.Shell {
+			request_redraw = proc "c" () {},
+		}
+		app.data_start(s, &shell)
+		queued, _ := jobs.pending(&d.queue)
+		label := fmt.tprint(c)
+		if c.service != "" {
+			testing.expect(t, d.session != nil, label)
+			testing.expect(t, app.keychain_service(d) == c.service, label)
+			testing.expect(t, queued == 1, label)
+		} else {
+			testing.expect(t, d.session == nil, label)
+			testing.expect(t, app.keychain_service(d) != app.KEYCHAIN_SERVICE, label)
+			testing.expect(t, queued == 0, label)
+			testing.expect(t, d.lists.root != real_cache, label)
+		}
+		d.running = false
+		for {
+			if _, ok := jobs.try_pop(&d.queue); !ok {
+				break
+			}
+		}
+		app.data_shutdown(s)
+		free(s)
+	}
+}
+
+@(private = "file")
+env_put :: proc(name: string, value: Maybe(string)) {
+	if v, ok := value.?; ok {
+		os.set_env(name, v)
+	} else {
+		os.unset_env(name)
 	}
 }
 
