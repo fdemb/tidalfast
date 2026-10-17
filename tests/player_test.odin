@@ -268,3 +268,42 @@ reload_keeps_a_pending_seek :: proc(t: ^testing.T) {
 	later := app.playback_position(s)
 	testing.expectf(t, later > at, "the position stays at %v s", later)
 }
+
+// A queue restored at sign-in, as from its file, with no stream resolved
+// and no workers running.
+@(private = "file")
+restored_player_state :: proc(rows: []app.Row, sample, rate: i64) -> ^app.State {
+	s := fake_player_state(nil)
+	s.data.fake = false
+	res := app.Result {
+		hit   = true,
+		rows  = rows,
+		queue = {index = 0, sample = sample, rate = rate},
+	}
+	app.playback_restore(s, &res)
+	return s
+}
+
+// The restored track's stream fails. The queue moves on to the next one,
+// and that one must stay paused too, rather than play by itself.
+@(test)
+restored_queue_stays_paused_past_a_failure :: proc(t: ^testing.T) {
+	rows := []app.Row{{title = "One", seconds = 300, id = 101}, {title = "Two", seconds = 300, id = 102}}
+	s := restored_player_state(rows, 100 * 44100, 44100)
+	defer free(s)
+	defer app.playback_shutdown(s)
+	pb := &s.playback
+	testing.expect_value(t, pb.index, 0)
+	testing.expect(t, !app.playback_playing(s))
+
+	res := app.Result {
+		job = {kind = .Stream, view = u32(pb.cur.serial)},
+		err = .Stream_Not_Available,
+	}
+	app.playback_result(s, &res)
+	testing.expect_value(t, pb.index, 1)
+	testing.expect(t, !app.playback_playing(s), "the next track plays without the user")
+	testing.expect(t, wait_until(s, proc(s: ^app.State) -> bool {return s.playback.status.serial == s.playback.cur.serial}))
+	testing.expect(t, s.playback.status.state != .Playing, "the player plays the next track's placeholder")
+}
+

@@ -376,15 +376,16 @@ playback_stop :: proc(s: ^State) {
 	s.library.playing = -1
 }
 
-// start_item makes queue item i the current track, from sample at.
+// start_item makes queue item i the current track, from sample at, and
+// plays it unless paused is set.
 @(private = "file")
-start_item :: proc(s: ^State, i: int, at: i64 = 0) {
+start_item :: proc(s: ^State, i: int, at: i64 = 0, paused := false) {
 	pb := &s.playback
 	if i < 0 || i >= len(pb.entries) || pb.entries[i].id == 0 {
 		return
 	}
 	pb.index = i
-	pb.paused = false
+	pb.paused = paused
 	pb.seek_id = 0
 	pb.message = {}
 	if next_failed(pb, i) {
@@ -397,7 +398,7 @@ start_item :: proc(s: ^State, i: int, at: i64 = 0) {
 		pb.next = {}
 		pb.cur.at = at
 		if pb.cur.resolved {
-			audio.play(pb.player, source_of(pb, &pb.cur), at)
+			audio.play(pb.player, source_of(pb, &pb.cur), at, paused)
 		}
 		artwork_free(&pb.art)
 		pb.art = pb.next_art
@@ -414,7 +415,7 @@ start_item :: proc(s: ^State, i: int, at: i64 = 0) {
 	pb.cur = {serial = pb.serial, queue = pb.queue_gen, item = i, track = pb.entries[i].id, at = at}
 	// Silence until the stream resolves, rather than more of the old track.
 	if !pb.fake {
-		audio.play(pb.player, {serial = pb.cur.serial}, at)
+		audio.play(pb.player, {serial = pb.cur.serial}, at, paused)
 	}
 	resolve(s, &pb.cur)
 }
@@ -427,7 +428,7 @@ resolve :: proc(s: ^State, t: ^Track_Source) {
 		t.resolved = true
 		t.rate = 44100
 		if t == &pb.cur {
-			audio.play(pb.player, source_of(pb, t), t.at)
+			audio.play(pb.player, source_of(pb, t), t.at, pb.paused)
 		} else {
 			audio.set_next(pb.player, source_of(pb, t))
 		}
@@ -549,7 +550,7 @@ skip_failed :: proc(s: ^State) {
 		return
 	}
 	msg := pb.message
-	start_item(s, n)
+	start_item(s, n, paused = pb.paused)
 	pb.message = msg
 }
 
@@ -1026,9 +1027,7 @@ playback_restore :: proc(s: ^State, res: ^Result) {
 		queue_reset(pb, 0)
 		return
 	}
-	start_item(s, i, max(at, 0))
+	start_item(s, i, max(at, 0), paused = true)
 	pb.cur.rate = int(head.rate)
-	pb.paused = true
-	audio.set_paused(pb.player, true)
 	log.infof("app: resumed the queue at item %d of %d, %.1f s in", i, len(pb.entries), playback_position(s))
 }
