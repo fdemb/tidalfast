@@ -203,6 +203,14 @@ data_start :: proc(s: ^State, shell: ^platform.Shell) {
 	// Checked even with fake data, so a refused TIDALFAST_API is always
 	// logged.
 	api := api_override()
+	// Either variable, even empty, asks for the mock. Without a mock URL
+	// the app takes, falling back to TIDAL would use the user's login.
+	_, wants_api := os.lookup_env("TIDALFAST_API", context.temp_allocator)
+	_, wants_keychain := os.lookup_env("TIDALFAST_KEYCHAIN", context.temp_allocator)
+	if api == "" && (wants_api || wants_keychain) && !d.fake {
+		log.warn("app: TIDALFAST_API or TIDALFAST_KEYCHAIN is set but there's no mock URL to use, showing the fake data instead of TIDAL")
+		d.fake = true
+	}
 	if d.fake {
 		d.account = .Fake
 		return
