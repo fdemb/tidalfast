@@ -35,6 +35,12 @@ Line :: struct {
 	fonts_mapped:       f64,
 	fonts_mapped_bytes: f64,
 	fonts_resident:     f64,
+	// Instructions and cycles since the process started, all threads, and
+	// the UI thread's alone. Zero where the OS doesn't say.
+	instructions:       f64,
+	cycles:             f64,
+	ui_instructions:    f64,
+	ui_cycles:          f64,
 }
 
 // The marks in the order they happen. The shell prints main, launched,
@@ -87,6 +93,10 @@ line_field :: proc(l: ^Line, name: string) -> f64 {
 	case "fonts_mapped":       return l.fonts_mapped
 	case "fonts_mapped_bytes": return l.fonts_mapped_bytes
 	case "fonts_resident":     return l.fonts_resident
+	case "instructions":       return l.instructions
+	case "cycles":             return l.cycles
+	case "ui_instructions":    return l.ui_instructions
+	case "ui_cycles":          return l.ui_cycles
 	}
 	return 0
 }
@@ -180,6 +190,11 @@ Results :: struct {
 
 MB :: 1 << 20
 
+// COUNTERS are the instruction counts kept per startup mark, in millions.
+// The UI thread's is the steadier: about 1% from run to run, where the
+// whole process's also holds however far the workers got by the mark.
+COUNTERS := [?]string{"ui_instructions", "instructions"}
+
 // add_startup sums up a setup's startup runs: for each mark, run 1 by
 // itself, since the first run after a build also pays for the font cache
 // and code signing checks, then the median, min and max of the rest. Runs
@@ -207,6 +222,17 @@ add_startup :: proc(r: ^Results, setup: string, runs: [][]Line) {
 			append(&r.metrics, Metric{"startup", setup, mark, "median", "ms", st.median})
 			append(&r.metrics, Metric{"startup", setup, mark, "min", "ms", st.min})
 			append(&r.metrics, Metric{"startup", setup, mark, "max", "ms", st.max})
+		}
+		for field in COUNTERS {
+			values := make([dynamic]f64, context.temp_allocator)
+			for run in runs[1:] {
+				if l, ok := find_mark(run, mark); ok && line_field(l, field) > 0 {
+					append(&values, line_field(l, field))
+				}
+			}
+			if len(values) > 0 {
+				append(&r.metrics, Metric{"startup", setup, mark, field, "M", stats(values[:]).median / 1e6})
+			}
 		}
 	}
 	later := runs[1:] if len(runs) > 1 else runs
@@ -336,10 +362,25 @@ compare :: proc(a, b: []Metric, allocator := context.allocator) -> []Delta {
 	return out[:]
 }
 
-// write_compare prints each pair with its change. Times and sizes are
-// better lower, so a change in one of 10% and at least 1 ms or MB is marked
-// worse or better; smaller ones are within what startup times vary from run
-// to run.
+// significant says whether a change between two medians is more than runs
+// vary: 10% and at least 1 ms or MB for times and sizes, 2% for
+// instruction counts. Counts without a unit are never marked.
+significant :: proc(unit: string, a, diff: f64) -> bool {
+	if a == 0 {
+		return false
+	}
+	pct := math.abs(diff / a) * 100
+	switch unit {
+	case "M":
+		return pct >= 2
+	case "ms", "MB":
+		return pct >= 10 && math.abs(diff) >= 1
+	}
+	return false
+}
+
+// write_compare prints each pair with its change. Lower is better for every
+// unit, so a significant change is marked worse or better.
 write_compare :: proc(sb: ^strings.Builder, deltas: []Delta) {
 	fmt.sbprintfln(sb, "%-8s %-5s %-13s %-18s %10s %10s %10s %8s", "scenario", "setup", "row", "field", "a", "b", "delta", "change")
 	for d in deltas {
@@ -347,9 +388,8 @@ write_compare :: proc(sb: ^strings.Builder, deltas: []Delta) {
 		change := "-"
 		flag := ""
 		if d.value != 0 {
-			pct := diff / math.abs(d.value) * 100
-			change = fmt.tprintf("%+.1f%%", pct)
-			if math.abs(pct) >= 10 && math.abs(diff) >= 1 && d.unit != "" {
+			change = fmt.tprintf("%+.1f%%", diff / math.abs(d.value) * 100)
+			if significant(d.unit, d.value, diff) {
 				flag = " worse" if diff > 0 else " better"
 			}
 		}
@@ -376,4 +416,134 @@ save_results :: proc(r: ^Results, allocator := context.allocator) -> ([]u8, bool
 	}
 	fmt.sbprintln(&b, "]}")
 	return b.buf[:], true
+}
+
+// Paired is one startup number from an A/B run, where the two builds took
+// turns: the medians of each, the median and middle half (25th to 75th
+// percentile) of the differences between runs next to each other, and in
+// how many pairs b was higher and lower.
+Paired :: struct {
+	setup, row, field, unit: string,
+	a, b:                    f64,
+	diff, low, high:         f64,
+	count:                   int,
+	higher, lower:           int,
+}
+
+// PAIRED_FIELDS are what paired_startup compares at each mark, with the
+// unit and scale they're reported in.
+PAIRED_FIELDS := [?]struct {
+	name, unit: string,
+	scale:      f64,
+} {
+	{"ms", "ms", 1},
+	{"ui_instructions", "M", 1e6},
+	{"instructions", "M", 1e6},
+}
+
+// paired_startup pairs run i of a with run i of b, leaving out run 1 of
+// each, which pays for checks on a new binary, and runs that didn't reach
+// a mark.
+paired_startup :: proc(setup: string, a, b: [][]Line, allocator := context.allocator) -> []Paired {
+	out := make([dynamic]Paired, allocator)
+	for mark in MARKS {
+		for f in PAIRED_FIELDS {
+			as := make([dynamic]f64, context.temp_allocator)
+			bs := make([dynamic]f64, context.temp_allocator)
+			diffs := make([dynamic]f64, context.temp_allocator)
+			for i in 1 ..< min(len(a), len(b)) {
+				la, oka := find_mark(a[i], mark)
+				lb, okb := find_mark(b[i], mark)
+				if !oka || !okb {
+					continue
+				}
+				va, vb := paired_value(la, f.name) / f.scale, paired_value(lb, f.name) / f.scale
+				if f.name != "ms" && (va == 0 || vb == 0) {
+					continue
+				}
+				append(&as, va)
+				append(&bs, vb)
+				append(&diffs, vb - va)
+			}
+			if len(diffs) == 0 {
+				continue
+			}
+			higher, lower := 0, 0
+			for d in diffs {
+				higher += int(d > 0)
+				lower += int(d < 0)
+			}
+			slice.sort(diffs[:])
+			append(&out, Paired{
+				setup = setup, row = mark, field = f.name, unit = f.unit,
+				a = stats(as[:]).median, b = stats(bs[:]).median,
+				diff = stats(diffs[:]).median, low = quantile(diffs[:], 0.25), high = quantile(diffs[:], 0.75),
+				count = len(diffs), higher = higher, lower = lower,
+			})
+		}
+	}
+	return out[:]
+}
+
+@(private = "file")
+paired_value :: proc(l: ^Line, name: string) -> f64 {
+	return l.ms if name == "ms" else line_field(l, name)
+}
+
+// quantile reads sorted at q (0 to 1), between its two nearest values.
+quantile :: proc(sorted: []f64, q: f64) -> f64 {
+	if len(sorted) == 0 {
+		return 0
+	}
+	at := q * f64(len(sorted) - 1)
+	lo := int(at)
+	hi := min(lo + 1, len(sorted) - 1)
+	return sorted[lo] + (sorted[hi] - sorted[lo]) * (at - f64(lo))
+}
+
+// sign_test is the two-sided p-value of a sign test: the chance that pairs
+// with no real difference split at least this unevenly between higher and
+// lower. Ties don't count.
+sign_test :: proc(higher, lower: int) -> f64 {
+	n := higher + lower
+	if n == 0 {
+		return 1
+	}
+	tail := 0.0
+	choose := 1.0 // n choose i
+	for i in 0 ..= min(higher, lower) {
+		tail += choose
+		choose = choose * f64(n - i) / f64(i + 1)
+	}
+	return min(1, 2 * tail / math.pow(2, f64(n)))
+}
+
+// paired_verdict marks a change worse or better when the sign test says
+// the pairs lean one way (p < 0.05; with 9 pairs, 8 of them) and the median
+// difference is at least 1% (and 1 ms for times), else "". A rule that only
+// needed most pairs to agree marked builds with the same startup code apart.
+paired_verdict :: proc(p: Paired) -> string {
+	if p.a == 0 || sign_test(p.higher, p.lower) >= 0.05 {
+		return ""
+	}
+	if math.abs(p.diff / p.a) < 0.01 || (p.unit == "ms" && math.abs(p.diff) < 1) {
+		return ""
+	}
+	if (p.diff > 0) != (p.higher > p.lower) {
+		return ""
+	}
+	return "worse" if p.diff > 0 else "better"
+}
+
+write_paired :: proc(sb: ^strings.Builder, rows: []Paired) {
+	fmt.sbprintfln(sb, "%-5s %-12s %-16s %10s %10s %10s %8s  %-19s %-12s %5s", "setup", "mark", "field", "a", "b", "delta", "change", "middle half", "b higher", "p")
+	for p in rows {
+		change := fmt.tprintf("%+.1f%%", p.diff / p.a * 100) if p.a != 0 else "-"
+		half := fmt.tprintf("%+.1f to %+.1f", p.low, p.high)
+		higher := fmt.tprintf("%d of %d", p.higher, p.count)
+		line := fmt.tprintf("%-5s %-12s %-16s %10s %10s %10s %8s  %-19s %-12s %5s %s %s", p.setup, p.row, p.field,
+			fmt.tprintf("%.1f", p.a), fmt.tprintf("%.1f", p.b), fmt.tprintf("%+.1f", p.diff), change, half, higher,
+			fmt.tprintf("%.2f", sign_test(p.higher, p.lower)), p.unit, paired_verdict(p))
+		fmt.sbprintln(sb, strings.trim_right_space(line))
+	}
 }

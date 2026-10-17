@@ -6,6 +6,8 @@
 ./build/measure/measure memory      # the memory scenario, once with each
 ./build/measure/measure all         # both
 ./build/measure/measure compare docs/measure-baseline.json build/measure/20261015-114141.json
+./build/measure/measure ab main      # this checkout against main, the two taking turns
+./build/measure/measure launches     # your own launches, from the app's launch log
 ```
 
 `./build.sh measure` builds an optimized app in `build/measure/app` (its own shell and dylib, hot reload off), `tests/mock_tidal` and the tool. The app is the release build plus `TIDALFAST_MOCK_API`, which lets it read `TIDALFAST_API` and `TIDALFAST_PKCE_REDIRECT`. The real release build never reads them (see [TIDAL data](tidal-data.md#the-mock-server)), so it can't run against the mock.
@@ -18,7 +20,23 @@ The setups:
 - `mock` starts its own `mock_tidal` on a free loopback port and logs in with `TIDALFAST_PKCE_REDIRECT` under a Keychain item called `tidalfast-measure-` and a random suffix. So the first run logs in and later runs read the login from the Keychain, as you would. The tool deletes the item at the end with `security delete-generic-password`. Deleting it from the tool itself fails with -25244, because the item's access list names the app.
 - `-real` runs `build/tidalfast` against your own account and your `tidalfast` Keychain item. Build it with `./build.sh release` first. It's for you to run by hand: macOS may ask for Keychain access, and the memory scenario plays a track from your longest list to the null device.
 
-`measure compare a.json b.json` prints every number in both files with its change. A time or size that changed by 10% and at least 1 ms or MB is marked `worse` or `better`. Startup times move a few percent from run to run, so compare medians from the same machine.
+`measure compare a.json b.json` prints every number in both files with its change. A time or size that changed by 10% and at least 1 ms or MB is marked `worse` or `better`, and an instruction count that changed by 2%. Startup times move a few percent from run to run, so compare medians from the same machine.
+
+## Comparing two builds
+
+Times measured on different days don't compare. On 17 October the commit the baseline below was recorded from, measured again, came out 50 ms (fake) and 109 ms (mock) slower to `tracks` than its own baseline. The code was the same; the machine wasn't. Load, heat and background work such as Spotlight, Photos analysis and XProtect's scans move startup by tens of percent.
+
+`measure ab <ref>` measures a change against the code it changes, in one sitting. It checks out `<ref>` in a worktree under `build/measure/ab-<time>`, builds it with its own `./build.sh measure`, and measures it (a) against this checkout's measure build (b), so run `./build.sh measure` first. The two take turns, a then b, then b then a, so whatever the machine does during the run weighs on both. Each build has its own settings, list cache, Keychain item and mock, both mocks this checkout's. A shared mock keeps one refresh token per user, so each build's login would end the other's. Flags are the same as `startup`'s; the memory scenario runs once each after the startup runs.
+
+For each startup mark it prints the median of a and of b, then the median and middle half (25th to 75th percentile) of the differences between runs next to each other, in how many of those pairs b was higher, and a sign test's p-value: the chance that two builds doing the same work split the pairs at least that unevenly. Each build's first run is left out. A change is `worse` or `better` only when p is under 0.05 (with the default 9 pairs, 8 of them going the same way) and the median difference is at least 1% (and 1 ms for times). An earlier rule, the middle half of the differences on one side of zero, marked two builds with the same startup code apart: b was faster in 7 of 9 pairs, which happens by chance 18% of the time. Memory runs once per build and is compared as `measure compare` does; with the fake data its footprint moved by up to 8 MB between runs of the same code, so read a memory `worse` there as a reason to run it again. It writes `<out>-a.json` and `<out>-b.json`, and removes the worktree when it's done.
+
+Judge a change on `ui_instructions` first: it moves least from run to run (see The numbers). Times are what a person waits for, but they need the change to be several percent before the middle half clears zero.
+
+## Launch log
+
+Every launch that gets to its first track rows appends a line to `launches.jsonl` next to the settings file (`~/Library/Application Support/tidalfast/` on macOS, `~/.config/tidalfast/` on Linux): the time, the commit the app was built from (with `-dirty` when the tree had changes), debug or release, the `init`, `first_frame`, `library` and `tracks` marks in ms, the UI thread's and the process's instructions, and footprint. `measure launches` sums it up per build: how many launches, and the median and middle half of `tracks`, `first_frame`, instructions and footprint. These are the launches the app really has, on your machine, with your account, cache and whatever else is running, so they show what a build is like to use, where `ab` shows what a change did.
+
+A worker appends the line, so the UI thread never waits on the disk. Past 512 KB, about 2,000 launches, the file keeps its newer half. Nothing in it leaves the machine, and it holds no account data. The fake data starts no workers, so it isn't logged; neither are runs with `TIDALFAST_MEASURE`. Runs against the mock are logged only when `TIDALFAST_LAUNCH_LOG` names a file. `TIDALFAST_LAUNCH_LOG=off` turns the log off. `./build.sh` passes the commit with `-define:TIDALFAST_COMMIT`; other builds log it as "".
 
 ## What the app prints
 
@@ -63,9 +81,10 @@ Then it quits through SIGTERM, the same path as Ctrl-C, so shutdown runs.
 - **resident** is the pages in RAM right now, clean ones included. That takes in the code of the app and every framework it touched, and mapped files. Pages of a mapped file that nobody wrote to are clean: the kernel can drop them and read them back from disk, so they count toward resident but not footprint.
 - **gpu** is the Metal device's `currentAllocatedSize`: glyph atlas pages, cover pages, instance buffers, the drawables' textures.
 - **fonts map** and **fonts res** are the fallback fonts the text loader mapped with `mmap`, and how much of them is resident (from `mincore`). Apple Color Emoji alone is 180 MB of file, but only the pages of glyphs drawn get read in. Those pages count toward resident and not footprint.
+- **instructions** and **cycles** are what every thread of the process has run since it started, dyld included, from `proc_pid_rusage` (`rusage_info_v4`). **ui_instructions** and **ui_cycles** are the UI thread's alone, from the `thread_selfcounts` system call, which isn't public API; a kernel without it gives zeros, and so does Linux for now. Unlike times, instruction counts hardly move with load, clock speed or heat: a fixed piece of work counted the same to 0.1% on an idle machine and with every core busy, while its time grew 25%. In the app they still vary, because how far other threads get by a mark, and how many frames run before it, differ from run to run. Over nine launches on 17 October the UI thread's count at `tracks` had a standard deviation of about 1% (fake and mock), the whole process's 0.7% (mock) to 3.7% (fake), and the time at `tracks` 6 to 7%. Only the app's marks and samples carry them; the shell's marks have times only.
 - The rest is the app's own accounting: `arena` (the persistent arena's used bytes), `frame_peak` (the frame arena's high-water mark), `atlas_pages`, `runs` (shaped runs in the text cache), `covers` and `cover_bytes` (the cover cache's entries and its pages' bytes), `rows` and `view_bytes` (the open list and its arena).
 
-Measuring costs nothing with `TIDALFAST_MEASURE` unset: the app counts drawn rows and covers in the frame it's building, which is two additions each. With it set, marks and samples come from frames that happen anyway. Only the memory scenario starts a thread, which samples once a second (`tick` lines) and wakes the UI when a stage's wait is over. A sample costs a few milliseconds because of `mincore` over 600 MB of fonts, so marks leave that out. An idle window shows 0 CPU time over 10 s with it unset and with `=1`.
+With `TIDALFAST_MEASURE` unset, measuring costs two additions per drawn row and cover, the marks until `tracks` is reached, and the launch log's one line. With it set, marks and samples come from frames that happen anyway. Only the memory scenario starts a thread, which samples once a second (`tick` lines) and wakes the UI when a stage's wait is over. A sample costs a few milliseconds because of `mincore` over 600 MB of fonts, so marks leave that out. An idle window shows 0 CPU time over 10 s with it unset and with `=1`.
 
 The frame-time overlay (backtick) shows footprint and gpu under the frame times.
 

@@ -27,6 +27,14 @@ else
 	clang_flags="-g -O0"
 fi
 
+# The commit goes into the app for the launch log (launch_log.odin), in
+# full: a short hash of only digits would read as a number.
+commit=$(git rev-parse HEAD 2>/dev/null || true)
+if [ -n "$commit" ] && ! git diff --quiet HEAD 2>/dev/null; then
+	commit="$commit-dirty"
+fi
+app_flags="-define:TIDALFAST_COMMIT=${commit:-unknown}"
+
 mkdir -p build build/measure
 
 # kb_text_shape's C source lives in src/kbts next to its bindings, which
@@ -72,7 +80,7 @@ if [ "$(uname -s)" = Linux ]; then
 
 	if [ "$target" = measure ]; then
 		mkdir -p build/measure/app
-		odin build src/app -build-mode:dll -out:build/measure/app/app.so -vet -strict-style -o:speed -define:TIDALFAST_MOCK_API=true
+		odin build src/app -build-mode:dll -out:build/measure/app/app.so -vet -strict-style -o:speed -define:TIDALFAST_MOCK_API=true $app_flags
 		if [ ! -f build/measure/app/tidalfast ] || [ shell/shell_wayland.c -nt build/measure/app/tidalfast ] || [ shell/platform.h -nt build/measure/app/tidalfast ]; then
 			shell_build build/measure/app/tidalfast -O2 -DHOT_RELOAD=0
 		fi
@@ -81,7 +89,7 @@ if [ "$(uname -s)" = Linux ]; then
 		exit 0
 	fi
 
-	odin build src/app -build-mode:dll -out:build/app.tmp.so -vet -strict-style $odin_flags
+	odin build src/app -build-mode:dll -out:build/app.tmp.so -vet -strict-style $odin_flags $app_flags
 	mv -f build/app.tmp.so build/app.so
 	if [ "$target" = all ] && { [ ! -f build/tidalfast ] || [ shell/shell_wayland.c -nt build/tidalfast ] || [ shell/platform.h -nt build/tidalfast ] || [ "$(cat build/shell-mode 2>/dev/null)" != "$mode" ]; }; then
 		echo "$mode" > build/shell-mode
@@ -95,7 +103,7 @@ fi
 
 if [ "$target" = measure ]; then
 	mkdir -p build/measure/app
-	odin build src/app -build-mode:dll -out:build/measure/app/app.dylib -vet -strict-style -o:speed -define:TIDALFAST_MOCK_API=true
+	odin build src/app -build-mode:dll -out:build/measure/app/app.dylib -vet -strict-style -o:speed -define:TIDALFAST_MOCK_API=true $app_flags
 	if [ ! -f build/measure/app/tidalfast ] || [ shell/shell.m -nt build/measure/app/tidalfast ] || [ shell/platform.h -nt build/measure/app/tidalfast ]; then
 		clang shell/shell.m -o build/measure/app/tidalfast -fobjc-arc -mmacosx-version-min=14.0 \
 			-Wall -Wno-unused-parameter -O2 -DHOT_RELOAD=0 \
@@ -108,7 +116,7 @@ fi
 
 # Build to a temp name and rename, so the shell's watcher never sees a half
 # written dylib.
-odin build src/app -build-mode:dll -out:build/app.tmp.dylib -vet -strict-style $odin_flags
+odin build src/app -build-mode:dll -out:build/app.tmp.dylib -vet -strict-style $odin_flags $app_flags
 rm -rf build/app.dylib.dSYM
 [ -d build/app.tmp.dylib.dSYM ] && mv build/app.tmp.dylib.dSYM build/app.dylib.dSYM
 mv -f build/app.tmp.dylib build/app.dylib

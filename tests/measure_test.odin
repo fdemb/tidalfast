@@ -1,8 +1,12 @@
 package tidal_tests
 
+import "core:fmt"
+import "core:os"
 import "core:strings"
 import "core:testing"
+import "core:time"
 
+import app "../src/app"
 import measure "../tools/measure"
 
 @(test)
@@ -102,4 +106,143 @@ test_measure_compare :: proc(t: ^testing.T) {
 	testing.expect(t, strings.has_suffix(lines[2], "better"), lines[2])
 	// A count changing isn't better or worse.
 	testing.expect(t, !strings.has_suffix(lines[3], "worse"), lines[3])
+}
+
+@(test)
+test_measure_counters :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	run :: proc(ui: string) -> []measure.Line {
+		return measure.parse_log(strings.concatenate({`measure: {"mark":"tracks","ms":300,"ui_instructions":`, ui, `,"instructions":2000000000}`}))
+	}
+	r: measure.Results
+	measure.add_startup(&r, "fake", {run("900000000"), run("800000000"), run("820000000"), run("810000000")})
+	v, ok := measure.find_metric(r.metrics[:], "startup", "fake", "tracks", "ui_instructions")
+	testing.expect(t, ok)
+	testing.expect_value(t, v, 810) // millions, run 1 left out
+	v, _ = measure.find_metric(r.metrics[:], "startup", "fake", "tracks", "instructions")
+	testing.expect_value(t, v, 2000)
+
+	// Counts are marked from 2%, times and sizes from 10% and 1 ms or MB.
+	testing.expect(t, measure.significant("M", 800, 16))
+	testing.expect(t, !measure.significant("M", 800, 15))
+	testing.expect(t, !measure.significant("ms", 300, 29))
+	testing.expect(t, measure.significant("ms", 300, -30))
+	testing.expect(t, !measure.significant("ms", 5, 0.9))
+	testing.expect(t, !measure.significant("", 500, 400))
+}
+
+@(test)
+test_measure_paired :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	runs :: proc(ms: ..string) -> [][]measure.Line {
+		out := make([dynamic][]measure.Line)
+		for m in ms {
+			append(&out, measure.parse_log(strings.concatenate({`measure: {"mark":"tracks","ms":`, m, `,"ui_instructions":800000000}`})))
+		}
+		return out[:]
+	}
+	sorted := []f64{1, 2, 3, 4, 5}
+	testing.expect_value(t, measure.quantile(sorted, 0.25), 2)
+	testing.expect_value(t, measure.quantile(sorted, 0.5), 3)
+	testing.expect_value(t, measure.quantile([]f64{1, 2}, 0.5), 1.5)
+
+	testing.expect_value(t, measure.sign_test(9, 0), 2.0 / 512)
+	testing.expect_value(t, measure.sign_test(8, 1), 20.0 / 512)
+	testing.expect_value(t, measure.sign_test(2, 7), 92.0 / 512)
+	testing.expect_value(t, measure.sign_test(0, 0), 1)
+
+	// b is 10 ms slower in every pair: worse. Run 1 of each is left out.
+	a := runs("900", "200", "210", "190", "205", "200", "195")
+	b := runs("100", "210", "220", "200", "215", "210", "205")
+	rows := measure.paired_startup("fake", a, b)
+	p: measure.Paired
+	found := false
+	for r in rows {
+		if r.row == "tracks" && r.field == "ms" {
+			p, found = r, true
+		}
+	}
+	testing.expect(t, found)
+	testing.expect_value(t, p.count, 6)
+	testing.expect_value(t, p.higher, 6)
+	testing.expect_value(t, p.a, 200)
+	testing.expect_value(t, p.b, 210)
+	testing.expect_value(t, p.diff, 10)
+	testing.expect_value(t, measure.paired_verdict(p), "worse")
+	// The same counts on both sides: no change.
+	for r in rows {
+		if r.field == "ui_instructions" {
+			testing.expect_value(t, r.diff, 0)
+			testing.expect_value(t, measure.paired_verdict(r), "")
+		}
+	}
+
+	// Lower in 7 of 9 pairs, as an A/B of two builds with the same startup
+	// code was on 17 October: the middle half of the differences was below
+	// zero, but a split that even happens by chance 18% of the time.
+	a = runs("747.2", "217.9", "247.2", "215.0", "205.0", "206.9", "206.8", "200.9", "205.7", "228.6")
+	b = runs("441.2", "215.1", "209.8", "207.4", "199.7", "209.7", "196.4", "195.7", "209.3", "208.7")
+	for r in measure.paired_startup("fake", a, b) {
+		if r.row == "tracks" && r.field == "ms" {
+			testing.expect_value(t, r.lower, 7)
+			testing.expect(t, r.high < 0)
+			testing.expect_value(t, measure.paired_verdict(r), "")
+		}
+	}
+}
+
+@(test)
+test_measure_launches :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	log := `{"time":100,"commit":"aaaaaaaaaa","build":"release","first_frame":500,"tracks":700,"ui_instructions":900000000,"footprint":104857600}
+{"time":200,"commit":"aaaaaaaaaa","build":"release","first_frame":520,"tracks":900,"ui_instructions":910000000,"footprint":104857600}
+not json
+{"time":300,"commit":"bbbbbbbbbb-dirty","build":"debug","first_frame":800,"tracks":1100,"ui_instructions":1500000000,"footprint":209715200}
+{"time":400,"commit":"aaaaaaaaaa","build":"release","first_frame":510,"tracks":800,"ui_instructions":905000000,"footprint":104857600}
+`
+	groups := measure.group_launches(log)
+	testing.expect_value(t, len(groups), 2)
+	testing.expect_value(t, groups[0].commit, "aaaaaaaaaa")
+	testing.expect_value(t, len(groups[0].launches), 3)
+	testing.expect_value(t, groups[0].first, 100)
+	testing.expect_value(t, groups[0].last, 400)
+	testing.expect_value(t, groups[1].build, "debug")
+	values := []f64{700, 900, 800}
+	m, lo, hi := measure.spread(values)
+	testing.expect_value(t, m, 800)
+	testing.expect_value(t, lo, 750)
+	testing.expect_value(t, hi, 850)
+
+	sb := strings.builder_make()
+	measure.write_launches(&sb, groups)
+	out := strings.to_string(sb)
+	testing.expect(t, strings.contains(out, "aaaaaaa        release        3  800 (750 to 850)"), out)
+	testing.expect(t, strings.contains(out, "bbbbbbb-dirty"), out)
+}
+
+@(test)
+test_launch_log_append :: proc(t: ^testing.T) {
+	dir := fmt.tprintf("%s/tidalfast-launches-%d", temp_base(), time.now()._nsec)
+	path := fmt.tprintf("%s/nested/launches.jsonl", dir)
+	defer os.remove_all(dir)
+
+	testing.expect(t, app.launch_log_append(path, transmute([]u8)string("{\"n\":1}\n")))
+	testing.expect(t, app.launch_log_append(path, transmute([]u8)string("{\"n\":2}\n")))
+	data, _ := os.read_entire_file(path, context.temp_allocator)
+	testing.expect_value(t, string(data), "{\"n\":1}\n{\"n\":2}\n")
+
+	// Past the limit the file keeps its newer half, from a line's start.
+	line := strings.concatenate({"{\"pad\":\"", strings.repeat("x", 990, context.temp_allocator), "\"}\n"}, context.temp_allocator)
+	big := strings.builder_make(context.temp_allocator)
+	for i in 0 ..< app.LAUNCH_LOG_LIMIT / len(line) + 2 {
+		fmt.sbprintf(&big, "{{\"i\":%04d,%s", i, line[1:])
+	}
+	_ = os.write_entire_file(path, transmute([]u8)strings.to_string(big))
+	testing.expect(t, app.launch_log_append(path, transmute([]u8)string("{\"n\":3}\n")))
+	data, _ = os.read_entire_file(path, context.temp_allocator)
+	testing.expect(t, len(data) <= strings.builder_len(big) / 2 + 8, fmt.tprint(len(data)))
+	testing.expect(t, strings.has_prefix(string(data), "{\"i\":"))
+	testing.expect(t, strings.has_suffix(string(data), "{\"n\":3}\n"))
+	last := strings.split_lines(strings.trim_space(string(data)), context.temp_allocator)
+	testing.expect_value(t, last[len(last) - 2][:10], fmt.tprintf("{{\"i\":%04d,", app.LAUNCH_LOG_LIMIT / len(line) + 1))
 }

@@ -10,8 +10,10 @@ package app
 //   startup  the same, then quit once the first track rows and their covers are drawn
 //   memory   after startup, run the memory scenario (measure_step) and quit
 //
-// With it off nothing here runs except two counters per drawn row. Marks and
-// samples come from frames that happen anyway. Only the memory scenario
+// With it off the marks are still kept, quietly, until the first track
+// rows show, for the launch log (launch_log.odin); after that nothing here
+// runs except two counters per drawn row. Marks and samples come from
+// frames that happen anyway. Only the memory scenario
 // starts a thread, which samples once a second and wakes the UI when a
 // stage's wait is over.
 
@@ -72,6 +74,7 @@ Measure :: struct {
 	mode:         Measure_Mode,
 	start_ns:     i64, // when the process started, Unix nanoseconds
 	marks:        bit_set[Mark],
+	mark_ms:      [Mark]f64,
 	// The frame being built: track rows drawn, and covers asked for and
 	// ready. A frame with every cover ready is one with nothing left to fill in.
 	rows:         int,
@@ -96,6 +99,13 @@ Process_Memory :: struct {
 	gpu:            int, // Metal's currentAllocatedSize
 }
 
+// Counters is CPU work done since a process or thread started, zero where
+// the OS doesn't say.
+Counters :: struct {
+	instructions: u64,
+	cycles:       u64,
+}
+
 measure_mode :: proc(value: string) -> Measure_Mode {
 	switch value {
 	case "":
@@ -113,9 +123,6 @@ measure_start :: proc(s: ^State, shell: ^platform.Shell) {
 	m.mode = measure_mode(os.get_env("TIDALFAST_MEASURE", context.temp_allocator))
 	m.wake = shell.request_redraw
 	m.renderer = &s.renderer
-	if m.mode == .Off {
-		return
-	}
 	m.start_ns = process_start_ns()
 	measure_thread_start(m)
 }
@@ -190,7 +197,7 @@ measure_count_cover :: #force_inline proc(s: ^State, ready: bool) {
 // frame reached and moves the memory scenario on.
 measure_frame :: proc(s: ^State) {
 	m := &s.measure
-	if m.mode == .Off {
+	if m.mode == .Off && .Tracks in m.marks {
 		return
 	}
 	measure_mark(s, .First_Frame)
@@ -215,11 +222,17 @@ measure_frame :: proc(s: ^State) {
 
 measure_mark :: proc(s: ^State, mark: Mark) {
 	m := &s.measure
-	if m.mode == .Off || mark in m.marks {
+	if mark in m.marks {
 		return
 	}
 	m.marks += {mark}
-	measure_line(s, "mark", MARK_NAMES[mark], measure_ms(m), false)
+	m.mark_ms[mark] = measure_ms(m)
+	if m.mode != .Off {
+		measure_line(s, "mark", MARK_NAMES[mark], m.mark_ms[mark], false)
+	}
+	if mark == .Tracks {
+		launch_log_push(s)
+	}
 }
 
 // A sample also counts the mapped fonts' resident pages, which takes a few
@@ -348,14 +361,17 @@ measure_quit :: proc() {
 @(private = "file")
 measure_line :: proc(s: ^State, kind, name: string, ms: f64, fonts_resident: bool) {
 	pm := process_memory(&s.renderer)
+	pc := process_counters()
+	tc := thread_counters()
 	view_bytes := int(s.data.view.arena.total_used) if s.data.view.has_arena else 0
 	buf: [1024]u8
 	b := strings.builder_from_bytes(buf[:])
 	fmt.sbprintf(&b,
 		`{{"%s":"%s","ms":%.1f,"footprint":%d,"footprint_peak":%d,"resident":%d,"resident_peak":%d,"gpu":%d,` +
-		`"arena":%d,"frame_peak":%d,"atlas_pages":%d,"runs":%d,"covers":%d,"cover_bytes":%d,"rows":%d,"view_bytes":%d`,
+		`"arena":%d,"frame_peak":%d,"atlas_pages":%d,"runs":%d,"covers":%d,"cover_bytes":%d,"rows":%d,"view_bytes":%d,` +
+		`"instructions":%d,"cycles":%d,"ui_instructions":%d,"ui_cycles":%d`,
 		kind, name, ms, pm.footprint, pm.footprint_peak, pm.resident, pm.resident_peak, pm.gpu,
-		s.arena.offset, s.frame_arena.peak_used, s.text.atlas.page_count, s.text.run_count, s.data.covers.used, s.data.covers.bytes, view_count(s), view_bytes)
+		s.arena.offset, s.frame_arena.peak_used, s.text.atlas.page_count, s.text.run_count, s.data.covers.used, s.data.covers.bytes, view_count(s), view_bytes, pc.instructions, pc.cycles, tc.instructions, tc.cycles)
 	if fonts_resident {
 		fonts, mapped, resident := text.mapped_fonts(&s.text)
 		fmt.sbprintf(&b, `,"fonts_mapped":%d,"fonts_mapped_bytes":%d,"fonts_resident":%d`, fonts, mapped, resident)

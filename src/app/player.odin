@@ -144,6 +144,7 @@ playback_start :: proc(s: ^State, shell: ^platform.Shell) {
 	pb.null_output = os.get_env("TIDALFAST_AUDIO_NULL", context.temp_allocator) != ""
 	pb.settings_path = settings_default_path(runtime.heap_allocator())
 	s.data.settings_path = strings.clone(pb.settings_path, runtime.heap_allocator())
+	s.data.launch_log_path = launch_log_path(runtime.heap_allocator())
 	pb.settings, _ = settings_load(pb.settings_path)
 	if v, ok := strconv.parse_f32(os.get_env("TIDALFAST_VOLUME", context.temp_allocator)); ok {
 		pb.volume_file = pb.settings.volume

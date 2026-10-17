@@ -7,6 +7,8 @@
 //     ./build/measure/measure memory             fake and mock, 1 run each
 //     ./build/measure/measure all
 //     ./build/measure/measure compare a.json b.json
+//     ./build/measure/measure ab main            this checkout against main, taking turns
+//     ./build/measure/measure launches           the app's own log of real launches
 //
 // Flags: -runs=N, -setup=fake,mock, -app=path, -timeout=seconds, -out=path,
 // and -real, which runs against your own account and Keychain item with
@@ -14,7 +16,6 @@
 package measure
 
 import "core:fmt"
-import "core:math/rand"
 import "core:os"
 import "core:path/filepath"
 import "core:strconv"
@@ -22,19 +23,30 @@ import "core:strings"
 import "core:time"
 
 Config :: struct {
-	root:      string, // the checkout
-	out_dir:   string, // build/measure
-	app:       string,
-	mock:      string,
-	setups:    []string,
-	runs:      int, // 0: the scenario's default
-	timeout:   time.Duration, // 0: the scenario's default
-	out:       string,
-	real:      bool,
-	log_dir:   string,
-	mock_url:  string,
-	keychain:  string,
-	failed:    int,
+	root:     string, // the checkout
+	out_dir:  string, // build/measure
+	app:      string,
+	mock:     string,
+	setups:   []string,
+	runs:     int, // 0: the scenario's default
+	timeout:  time.Duration, // 0: the scenario's default
+	out:      string,
+	real:     bool,
+	log_dir:  string,
+	failed:   int,
+}
+
+// Side is one build being measured: its app, and its own logs, settings,
+// list cache, mock and Keychain item, so two builds never share state. A
+// shared mock would revoke one build's login whenever the other refreshed
+// its own, since the mock keeps one refresh token per user.
+Side :: struct {
+	name:     string, // "" outside ab, else "a" or "b"
+	app:      string,
+	log_dir:  string,
+	keychain: string,
+	mock:     os.Process,
+	mock_url: string,
 }
 
 main :: proc() {
@@ -48,8 +60,21 @@ main :: proc() {
 		}
 		os.exit(compare_files(args[1], args[2]))
 	}
+	if args[0] == "launches" {
+		if len(args) > 2 {
+			usage()
+		}
+		os.exit(show_launches(args[1] if len(args) == 2 else launch_log_default()))
+	}
 	scenario := args[0]
-	if scenario != "startup" && scenario != "memory" && scenario != "all" {
+	base := ""
+	if scenario == "ab" {
+		if len(args) < 2 || strings.has_prefix(args[1], "-") {
+			usage()
+		}
+		base = args[1]
+		args = args[1:]
+	} else if scenario != "startup" && scenario != "memory" && scenario != "all" {
 		usage()
 	}
 
@@ -80,6 +105,9 @@ main :: proc() {
 		}
 	}
 	if cfg.real {
+		if base != "" {
+			usage()
+		}
 		setups_flag = "real"
 	}
 	cfg.setups = strings.split(setups_flag, ",")
@@ -100,6 +128,10 @@ main :: proc() {
 	}
 	cfg.log_dir = join(cfg.out_dir, fmt.tprintf("logs-%s", stamp))
 	os.make_directory_all(cfg.log_dir)
+	if base != "" {
+		os.exit(run_ab(&cfg, base, stamp))
+	}
+	side := Side{app = cfg.app, log_dir = cfg.log_dir}
 
 	results := Results {
 		version = 1,
@@ -110,7 +142,6 @@ main :: proc() {
 	fmt.printfln("%s, %s, macOS %s (%s), %.0f GB", results.machine.model, results.machine.cpu, results.machine.os, results.machine.os_build, results.machine.memory_gb)
 	fmt.printfln("app %s, logs in %s\n", cfg.app, cfg.log_dir)
 
-	mock_process: os.Process
 	has_mock := false
 	for setup in cfg.setups {
 		switch setup {
@@ -120,12 +151,10 @@ main :: proc() {
 				fmt.eprintfln("measure: no mock at %s; run ./build.sh measure", cfg.mock)
 				os.exit(1)
 			}
-			p, url, ok := start_mock(&cfg)
-			if !ok {
+			if !start_side_mock(&cfg, &side) {
 				os.exit(1)
 			}
-			mock_process, cfg.mock_url, has_mock = p, url, true
-			cfg.keychain = fmt.tprintf("tidalfast-measure-%08x", rand.uint32())
+			has_mock = true
 		case:
 			fmt.eprintfln("measure: unknown setup %s", setup)
 			os.exit(1)
@@ -134,18 +163,24 @@ main :: proc() {
 
 	for setup in cfg.setups {
 		if scenario == "startup" || scenario == "all" {
-			runs := run_scenario(&cfg, setup, "startup", cfg.runs if cfg.runs > 0 else 10, cfg.timeout if cfg.timeout > 0 else 60 * time.Second)
-			add_startup(&results, setup, runs)
+			runs := make([dynamic][]Line)
+			for i in 0 ..< startup_runs(&cfg) {
+				append(&runs, run_once(&cfg, &side, setup, "startup", i, startup_runs(&cfg)))
+			}
+			add_startup(&results, setup, runs[:])
 		}
 		if scenario == "memory" || scenario == "all" {
-			runs := run_scenario(&cfg, setup, "memory", cfg.runs if cfg.runs > 0 && scenario == "memory" else 1, cfg.timeout if cfg.timeout > 0 else 240 * time.Second)
-			add_memory(&results, setup, runs)
+			n := cfg.runs if cfg.runs > 0 && scenario == "memory" else 1
+			runs := make([dynamic][]Line)
+			for i in 0 ..< n {
+				append(&runs, run_once(&cfg, &side, setup, "memory", i, n))
+			}
+			add_memory(&results, setup, runs[:])
 		}
 	}
 
 	if has_mock {
-		stop(mock_process)
-		delete_keychain_item(cfg.keychain)
+		stop_side_mock(&side)
 	}
 
 	b := strings.builder_make()
@@ -164,51 +199,62 @@ main :: proc() {
 
 usage :: proc() {
 	fmt.eprintln(`usage: measure startup|memory|all [-runs=N] [-setup=fake,mock] [-app=path] [-timeout=s] [-out=path] [-real]
-       measure compare a.json b.json`)
+       measure ab <git ref> [-runs=N] [-setup=fake,mock] [-timeout=s] [-out=path]
+       measure compare a.json b.json
+       measure launches [launches.jsonl]`)
 	os.exit(2)
 }
 
-// run_scenario launches the app runs times and returns each run's lines.
-// A run that times out or never gets to its last line still counts what it
+startup_runs :: proc(cfg: ^Config) -> int {
+	return cfg.runs if cfg.runs > 0 else 10
+}
+
+// run_once launches side's app once, run i of n, and returns its lines. A
+// run that times out or never gets to its last line still counts what it
 // printed, and counts as failed.
-run_scenario :: proc(cfg: ^Config, setup, scenario: string, runs: int, timeout: time.Duration) -> [][]Line {
-	out := make([dynamic][]Line)
-	for i in 0 ..< runs {
-		fmt.printf("%s %s run %d/%d ", scenario, setup, i + 1, runs)
-		log_path := join(cfg.log_dir, fmt.tprintf("%s-%s-%d.log", scenario, setup, i + 1))
-		env := app_env(cfg, setup, scenario)
-		log, finished := run_app(cfg.app, env, log_path, timeout)
-		lines := parse_log(log)
-		last := "tracks" if scenario == "startup" else "idle_after"
-		reached: bool
-		if scenario == "startup" {
-			_, reached = find_mark(lines, last)
-		} else {
-			_, reached = find_sample(lines, last)
-		}
-		for &l in lines {
-			if l.error != "" {
-				fmt.printf("(%s) ", l.error)
-			}
-		}
-		if !finished || !reached {
-			cfg.failed += 1
-			fmt.printfln("failed: %s, see %s", "timed out" if !finished else fmt.tprintf("no %s line", last), log_path)
-		} else if l, ok := find_mark(lines, "tracks"); ok && scenario == "startup" {
-			fmt.printfln("tracks at %.1f ms", l.ms)
-		} else {
-			fmt.println("done")
-		}
-		append(&out, lines)
+run_once :: proc(cfg: ^Config, side: ^Side, setup, scenario: string, i, n: int) -> []Line {
+	timeout := cfg.timeout
+	if timeout == 0 {
+		timeout = 60 * time.Second if scenario == "startup" else 240 * time.Second
 	}
-	return out[:]
+	label := fmt.tprintf("%s-%s", side.name, setup) if side.name != "" else setup
+	fmt.printf("%s %s run %d/%d ", scenario, label, i + 1, n)
+	log_path := join(side.log_dir, fmt.tprintf("%s-%s-%d.log", scenario, setup, i + 1))
+	env := app_env(cfg, side, setup, scenario)
+	log, finished := run_app(side.app, env, log_path, timeout)
+	lines := parse_log(log)
+	last := "tracks" if scenario == "startup" else "idle_after"
+	reached: bool
+	if scenario == "startup" {
+		_, reached = find_mark(lines, last)
+	} else {
+		_, reached = find_sample(lines, last)
+	}
+	for &l in lines {
+		if l.error != "" {
+			fmt.printf("(%s) ", l.error)
+		}
+	}
+	if !finished || !reached {
+		cfg.failed += 1
+		fmt.printfln("failed: %s, see %s", "timed out" if !finished else fmt.tprintf("no %s line", last), log_path)
+	} else if l, ok := find_mark(lines, "tracks"); ok && scenario == "startup" {
+		if l.ui_instructions > 0 {
+			fmt.printfln("tracks at %.1f ms, UI thread %.0f M instructions", l.ms, l.ui_instructions / 1e6)
+		} else {
+			fmt.printfln("tracks at %.1f ms", l.ms)
+		}
+	} else {
+		fmt.println("done")
+	}
+	return lines
 }
 
 // app_env is this process's environment without TIDALFAST_ and Metal
 // variables someone left set, plus what the setup needs. Settings go to a
 // file of their own that doesn't exist, so bit-perfect output is off and
 // your settings stay as they are, and the list cache to a folder of its own.
-app_env :: proc(cfg: ^Config, setup, scenario: string) -> []string {
+app_env :: proc(cfg: ^Config, side: ^Side, setup, scenario: string) -> []string {
 	env := make([dynamic]string)
 	base, _ := os.environ(context.allocator)
 	for kv in base {
@@ -219,17 +265,17 @@ app_env :: proc(cfg: ^Config, setup, scenario: string) -> []string {
 	append(&env, fmt.tprintf("TIDALFAST_MEASURE=%s", scenario))
 	append(&env, "TIDALFAST_AUDIO_NULL=1")
 	if setup != "real" {
-		append(&env, fmt.tprintf("TIDALFAST_SETTINGS=%s", join(cfg.log_dir, "settings.json")))
+		append(&env, fmt.tprintf("TIDALFAST_SETTINGS=%s", join(side.log_dir, "settings.json")))
 		// The list cache too, shared by the runs: the first starts with none.
-		append(&env, fmt.tprintf("TIDALFAST_CACHE=%s", join(cfg.log_dir, "cache")))
+		append(&env, fmt.tprintf("TIDALFAST_CACHE=%s", join(side.log_dir, "cache")))
 	}
 	switch setup {
 	case "fake":
 		append(&env, "TIDALFAST_FAKE=1")
 	case "mock":
-		append(&env, fmt.tprintf("TIDALFAST_API=%s", cfg.mock_url))
-		append(&env, fmt.tprintf("TIDALFAST_KEYCHAIN=%s", cfg.keychain))
-		append(&env, fmt.tprintf("TIDALFAST_PKCE_REDIRECT=%s/android/login/auth?code=mock-pkce-code-1", cfg.mock_url))
+		append(&env, fmt.tprintf("TIDALFAST_API=%s", side.mock_url))
+		append(&env, fmt.tprintf("TIDALFAST_KEYCHAIN=%s", side.keychain))
+		append(&env, fmt.tprintf("TIDALFAST_PKCE_REDIRECT=%s/android/login/auth?code=mock-pkce-code-1", side.mock_url))
 	}
 	return env[:]
 }
@@ -268,16 +314,34 @@ stop :: proc(p: os.Process) {
 	}
 }
 
+// start_side_mock starts side's mock and names its Keychain item.
+start_side_mock :: proc(cfg: ^Config, side: ^Side) -> bool {
+	p, url, ok := start_mock(cfg, side.log_dir)
+	if !ok {
+		return false
+	}
+	side.mock, side.mock_url = p, url
+	side.keychain = new_keychain_name()
+	return true
+}
+
+// stop_side_mock stops side's mock and deletes the login its runs saved.
+stop_side_mock :: proc(side: ^Side) {
+	stop(side.mock)
+	delete_keychain_item(side.keychain)
+}
+
 // start_mock starts tests/mock_tidal on a free loopback port and waits
-// until it listens. It makes its audio files first, which takes a while.
-start_mock :: proc(cfg: ^Config) -> (p: os.Process, url: string, ok: bool) {
-	log_path := join(cfg.log_dir, "mock.log")
+// until it listens. It makes its audio files first, in log_dir, which
+// takes a while.
+start_mock :: proc(cfg: ^Config, log_dir: string) -> (p: os.Process, url: string, ok: bool) {
+	log_path := join(log_dir, "mock.log")
 	f, err := os.create(log_path)
 	if err != nil {
 		return
 	}
 	defer os.close(f)
-	audio := fmt.tprintf("-audio-dir=%s", join(cfg.log_dir, "mock-audio"))
+	audio := fmt.tprintf("-audio-dir=%s", join(log_dir, "mock-audio"))
 	perr: os.Error
 	p, perr = os.process_start({command = {cfg.mock, "-port=0", audio}, stdout = f, stderr = f})
 	if perr != nil {
@@ -339,5 +403,23 @@ compare_files :: proc(a_path, b_path: string) -> int {
 	sb := strings.builder_make()
 	write_compare(&sb, compare(a.metrics[:], b.metrics[:]))
 	fmt.print(strings.to_string(sb))
+	return 0
+}
+
+show_launches :: proc(path: string) -> int {
+	data, err := os.read_entire_file(path, context.allocator)
+	if err != nil {
+		fmt.eprintfln("measure: can't read %s: %v", path, err)
+		return 1
+	}
+	groups := group_launches(string(data))
+	if len(groups) == 0 {
+		fmt.eprintfln("measure: no launches in %s", path)
+		return 1
+	}
+	b := strings.builder_make()
+	fmt.sbprintfln(&b, "%s\n", path)
+	write_launches(&b, groups)
+	fmt.print(strings.to_string(b))
 	return 0
 }

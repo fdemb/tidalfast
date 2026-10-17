@@ -56,3 +56,15 @@ field :: proc(text, name: string, sep: byte) -> string {
 	}
 	return ""
 }
+
+// launch_log_default is where the app writes its launch log: the
+// TIDALFAST_LAUNCH_LOG it would read, else next to its settings.
+launch_log_default :: proc() -> string {
+	if p := os.get_env("TIDALFAST_LAUNCH_LOG", context.allocator); p != "" && p != "off" {
+		return p
+	}
+	if dir := os.get_env("XDG_CONFIG_HOME", context.allocator); dir != "" {
+		return join(dir, "tidalfast", "launches.jsonl")
+	}
+	return join(os.get_env("HOME", context.allocator), ".config", "tidalfast", "launches.jsonl")
+}

@@ -70,6 +70,7 @@ Job_Kind :: enum u8 {
 	Save_Settings, // write the settings, see settings.odin
 	Disk, // read or write a cache file, on the disk thread, see lists.odin
 	Add_Track, // like a track or add it to a playlist, see add_to_list
+	Launch_Log, // append this launch to the launch log, see launch_log.odin
 }
 
 Source :: enum u8 {
@@ -97,7 +98,7 @@ Job :: struct {
 	not_before: time.Tick, // Login_Wait: when to poll first, {} for now
 	id:         Small, // playlist id, image id, device code, query, album or artist id
 	op:         Disk_Op,
-	blob:       []u8, // Disk writes: the file, heap, freed by the disk thread
+	blob:       []u8, // Disk writes: the file, heap, freed by the disk thread; Launch_Log: the line, freed by the worker
 }
 
 // Priorities: lower runs first.
@@ -371,6 +372,11 @@ run_job :: proc(d: ^Data, job: Job) -> (res: Result) {
 	id := job.id
 	switch job.kind {
 	case .None, .Cover, .Artwork, .Disk:
+	case .Launch_Log:
+		if !launch_log_append(d.launch_log_path, job.blob) {
+			res.err = .Io
+		}
+		delete(job.blob, runtime.heap_allocator())
 	case .Save_Settings:
 		if !settings_flush(d) {
 			res.err = .Io
