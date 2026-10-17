@@ -828,6 +828,68 @@ held_login_code_follows_the_login_shown :: proc(t: ^testing.T) {
 	testing.expect(t, shows(login_screen(t, s), "ABCDE"))
 }
 
+// After a failed code login, going to the PKCE login and back asks TIDAL
+// for a new code and says so, not the old error, whether the queue takes
+// the ask at once or holds it for room.
+@(test)
+code_login_after_a_failure_asks_again :: proc(t: ^testing.T) {
+	FAILED :: "Can't reach TIDAL. Check your connection."
+	for full in ([]bool{false, true}) {
+		s := data_state()
+		d := &s.data
+		launch_signed_out(s)
+		app.device_begin(d)
+		starts := data_jobs(d)
+		if testing.expect_value(t, len(starts), 1) {
+			res := app.Result{job = starts[0], err = .Network}
+			app.handle_result(s, &res, 0)
+		}
+		testing.expect(t, shows(login_screen(t, s), FAILED))
+
+		app.pkce_show(d)
+		if full {
+			fill_with_covers(d)
+		}
+		app.device_begin(d)
+		if full {
+			free_slots(d, 4)
+			app.data_retry(d)
+		}
+		screen := login_screen(t, s)
+		testing.expectf(t, shows(screen, "Getting a code from TIDAL…"), "full queue %v: %s", full, screen)
+		testing.expectf(t, !shows(screen, FAILED), "full queue %v: %s", full, screen)
+		testing.expectf(t, login_starts(s) == 1, "full queue %v: one code asked for", full)
+		screen = login_screen(t, s)
+		testing.expectf(t, shows(screen, "ABCDE"), "full queue %v: %s", full, screen)
+		data_state_free(s)
+	}
+}
+
+// A pasted address does nothing unless the paste form shows: not on the
+// code login's card, and not a second time while the first is exchanged.
+@(test)
+pkce_submit_needs_the_paste_form :: proc(t: ^testing.T) {
+	s := data_state()
+	defer data_state_free(s)
+	d := &s.data
+	URL :: "https://tidal.com/android/login/auth?code=c"
+	show_code(t, s)
+	data_jobs(d)
+	app.pkce_submit(s, URL)
+	testing.expect_value(t, len(data_jobs(d)), 0)
+	testing.expect(t, shows(login_screen(t, s), "ABCDE"))
+
+	app.pkce_show(d)
+	app.pkce_submit(s, URL)
+	app.pkce_submit(s, URL)
+	queued := data_jobs(d)
+	testing.expect_value(t, len(queued), 1)
+	for job in queued {
+		_, pkce := job.payload.(app.Login_Pkce_Job)
+		testing.expectf(t, pkce, "queued %v", job.payload)
+	}
+}
+
 // A full hold list makes room from a job no longer wanted before any add,
 // and going back to the code login asks for a code again.
 @(test)
