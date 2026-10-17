@@ -199,6 +199,37 @@ device_wait_honours_interval_and_slow_down :: proc(t: ^testing.T) {
 	testing.expect_value(t, m.poll_count, 1)
 }
 
+// A device wait between polls stops as soon as another login attempt
+// starts, and polls no more.
+@(test)
+device_wait_stops_with_its_attempt :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := oauth_session(&m)
+	defer tidal.session_destroy(s)
+	s.config.api_oauth2_token = fmt.tprintf("%sdevice_token", m.base_url)
+	tidal.session_set_login_attempt(s, 1)
+
+	worker := thread.create_and_start_with_poly_data(s, proc(s: ^tidal.Session) {
+		time.sleep(300 * time.Millisecond)
+		tidal.session_set_login_attempt(s, 2)
+	})
+	link := tidal.Link_Login {
+		device_code = "dc",
+		interval    = 2,
+		expires_in  = 3,
+	}
+	start := time.tick_now()
+	err := tidal.login_device_wait(s, &link, until_expiry = true, attempt = 1)
+	took := time.duration_seconds(time.tick_since(start))
+	thread.join(worker)
+	thread.destroy(worker)
+	testing.expect(t, tidal.is_error(err, .Cancelled), fmt.tprint(err))
+	testing.expect(t, took < 1, fmt.tprint(took))
+	testing.expect_value(t, m.poll_count, 1)
+}
+
 @(test)
 clear_auth_cancels_requests_in_flight :: proc(t: ^testing.T) {
 	m: Mock
