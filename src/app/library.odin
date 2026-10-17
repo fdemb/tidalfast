@@ -898,24 +898,13 @@ skip_button :: proc(id: string, forward: bool) -> ui.Signal {
 	return ui.signal(b)
 }
 
-// toggle_button is a transport button lit while on, with a dot under it.
+// toggle_button is a transport button lit while on.
 toggle_button :: proc(id, icon, name, value: string, on: bool) -> ui.Signal {
-	b := ui.column(id, {.Clickable, .Focusable, .Draw_Hot_Effects, .Draw_Active_Effects}, ui.px(36), ui.px(36))
+	ui.text_style(.Icon, 18, ACCENT if on else SECONDARY)
+	b := ui.box_make(fmt.tprintf("%s###%s", icon, id), {.Clickable, .Focusable, .Draw_Text, .Draw_Hot_Effects, .Draw_Active_Effects}, ui.px(36), ui.px(36))
+	b.text_align = .Center
 	b.radius = 18
 	ui.accessible(b, .Button, name, value)
-	ui.spacer(ui.px(6))
-	ui.text_style(.Icon, 18, ACCENT if on else SECONDARY)
-	glyph := ui.label(icon, ui.fill(), ui.px(20))
-	glyph.text_align = .Center
-	ui.spacer(ui.px(2))
-	{
-		ui.row("", {}, ui.fill(), ui.px(4))
-		ui.spacer(ui.fill())
-		dot := ui.box_make("", {.Draw_Background}, ui.px(4), ui.px(4))
-		dot.background = ACCENT if on else {}
-		dot.radius = 2
-		ui.spacer(ui.fill())
-	}
 	return ui.signal(b)
 }
 
