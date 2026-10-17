@@ -388,6 +388,134 @@ refused_pushes_are_retried :: proc(t: ^testing.T) {
 	testing.expect_value(t, d.retry, bit_set[app.Job_Kind; u16]{})
 }
 
+// data_jobs empties the queue and returns the jobs in it but covers.
+@(private = "file")
+data_jobs :: proc(d: ^app.Data) -> [dynamic]app.Job {
+	out := make([dynamic]app.Job, context.temp_allocator)
+	for {
+		job, ok := jobs.try_pop(&d.queue)
+		if !ok {
+			return out
+		}
+		if job.kind != .Cover {
+			append(&out, job)
+		}
+	}
+}
+
+@(private = "file")
+fill_with_covers :: proc(d: ^app.Data) {
+	for jobs.push(&d.queue, app.Job{kind = .Cover}, app.PRIORITY_COVER) {}
+}
+
+@(private = "file")
+free_slots :: proc(d: ^app.Data, n: int) {
+	for _ in 0 ..< n {
+		jobs.try_pop(&d.queue)
+	}
+}
+
+// Jobs a full queue refused go out once there's room, and only those still
+// wanted: pages of the open list, not of one closed since, and nothing for
+// an account that ended.
+@(test)
+refused_jobs_wait_for_room :: proc(t: ^testing.T) {
+	s := data_state()
+	defer data_state_free(s)
+	d := &s.data
+	d.account = .Signed_In
+	fill_with_covers(d)
+
+	app.request_playlists(d)
+	app.view_open(d, .Playlist, "closed", "closed", "", 300)
+	closed := d.view.gen
+	app.view_open(d, .Playlist, "open", "open", "", 300)
+	app.push_job(d, {kind = .Add_Track, source = .Liked, key = 5})
+	app.data_retry(d)
+	testing.expect_value(t, len(data_jobs(d)), 0)
+
+	fill_with_covers(d)
+	free_slots(d, 8)
+	app.data_retry(d)
+	playlists, adds: int
+	pages := make([dynamic]i32, context.temp_allocator)
+	for job in data_jobs(d) {
+		#partial switch job.kind {
+		case .Playlists:
+			playlists += 1
+		case .Add_Track:
+			adds += 1
+			testing.expect_value(t, job.key, 5)
+		case .Tracks:
+			testing.expect(t, job.view != closed, "no pages for the list closed since")
+			testing.expect_value(t, job.view, d.view.gen)
+			append(&pages, job.offset)
+		case:
+			testing.fail_now(t, fmt.tprint("unexpected job", job.kind))
+		}
+	}
+	testing.expect_value(t, playlists, 1)
+	testing.expect_value(t, adds, 1)
+	testing.expect_value(t, len(pages), 2)
+	testing.expect(t, slice.contains(pages[:], 0) && slice.contains(pages[:], app.PAGE_FIRST))
+	testing.expect(t, d.sidebar.loading)
+	testing.expect_value(t, d.view.in_flight, 2)
+
+	fill_with_covers(d)
+	app.push_job(d, {kind = .Add_Track, source = .Liked, key = 6})
+	app.account_end(s)
+	free_slots(d, 8)
+	app.data_retry(d)
+	testing.expect_value(t, len(data_jobs(d)), 0)
+}
+
+// A refused login job goes out when there's room while the login still
+// waits for it, and not once the login has moved on.
+@(test)
+refused_login_jobs_wait_for_room :: proc(t: ^testing.T) {
+	s := data_state()
+	defer data_state_free(s)
+	d := &s.data
+	d.account = .Signed_Out
+	d.login.pkce = .Off
+	fill_with_covers(d)
+
+	app.request_login_code(d)
+	app.data_retry(d)
+	free_slots(d, 4)
+	app.data_retry(d)
+	queued := data_jobs(d)
+	if testing.expect_value(t, len(queued), 1) {
+		testing.expect_value(t, queued[0].kind, app.Job_Kind.Login_Start)
+		testing.expect_value(t, queued[0].view, d.login_attempt)
+	}
+
+	d.login = {pkce = .Off, link = {device_code = app.small("dc"), interval = 5}}
+	fill_with_covers(d)
+	app.request_login_poll(d)
+	free_slots(d, 4)
+	app.data_retry(d)
+	queued = data_jobs(d)
+	if testing.expect_value(t, len(queued), 1) {
+		testing.expect_value(t, queued[0].kind, app.Job_Kind.Login_Wait)
+		testing.expect_value(t, queued[0].view, d.login_attempt)
+		testing.expect_value(t, app.small_str(&queued[0].id), "dc")
+	}
+
+	// The PKCE login finished before there was room.
+	d.login = {pkce = .Off}
+	fill_with_covers(d)
+	app.request_login_code(d)
+	d.login = {}
+	d.account = .Signed_In
+	free_slots(d, 4)
+	app.data_retry(d)
+	queued = data_jobs(d)
+	for job in queued {
+		testing.expect(t, job.kind != .Login_Start, "no code for a login that finished")
+	}
+}
+
 @(private = "file")
 fake_rows :: proc(n: int) -> []app.Row {
 	rows := make([]app.Row, n, context.temp_allocator)
