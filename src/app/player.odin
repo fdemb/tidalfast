@@ -488,8 +488,7 @@ stream_result :: proc(s: ^State, res: ^Result, job: Stream_Job) {
 			// Every track comes like this for this login, so skipping on
 			// would only fail through the queue.
 			pb.message = small(lossy_message(small_str(&res.codec)))
-			source_clear(&pb.cur)
-			pb.paused = true
+			stop_current(pb)
 			return
 		}
 		pb.message = small(fmt.tprintf("Couldn't play %s: %s", title, small_str(&res.message)))
@@ -543,13 +542,21 @@ skip_failed :: proc(s: ^State) {
 	// asking for streams.
 	n := audio.queue_next(pb.entries, pb.order, pb.index)
 	if n < 0 {
-		source_clear(&pb.cur)
-		pb.paused = true
+		stop_current(pb)
 		return
 	}
 	msg := pb.message
 	start_item(s, n, paused = pb.paused)
 	pb.message = msg
+}
+
+// stop_current drops the current track after a failure that ends playback.
+// The player was playing its placeholder's silence, so it stops too.
+@(private = "file")
+stop_current :: proc(pb: ^Playback) {
+	source_clear(&pb.cur)
+	pb.paused = true
+	audio.stop(pb.player)
 }
 
 playback_next :: proc(s: ^State) {

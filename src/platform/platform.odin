@@ -1,5 +1,6 @@
 // Types shared by the Obj-C shell and the app dylib. shell/platform.h mirrors
-// this file field for field. Change both together and bump ABI_VERSION.
+// this file field for field. Change both together and bump ABI_VERSION;
+// tests/abi_test.odin compares their field offsets.
 package platform
 
 ABI_VERSION :: 6

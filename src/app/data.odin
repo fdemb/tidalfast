@@ -645,7 +645,8 @@ sign_out :: proc(s: ^State, why: string) {
 
 // account_end drops the signed-in account but not its Keychain item:
 // queued jobs for it go, the ones in flight are cancelled, and so are
-// their results. Playback stops and its queue goes.
+// their results. Playback stops and its queue goes, and so do the search
+// and the places Back goes to.
 account_end :: proc(s: ^State) {
 	d := &s.data
 	sync.atomic_add(&d.auth_gen, 1) // the disk thread reads it
@@ -662,6 +663,8 @@ account_end :: proc(s: ^State) {
 	queued_drop(d)
 	lists_clear(d)
 	playback_stop(s)
+	search_forget(s)
+	s.history = {}
 	s.library.playlist = 0
 }
 
