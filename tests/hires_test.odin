@@ -15,6 +15,7 @@ import ma "vendor:miniaudio"
 
 import app "../src/app"
 import "../src/audio"
+import "../src/jobs"
 import tidal "../src/tidal"
 import "dashgen"
 
@@ -1126,22 +1127,18 @@ device_loss_reopens :: proc(t: ^testing.T) {
 settings_saves_in_order :: proc(t: ^testing.T) {
 	dir := fmt.tprintf("%s/tidalfast-settings-race-%d", temp_base(), time.now()._nsec)
 	defer os.remove_all(dir)
-	s := new(app.State)
-	defer free(s)
-	d := &s.data
-	d.settings_path = strings.clone(fmt.tprintf("%s/settings.json", dir))
-	defer delete(d.settings_path)
+	store := app.Settings_Store {
+		path = fmt.tprintf("%s/settings.json", dir),
+	}
 
 	Shared :: struct {
-		d:        ^app.Data,
-		done:     bool,
-		bad:      int,
-		reads:    int,
-		path:     string,
+		store: ^app.Settings_Store,
+		done:  bool,
+		bad:   int,
+		reads: int,
 	}
 	sh := Shared {
-		d    = d,
-		path = d.settings_path,
+		store = &store,
 	}
 	writer :: proc(sh: ^Shared) {
 		for i in 0 ..< 40 {
@@ -1150,12 +1147,13 @@ settings_saves_in_order :: proc(t: ^testing.T) {
 				hog         = i % 2 == 0,
 				device      = {rate = f64(1000 + i), orig_rate = 48000, uid_len = 3, uid = {0 = 'u', 1 = 'i', 2 = 'd'}},
 			}
-			app.settings_queue(sh.d, st, now = true)
+			app.settings_put(sh.store, st)
+			app.settings_flush(sh.store)
 		}
 	}
 	reader :: proc(sh: ^Shared) {
 		for !sync.atomic_load(&sh.done) {
-			data, err := os.read_entire_file(sh.path, context.temp_allocator)
+			data, err := os.read_entire_file(sh.store.path, context.temp_allocator)
 			if err == nil {
 				sh.reads += 1
 				if _, ok := app.settings_decode_json(data); !ok {
@@ -1175,19 +1173,98 @@ settings_saves_in_order :: proc(t: ^testing.T) {
 		thread.destroy(w)
 	}
 	// The newest settings, written last by whichever thread.
-	app.settings_queue(d, {bit_perfect = true, hog = true}, now = true)
+	app.settings_put(&store, {bit_perfect = true, hog = true})
+	testing.expect(t, app.settings_flush(&store))
 	sync.atomic_store(&sh.done, true)
 	thread.join(r)
 	thread.destroy(r)
 
 	testing.expectf(t, sh.bad == 0, "%d of %d reads weren't whole settings", sh.bad, sh.reads)
-	st, ok := app.settings_load(d.settings_path)
+	st, ok := app.settings_load(store.path)
 	testing.expect(t, ok)
 	testing.expect_value(t, st, app.Settings{bit_perfect = true, hog = true})
 	entries, _ := os.read_all_directory_by_path(dir, context.temp_allocator)
 	for e in entries {
 		testing.expectf(t, e.name == "settings.json", "left behind: %s", e.name)
 	}
+}
+
+// With workers running, a change waits for a worker instead of the disk.
+// Two quick changes make one write, with the newer settings: the second
+// save finds the file already has them.
+@(test)
+settings_burst_writes_the_newest_once :: proc(t: ^testing.T) {
+	dir := fmt.tprintf("%s/tidalfast-settings-burst-%d", temp_base(), time.now()._nsec)
+	defer os.remove_all(dir)
+	path := fmt.tprintf("%s/settings.json", dir)
+	s := new(app.State)
+	defer free(s)
+	d := &s.data
+	d.settings_store.path = strings.clone(path)
+	defer delete(d.settings_store.path)
+	d.running = true
+
+	app.settings_queue(d, {volume = 0.1})
+	app.settings_queue(d, {volume = 0.2, shuffle = true})
+	testing.expect(t, !os.exists(path), "a change wrote on the UI thread")
+	saves := make([dynamic]app.Job, context.temp_allocator)
+	for {
+		job, ok := jobs.try_pop(&d.queue)
+		if !ok {
+			break
+		}
+		_, save := job.payload.(app.Save_Settings_Job)
+		testing.expect(t, save)
+		append(&saves, job)
+	}
+	testing.expect(t, len(saves) > 0)
+	for job, i in saves {
+		res := app.run_job(d, job)
+		testing.expect_value(t, res.err, nil)
+		app.result_free(&res)
+		if i == 0 {
+			st, ok := app.settings_load(path)
+			testing.expect(t, ok)
+			testing.expect_value(t, st, app.Settings{volume = 0.2, shuffle = true})
+			testing.expect_value(t, os.remove(path), nil)
+		}
+	}
+	testing.expect(t, !os.exists(path), "a save with nothing new wrote the file again")
+}
+
+// A save queued when the workers stop, which no worker ran, is written at
+// shutdown, and so is the device record playback_shutdown clears after.
+@(test)
+shutdown_writes_the_newest_settings :: proc(t: ^testing.T) {
+	dir := fmt.tprintf("%s/tidalfast-settings-shutdown-%d", temp_base(), time.now()._nsec)
+	defer os.remove_all(dir)
+	path := fmt.tprintf("%s/settings.json", dir)
+	s := new(app.State)
+	defer free(s)
+	d := &s.data
+	d.settings_store.path = strings.clone(path)
+	defer delete(d.settings_store.path)
+	d.running = true
+
+	s.settings = {volume = 0.4, repeat = .All, device = {orig_rate = 48000, rate = 96000}}
+	app.settings_queue(d, s.settings)
+	d.running = false
+	for {
+		if _, ok := jobs.try_pop(&d.queue); !ok {
+			break
+		}
+	}
+	testing.expect(t, !os.exists(path))
+	testing.expect(t, app.settings_flush(&d.settings_store))
+	st, ok := app.settings_load(path)
+	testing.expect(t, ok)
+	testing.expect_value(t, st, app.Settings{volume = 0.4, repeat = .All, device = {orig_rate = 48000, rate = 96000}})
+
+	s.playback.index = -1
+	app.playback_shutdown(s)
+	st, ok = app.settings_load(path)
+	testing.expect(t, ok)
+	testing.expect_value(t, st, app.Settings{volume = 0.4, repeat = .All})
 }
 
 // A record for a device that isn't there is left alone.

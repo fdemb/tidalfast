@@ -141,18 +141,24 @@ settings_save :: proc(path: string, st: Settings) -> bool {
 	return true
 }
 
-// settings_queue makes st the newest settings to save and has a worker
-// save them, or saves them now when there are no workers or now is set.
-settings_queue :: proc(d: ^Data, st: Settings, now := false) {
-	sync.lock(&d.settings_mutex)
-	d.settings_latest = st
-	d.settings_gen += 1
-	sync.unlock(&d.settings_mutex)
-	if d.running && !now {
-		push_job(d, {payload = Save_Settings_Job{}})
-	} else if !settings_flush(d) {
-		log.errorf("app: couldn't save the settings to %s", d.settings_path)
-	}
+// Settings_Store is the settings file and the newest settings for it. The
+// UI thread puts settings in and a worker, or shutdown, flushes them out.
+// The path is the store's own copy, set before the workers start and freed
+// after they stop.
+Settings_Store :: struct {
+	path:    string, // heap, "" for none
+	mutex:   sync.Mutex, // guards latest and gen
+	latest:  Settings,
+	gen:     u64,
+	write:   sync.Mutex, // held while a flush writes the file
+	written: u64, // the gen on disk; under write
+}
+
+// settings_put makes st the newest settings to save.
+settings_put :: proc(store: ^Settings_Store, st: Settings) {
+	sync.guard(&store.mutex)
+	store.latest = st
+	store.gen += 1
 }
 
 // settings_flush writes the newest settings if the file doesn't have them
@@ -160,19 +166,30 @@ settings_queue :: proc(d: ^Data, st: Settings, now := false) {
 // writes only if there's something newer, so older settings never land
 // after newer ones and a burst of changes makes few writes. False if the
 // write failed.
-settings_flush :: proc(d: ^Data) -> bool {
-	sync.guard(&d.settings_write)
-	sync.lock(&d.settings_mutex)
-	st, gen := d.settings_latest, d.settings_gen
-	sync.unlock(&d.settings_mutex)
-	if gen == d.settings_written || d.settings_path == "" {
+settings_flush :: proc(store: ^Settings_Store) -> bool {
+	sync.guard(&store.write)
+	sync.lock(&store.mutex)
+	st, gen := store.latest, store.gen
+	sync.unlock(&store.mutex)
+	if gen == store.written || store.path == "" {
 		return true
 	}
-	if !settings_save(d.settings_path, st) {
+	if !settings_save(store.path, st) {
 		return false
 	}
-	d.settings_written = gen
+	store.written = gen
 	return true
+}
+
+// settings_queue puts st in the store and has a worker save it, or saves
+// it now when there are no workers or now is set.
+settings_queue :: proc(d: ^Data, st: Settings, now := false) {
+	settings_put(&d.settings_store, st)
+	if d.running && !now {
+		push_job(d, {payload = Save_Settings_Job{}})
+	} else if !settings_flush(&d.settings_store) {
+		log.errorf("app: couldn't save the settings to %s", d.settings_store.path)
+	}
 }
 
 // settings_set applies st to the player and saves it.

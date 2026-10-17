@@ -165,8 +165,8 @@ app_shutdown :: proc "c" (m: ^platform.Memory) {
 	}
 	measure_unload(s)
 	workers_stop(&s.data)
-	if !settings_flush(&s.data) {
-		log.errorf("app: couldn't save the settings to %s", s.data.settings_path)
+	if !settings_flush(&s.data.settings_store) {
+		log.errorf("app: couldn't save the settings to %s", s.data.settings_store.path)
 	}
 	playback_shutdown(s)
 	data_shutdown(s)

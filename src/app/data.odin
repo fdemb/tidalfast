@@ -197,15 +197,8 @@ Data :: struct {
 	device_login:   bool,
 	notice_hidden:  bool,
 	relogin:        bool, // the login screen shows over a signed-in account
-	// The settings file and the newest settings for it, see settings_queue.
-	// The path is Data's own copy, freed after the workers stop.
-	settings_path:    string, // heap, "" for none
-	launch_log_path:  string, // heap, "" for no launch log
-	settings_mutex:   sync.Mutex, // guards settings_latest and settings_gen
-	settings_latest:  Settings,
-	settings_gen:     u64,
-	settings_write:   sync.Mutex, // held while a save writes the file
-	settings_written: u64, // the settings_gen on disk; under settings_write
+	settings_store: Settings_Store,
+	launch_log_path: string, // heap, "" for no launch log
 	sidebar:        Sidebar,
 	view:           Track_View,
 	refresh:        Track_View, // the open list fetched again, see refresh_start
@@ -255,8 +248,8 @@ data_start :: proc(s: ^State, shell: ^platform.Shell) {
 	if run.fallback {
 		log.warn("app: TIDALFAST_API, TIDALFAST_KEYCHAIN or TIDALFAST_PKCE_REDIRECT is set without a mock URL the app takes, showing the fake data instead of TIDAL")
 	}
-	d.settings_path = run.settings
-	s.settings, _ = settings_load(d.settings_path)
+	d.settings_store.path = run.settings
+	s.settings, _ = settings_load(d.settings_store.path)
 	d.fake = run.mode == .Fake
 	if d.fake {
 		d.account = .Fake
@@ -323,8 +316,8 @@ data_shutdown :: proc(s: ^State) {
 		d.session = nil
 	}
 	delete(d.saved_auth, runtime.heap_allocator())
-	delete(d.settings_path, runtime.heap_allocator())
-	d.settings_path = ""
+	delete(d.settings_store.path, runtime.heap_allocator())
+	d.settings_store.path = ""
 	delete(d.launch_log_path, runtime.heap_allocator())
 	d.launch_log_path = ""
 	sidebar_free(d)

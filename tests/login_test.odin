@@ -1293,7 +1293,7 @@ mock_fallback_leaves_bit_perfect_and_the_settings_alone :: proc(t: ^testing.T) {
 		label := fmt.tprint(settings)
 		testing.expect(t, d.fake, label)
 		testing.expect_value(t, app.output_of(s.settings), audio.Output{})
-		testing.expect_value(t, d.settings_path, "")
+		testing.expect_value(t, d.settings_store.path, "")
 		if settings != nil {
 			st := s.settings
 			st.volume = 0.2
