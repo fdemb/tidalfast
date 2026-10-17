@@ -345,7 +345,7 @@ pkce_submit :: proc(s: ^State, text: string) {
 	sync.atomic_store(&d.device_cancel, true)
 	l.pkce = .Exchanging
 	l.pkce_note = {}
-	push_job(d, {kind = .Login_Pkce, view = d.login_attempt})
+	push_job(d, {payload = Login_Pkce_Job{attempt = d.login_attempt}})
 }
 
 // pkce_has_tokens says whether a PKCE login got its tokens but hasn't
@@ -361,7 +361,7 @@ pkce_resume :: proc(d: ^Data) {
 	l := &d.login
 	l.pkce = .Exchanging
 	l.pkce_note = {}
-	push_job(d, {kind = .Login_Pkce, view = d.login_attempt})
+	push_job(d, {payload = Login_Pkce_Job{attempt = d.login_attempt}})
 }
 
 // pkce_done takes a Login_Pkce result.

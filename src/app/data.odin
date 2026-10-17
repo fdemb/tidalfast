@@ -152,7 +152,7 @@ Data :: struct {
 	pkce_len:       int,
 	device_cancel:  bool, // stops a device-code poll once the PKCE login takes over (atomic)
 	// Goes up when a login starts or the user switches between the device
-	// and hi-res logins. Login jobs carry it (Job.view) and the session
+	// and hi-res logins. Login jobs carry it (their attempt) and the session
 	// drops tokens from an older one, so a late answer to an abandoned login
 	// can't replace the one the user finished.
 	login_attempt:  u32,
@@ -219,7 +219,7 @@ data_start :: proc(s: ^State, shell: ^platform.Shell) {
 	}
 	session_open(d)
 	d.account = .Restoring
-	push_job(d, {kind = .Restore})
+	push_job(d, {payload = Restore_Job{}})
 	workers_start(d)
 }
 
@@ -521,25 +521,26 @@ push_job :: proc(d: ^Data, job: Job, priority: u8 = PRIORITY_DATA) {
 // hold_job keeps a job the queue refused. One held Save_Settings saves the
 // newest settings, so it stands for any later one. When the list is full
 // the oldest Stream, Artwork or Add_Track goes: a playback job's track has
-// most likely moved on. The other kinds each have a flag that waits for
-// their answer and holds back another push, so there are only a few of
-// them.
+// most likely moved on. The other kinds come one or two at a time, a flag
+// such as Login.requested or a list's in_flight holding back the next, so
+// they always fit.
 @(private = "file")
 hold_job :: proc(d: ^Data, job: Job, priority: u8) {
 	held := d.held[:d.held_count]
-	if job.kind == .Save_Settings {
+	if _, save := job.payload.(Save_Settings_Job); save {
 		for h in held {
-			if h.job.kind == .Save_Settings {
+			if _, held_save := h.job.payload.(Save_Settings_Job); held_save {
 				return
 			}
 		}
 	}
 	if d.held_count == len(d.held) {
 		drop := 0
-		for h, i in held {
-			if h.job.kind == .Stream || h.job.kind == .Artwork || h.job.kind == .Add_Track {
+		oldest: for h, i in held {
+			#partial switch _ in h.job.payload {
+			case Stream_Job, Artwork_Job, Add_Track_Job:
 				drop = i
-				break
+				break oldest
 			}
 		}
 		job_free(&d.held[drop].job)
@@ -561,15 +562,20 @@ held_free :: proc(d: ^Data) {
 
 // job_free frees what a job owns, for a job that won't run.
 job_free :: proc(job: ^Job) {
-	if job.kind == .Disk || job.kind == .Launch_Log {
-		delete(job.blob, runtime.heap_allocator())
-		job.blob = nil
+	#partial switch &p in job.payload {
+	case Disk_Job:
+		delete(p.blob, runtime.heap_allocator())
+		p.blob = nil
+	case Launch_Log_Job:
+		delete(p.line, runtime.heap_allocator())
+		p.line = nil
 	}
 }
 
 @(private = "file")
 drop_account_job :: proc(job: ^Job, _: rawptr) -> bool {
-	return job.kind != .Cover
+	_, cover := job.payload.(Cover_Job)
+	return !cover
 }
 
 // sign_out ends a login TIDAL no longer accepts. Results of jobs queued
@@ -625,7 +631,7 @@ request_login_code :: proc(d: ^Data) {
 		return
 	}
 	sync.atomic_store(&d.device_cancel, false)
-	push_job(d, {kind = .Login_Start, view = d.login_attempt})
+	push_job(d, {payload = Login_Start_Job{attempt = d.login_attempt}})
 	d.login.requested = true
 	d.login.start_for = d.login_attempt
 }
@@ -645,7 +651,7 @@ request_login_poll :: proc(d: ^Data) {
 		return
 	}
 	l.waiting = true
-	push_job(d, {kind = .Login_Wait, view = d.login_attempt, id = l.link.device_code, interval = l.link.interval, deadline = l.deadline, not_before = l.poll_at, once = l.poll_once})
+	push_job(d, {payload = Login_Wait_Job{attempt = d.login_attempt, device_code = l.link.device_code, interval = l.link.interval, deadline = l.deadline, not_before = l.poll_at, once = l.poll_once}})
 }
 
 // login_next_attempt starts a new login attempt. Tokens that arrive for an
@@ -661,15 +667,18 @@ request_playlists :: proc(d: ^Data) {
 		return
 	}
 	d.sidebar.loading = true
-	push_job(d, {kind = .Playlists})
+	push_job(d, {payload = Playlists_Job{}})
 }
 
 // data_retry pushes again the jobs the queue refused, if they're still
 // wanted.
 data_retry :: proc(s: ^State) {
 	d := &s.data
-	held := d.held
 	n := d.held_count
+	if n == 0 {
+		return
+	}
+	held := d.held
 	d.held_count = 0
 	for &h in held[:n] {
 		if held_wanted(s, h.job) {
@@ -690,23 +699,23 @@ held_wanted :: proc(s: ^State, job: Job) -> bool {
 	if job.auth != d.auth_gen {
 		return false
 	}
-	#partial switch job.kind {
-	case .Restore:
+	#partial switch p in job.payload {
+	case Restore_Job:
 		return d.account == .Restoring
-	case .Login_Start:
+	case Login_Start_Job:
 		// Also when the user went on to another login: its answer clears
 		// requested, which holds back the next login's code.
-		return l.requested && l.start_for == job.view
-	case .Login_Wait:
+		return l.requested && l.start_for == p.attempt
+	case Login_Wait_Job:
 		return l.waiting
-	case .Login_Pkce:
+	case Login_Pkce_Job:
 		return d.account == .Signed_Out && l.pkce == .Exchanging
-	case .Playlists:
+	case Playlists_Job:
 		return d.account == .Signed_In
-	case .Tracks:
-		return track_view(d, job.view) != nil
-	case .Search:
-		return job.view == s.search.gen
+	case Tracks_Job:
+		return track_view(d, p.view) != nil
+	case Search_Job:
+		return p.gen == s.search.gen
 	}
 	return true
 }
@@ -757,20 +766,24 @@ data_update :: proc(s: ^State, now: f64) {
 
 handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 	d := &s.data
+	_, is_cover := res.job.payload.(Cover_Job)
 	// From a login sign_out has ended. Covers don't depend on the login.
-	if res.job.kind != .Cover && res.job.auth != d.auth_gen {
+	if !is_cover && res.job.auth != d.auth_gen {
 		return
 	}
 	err, failed := res.err.?
 	// Only jobs that sent the login's tokens can end it. A cover carries no
 	// token, and a login job's .Authentication means the user denied it.
-	if failed && err == .Authentication && res.job.kind != .Cover && res.job.kind != .Login_Start && res.job.kind != .Login_Wait && res.job.kind != .Login_Pkce {
-		sign_out(s, "Your TIDAL session ended. Log in again.")
-		return
+	if failed && err == .Authentication {
+		#partial switch _ in res.job.payload {
+		case Cover_Job, Login_Start_Job, Login_Wait_Job, Login_Pkce_Job:
+		case:
+			sign_out(s, "Your TIDAL session ended. Log in again.")
+			return
+		}
 	}
-	switch res.job.kind {
-	case .None:
-	case .Restore:
+	switch p in res.job.payload {
+	case Restore_Job:
 		if res.message.len > 0 {
 			d.message = res.message
 		}
@@ -783,13 +796,13 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 				pkce_submit(s, redirect)
 			}
 		}
-	case .Login_Start:
+	case Login_Start_Job:
 		l := &d.login
-		if res.job.view != d.login_attempt {
+		if p.attempt != d.login_attempt {
 			// The user went on to another login. If that's the device login
 			// again, it waited for this answer to ask for a code of its own.
 			// A Login_Start from before d.login was reset is no one's.
-			if !l.requested || l.start_for != res.job.view {
+			if !l.requested || l.start_for != p.attempt {
 				return
 			}
 			l.requested = false
@@ -813,8 +826,8 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 			deadline = time.tick_add(time.tick_now(), time.Duration(f64(res.link.expires) * f64(time.Second))),
 		}
 		request_login_poll(d)
-	case .Login_Wait:
-		if res.job.view != d.login_attempt {
+	case Login_Wait_Job:
+		if p.attempt != d.login_attempt {
 			// The user went on to another login. If that's the device login
 			// again, its poll waited for this one to end.
 			l := &d.login
@@ -831,18 +844,18 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 		if d.account == .Signed_In {
 			return // the hi-res login finished first
 		}
-		login_wait_done(d, res, err, failed)
-	case .Login_Pkce:
-		if res.job.view != d.login_attempt {
+		login_wait_done(d, res, p, err, failed)
+	case Login_Pkce_Job:
+		if p.attempt != d.login_attempt {
 			return
 		}
 		pkce_done(d, res, failed)
-	case .Save_Settings:
+	case Save_Settings_Job:
 		if failed {
 			d.message = res.message
 		}
-	case .Launch_Log:
-	case .Playlists:
+	case Launch_Log_Job:
+	case Playlists_Job:
 		d.sidebar.loading = false
 		if failed {
 			d.message = res.message
@@ -850,13 +863,13 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 		}
 		sidebar_adopt(s, res, false)
 		sidebar_save(d)
-	case .Disk:
-		disk_result(s, res)
-	case .Add_Track:
-		add_result(s, res)
-	case .Tracks:
+	case Disk_Job:
+		disk_result(s, res, p)
+	case Add_Track_Job:
+		add_result(s, res, p)
+	case Tracks_Job:
 		r := &d.refresh
-		v := track_view(d, res.job.view)
+		v := track_view(d, p.view)
 		if v == nil {
 			return
 		}
@@ -870,19 +883,21 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 			v.done = true
 			return
 		}
-		view_add_rows(v, int(res.job.offset), int(res.job.limit), res.rows, res.total)
+		view_add_rows(v, int(p.offset), int(p.limit), res.rows, res.total)
 		view_pages(d, v)
 		if v != r {
 			list_loaded(d, v)
 		} else if view_complete(r) {
 			refresh_land(s)
 		}
-	case .Stream, .Artwork:
-		playback_result(s, res)
-	case .Search:
-		search_result(s, res)
-	case .Cover:
-		key := res.job.key
+	case Stream_Job:
+		stream_result(s, res, p)
+	case Artwork_Job:
+		artwork_result(s, res, p)
+	case Search_Job:
+		search_result(s, res, p)
+	case Cover_Job:
+		key := p.key
 		if failed || res.pixels == nil {
 			cover.set_failed(&d.covers, key, now)
 			return
@@ -917,7 +932,7 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 // seconds, once per try, and goes back to polling as soon as TIDAL
 // answers.
 @(private = "file")
-login_wait_done :: proc(d: ^Data, res: ^Result, err: tidal.Error_Kind, failed: bool) {
+login_wait_done :: proc(d: ^Data, res: ^Result, job: Login_Wait_Job, err: tidal.Error_Kind, failed: bool) {
 	l := &d.login
 	l.waiting = false
 	if res.link.interval > 0 {
@@ -934,7 +949,7 @@ login_wait_done :: proc(d: ^Data, res: ^Result, err: tidal.Error_Kind, failed: b
 	expired := time.tick_diff(time.tick_now(), l.deadline) <= 0 && !login_has_tokens(d)
 	#partial switch err {
 	case .Timeout:
-		if res.job.once && !expired {
+		if job.once && !expired {
 			// TIDAL answered the check, which counts as a poll.
 			l.note = {}
 			l.retries = 0
@@ -1020,12 +1035,14 @@ select_playlist :: proc(s: ^State, i: int) {
 @(private = "file")
 drop_track_jobs :: proc(job: ^Job, keep: rawptr) -> bool {
 	q := (^Track_View)(keep)
-	return job.kind == .Tracks && (q.source == .None || job.view != q.gen)
+	p, tracks := job.payload.(Tracks_Job)
+	return tracks && (q.source == .None || p.view != q.gen)
 }
 
 @(private = "file")
 drop_view_jobs :: proc(job: ^Job, view: rawptr) -> bool {
-	return job.kind == .Tracks && job.view == (^u32)(view)^
+	p, tracks := job.payload.(Tracks_Job)
+	return tracks && p.view == (^u32)(view)^
 }
 
 POISON :: 0xdb
@@ -1228,15 +1245,7 @@ view_request_pages :: proc(d: ^Data) {
 view_pages :: proc(d: ^Data, v: ^Track_View) {
 	for v.source != .None && !v.done && !v.reading && v.in_flight < PAGES_IN_FLIGHT && (v.next_offset < v.hint || v.in_flight == 0) {
 		limit := PAGE_FIRST if v.next_offset == 0 else PAGE_SIZE
-		job := Job {
-			kind   = .Tracks,
-			source = v.source,
-			view   = v.gen,
-			offset = i32(v.next_offset),
-			limit  = i32(limit),
-			id     = v.id,
-		}
-		push_job(d, job)
+		push_job(d, {payload = Tracks_Job{view = v.gen, source = v.source, id = v.id, offset = i32(v.next_offset), limit = i32(limit)}})
 		v.next_offset += limit
 		v.in_flight += 1
 	}

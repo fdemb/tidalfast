@@ -55,24 +55,6 @@ small_str :: proc(s: ^Small) -> string {
 	return string(s.buf[:s.len])
 }
 
-Job_Kind :: enum u8 {
-	None,
-	Restore, // read the tokens from the Keychain into the session
-	Login_Start, // ask TIDAL for a device code
-	Login_Wait, // poll until the user approves the device code
-	Playlists, // the sidebar: liked songs count, playlists made or followed
-	Tracks, // one page of a track list
-	Cover, // download and decode one cover
-	Stream, // resolve a track's stream URL, see player.odin
-	Artwork, // a cover for Now Playing: download and decode, keep the pixels
-	Search, // songs, albums, artists and playlists for a query, see search.odin
-	Login_Pkce, // finish a PKCE login with the pasted address, see login.odin
-	Save_Settings, // write the settings, see settings.odin
-	Disk, // read or write a cache file, on the disk thread, see lists.odin
-	Add_Track, // like a track or add it to a playlist, see add_to_list
-	Launch_Log, // append this launch to the launch log, see launch_log.odin
-}
-
 Source :: enum u8 {
 	None,
 	Liked,
@@ -82,24 +64,121 @@ Source :: enum u8 {
 	Artist,
 }
 
+// Job is work for a worker, or for the disk thread. Its payload says what
+// to do and holds only what that kind needs.
 Job :: struct {
-	kind:       Job_Kind,
-	source:     Source,
-	once:       bool, // Login_Wait: poll once, to see if TIDAL answers again
-	auth:       u32, // the auth generation it was queued in, see sign_out
-	view:       u32, // Tracks: the view generation it's for; Stream: the track's serial; Search: the query's generation; Login_Start, Login_Wait, Login_Pkce: the login attempt
-	offset:     i32,
-	limit:      i32,
-	key:        u64, // Cover: the cache key; Stream, Add_Track: the track id; Artwork: the track's serial; Disk: the user id
-	size:       u16, // Cover: pixels across on screen
-	fetch:      u16, // Cover: the size to download
-	interval:   f32, // Login_Wait: seconds between polls
-	deadline:   time.Tick, // Login_Wait: when the code expires
-	not_before: time.Tick, // Login_Wait: when to poll first, {} for now
-	remote:     bool, // Cover, Artwork: not on disk, so it waits out a backoff
-	id:         Small, // playlist id, image id, device code, query, album or artist id
-	op:         Disk_Op,
-	blob:       []u8, // Disk writes: the file, heap, freed by the disk thread; Launch_Log: the line, freed by the worker
+	auth:    u32, // the auth generation it was queued in, see sign_out
+	payload: Job_Payload,
+}
+
+Job_Payload :: union {
+	Restore_Job,
+	Login_Start_Job,
+	Login_Wait_Job,
+	Login_Pkce_Job,
+	Playlists_Job,
+	Tracks_Job,
+	Cover_Job,
+	Stream_Job,
+	Artwork_Job,
+	Search_Job,
+	Save_Settings_Job,
+	Disk_Job,
+	Add_Track_Job,
+	Launch_Log_Job,
+}
+
+// Restore_Job reads the tokens from the Keychain into the session.
+Restore_Job :: struct {}
+
+// Login_Start_Job asks TIDAL for a device code.
+Login_Start_Job :: struct {
+	attempt: u32, // the login attempt, see Data.login_attempt
+}
+
+// Login_Wait_Job polls until the user approves the device code.
+Login_Wait_Job :: struct {
+	attempt:     u32,
+	device_code: Small,
+	interval:    f32, // seconds between polls
+	deadline:    time.Tick, // when the code expires
+	not_before:  time.Tick, // when to poll first, {} for now
+	once:        bool, // poll once, to see if TIDAL answers again
+}
+
+// Login_Pkce_Job finishes a PKCE login with the pasted address, see
+// login.odin.
+Login_Pkce_Job :: struct {
+	attempt: u32,
+}
+
+// Playlists_Job is the sidebar: the liked songs count and the playlists
+// made or followed.
+Playlists_Job :: struct {}
+
+// Tracks_Job is one page of a track list.
+Tracks_Job :: struct {
+	view:   u32, // the Track_View.gen it's for
+	source: Source,
+	id:     Small, // the playlist, album or artist id, or the query
+	offset: i32,
+	limit:  i32,
+}
+
+// Image_Job is an image to read from disk or download, and decode.
+Image_Job :: struct {
+	id:     Small, // TIDAL's image id
+	size:   u16, // pixels across to decode to
+	fetch:  u16, // the size to download, 0 for size
+	remote: bool, // not on disk, so it waits out a backoff
+}
+
+Cover_Job :: struct {
+	key:   u64, // the cover cache's
+	image: Image_Job,
+}
+
+// Artwork_Job is a cover for Now Playing, kept as pixels.
+Artwork_Job :: struct {
+	serial: u64, // the track's, see player.odin
+	image:  Image_Job,
+}
+
+// Stream_Job resolves a track's stream URL, see player.odin.
+Stream_Job :: struct {
+	track:  i64,
+	serial: u64,
+}
+
+// Search_Job asks for songs, albums, artists and playlists, see search.odin.
+Search_Job :: struct {
+	gen:   u32, // the query's, see Search.gen
+	query: Small,
+}
+
+// Save_Settings_Job writes the settings, see settings.odin.
+Save_Settings_Job :: struct {}
+
+// Disk_Job reads or writes a cache file, on the disk thread, see lists.odin.
+Disk_Job :: struct {
+	op:     Disk_Op,
+	user:   i64, // whose folder
+	source: Source, // .None for the sidebar
+	id:     Small,
+	view:   u32, // reading a list: the Track_View.gen it's for
+	blob:   []u8, // writes: the file, heap, freed by the disk thread
+}
+
+// Add_Track_Job likes a track or adds it to a playlist, see add_to_list.
+Add_Track_Job :: struct {
+	track:  i64,
+	source: Source, // .Liked or .Playlist
+	id:     Small, // the playlist's
+}
+
+// Launch_Log_Job appends this launch to the launch log, see launch_log.odin.
+Launch_Log_Job :: struct {
+	line: []u8, // heap, freed by the worker
 }
 
 // Priorities: lower runs first.
@@ -312,11 +391,13 @@ retry_later :: proc(d: ^Data, res: Result) -> bool {
 // it. A cover counts until it's found missing from disk.
 @(private = "file")
 is_local :: proc(job: ^Job) -> bool {
-	#partial switch job.kind {
-	case .Save_Settings, .Launch_Log, .Disk:
+	#partial switch p in job.payload {
+	case Save_Settings_Job, Launch_Log_Job, Disk_Job:
 		return true
-	case .Cover, .Artwork:
-		return !job.remote
+	case Cover_Job:
+		return !p.image.remote
+	case Artwork_Job:
+		return !p.image.remote
 	}
 	return false
 }
@@ -328,12 +409,16 @@ is_local :: proc(job: ^Job) -> bool {
 @(private = "file")
 requeued :: proc(job: Job, res: Result) -> Job {
 	job := job
-	if (job.kind == .Cover || job.kind == .Artwork) && res.err != nil {
-		job.remote = true
-	}
-	if job.kind == .Login_Wait && res.link.interval > 0 {
-		job.interval = res.link.interval
-		job.not_before = time.tick_add(time.tick_now(), time.Duration(f64(job.interval) * f64(time.Second)))
+	#partial switch &p in job.payload {
+	case Cover_Job:
+		p.image.remote ||= res.err != nil
+	case Artwork_Job:
+		p.image.remote ||= res.err != nil
+	case Login_Wait_Job:
+		if res.link.interval > 0 {
+			p.interval = res.link.interval
+			p.not_before = time.tick_add(time.tick_now(), time.Duration(f64(p.interval) * f64(time.Second)))
+		}
 	}
 	return job
 }
@@ -362,7 +447,7 @@ fail :: proc(res: ^Result, err: tidal.Error) {
 // "" when there's nothing to log. It holds only fields that can't carry
 // server text (see tidal.error_summary): what the server said may hold a
 // signed URL.
-stream_error_line :: proc(track_id: u64, what: string, err: tidal.Error, allocator := context.allocator) -> string {
+stream_error_line :: proc(track_id: i64, what: string, err: tidal.Error, allocator := context.allocator) -> string {
 	e, _ := err.?
 	if e.kind == .Cancelled || e.kind == .Backing_Off {
 		return "" // the job goes back in the queue
@@ -371,7 +456,7 @@ stream_error_line :: proc(track_id: u64, what: string, err: tidal.Error, allocat
 }
 
 @(private = "file")
-log_stream_error :: proc(track_id: u64, what: string, err: tidal.Error) {
+log_stream_error :: proc(track_id: i64, what: string, err: tidal.Error) {
 	if line := stream_error_line(track_id, what, err, context.temp_allocator); line != "" {
 		log.error(line)
 	}
@@ -381,8 +466,12 @@ log_stream_error :: proc(track_id: u64, what: string, err: tidal.Error) {
 run_job :: proc(d: ^Data, job: Job) -> (res: Result) {
 	res.job = job
 	s := d.session
-	if job.kind == .Cover || job.kind == .Artwork {
-		run_cover(d, job, &res)
+	#partial switch p in job.payload {
+	case Cover_Job:
+		run_cover(d, p.image, &res)
+		return
+	case Artwork_Job:
+		run_cover(d, p.image, &res)
 		return
 	}
 	res.arena = new(vmem.Arena, runtime.heap_allocator())
@@ -394,28 +483,27 @@ run_job :: proc(d: ^Data, job: Job) -> (res: Result) {
 		return
 	}
 	alloc := vmem.arena_allocator(res.arena)
-	id := job.id
-	switch job.kind {
-	case .None, .Cover, .Artwork, .Disk:
-	case .Launch_Log:
-		if !launch_log_append(d.launch_log_path, job.blob) {
+	switch p in job.payload {
+	case Cover_Job, Artwork_Job, Disk_Job:
+	case Launch_Log_Job:
+		if !launch_log_append(d.launch_log_path, p.line) {
 			res.err = .Io
 		}
-		delete(job.blob, runtime.heap_allocator())
-	case .Save_Settings:
+		delete(p.line, runtime.heap_allocator())
+	case Save_Settings_Job:
 		if !settings_flush(d) {
 			res.err = .Io
 			res.message = small("Couldn't save the settings")
 		}
-	case .Login_Pkce:
-		run_login_pkce(d, job, &res)
-	case .Stream:
-		info, refused, err := tidal.resolve_stream_flac(s, i64(job.key), alloc)
+	case Login_Pkce_Job:
+		run_login_pkce(d, p, &res)
+	case Stream_Job:
+		info, refused, err := tidal.resolve_stream_flac(s, p.track, alloc)
 		if refused != nil {
-			log_stream_error(job.key, "at HI_RES_LOSSLESS failed, asking for LOSSLESS", refused)
+			log_stream_error(p.track, "at HI_RES_LOSSLESS failed, asking for LOSSLESS", refused)
 		}
 		if err != nil {
-			log_stream_error(job.key, "failed", err)
+			log_stream_error(p.track, "failed", err)
 			fail(&res, err)
 			if e, _ := err.?; e.kind == .Lossy_Stream {
 				res.codec = small(tidal.error_detail(&e))
@@ -423,9 +511,9 @@ run_job :: proc(d: ^Data, job: Job) -> (res: Result) {
 			return
 		}
 		res.stream = info
-	case .Restore:
+	case Restore_Job:
 		res.signed_in = auth_load(d, &res)
-	case .Login_Start:
+	case Login_Start_Job:
 		link, err := tidal.login_device_start(s, alloc)
 		if err != nil {
 			fail(&res, err)
@@ -439,21 +527,22 @@ run_job :: proc(d: ^Data, job: Job) -> (res: Result) {
 			interval    = f32(link.interval),
 			expires     = f32(link.expires_in),
 		}
-	case .Login_Wait:
-		run_login_wait(d, job, &res)
-	case .Playlists:
+	case Login_Wait_Job:
+		run_login_wait(d, p, &res)
+	case Playlists_Job:
 		run_playlists(s, &res, alloc)
-	case .Tracks:
+	case Tracks_Job:
 		tracks: []tidal.Track
 		err: tidal.Error
 		res.total = -1
-		#partial switch job.source {
+		id := p.id
+		#partial switch p.source {
 		case .Liked:
-			tracks, res.total, err = tidal.favorites_tracks(s, int(job.limit), int(job.offset), .Date, .Descending, alloc)
+			tracks, res.total, err = tidal.favorites_tracks(s, int(p.limit), int(p.offset), .Date, .Descending, alloc)
 		case .Playlist:
-			tracks, res.total, err = tidal.playlist_tracks(s, small_str(&id), int(job.limit), int(job.offset), allocator = alloc)
+			tracks, res.total, err = tidal.playlist_tracks(s, small_str(&id), int(p.limit), int(p.offset), allocator = alloc)
 		case:
-			tracks, err = more_tracks(s, job, alloc)
+			tracks, err = more_tracks(s, p, alloc)
 		}
 		if err != nil {
 			fail(&res, err)
@@ -463,10 +552,11 @@ run_job :: proc(d: ^Data, job: Job) -> (res: Result) {
 		for t, i in tracks {
 			res.rows[i] = row_from_track(t, alloc)
 		}
-	case .Add_Track:
-		run_add_track(s, job, &res, alloc)
-	case .Search:
-		found, err := tidal.search(s, small_str(&id), {.Track, .Album, .Artist, .Playlist}, SEARCH_PAGE, 0, alloc)
+	case Add_Track_Job:
+		run_add_track(s, p, &res, alloc)
+	case Search_Job:
+		query := p.query
+		found, err := tidal.search(s, small_str(&query), {.Track, .Album, .Artist, .Playlist}, SEARCH_PAGE, 0, alloc)
 		if err != nil {
 			fail(&res, err)
 			return
@@ -484,9 +574,9 @@ run_job :: proc(d: ^Data, job: Job) -> (res: Result) {
 // earlier try already did, and then loading the account failed or a reload
 // cut it short, the code is spent: it finishes with those tokens instead.
 @(private = "file")
-run_login_pkce :: proc(d: ^Data, job: Job, res: ^Result) {
+run_login_pkce :: proc(d: ^Data, job: Login_Pkce_Job, res: ^Result) {
 	s := d.session
-	attempt := u64(job.view)
+	attempt := u64(job.attempt)
 	if attempt != tidal.session_login_attempt(s) {
 		res.err = .Cancelled
 		return
@@ -507,9 +597,9 @@ run_login_pkce :: proc(d: ^Data, job: Job, res: ^Result) {
 }
 
 @(private = "file")
-run_login_wait :: proc(d: ^Data, job: Job, res: ^Result) {
+run_login_wait :: proc(d: ^Data, job: Login_Wait_Job, res: ^Result) {
 	s := d.session
-	attempt := u64(job.view)
+	attempt := u64(job.attempt)
 	if attempt != tidal.session_login_attempt(s) {
 		res.err = .Cancelled
 		return
@@ -544,9 +634,9 @@ run_login_wait :: proc(d: ^Data, job: Job, res: ^Result) {
 		res.message = small("The code expired")
 		return
 	}
-	id := job.id
+	code := job.device_code
 	link := tidal.Link_Login {
-		device_code = small_str(&id),
+		device_code = small_str(&code),
 		interval    = f64(job.interval),
 		expires_in  = left,
 	}
@@ -607,8 +697,8 @@ run_playlists :: proc(s: ^tidal.Session, res: ^Result, alloc: mem.Allocator) {
 // the kept copies can take it in place. If that second ask fails, the add
 // still stands and res.rows stays empty.
 @(private = "file")
-run_add_track :: proc(s: ^tidal.Session, job: Job, res: ^Result, alloc: mem.Allocator) {
-	track := fmt.tprint(job.key)
+run_add_track :: proc(s: ^tidal.Session, job: Add_Track_Job, res: ^Result, alloc: mem.Allocator) {
+	track := fmt.tprint(job.track)
 	id := job.id
 	if job.source == .Liked {
 		if err := tidal.favorites_add_track(s, {track}); err != nil {
@@ -617,7 +707,7 @@ run_add_track :: proc(s: ^tidal.Session, job: Job, res: ^Result, alloc: mem.Allo
 		}
 		res.added = true // add_result tells from the count whether it was there
 		newest, count, err := tidal.favorites_tracks(s, 1, 0, .Date, .Descending, alloc)
-		if err == nil && len(newest) == 1 && newest[0].id == i64(job.key) {
+		if err == nil && len(newest) == 1 && newest[0].id == job.track {
 			res.version = {count = i64(count), newest = newest[0].id}
 			res.rows = make([]Row, 1, alloc)
 			res.rows[0] = row_from_track(newest[0], alloc)
@@ -646,21 +736,21 @@ run_add_track :: proc(s: ^tidal.Session, job: Job, res: ^Result, alloc: mem.Allo
 		version.updated = time.to_unix_nanoseconds(t) / 1e6
 	}
 	last, total, lerr := tidal.playlist_tracks(s, small_str(&id), 1, pl.num_tracks - 1, allocator = alloc)
-	if lerr == nil && total == pl.num_tracks && len(last) == 1 && last[0].id == i64(job.key) {
+	if lerr == nil && total == pl.num_tracks && len(last) == 1 && last[0].id == job.track {
 		res.version = version
 		res.rows = make([]Row, 1, alloc)
 		res.rows[0] = row_from_track(last[0], alloc)
 	}
 }
 
-// fetch_size is the size a Cover or Artwork job downloads. Artwork is shown
-// at the size it's fetched, so it may leave fetch at 0.
-fetch_size :: proc(job: Job) -> int {
+// fetch_size is the size an image job downloads. Artwork is shown at the
+// size it's fetched, so it may leave fetch at 0.
+fetch_size :: proc(job: Image_Job) -> int {
 	return int(job.fetch) if job.fetch != 0 else int(job.size)
 }
 
 @(private = "file")
-run_cover :: proc(d: ^Data, job: Job, res: ^Result) {
+run_cover :: proc(d: ^Data, job: Image_Job, res: ^Result) {
 	s := d.session
 	id := job.id
 	heap := runtime.heap_allocator()

@@ -117,7 +117,10 @@ type_text :: proc(f: ^Frame, s: string) -> platform.Event {
 
 @(private = "file")
 search_jobs :: proc(s: ^app.State) -> int {
-	return jobs.remove_if(&s.data.queue, proc(job: ^app.Job, _: rawptr) -> bool {return job.kind == .Search}, nil)
+	return jobs.remove_if(&s.data.queue, proc(job: ^app.Job, _: rawptr) -> bool {
+		_, search := job.payload.(app.Search_Job)
+		return search
+	}, nil)
 }
 
 // two_artists is a song's two artists, the first with a comma in its name.
@@ -254,11 +257,11 @@ artist_and_album_links :: proc(t: ^testing.T) {
 	albums := []app.Found{{id = 5, name = "An album", subtitle = "Album · Tyler, The Creator, Kali Uchis"}}
 	albums[0].artist, albums[0].artists = two_artists()
 	res := app.Result {
-		job   = {kind = .Search, view = sr.gen, id = app.small("abc")},
+		job   = {payload = app.Search_Job{gen = sr.gen, query = app.small("abc")}},
 		rows  = []app.Row{{title = "Found song", artist = "Someone", id = 1}},
 		found = {albums = albums},
 	}
-	app.search_result(s, &res)
+	app.handle_result(s, &res, 0)
 	library_frame(t, s, &f)
 	library_frame(t, s, &f, press(s, "Albums"))
 	library_frame(t, s, &f)
@@ -348,10 +351,10 @@ sidebar_pick_ends_the_search :: proc(t: ^testing.T) {
 	testing.expect(t, sr.gen != sent)
 	testing.expect_value(t, search_jobs(s), 0)
 	res := app.Result {
-		job  = {kind = .Search, view = sent, id = app.small("abc")},
+		job  = {payload = app.Search_Job{gen = sent, query = app.small("abc")}},
 		rows = []app.Row{{title = "Late", id = 1}},
 	}
-	app.search_result(s, &res)
+	app.handle_result(s, &res, 0)
 	testing.expect(t, !app.search_showing(s))
 	testing.expect_value(t, s.data.view.source, app.Source.Liked)
 	library_frame(t, s, &f)
@@ -520,10 +523,10 @@ track_menu_closes_with_its_list :: proc(t: ^testing.T) {
 		r = {title = "Found song", artist = "Other Artist", album = "Other Album", id = i64(100 + i), album_id = 22}
 	}
 	res := app.Result {
-		job  = {kind = .Search, view = s.search.gen, id = app.small("found")},
+		job  = {payload = app.Search_Job{gen = s.search.gen, query = app.small("found")}},
 		rows = rows,
 	}
-	app.search_result(s, &res)
+	app.handle_result(s, &res, 0)
 	library_frame(t, s, &f, press(s, "Go to album"))
 	testing.expect(t, !ui.menu_is_open("track_menu"))
 	testing.expect_value(t, s.data.view.source, app.Source.Search)
@@ -572,11 +575,11 @@ search_results_come_back_from_memory :: proc(t: ^testing.T) {
 	testing.expect_value(t, search_jobs(s), 1)
 	albums := []app.Found{{id = 5, name = "An album", subtitle = "Album · Someone"}}
 	res := app.Result {
-		job   = {kind = .Search, view = sr.gen, id = app.small("abc")},
+		job   = {payload = app.Search_Job{gen = sr.gen, query = app.small("abc")}},
 		rows  = []app.Row{{title = "Found song", artist = "Someone", id = 1}, {title = "Other song", artist = "Someone", id = 2}},
 		found = {albums = albums},
 	}
-	app.search_result(s, &res)
+	app.handle_result(s, &res, 0)
 	testing.expect(t, s.data.view.done)
 	library_frame(t, s, &f)
 

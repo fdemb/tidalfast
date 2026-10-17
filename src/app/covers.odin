@@ -74,11 +74,12 @@ Stale_Covers :: struct {
 
 @(private = "file")
 drop_stale_cover :: proc(job: ^Job, data: rawptr) -> bool {
-	if job.kind != .Cover {
+	p, is_cover := job.payload.(Cover_Job)
+	if !is_cover {
 		return false
 	}
 	st := (^Stale_Covers)(data)
-	e := cover.lookup(st.cache, job.key)
+	e := cover.lookup(st.cache, p.key)
 	if e != nil && e.wanted_frame == st.frame {
 		return false
 	}
@@ -111,11 +112,7 @@ covers_schedule :: proc(s: ^State) {
 				continue
 			}
 			job := Job {
-				kind = .Cover,
-				key  = e.key,
-				size = e.px,
-				fetch = e.fetch,
-				id   = small(cover.entry_id(&e)),
+				payload = Cover_Job{key = e.key, image = {id = small(cover.entry_id(&e)), size = e.px, fetch = e.fetch}},
 			}
 			if room > 0 && jobs.push(&d.queue, job, e.priority) {
 				e.state = .Queued

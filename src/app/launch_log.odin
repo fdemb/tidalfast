@@ -65,7 +65,7 @@ launch_log_push :: proc(s: ^State) {
 		time.to_unix_seconds(time.now()), TIDALFAST_COMMIT, "debug" when ODIN_DEBUG else "release",
 		m.mark_ms[.Init], m.mark_ms[.First_Frame], m.mark_ms[.Library], m.mark_ms[.Tracks],
 		tc.instructions, pc.instructions, pm.footprint, allocator = runtime.heap_allocator())
-	job := Job{kind = .Launch_Log, blob = transmute([]u8)line, auth = d.auth_gen}
+	job := Job{auth = d.auth_gen, payload = Launch_Log_Job{line = transmute([]u8)line}}
 	if !jobs.push(&d.queue, job, PRIORITY_DATA) {
 		delete(line, runtime.heap_allocator())
 	}

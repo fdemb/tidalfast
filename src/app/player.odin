@@ -427,7 +427,7 @@ resolve :: proc(s: ^State, t: ^Track_Source) {
 		}
 		return
 	}
-	push_job(&s.data, {kind = .Stream, key = u64(pb.entries[t.item].id), view = u32(t.serial)})
+	push_job(&s.data, {payload = Stream_Job{track = pb.entries[t.item].id, serial = t.serial}})
 	request_artwork(s, t)
 }
 
@@ -437,37 +437,40 @@ request_artwork :: proc(s: ^State, t: ^Track_Source) {
 	if pb.fake || pb.items[t.item].cover == "" {
 		return
 	}
-	push_job(&s.data, {kind = .Artwork, key = t.serial, size = ARTWORK_SIZE, fetch = ARTWORK_SIZE, id = small(pb.items[t.item].cover)}, PRIORITY_COVER)
+	image := Image_Job{id = small(pb.items[t.item].cover), size = ARTWORK_SIZE, fetch = ARTWORK_SIZE}
+	push_job(&s.data, {payload = Artwork_Job{serial = t.serial, image = image}}, PRIORITY_COVER)
 }
 
-// playback_result takes a Stream or Artwork job's result.
-playback_result :: proc(s: ^State, res: ^Result) {
+// artwork_result takes an Artwork job's result.
+artwork_result :: proc(s: ^State, res: ^Result, job: Artwork_Job) {
 	pb := &s.playback
-	if res.job.kind == .Artwork {
-		a: ^Artwork
-		switch res.job.key {
-		case 0:
-			return
-		case pb.cur.serial:
-			a = &pb.art
-		case pb.next.serial:
-			a = &pb.next_art
-		case:
-			return
-		}
-		if res.pixels == nil {
-			return
-		}
-		artwork_free(a)
-		a^ = {res.pixels, res.w, res.h, res.job.key}
-		res.pixels = nil
+	a: ^Artwork
+	switch job.serial {
+	case 0:
+		return
+	case pb.cur.serial:
+		a = &pb.art
+	case pb.next.serial:
+		a = &pb.next_art
+	case:
 		return
 	}
+	if res.pixels == nil {
+		return
+	}
+	artwork_free(a)
+	a^ = {res.pixels, res.w, res.h, job.serial}
+	res.pixels = nil
+}
+
+// stream_result takes a Stream job's result.
+stream_result :: proc(s: ^State, res: ^Result, job: Stream_Job) {
+	pb := &s.playback
 	t: ^Track_Source
-	switch u32(res.job.view) {
-	case u32(pb.cur.serial):
+	switch job.serial {
+	case pb.cur.serial:
 		t = &pb.cur
-	case u32(pb.next.serial):
+	case pb.next.serial:
 		t = &pb.next
 	case:
 		return // for a track no longer wanted

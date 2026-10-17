@@ -325,8 +325,8 @@ auth_failures_sign_out_once :: proc(t: ^testing.T) {
 	testing.expect_value(t, status, os_services.SECRET_OK)
 
 	// Two requests under the old login, both refused.
-	app.push_job(d, {kind = .Playlists})
-	app.push_job(d, {kind = .Tracks})
+	app.push_job(d, {payload = app.Playlists_Job{}})
+	app.push_job(d, {payload = app.Tracks_Job{}})
 	first := fail_job(d, .Authentication)
 	second := fail_job(d, .Authentication)
 
@@ -370,7 +370,7 @@ data_jobs :: proc(d: ^app.Data) -> [dynamic]app.Job {
 		if !ok {
 			return out
 		}
-		if job.kind != .Cover {
+		if _, cover := job.payload.(app.Cover_Job); !cover {
 			append(&out, job)
 		}
 	}
@@ -378,7 +378,7 @@ data_jobs :: proc(d: ^app.Data) -> [dynamic]app.Job {
 
 @(private = "file")
 fill_with_covers :: proc(d: ^app.Data) {
-	for jobs.push(&d.queue, app.Job{kind = .Cover}, app.PRIORITY_COVER) {}
+	for jobs.push(&d.queue, app.Job{payload = app.Cover_Job{}}, app.PRIORITY_COVER) {}
 }
 
 @(private = "file")
@@ -403,7 +403,7 @@ refused_jobs_wait_for_room :: proc(t: ^testing.T) {
 	app.view_open(d, .Playlist, "closed", "closed", "", 300)
 	closed := d.view.gen
 	app.view_open(d, .Playlist, "open", "open", "", 300)
-	app.push_job(d, {kind = .Add_Track, source = .Liked, key = 5})
+	app.push_job(d, {payload = app.Add_Track_Job{track = 5, source = .Liked}})
 	app.data_retry(s)
 	testing.expect_value(t, len(data_jobs(d)), 0)
 
@@ -413,18 +413,18 @@ refused_jobs_wait_for_room :: proc(t: ^testing.T) {
 	playlists, adds: int
 	pages := make([dynamic]i32, context.temp_allocator)
 	for job in data_jobs(d) {
-		#partial switch job.kind {
-		case .Playlists:
+		#partial switch p in job.payload {
+		case app.Playlists_Job:
 			playlists += 1
-		case .Add_Track:
+		case app.Add_Track_Job:
 			adds += 1
-			testing.expect_value(t, job.key, 5)
-		case .Tracks:
-			testing.expect(t, job.view != closed, "no pages for the list closed since")
-			testing.expect_value(t, job.view, d.view.gen)
-			append(&pages, job.offset)
+			testing.expect_value(t, p.track, 5)
+		case app.Tracks_Job:
+			testing.expect(t, p.view != closed, "no pages for the list closed since")
+			testing.expect_value(t, p.view, d.view.gen)
+			append(&pages, p.offset)
 		case:
-			testing.fail_now(t, fmt.tprint("unexpected job", job.kind))
+			testing.fail_now(t, fmt.tprint("unexpected job", job.payload))
 		}
 	}
 	testing.expect_value(t, playlists, 1)
@@ -435,11 +435,46 @@ refused_jobs_wait_for_room :: proc(t: ^testing.T) {
 	testing.expect_value(t, d.view.in_flight, 2)
 
 	fill_with_covers(d)
-	app.push_job(d, {kind = .Add_Track, source = .Liked, key = 6})
+	app.push_job(d, {payload = app.Add_Track_Job{track = 6, source = .Liked}})
 	app.account_end(s)
 	free_slots(d, 8)
 	app.data_retry(s)
 	testing.expect_value(t, len(data_jobs(d)), 0)
+}
+
+// Adds piling up while the queue is full push out the oldest adds, never
+// the list's pages or the sidebar, which nothing would ask for again.
+@(test)
+held_jobs_keep_what_waits :: proc(t: ^testing.T) {
+	s := data_state()
+	defer data_state_free(s)
+	d := &s.data
+	d.account = .Signed_In
+	fill_with_covers(d)
+
+	app.view_open(d, .Playlist, "pl", "pl", "", 300)
+	app.request_playlists(d)
+	for track in 0 ..< 20 {
+		app.push_job(d, {payload = app.Add_Track_Job{track = i64(track), source = .Liked}})
+	}
+	free_slots(d, 32)
+	app.data_retry(s)
+	pages, playlists: int
+	adds := make([dynamic]i64, context.temp_allocator)
+	for job in data_jobs(d) {
+		#partial switch p in job.payload {
+		case app.Tracks_Job:
+			pages += 1
+		case app.Playlists_Job:
+			playlists += 1
+		case app.Add_Track_Job:
+			append(&adds, p.track)
+		}
+	}
+	testing.expect_value(t, pages, 2)
+	testing.expect_value(t, playlists, 1)
+	testing.expect_value(t, len(adds), app.HELD_JOBS - 3)
+	testing.expect(t, slice.contains(adds[:], 19) && !slice.contains(adds[:], 0), "the oldest adds went")
 }
 
 // A refused login job goes out when there's room while the login still
@@ -459,8 +494,9 @@ refused_login_jobs_wait_for_room :: proc(t: ^testing.T) {
 	app.data_retry(s)
 	queued := data_jobs(d)
 	if testing.expect_value(t, len(queued), 1) {
-		testing.expect_value(t, queued[0].kind, app.Job_Kind.Login_Start)
-		testing.expect_value(t, queued[0].view, d.login_attempt)
+		start, ok := queued[0].payload.(app.Login_Start_Job)
+		testing.expect(t, ok)
+		testing.expect_value(t, start.attempt, d.login_attempt)
 	}
 
 	d.login = {pkce = .Off, link = {device_code = app.small("dc"), interval = 5}}
@@ -470,9 +506,10 @@ refused_login_jobs_wait_for_room :: proc(t: ^testing.T) {
 	app.data_retry(s)
 	queued = data_jobs(d)
 	if testing.expect_value(t, len(queued), 1) {
-		testing.expect_value(t, queued[0].kind, app.Job_Kind.Login_Wait)
-		testing.expect_value(t, queued[0].view, d.login_attempt)
-		testing.expect_value(t, app.small_str(&queued[0].id), "dc")
+		wait, ok := queued[0].payload.(app.Login_Wait_Job)
+		testing.expect(t, ok)
+		testing.expect_value(t, wait.attempt, d.login_attempt)
+		testing.expect_value(t, app.small_str(&wait.device_code), "dc")
 	}
 
 	// The PKCE login finished before there was room.
@@ -485,7 +522,8 @@ refused_login_jobs_wait_for_room :: proc(t: ^testing.T) {
 	app.data_retry(s)
 	queued = data_jobs(d)
 	for job in queued {
-		testing.expect(t, job.kind != .Login_Start, "no code for a login that finished")
+		_, start := job.payload.(app.Login_Start_Job)
+		testing.expect(t, !start, "no code for a login that finished")
 	}
 }
 
@@ -540,13 +578,14 @@ view_grows_past_the_count :: proc(t: ^testing.T) {
 	testing.expect_value(t, queued, 2)
 	for _ in 0 ..< 2 {
 		job, _ := jobs.try_pop(&d.queue)
+		p := job.payload.(app.Tracks_Job)
 		v.in_flight -= 1
-		app.view_add_rows(v, int(job.offset), int(job.limit), fake_rows(int(job.limit)))
+		app.view_add_rows(v, int(p.offset), int(p.limit), fake_rows(int(p.limit)))
 	}
 	testing.expect_value(t, v.count, 150)
 	app.view_request_pages(d)
 	job, _ := jobs.try_pop(&d.queue)
-	testing.expect_value(t, job.offset, 150)
+	testing.expect_value(t, job.payload.(app.Tracks_Job).offset, 150)
 	v.in_flight -= 1
 	app.view_add_rows(v, 150, 100, fake_rows(80))
 	testing.expect_value(t, v.count, 230)
@@ -652,7 +691,7 @@ cover_401_keeps_the_login :: proc(t: ^testing.T) {
 
 	e := cover.want(&d.covers, .Album, "cover-id", 80, 80, 1, app.PRIORITY_COVER)
 	key := e.key
-	app.push_job(d, {kind = .Cover, key = key, size = 80, fetch = 80, id = app.small("cover-id")}, app.PRIORITY_COVER)
+	app.push_job(d, {payload = app.Cover_Job{key = key, image = {id = app.small("cover-id"), size = 80, fetch = 80}}}, app.PRIORITY_COVER)
 	app.workers_start(d)
 	res, ok := wait_result(d, 5 * time.Second)
 	testing.expect(t, ok)
@@ -683,7 +722,7 @@ add_track_job :: proc(t: ^testing.T) {
 	d.account = .Signed_In
 	app.workers_start(d)
 
-	app.push_job(d, {kind = .Add_Track, source = .Playlist, id = app.small("pl"), key = 33})
+	app.push_job(d, {payload = app.Add_Track_Job{track = 33, source = .Playlist, id = app.small("pl")}})
 	res, ok := wait_result(d, 5 * time.Second)
 	testing.expect(t, ok)
 	testing.expect_value(t, res.err, nil)
@@ -695,13 +734,13 @@ add_track_job :: proc(t: ^testing.T) {
 	testing.expect(t, len(ids) == 3 && ids[2] == 33)
 	app.result_free(&res)
 
-	app.push_job(d, {kind = .Add_Track, source = .Playlist, id = app.small("pl"), key = 33})
+	app.push_job(d, {payload = app.Add_Track_Job{track = 33, source = .Playlist, id = app.small("pl")}})
 	res, ok = wait_result(d, 5 * time.Second)
 	testing.expect(t, ok && res.err == nil && !res.added && len(res.rows) == 0)
 	testing.expect_value(t, len(mock_item_ids(&m, context.temp_allocator)), 3)
 	app.result_free(&res)
 
-	app.push_job(d, {kind = .Add_Track, source = .Liked, key = 5000})
+	app.push_job(d, {payload = app.Add_Track_Job{track = 5000, source = .Liked}})
 	res, ok = wait_result(d, 5 * time.Second)
 	testing.expect(t, ok && res.err == nil && res.added)
 	testing.expect(t, len(res.rows) == 1 && res.rows[0].id == 5000)
@@ -726,7 +765,7 @@ add_track_stands_when_the_read_after_fails :: proc(t: ^testing.T) {
 	d.account = .Signed_In
 	app.workers_start(d)
 
-	app.push_job(d, {kind = .Add_Track, source = .Playlist, id = app.small("pl"), key = 33})
+	app.push_job(d, {payload = app.Add_Track_Job{track = 33, source = .Playlist, id = app.small("pl")}})
 	res, ok := wait_result(d, 5 * time.Second)
 	testing.expect(t, ok)
 	testing.expect_value(t, res.err, nil)
@@ -755,13 +794,14 @@ local_jobs_run_during_a_backoff :: proc(t: ^testing.T) {
 	d.launch_log_path = path
 	defer d.launch_log_path = ""
 
-	app.push_job(d, {kind = .Playlists})
-	app.push_job(d, {kind = .Cover, key = 7, size = 80, fetch = 80, id = app.small("cover-id")}, app.PRIORITY_COVER)
-	app.push_job(d, {kind = .Launch_Log, blob = slice.clone([]u8{'x', '\n'}, runtime.heap_allocator())})
+	app.push_job(d, {payload = app.Playlists_Job{}})
+	app.push_job(d, {payload = app.Cover_Job{key = 7, image = {id = app.small("cover-id"), size = 80, fetch = 80}}}, app.PRIORITY_COVER)
+	app.push_job(d, {payload = app.Launch_Log_Job{line = slice.clone([]u8{'x', '\n'}, runtime.heap_allocator())}})
 	app.workers_start(d)
 	res, ok := wait_result(d, 2 * time.Second)
 	testing.expect(t, ok)
-	testing.expect_value(t, res.job.kind, app.Job_Kind.Launch_Log)
+	_, launch_log := res.job.payload.(app.Launch_Log_Job)
+	testing.expect(t, launch_log)
 	testing.expect_value(t, res.err, nil)
 	app.result_free(&res)
 
@@ -1008,7 +1048,8 @@ try_again_keeps_the_tokens :: proc(t: ^testing.T) {
 	app.request_login_code(d)
 	job, ok := jobs.try_pop(&d.queue)
 	testing.expect(t, ok)
-	testing.expect_value(t, job.kind, app.Job_Kind.Login_Wait)
+	_, wait := job.payload.(app.Login_Wait_Job)
+	testing.expect(t, wait)
 	testing.expect_value(t, tidal.session_auth(d.session, context.temp_allocator).access_token, "device-access")
 }
 
