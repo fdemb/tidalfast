@@ -582,7 +582,9 @@ mock_run_without_mock_url_keeps_off_tidal :: proc(t: ^testing.T) {
 
 // Only a run that asks for neither the mock nor fake data gets TIDAL and the
 // user's Keychain item. The mock gets its own item, and fake data, asked
-// for or fallen back to, gets none.
+// for or fallen back to, gets none. Fake data asked for uses a settings
+// file only when TIDALFAST_SETTINGS names one, so its loud tones never
+// play bit-perfect from the user's settings.
 @(test)
 run_decide_picks_the_run :: proc(t: ^testing.T) {
 	CONFIG :: "/config"
@@ -602,9 +604,9 @@ run_decide_picks_the_run :: proc(t: ^testing.T) {
 		{{api = MOCK, wants_mock = true, keychain = app.KEYCHAIN_SERVICE}, {mode = .Mock, keychain = app.KEYCHAIN_MOCK_SERVICE}},
 		{{wants_mock = true, keychain = "tidalfast-test", settings = "/s.json", config_dir = CONFIG}, {mode = .Fake, fallback = true}},
 		{{fake = "1", settings = "/s.json", config_dir = CONFIG}, {mode = .Fake, settings = "/s.json"}},
-		{{fake = "1", wants_mock = true, config_dir = CONFIG}, {mode = .Fake, settings = DEFAULT}},
-		{{bench = "1", api = MOCK, wants_mock = true, config_dir = CONFIG}, {mode = .Fake, settings = DEFAULT}},
-		{{bench = "text", config_dir = CONFIG}, {mode = .Fake, settings = DEFAULT}},
+		{{fake = "1", wants_mock = true, config_dir = CONFIG}, {mode = .Fake}},
+		{{bench = "1", api = MOCK, wants_mock = true, config_dir = CONFIG}, {mode = .Fake}},
+		{{bench = "text", config_dir = CONFIG}, {mode = .Fake}},
 	}
 	for c in cases {
 		testing.expect_value(t, app.run_decide(c.env, context.temp_allocator), c.want)
