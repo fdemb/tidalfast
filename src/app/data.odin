@@ -686,8 +686,7 @@ held_remove_if :: proc(d: ^Data, pred: proc(job: ^Job, data: rawptr) -> bool, da
 	return removed
 }
 
-// page_of picks the pages of the list gen names. Once a list is done it
-// wants no more of them, as view_pages wouldn't ask, and its held ones go.
+// page_of picks the pages of the list gen names, queued or held.
 @(private = "file")
 page_of :: proc(job: ^Job, gen: rawptr) -> bool {
 	p, page := job.payload.(Tracks_Job)
@@ -1198,12 +1197,6 @@ drop_track_jobs :: proc(job: ^Job, keep: rawptr) -> bool {
 	return tracks && (q.source == .None || p.view != q.gen)
 }
 
-@(private = "file")
-drop_view_jobs :: proc(job: ^Job, view: rawptr) -> bool {
-	p, tracks := job.payload.(Tracks_Job)
-	return tracks && p.view == (^u32)(view)^
-}
-
 POISON :: 0xdb
 
 view_gen :: proc(d: ^Data) -> u32 {
@@ -1241,7 +1234,7 @@ queued_drop :: proc(d: ^Data) {
 	if q.source == .None {
 		return
 	}
-	jobs.remove_if(&d.queue, drop_view_jobs, &q.gen)
+	jobs.remove_if(&d.queue, page_of, &q.gen)
 	if q.has_arena {
 		if d.lists.memory && view_complete(q) && q.fetched != 0 {
 			list_keep(d, q^)
