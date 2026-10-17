@@ -18,6 +18,7 @@ import "../src/jobs"
 import "../src/os_services"
 import "../src/platform"
 import tidal "../src/tidal"
+import "../src/ui"
 
 @(private = "file")
 oauth_session :: proc(m: ^Mock) -> ^tidal.Session {
@@ -289,21 +290,166 @@ test_keychain_service :: proc() -> string {
 }
 
 // A State for data tests: no renderer, no workers, a session that sends
-// nothing unless a test asks, and a Keychain service of its own.
+// nothing unless a test asks, and a keychain in memory.
 @(private = "file")
 data_state :: proc() -> ^app.State {
 	s := new(app.State)
-	d := &s.data
-	d.keychain = app.small(test_keychain_service())
-	app.session_open(d)
+	test_keychain(&s.data)
+	app.session_open(&s.data)
 	return s
 }
 
 @(private = "file")
 data_state_free :: proc(s: ^app.State) {
-	os_services.secret_delete(app.keychain_service(&s.data), app.KEYCHAIN_ACCOUNT)
 	app.data_shutdown(s)
+	test_state_free(s)
 	free(s)
+}
+
+// test_keychain is d's keychain, made in memory if it has none, so tests
+// never touch the OS Keychain.
+test_keychain :: proc(d: ^app.Data) -> ^app.Keychain {
+	if d.keychain == nil {
+		d.keychain = new(app.Memory_Keychain, runtime.heap_allocator())
+	}
+	return &d.keychain
+}
+
+// keychain_auth is the login the keychain holds, read the way a launch
+// reads it, or false for none.
+keychain_auth :: proc(d: ^app.Data) -> (a: tidal.Auth, ok: bool) {
+	data, status := app.keychain_get(&d.keychain, context.temp_allocator)
+	if status != os_services.SECRET_OK {
+		return
+	}
+	restored := tidal.session_create()
+	defer tidal.session_destroy(restored)
+	ok = app.auth_restore(restored, data)
+	return tidal.session_auth(restored, context.temp_allocator), ok
+}
+
+// test_state_free frees what the test helpers here gave s: the keychain
+// and the UI the login screen was drawn with.
+test_state_free :: proc(s: ^app.State) {
+	if k, ok := s.data.keychain.(^app.Memory_Keychain); ok {
+		app.keychain_delete(&s.data.keychain)
+		free(k, runtime.heap_allocator())
+		s.data.keychain = nil
+	}
+	if s.ui.boxes != nil {
+		delete(s.ui.boxes)
+		delete(s.ui.table)
+		delete(s.ui.hits)
+		s.ui.boxes = nil
+	}
+}
+
+TEST_LOGIN :: tidal.Auth {
+	token_type    = "Bearer",
+	access_token  = "a",
+	refresh_token = "r",
+	user_id       = 123,
+	user_kind     = .Logged_In_User,
+}
+
+// sign_in signs s in as a launch with a saved login does: the keychain
+// holds the login and the Restore job reads it. The account's first jobs
+// go in the queue, or wait for room in it.
+sign_in :: proc(s: ^app.State, login := TEST_LOGIN) {
+	d := &s.data
+	if d.session == nil {
+		app.session_open(d)
+	}
+	app.keychain_set(test_keychain(d), app.auth_marshal(login, context.temp_allocator))
+	run_now(s, {auth = d.auth_gen, payload = app.Restore_Job{}})
+}
+
+// launch_signed_out is a launch with no saved login: the login screen.
+launch_signed_out :: proc(s: ^app.State) {
+	d := &s.data
+	app.keychain_delete(test_keychain(d))
+	// Restore reads TIDALFAST_PKCE_REDIRECT when it finds no login.
+	sync.guard(&env_mutex)
+	run_now(s, {auth = d.auth_gen, payload = app.Restore_Job{}})
+}
+
+// run_now runs job as a worker would, on this thread, and hands the app
+// its result. Only for jobs that stay on this machine or go to a mock.
+run_now :: proc(s: ^app.State, job: app.Job) {
+	res := app.run_job(&s.data, job)
+	app.handle_result(s, &res, 0)
+	app.result_free(&res)
+}
+
+// run_queued empties the queue: it runs the jobs of type T with run_now
+// and drops the rest. It returns how many it ran.
+run_queued :: proc(s: ^app.State, $T: typeid) -> int {
+	queued := make([dynamic]app.Job, context.temp_allocator)
+	for {
+		job, ok := jobs.try_pop(&s.data.queue)
+		if !ok {
+			break
+		}
+		append(&queued, job)
+	}
+	n := 0
+	for &job in queued {
+		if _, is := job.payload.(T); is {
+			run_now(s, job)
+			n += 1
+		} else {
+			app.job_free(&job)
+		}
+	}
+	return n
+}
+
+// login_screen draws a frame of the login screen with events, text typed
+// in it if events has a .Text event, and returns what the frame reads out
+// to accessibility: every node's label and then its value, one a line.
+login_screen :: proc(t: ^testing.T, s: ^app.State, events: []platform.Event = nil, text := "", loc := #caller_location) -> string {
+	if !testing.expect(t, app.show_login(s), "the login screen shows", loc = loc) {
+		return ""
+	}
+	return screen_of(s, app.draw_login, events, text)
+}
+
+// screen_of is login_screen for what draw draws.
+screen_of :: proc(s: ^app.State, draw: proc(s: ^app.State), events: []platform.Event = nil, text := "") -> string {
+	if s.ui.boxes == nil {
+		ui.init(&s.ui)
+	}
+	ui.begin_frame(&s.ui, events, nil, nil, 1000, 700, 0, nil, transmute([]u8)strings.clone(text, context.temp_allocator))
+	draw(s)
+	ui.end_frame()
+	b := strings.builder_make(context.temp_allocator)
+	nodes, _ := ui.access_tree(&s.ui)
+	for n in nodes {
+		fmt.sbprintf(&b, "%s\n", n.label)
+		if n.value != nil {
+			fmt.sbprintf(&b, "%s\n", n.value)
+		}
+	}
+	return strings.to_string(b)
+}
+
+// login_press presses the login screen's button whose label starts with
+// label, or with .Access_Focus focuses its field, through accessibility.
+login_press :: proc(t: ^testing.T, s: ^app.State, label: string, kind := platform.Event_Kind.Access_Press, loc := #caller_location) {
+	login_screen(t, s, loc = loc)
+	nodes, _ := ui.access_tree(&s.ui)
+	for n in nodes {
+		if strings.has_prefix(string(n.label), label) {
+			login_screen(t, s, {{kind = kind, target = n.id}}, loc = loc)
+			return
+		}
+	}
+	testing.fail_now(t, fmt.tprint("nothing on the login screen reads", label), loc)
+}
+
+// shows says whether screen, from login_screen, has a line that is line.
+shows :: proc(screen, line: string) -> bool {
+	return strings.contains(screen, fmt.tprintf("\n%s\n", line)) || strings.has_prefix(screen, fmt.tprintf("%s\n", line))
 }
 
 @(private = "file")
@@ -314,57 +460,55 @@ fail_job :: proc(d: ^app.Data, kind: tidal.Error_Kind) -> app.Result {
 	return {job = job, err = kind, message = app.small("Authentication: 401")}
 }
 
+// Two requests under the old login come back refused. The first signs
+// out: the keychain item goes and the login screen says why. The second,
+// arriving after the user logged in again, leaves the new login alone.
 @(test)
 auth_failures_sign_out_once :: proc(t: ^testing.T) {
-	s := data_state()
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := mock_data_state(&m)
 	defer data_state_free(s)
 	d := &s.data
-	service := app.keychain_service(d)
-	tidal.session_restore(d.session, {token_type = "Bearer", access_token = "old", refresh_token = "old-r", user_id = 123, user_kind = .Logged_In_User})
-	d.account = .Signed_In
-	app.auth_changed(d.session, d)
-	_, status := os_services.secret_get(service, app.KEYCHAIN_ACCOUNT, context.temp_allocator)
-	testing.expect_value(t, status, os_services.SECRET_OK)
+	sign_in(s, {token_type = "Bearer", access_token = "old", refresh_token = "old-r", user_id = 123, user_kind = .Logged_In_User})
+	_, saved := keychain_auth(d)
+	testing.expect(t, saved)
+	testing.expect(t, !app.show_login(s))
+	data_jobs(d)
 
-	// Two requests under the old login, both refused.
 	app.push_job(d, {payload = app.Playlists_Job{}})
 	app.push_job(d, {payload = app.Tracks_Job{}})
 	first := fail_job(d, .Authentication)
 	second := fail_job(d, .Authentication)
 
 	app.handle_result(s, &first, 0)
-	testing.expect_value(t, d.auth_gen, 1)
-	testing.expect_value(t, d.account, app.Account.Signed_Out)
-	_, status = os_services.secret_get(service, app.KEYCHAIN_ACCOUNT, context.temp_allocator)
-	testing.expect_value(t, status, os_services.SECRET_NOT_FOUND)
+	_, saved = keychain_auth(d)
+	testing.expect(t, !saved, "the keychain item went")
 	testing.expect_value(t, tidal.session_auth(d.session, context.temp_allocator).access_token, "")
 	// The login screen shows the PKCE login, which waits for the user.
-	queued, _ := jobs.pending(&d.queue)
-	testing.expect_value(t, queued, 0)
-	testing.expect_value(t, d.login.pkce, app.Pkce_Step.Paste)
-	testing.expect(t, d.login.note.len > 0)
+	screen := login_screen(t, s)
+	testing.expect(t, shows(screen, "Log in to TIDAL"), screen)
+	testing.expect(t, shows(screen, "Your TIDAL session ended. Log in again."), screen)
+	testing.expect_value(t, len(data_jobs(d)), 0)
 
-	// The new login is saved before the second failure arrives.
-	tidal.session_restore(d.session, {token_type = "Bearer", access_token = "new", refresh_token = "new-r", user_id = 123, user_kind = .Logged_In_User})
-	app.auth_changed(d.session, d)
-	d.account = .Signed_In
-	d.login = {}
+	// The user logs in again before the second failure arrives.
+	m.polls = {"ok"}
+	app.pkce_submit(s, fmt.tprintf("%sandroid/login/auth?code=c", m.base_url))
+	testing.expect_value(t, run_queued(s, app.Login_Pkce_Job), 1)
+	testing.expect(t, !app.show_login(s))
+	data_jobs(d)
 
 	app.handle_result(s, &second, 0)
-	testing.expect_value(t, d.auth_gen, 1)
-	testing.expect_value(t, d.account, app.Account.Signed_In)
-	queued, _ = jobs.pending(&d.queue)
-	testing.expect_value(t, queued, 0)
-	data, kstatus := os_services.secret_get(service, app.KEYCHAIN_ACCOUNT, context.temp_allocator)
-	testing.expect_value(t, kstatus, os_services.SECRET_OK)
-	restored := tidal.session_create()
-	defer tidal.session_destroy(restored)
-	testing.expect(t, app.auth_restore(restored, data))
-	testing.expect_value(t, tidal.session_auth(restored, context.temp_allocator).access_token, "new")
+	testing.expect(t, !app.show_login(s), "the new login stays")
+	testing.expect_value(t, len(data_jobs(d)), 0)
+	a, kept := keychain_auth(d)
+	testing.expect(t, kept)
+	testing.expect_value(t, a.access_token, "device-access")
+	testing.expect_value(t, tidal.session_auth(d.session, context.temp_allocator).access_token, "device-access")
 }
 
 // data_jobs empties the queue and returns the jobs in it but covers.
-@(private = "file")
 data_jobs :: proc(d: ^app.Data) -> [dynamic]app.Job {
 	out := make([dynamic]app.Job, context.temp_allocator)
 	for {
@@ -398,10 +542,9 @@ refused_jobs_wait_for_room :: proc(t: ^testing.T) {
 	s := data_state()
 	defer data_state_free(s)
 	d := &s.data
-	d.account = .Signed_In
 	fill_with_covers(d)
 
-	app.request_playlists(d)
+	sign_in(s)
 	app.view_open(d, .Playlist, "closed", "closed", "", 300)
 	closed := d.view.gen
 	app.view_open(d, .Playlist, "open", "open", "", 300)
@@ -451,11 +594,10 @@ held_jobs_keep_what_waits :: proc(t: ^testing.T) {
 	s := data_state()
 	defer data_state_free(s)
 	d := &s.data
-	d.account = .Signed_In
 	fill_with_covers(d)
 
+	sign_in(s)
 	app.view_open(d, .Playlist, "pl", "pl", "", 300)
-	app.request_playlists(d)
 	for track in 0 ..< 20 {
 		app.push_job(d, {payload = app.Add_Track_Job{track = i64(track), source = .Liked}})
 	}
@@ -483,66 +625,96 @@ held_jobs_keep_what_waits :: proc(t: ^testing.T) {
 // waits for it, and not once the login has moved on.
 @(test)
 refused_login_jobs_wait_for_room :: proc(t: ^testing.T) {
-	s := data_state()
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := mock_data_state(&m)
 	defer data_state_free(s)
 	d := &s.data
-	d.account = .Signed_Out
-	d.login.pkce = .Off
+	launch_signed_out(s)
 	fill_with_covers(d)
 
-	app.request_login_code(d)
+	app.device_begin(d)
 	app.data_retry(d)
 	free_slots(d, 4)
 	app.data_retry(d)
 	queued := data_jobs(d)
-	if testing.expect_value(t, len(queued), 1) {
-		start, ok := queued[0].payload.(app.Login_Start_Job)
-		testing.expect(t, ok)
-		testing.expect_value(t, start.attempt, d.login_attempt)
+	if !testing.expect_value(t, len(queued), 1) {
+		return
 	}
+	_, is_start := queued[0].payload.(app.Login_Start_Job)
+	testing.expect(t, is_start)
 
-	d.login = {pkce = .Off, link = {device_code = app.small("dc"), interval = 5}}
+	// TIDAL's code comes back while the queue is full again.
 	fill_with_covers(d)
-	app.request_login_poll(d)
+	answer_login_start(s, queued[0])
+	testing.expect(t, shows(login_screen(t, s), "ABCDE"))
 	free_slots(d, 4)
 	app.data_retry(d)
 	queued = data_jobs(d)
-	if testing.expect_value(t, len(queued), 1) {
-		wait, ok := queued[0].payload.(app.Login_Wait_Job)
-		testing.expect(t, ok)
-		testing.expect_value(t, wait.attempt, d.login_attempt)
-		testing.expect_value(t, app.small_str(&wait.device_code), "dc")
+	if !testing.expect_value(t, len(queued), 1) {
+		return
 	}
+	wait, is_wait := queued[0].payload.(app.Login_Wait_Job)
+	testing.expect(t, is_wait)
+	testing.expect_value(t, app.small_str(&wait.device_code), "dc")
+	// It's the code's own poll: its answer is taken.
+	failed := app.Result{job = queued[0], err = .Network}
+	app.handle_result(s, &failed, 0)
+	testing.expect(t, shows(login_screen(t, s), "Can't reach TIDAL. Trying again in 2 s."))
+}
 
-	// The PKCE login finished before there was room.
-	d.login = {pkce = .Off}
+// A code the queue refused never goes out once the PKCE login finished.
+@(test)
+held_login_code_dropped_after_the_pkce_login :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := mock_data_state(&m)
+	defer data_state_free(s)
+	d := &s.data
+	launch_signed_out(s)
 	fill_with_covers(d)
-	app.request_login_code(d)
-	d.login = {}
-	d.account = .Signed_In
-	free_slots(d, 4)
-	app.data_retry(d)
-	queued = data_jobs(d)
-	for job in queued {
-		_, start := job.payload.(app.Login_Start_Job)
-		testing.expect(t, !start, "no code for a login that finished")
+
+	app.device_begin(d)
+	app.pkce_show(d)
+	m.polls = {"ok"}
+	app.pkce_submit(s, fmt.tprintf("%sandroid/login/auth?code=c", m.base_url))
+	for _ in 0 ..< 3 {
+		free_slots(d, 4)
+		app.data_retry(d)
+		for job in data_jobs(d) {
+			_, start := job.payload.(app.Login_Start_Job)
+			testing.expect(t, !start, "no code for a login that finished")
+			if _, pkce := job.payload.(app.Login_Pkce_Job); pkce {
+				run_now(s, job)
+			}
+		}
 	}
+	testing.expect(t, !app.show_login(s))
+}
+
+// answer_login_start hands the app TIDAL's code for job, a Login_Start, as
+// a worker would.
+answer_login_start :: proc(s: ^app.State, job: app.Job, interval: f32 = 1, expires: f32 = 300) {
+	res := app.Result {
+		job  = job,
+		link = {user_code = app.small("ABCDE"), device_code = app.small("dc"), interval = interval, expires = expires},
+	}
+	app.handle_result(s, &res, 0)
 }
 
 // login_starts answers the queued Login_Start jobs with a code, as the
 // workers would, until no more go out, and empties the queue. It returns how
 // many there were.
 @(private = "file")
-login_starts :: proc(t: ^testing.T, s: ^app.State) -> int {
+login_starts :: proc(s: ^app.State) -> int {
 	n := 0
 	for {
-		queued := data_jobs(&s.data)
 		starts := 0
-		for job in queued {
-			if p, start := job.payload.(app.Login_Start_Job); start {
-				testing.expect_value(t, p.attempt, s.data.login_attempt)
-				res := app.Result{job = job, link = {user_code = app.small("ABCDE"), device_code = app.small("dc"), interval = 1, expires = 300}}
-				app.handle_result(s, &res, 0)
+		for job in data_jobs(&s.data) {
+			if _, start := job.payload.(app.Login_Start_Job); start {
+				answer_login_start(s, job)
 				starts += 1
 			}
 		}
@@ -553,6 +725,18 @@ login_starts :: proc(t: ^testing.T, s: ^app.State) -> int {
 	}
 }
 
+// show_code is the code login with TIDAL's code on screen and its poll
+// queued.
+show_code :: proc(t: ^testing.T, s: ^app.State, interval: f32 = 1, expires: f32 = 300, loc := #caller_location) {
+	launch_signed_out(s)
+	app.device_begin(&s.data)
+	start, ok := jobs.try_pop(&s.data.queue)
+	_, is_start := start.payload.(app.Login_Start_Job)
+	testing.expect(t, ok && is_start, "the code login asks for a code", loc = loc)
+	answer_login_start(s, start, interval, expires)
+	testing.expect(t, shows(login_screen(t, s, loc = loc), "ABCDE"), "the code shows", loc = loc)
+}
+
 // A code the queue refused isn't asked for once the user has moved on to
 // the PKCE login, and going back to the code login asks for one code.
 @(test)
@@ -560,19 +744,18 @@ held_login_code_follows_the_login_shown :: proc(t: ^testing.T) {
 	s := data_state()
 	defer data_state_free(s)
 	d := &s.data
-	d.account = .Signed_Out
-	d.login.pkce = .Off
+	launch_signed_out(s)
 	fill_with_covers(d)
 
-	app.request_login_code(d)
+	app.device_begin(d)
 	app.pkce_show(d)
 	free_slots(d, 4)
 	app.data_retry(d)
-	testing.expect_value(t, login_starts(t, s), 0)
+	testing.expect_value(t, login_starts(s), 0)
 
 	app.device_begin(d)
-	testing.expect_value(t, login_starts(t, s), 1)
-	testing.expect_value(t, app.small_str(&d.login.link.user_code), "ABCDE")
+	testing.expect_value(t, login_starts(s), 1)
+	testing.expect(t, shows(login_screen(t, s), "ABCDE"))
 }
 
 // A full hold list makes room from a job no longer wanted before any add,
@@ -582,11 +765,10 @@ full_hold_list_drops_unwanted_jobs_first :: proc(t: ^testing.T) {
 	s := data_state()
 	defer data_state_free(s)
 	d := &s.data
-	d.account = .Signed_Out
-	d.login.pkce = .Off
+	launch_signed_out(s)
 	fill_with_covers(d)
 
-	app.request_login_code(d)
+	app.device_begin(d)
 	for track in 0 ..< app.HELD_JOBS - 1 {
 		app.push_job(d, {payload = app.Add_Track_Job{track = i64(track), source = .Liked}})
 	}
@@ -602,11 +784,12 @@ full_hold_list_drops_unwanted_jobs_first :: proc(t: ^testing.T) {
 		case app.Add_Track_Job:
 			append(&adds, p.track)
 		case app.Login_Start_Job:
-			testing.expect_value(t, p.attempt, d.login_attempt)
+			answer_login_start(s, job)
 			starts += 1
 		}
 	}
 	testing.expect_value(t, starts, 1)
+	testing.expect(t, shows(login_screen(t, s), "ABCDE"), "the code is the one the login shown asked for")
 	testing.expect_value(t, len(adds), app.HELD_JOBS - 1)
 	testing.expect(t, !slice.contains(adds[:], 0) && slice.contains(adds[:], 1), "the new code's room came from the oldest add")
 	testing.expect(t, slice.contains(adds[:], app.HELD_JOBS - 1), "the unwanted code made room for the last add")
@@ -619,13 +802,12 @@ full_hold_list_never_drops_a_waiting_job :: proc(t: ^testing.T) {
 	s := data_state()
 	testing.cleanup(t, proc(s: rawptr) {data_state_free((^app.State)(s))}, s)
 	d := &s.data
-	d.account = .Signed_In
 	fill_with_covers(d)
 	for _ in 0 ..< app.HELD_JOBS {
 		app.push_job(d, {payload = app.Cover_Job{}}, app.PRIORITY_COVER)
 	}
 	testing.expect_assert(t, "the hold list is full of jobs that wait behind a flag")
-	app.request_playlists(d)
+	sign_in(s)
 	testing.fail_now(t, "a full hold list of waiting jobs pushed one out")
 }
 
@@ -636,7 +818,8 @@ held_page_past_the_end_stays_home :: proc(t: ^testing.T) {
 	s := data_state()
 	defer data_state_free(s)
 	d := &s.data
-	d.account = .Signed_In
+	sign_in(s)
+	data_jobs(d)
 	app.view_open(d, .Playlist, "pl", "pl", "", 300)
 	v := &d.view
 	out := data_jobs(d)
@@ -667,7 +850,8 @@ held_page_keeps_later_pages_back :: proc(t: ^testing.T) {
 	s := data_state()
 	defer data_state_free(s)
 	d := &s.data
-	d.account = .Signed_In
+	sign_in(s)
+	data_jobs(d)
 	app.view_open(d, .Playlist, "pl", "pl", "", 300)
 	v := &d.view
 	out := data_jobs(d)
@@ -770,7 +954,6 @@ reload_keeps_the_backoff :: proc(t: ^testing.T) {
 	s := new(app.State)
 	defer free(s)
 	d := &s.data
-	d.keychain = app.small(test_keychain_service())
 	d.api = app.small(m.base_url)
 	app.session_open(d)
 	defer app.data_shutdown(s)
@@ -866,11 +1049,12 @@ mock_run_without_mock_url_keeps_off_tidal :: proc(t: ^testing.T) {
 		label := fmt.tprint(c)
 		if c.service != "" {
 			testing.expect(t, d.session != nil, label)
-			testing.expect(t, app.keychain_service(d) == c.service, label)
+			k, os_keychain := d.keychain.(app.Os_Keychain)
+			testing.expect(t, os_keychain && app.small_str(&k.service) == c.service, label)
 			testing.expect(t, queued == 1, label)
 		} else {
 			testing.expect(t, d.session == nil, label)
-			testing.expect(t, app.keychain_service(d) != app.KEYCHAIN_SERVICE, label)
+			testing.expect(t, d.keychain == nil, label)
 			testing.expect(t, queued == 0, label)
 			testing.expect(t, d.lists.root != real_cache, label)
 		}
@@ -992,13 +1176,13 @@ env_put :: proc(name: string, value: Maybe(string)) {
 	}
 }
 
-// A State whose session talks to the mock, with a Keychain service of its
-// own. Workers aren't started.
+// A State whose session talks to the mock, with a keychain in memory.
+// Workers aren't started.
 @(private = "file")
 mock_data_state :: proc(m: ^Mock) -> ^app.State {
 	s := new(app.State)
 	d := &s.data
-	d.keychain = app.small(test_keychain_service())
+	test_keychain(d)
 	d.api = app.small(m.base_url)
 	d.wake = proc "c" () {}
 	cover.init(&d.covers, app.COVER_BUDGET)
@@ -1029,10 +1213,8 @@ cover_401_keeps_the_login :: proc(t: ^testing.T) {
 	s := mock_data_state(&m)
 	defer data_state_free(s)
 	d := &s.data
-	service := app.keychain_service(d)
-	tidal.session_restore(d.session, {token_type = "Bearer", access_token = "new", refresh_token = "new-r", user_id = 123, user_kind = .Logged_In_User})
-	d.account = .Signed_In
-	app.auth_changed(d.session, d)
+	sign_in(s, {token_type = "Bearer", access_token = "new", refresh_token = "new-r", user_id = 123, user_kind = .Logged_In_User})
+	data_jobs(d)
 
 	e := cover.want(&d.covers, .Album, "cover-id", 80, 80, 1, app.PRIORITY_COVER)
 	key := e.key
@@ -1045,11 +1227,11 @@ cover_401_keeps_the_login :: proc(t: ^testing.T) {
 
 	testing.expect_value(t, mock_count(&m, "GET /images/"), 1)
 	testing.expect_value(t, cover.lookup(&d.covers, key).state, cover.State.Failed)
-	testing.expect_value(t, d.account, app.Account.Signed_In)
-	testing.expect_value(t, d.auth_gen, 0)
+	testing.expect(t, !app.show_login(s))
 	testing.expect_value(t, tidal.session_auth(d.session, context.temp_allocator).access_token, "new")
-	_, status := os_services.secret_get(service, app.KEYCHAIN_ACCOUNT, context.temp_allocator)
-	testing.expect_value(t, status, os_services.SECRET_OK)
+	a, saved := keychain_auth(d)
+	testing.expect(t, saved)
+	testing.expect_value(t, a.access_token, "new")
 }
 
 // An Add_Track adds the track on TIDAL, then brings back the list's version
@@ -1063,8 +1245,8 @@ add_track_job :: proc(t: ^testing.T) {
 	s := mock_data_state(&m)
 	defer data_state_free(s)
 	d := &s.data
-	tidal.session_restore(d.session, {token_type = "Bearer", access_token = "a", refresh_token = "r", user_id = 123, user_kind = .Logged_In_User})
-	d.account = .Signed_In
+	sign_in(s)
+	data_jobs(d)
 	app.workers_start(d)
 
 	app.push_job(d, {payload = app.Add_Track_Job{track = 33, source = .Playlist, id = app.small("pl")}})
@@ -1106,8 +1288,8 @@ add_track_stands_when_the_read_after_fails :: proc(t: ^testing.T) {
 	s := mock_data_state(&m)
 	defer data_state_free(s)
 	d := &s.data
-	tidal.session_restore(d.session, {token_type = "Bearer", access_token = "a", refresh_token = "r", user_id = 123, user_kind = .Logged_In_User})
-	d.account = .Signed_In
+	sign_in(s)
+	data_jobs(d)
 	app.workers_start(d)
 
 	app.push_job(d, {payload = app.Add_Track_Job{track = 33, source = .Playlist, id = app.small("pl")}})
@@ -1131,8 +1313,8 @@ local_jobs_run_during_a_backoff :: proc(t: ^testing.T) {
 	s := mock_data_state(&m)
 	defer data_state_free(s)
 	d := &s.data
-	tidal.session_restore(d.session, {token_type = "Bearer", access_token = "a", refresh_token = "r", user_id = 123, user_kind = .Logged_In_User})
-	d.account = .Signed_In
+	sign_in(s)
+	data_jobs(d)
 	tidal.backoff_restore(d.session, time.tick_add(time.tick_now(), 30 * time.Second), "test")
 	path := fmt.tprintf("/tmp/tidalfast-backoff-%d.log", time.tick_now()._nsec)
 	defer os.remove(path)
@@ -1159,8 +1341,9 @@ local_jobs_run_during_a_backoff :: proc(t: ^testing.T) {
 	testing.expect_value(t, mock_count(&m, ""), 0)
 }
 
-// The approval got the tokens, then loading the session was held back
-// until after the code expired. The tokens still finish the login.
+// The approval got the tokens, then loading the session failed until
+// after the code expired. The tokens still finish the login, without
+// polling the spent code again.
 @(test)
 login_resumes_with_tokens_after_the_code_expired :: proc(t: ^testing.T) {
 	m: Mock
@@ -1169,20 +1352,19 @@ login_resumes_with_tokens_after_the_code_expired :: proc(t: ^testing.T) {
 	s := mock_data_state(&m)
 	defer data_state_free(s)
 	d := &s.data
-	tidal.session_restore(d.session, {token_type = "Bearer", access_token = "device-access", refresh_token = "device-refresh"})
-	d.account = .Signed_Out
-	d.login.link.device_code = app.small("dc")
-	d.login.link.interval = 1
-	d.login.deadline = time.tick_add(time.tick_now(), -time.Second)
-	app.request_login_poll(d)
+	m.polls = {"ok"}
+	m.sessions_fail = 1
+	show_code(t, s, interval = 0.2, expires = 1)
 	app.workers_start(d)
-	res, ok := wait_result(d, 5 * time.Second)
-	testing.expect(t, ok)
-	app.handle_result(s, &res, 0)
-	app.result_free(&res)
+	for _ in 0 ..< 2 {
+		res, ok := wait_result(d, 5 * time.Second)
+		testing.expect(t, ok)
+		app.handle_result(s, &res, 0)
+		app.result_free(&res)
+	}
 
-	testing.expect_value(t, m.poll_count, 0)
-	testing.expect_value(t, d.account, app.Account.Signed_In)
+	testing.expect_value(t, m.poll_count, 1)
+	testing.expect(t, !app.show_login(s))
 	testing.expect_value(t, tidal.session_auth(d.session, context.temp_allocator).user_id, 123)
 }
 
@@ -1196,12 +1378,10 @@ reload_keeps_an_approved_login :: proc(t: ^testing.T) {
 	s := mock_data_state(&m)
 	defer data_state_free(s)
 	d := &s.data
-	tidal.session_restore(d.session, {token_type = "Bearer", access_token = "device-access", refresh_token = "device-refresh"})
-	d.account = .Signed_Out
-	d.login.link.device_code = app.small("dc")
-	d.login.link.interval = 1
-	d.login.deadline = time.tick_add(time.tick_now(), 300 * time.Second)
-	app.request_login_poll(d)
+	m.polls = {"ok"}
+	m.sessions_fail = 1
+	show_code(t, s, interval = 0.2)
+	testing.expect_value(t, run_queued(s, app.Login_Wait_Job), 1)
 
 	shell := platform.Shell {
 		request_redraw = proc "c" () {},
@@ -1214,8 +1394,8 @@ reload_keeps_an_approved_login :: proc(t: ^testing.T) {
 	app.handle_result(s, &res, 0)
 	app.result_free(&res)
 
-	testing.expect_value(t, m.poll_count, 0)
-	testing.expect_value(t, d.account, app.Account.Signed_In)
+	testing.expect_value(t, m.poll_count, 1)
+	testing.expect(t, !app.show_login(s))
 }
 
 // slow_down, then a 429: the poll after the backoff still waits the slower
@@ -1229,18 +1409,14 @@ login_requeue_keeps_the_interval :: proc(t: ^testing.T) {
 	defer data_state_free(s)
 	d := &s.data
 	m.polls = {"slow_down", "429", "ok"}
-	d.account = .Signed_Out
-	d.login.link.device_code = app.small("dc")
-	d.login.link.interval = 0.2
-	d.login.deadline = time.tick_add(time.tick_now(), 300 * time.Second)
-	app.request_login_poll(d)
+	show_code(t, s, interval = 0.2)
 	app.workers_start(d)
 	res, ok := wait_result(d, 20 * time.Second)
 	testing.expect(t, ok)
 	app.handle_result(s, &res, 0)
 	app.result_free(&res)
 
-	testing.expect_value(t, d.account, app.Account.Signed_In)
+	testing.expect(t, !app.show_login(s))
 	testing.expect_value(t, len(m.poll_times), 3)
 	interval := 0.2 + f64(tidal.SLOW_DOWN_STEP)
 	for i in 1 ..< len(m.poll_times) {
@@ -1250,8 +1426,8 @@ login_requeue_keeps_the_interval :: proc(t: ^testing.T) {
 }
 
 // TIDAL answering 503 to every poll counts as not reaching it: the poll
-// fails at once, and the login checks again after 2 s, then 4 s, instead
-// of polling on as if the code were pending.
+// fails at once, and the login checks again after 2 s, then 4 s, once each
+// time, instead of polling on as if the code were pending.
 @(test)
 login_5xx_backs_off :: proc(t: ^testing.T) {
 	m: Mock
@@ -1261,24 +1437,23 @@ login_5xx_backs_off :: proc(t: ^testing.T) {
 	defer data_state_free(s)
 	d := &s.data
 	m.polls = {"503", "503", "503", "503", "503", "503", "503", "503"}
-	d.account = .Signed_Out
-	d.login.link.device_code = app.small("dc")
-	d.login.link.interval = 0.2
-	d.login.deadline = time.tick_add(time.tick_now(), 300 * time.Second)
-	app.request_login_poll(d)
+	show_code(t, s, interval = 0.2)
 	app.workers_start(d)
 
-	for want_wait in ([]f64{2, 4}) {
+	for want_wait in ([]int{2, 4}) {
 		res, ok := wait_result(d, 5 * time.Second)
 		testing.expect(t, ok)
 		testing.expect_value(t, res.err, tidal.Error_Kind.Network)
 		app.handle_result(s, &res, 0)
 		app.result_free(&res)
-		wait := time.duration_seconds(time.tick_diff(time.tick_now(), d.login.poll_at))
-		testing.expectf(t, wait > want_wait - 0.2 && wait <= want_wait, "the next check is in %.2f s, not %.0f", wait, want_wait)
-		testing.expect(t, d.login.poll_once)
+		screen := login_screen(t, s)
+		testing.expect(t, shows(screen, fmt.tprintf("Can't reach TIDAL. Trying again in %d s.", want_wait)), screen)
 	}
 	testing.expect_value(t, len(m.poll_times), 2)
+	if len(m.poll_times) == 2 {
+		gap := time.duration_seconds(time.tick_diff(m.poll_times[0], m.poll_times[1]))
+		testing.expectf(t, gap > 1.8, "the second check came %.2f s after the first, not 2 s", gap)
+	}
 }
 
 @(private = "file")
@@ -1299,8 +1474,8 @@ sign_out_stops_playback :: proc(t: ^testing.T) {
 	s := data_state()
 	defer data_state_free(s)
 	s.rows = []app.Row{{title = "One", seconds = 30}, {title = "Two", seconds = 30}}
+	sign_in(s)
 	s.data.fake = true
-	s.data.account = .Signed_In
 	pb := &s.playback
 	pb.index = -1
 	pb.set_now_playing = count_now_playing
@@ -1350,51 +1525,50 @@ session_5xx_after_approval_retries :: proc(t: ^testing.T) {
 	s := mock_data_state(&m)
 	defer data_state_free(s)
 	d := &s.data
+	m.polls = {"ok"}
 	m.sessions_fail = 1
-	tidal.session_restore(d.session, {token_type = "Bearer", access_token = "device-access", refresh_token = "device-refresh"})
-	d.account = .Signed_Out
-	d.login.link.device_code = app.small("dc")
-	d.login.link.interval = 1
-	d.login.deadline = time.tick_add(time.tick_now(), -time.Second)
-	app.request_login_poll(d)
+	show_code(t, s, interval = 0.2)
 	app.workers_start(d)
 
 	res, ok := wait_result(d, 5 * time.Second)
 	testing.expect(t, ok)
 	app.handle_result(s, &res, 0)
 	app.result_free(&res)
-	testing.expectf(t, d.login.error.len == 0, "the login stopped: %s", app.small_str(&d.login.error))
-	testing.expect(t, d.login.waiting)
+	screen := login_screen(t, s)
+	testing.expect(t, !shows(screen, "Try again"), screen)
+	testing.expect(t, shows(screen, "Can't reach TIDAL. Trying again in 2 s."), screen)
 	testing.expect_value(t, tidal.session_auth(d.session, context.temp_allocator).refresh_token, "device-refresh")
 
 	res, ok = wait_result(d, 10 * time.Second)
 	testing.expect(t, ok)
 	app.handle_result(s, &res, 0)
 	app.result_free(&res)
-	testing.expect_value(t, d.account, app.Account.Signed_In)
+	testing.expect(t, !app.show_login(s))
 	testing.expect_value(t, mock_count(&m, "GET /sessions"), 2)
-	testing.expect_value(t, m.poll_count, 0)
+	testing.expect_value(t, m.poll_count, 1)
 }
 
 // "Try again" on a login that has its tokens loads the session with them
 // rather than asking for a new code.
 @(test)
 try_again_keeps_the_tokens :: proc(t: ^testing.T) {
-	s := data_state()
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := mock_data_state(&m)
 	defer data_state_free(s)
 	d := &s.data
-	tidal.session_restore(d.session, {token_type = "Bearer", access_token = "device-access", refresh_token = "device-refresh"})
-	d.account = .Signed_Out
-	d.login = {
-		error = app.small("Bad response"),
-	}
+	m.polls = {"ok"}
+	m.sessions_fail = 1
+	m.sessions_status = 404
+	show_code(t, s, interval = 0.2)
+	testing.expect_value(t, run_queued(s, app.Login_Wait_Job), 1)
 
-	d.login.error = {}
-	app.request_login_code(d)
+	login_press(t, s, "Try again")
 	job, ok := jobs.try_pop(&d.queue)
 	testing.expect(t, ok)
 	_, wait := job.payload.(app.Login_Wait_Job)
-	testing.expect(t, wait)
+	testing.expect(t, wait, fmt.tprint(job.payload))
 	testing.expect_value(t, tidal.session_auth(d.session, context.temp_allocator).access_token, "device-access")
 }
 
@@ -1440,41 +1614,33 @@ superseded_login_wait_job :: proc(t: ^testing.T) {
 	defer data_state_free(s)
 	d := &s.data
 	m.polls = {"ok"}
-	d.account = .Signed_Out
-	d.login.link.device_code = app.small("dc")
-	d.login.link.interval = 0.2
-	d.login.deadline = time.tick_add(time.tick_now(), 300 * time.Second)
+	show_code(t, s, interval = 0.2)
 
 	// On to the hi-res login, as pkce_begin does.
-	app.request_login_poll(d)
-	d.login.pkce = .Paste
-	app.login_next_attempt(d)
+	app.pkce_show(d)
 	app.workers_start(d)
 	res, ok := wait_result(d, 5 * time.Second)
 	testing.expect(t, ok)
 	app.handle_result(s, &res, 0)
 	app.result_free(&res)
 	testing.expect_value(t, m.poll_count, 0)
-	testing.expect_value(t, d.account, app.Account.Signed_Out)
-	testing.expect(t, !d.login.waiting)
-	testing.expect_value(t, d.login.error.len, 0)
+	screen := login_screen(t, s)
+	testing.expect(t, shows(screen, "Log in to TIDAL"), screen)
+	testing.expect(t, !shows(screen, "Try again"), screen)
 	testing.expect_value(t, tidal.session_auth(d.session, context.temp_allocator).access_token, "")
 
 	// There and back to the code before the queued poll ran.
-	d.login.pkce = .Off
-	app.request_login_poll(d)
-	app.login_next_attempt(d)
-	res, ok = wait_result(d, 5 * time.Second)
-	testing.expect(t, ok)
-	app.handle_result(s, &res, 0)
-	app.result_free(&res)
-	testing.expect(t, d.login.waiting)
-	res, ok = wait_result(d, 5 * time.Second)
-	testing.expect(t, ok)
-	app.handle_result(s, &res, 0)
-	app.result_free(&res)
+	app.device_begin(d)
+	app.pkce_show(d)
+	app.device_begin(d)
+	for _ in 0 ..< 2 {
+		res, ok = wait_result(d, 5 * time.Second)
+		testing.expect(t, ok)
+		app.handle_result(s, &res, 0)
+		app.result_free(&res)
+	}
 	testing.expect_value(t, m.poll_count, 1)
-	testing.expect_value(t, d.account, app.Account.Signed_In)
+	testing.expect(t, !app.show_login(s))
 }
 
 // The PKCE exchange worked but loading the session got a 503. Trying again,
@@ -1489,16 +1655,16 @@ pkce_retry_keeps_the_tokens :: proc(t: ^testing.T) {
 		d := &s.data
 		m.polls = {"ok"}
 		m.sessions_fail = 1
-		d.account = .Signed_Out
+		launch_signed_out(s)
 		app.pkce_submit(s, fmt.tprintf("%sandroid/login/auth?code=one-use", m.base_url))
-		testing.expect_value(t, d.login.pkce, app.Pkce_Step.Exchanging)
+		testing.expect(t, shows(login_screen(t, s), "Logging you in…"))
 		app.workers_start(d)
 		res, ok := wait_result(d, 5 * time.Second)
 		testing.expect(t, ok)
 		app.handle_result(s, &res, 0)
 		app.result_free(&res)
-		testing.expect_value(t, d.account, app.Account.Signed_Out)
-		testing.expect(t, app.pkce_has_tokens(d))
+		ACCEPTED :: "TIDAL accepted the login, but your account didn't load."
+		testing.expect(t, shows(login_screen(t, s), ACCEPTED))
 		testing.expect_value(t, m.poll_count, 1)
 
 		if reload {
@@ -1507,14 +1673,14 @@ pkce_retry_keeps_the_tokens :: proc(t: ^testing.T) {
 			}
 			app.data_unload(s)
 			app.data_reload(s, &shell)
-			testing.expect(t, app.pkce_has_tokens(d))
+			testing.expect(t, shows(login_screen(t, s), ACCEPTED))
 		}
-		app.pkce_resume(d)
+		login_press(t, s, "Try again")
 		res, ok = wait_result(d, 5 * time.Second)
 		testing.expect(t, ok)
 		app.handle_result(s, &res, 0)
 		app.result_free(&res)
-		testing.expect_value(t, d.account, app.Account.Signed_In)
+		testing.expect(t, !app.show_login(s))
 		testing.expect_value(t, m.poll_count, 1)
 		testing.expect_value(t, mock_count(&m, "GET /sessions"), 2)
 		testing.expect(t, tidal.session_is_pkce(d.session))

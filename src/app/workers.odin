@@ -467,7 +467,6 @@ log_stream_error :: proc(track_id: i64, what: string, err: tidal.Error) {
 	}
 }
 
-@(private = "file")
 run_job :: proc(d: ^Data, job: Job) -> (res: Result) {
 	res.job = job
 	s := d.session

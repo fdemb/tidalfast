@@ -293,9 +293,15 @@ device_begin :: proc(d: ^Data) {
 // relogin_begin shows the PKCE login over a signed-in device-code login.
 // The account stays until the user submits an address.
 relogin_begin :: proc(d: ^Data) {
+	relogin_show(d)
+	os_services.open_url(tidal.pkce_login_url(d.session, context.temp_allocator))
+}
+
+// relogin_show is relogin_begin without the browser.
+relogin_show :: proc(d: ^Data) {
 	d.relogin = true
 	d.login = {}
-	pkce_begin(d)
+	pkce_show(d)
 }
 
 // pkce_check validates a pasted redirect address. It returns the address

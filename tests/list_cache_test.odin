@@ -26,19 +26,28 @@ cache_dir :: proc(name: string) -> string {
 	return dir
 }
 
-// cache_state is a signed-in State with the memory cache on and, with dir,
-// the disk cache in dir for user 7. No workers: tests run the jobs.
+@(private = "file")
+CACHE_LOGIN :: tidal.Auth {
+	token_type    = "Bearer",
+	access_token  = "a",
+	refresh_token = "r",
+	user_id       = 7,
+	user_kind     = .Logged_In_User,
+}
+
+// cache_state is a State signed in as user 7 with the memory cache on and,
+// with dir, the disk cache in dir. No workers: tests run the jobs.
 @(private = "file")
 cache_state :: proc(dir := "") -> ^app.State {
 	s := new(app.State)
 	app.library_init(&s.library)
 	s.playback.index = -1
-	s.data.account = .Signed_In
 	s.data.poison = true
 	s.data.lists.memory = true
+	sign_in(s, CACHE_LOGIN)
+	data_jobs(&s.data)
 	if dir != "" {
 		s.data.lists.root = strings.clone(dir, runtime.heap_allocator())
-		s.data.lists.user = 7
 	}
 	return s
 }
@@ -46,6 +55,7 @@ cache_state :: proc(dir := "") -> ^app.State {
 @(private = "file")
 cache_state_free :: proc(s: ^app.State) {
 	app.data_shutdown(s)
+	test_state_free(s)
 	free(s)
 }
 
@@ -1010,13 +1020,14 @@ sidebar_from_disk_is_fetched_again_after_a_failure :: proc(t: ^testing.T) {
 	s := cache_state(dir)
 	defer cache_state_free(s)
 	d := &s.data
-	app.lists_signed_in(d, 7)
-	app.request_playlists(d)
+	// A launch: the sidebar is read from disk and fetched from TIDAL.
+	app.account_end(s)
+	sign_in(s, CACHE_LOGIN)
 	testing.expect_value(t, playlists(s), 1)
 	run_disk(s)
 	testing.expect(t, d.sidebar.loaded && !d.sidebar.fresh)
 	failed := app.Result {
-		job = {payload = app.Playlists_Job{}},
+		job = {auth = d.auth_gen, payload = app.Playlists_Job{}},
 		err = .Network,
 	}
 	app.handle_result(s, &failed, 0)

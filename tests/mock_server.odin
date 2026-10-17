@@ -54,6 +54,7 @@ Mock :: struct {
 	token_error:   string, // the OAuth error with token_status
 	token_delay:   time.Duration, // before /token answers
 	sessions_fail: int, // /sessions answers this many requests with a 503
+	sessions_status: int, // or with this status, if set
 	// After a POST adds to the playlist, this many GETs of it answer 429.
 	add_then_limit: int,
 	limit_left:     int,
@@ -65,7 +66,7 @@ Mock :: struct {
 	poll_times: [dynamic]time.Tick,
 	// Paths answered with these bytes, as audio files or DASH segments.
 	files:      map[string][]u8,
-	token_form: map[string]string, // the last POST to /token, decoded
+	token_form: map[string]string, // the last POST to /token or /oauth2/token, decoded
 	// playbackinfopostpaywall's answer for each audioquality; 404 for others.
 	playback:   map[string]Mock_Answer,
 
@@ -235,7 +236,7 @@ mock_handle :: proc(m: ^Mock, client: net.TCP_Socket) {
 		req.form[dk] = dv
 	}
 
-	if req.path == "/token" {
+	if req.path == "/token" || req.path == "/oauth2/token" {
 		sync.guard(&m.mutex)
 		clear_query(&m.token_form, m.allocator)
 		for k, v in req.form {
@@ -302,7 +303,7 @@ mock_route :: proc(m: ^Mock, req: Mock_Request, target: string) -> (status: int,
 	case req.path == "/sessions":
 		if m.sessions_fail > 0 {
 			m.sessions_fail -= 1
-			return 503, `{"userMessage":"unavailable"}`, etag
+			return m.sessions_status if m.sessions_status != 0 else 503, `{"userMessage":"unavailable"}`, etag
 		}
 		if !req.authorized && "sessionId" not_in req.query {
 			return 401, `{"userMessage":"unauthorized"}`, etag

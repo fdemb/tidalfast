@@ -28,9 +28,10 @@ library_state :: proc(fake: bool) -> ^app.State {
 	s.playback.index = -1
 	s.data.poison = true
 	s.data.fake = fake
-	s.data.account = .Fake if fake else .Signed_In
 	if fake {
 		s.rows = app.make_rows()
+	} else {
+		sign_in(s)
 	}
 	app.search_init(s)
 	return s
@@ -40,6 +41,7 @@ library_state :: proc(fake: bool) -> ^app.State {
 library_state_free :: proc(s: ^app.State) {
 	app.search_shutdown(s)
 	app.data_shutdown(s)
+	test_state_free(s)
 }
 
 @(private = "file")
@@ -889,7 +891,6 @@ sign_out_forgets_history_and_search :: proc(t: ^testing.T) {
 	context.allocator = vmem.arena_allocator(&arena)
 	s := library_state(false)
 	defer library_state_free(s)
-	app.session_open(&s.data)
 	sr := &s.search
 	open_test_list(s)
 	f: Frame
@@ -909,7 +910,7 @@ sign_out_forgets_history_and_search :: proc(t: ^testing.T) {
 	testing.expect(t, enabled(s, "Back"))
 
 	app.account_end(s)
-	s.data.account = .Signed_In
+	sign_in(s)
 	library_frame(t, s, &f)
 	testing.expect(t, !enabled(s, "Back"))
 	testing.expect(t, !enabled(s, "Forward"))
