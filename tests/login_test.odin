@@ -527,6 +527,101 @@ refused_login_jobs_wait_for_room :: proc(t: ^testing.T) {
 	}
 }
 
+// login_starts answers the queued Login_Start jobs with a code, as the
+// workers would, until no more go out, and empties the queue. It returns how
+// many there were.
+@(private = "file")
+login_starts :: proc(t: ^testing.T, s: ^app.State) -> int {
+	n := 0
+	for {
+		queued := data_jobs(&s.data)
+		starts := 0
+		for job in queued {
+			if p, start := job.payload.(app.Login_Start_Job); start {
+				testing.expect_value(t, p.attempt, s.data.login_attempt)
+				res := app.Result{job = job, link = {user_code = app.small("ABCDE"), device_code = app.small("dc"), interval = 1, expires = 300}}
+				app.handle_result(s, &res, 0)
+				starts += 1
+			}
+		}
+		if starts == 0 {
+			return n
+		}
+		n += starts
+	}
+}
+
+// A code the queue refused isn't asked for once the user has moved on to
+// the PKCE login, and going back to the code login asks for one code.
+@(test)
+held_login_code_follows_the_login_shown :: proc(t: ^testing.T) {
+	s := data_state()
+	defer data_state_free(s)
+	d := &s.data
+	d.account = .Signed_Out
+	d.login.pkce = .Off
+	fill_with_covers(d)
+
+	app.request_login_code(d)
+	app.pkce_show(d)
+	free_slots(d, 4)
+	app.data_retry(s)
+	testing.expect_value(t, login_starts(t, s), 0)
+
+	app.device_begin(d)
+	testing.expect_value(t, login_starts(t, s), 1)
+	testing.expect_value(t, app.small_str(&d.login.link.user_code), "ABCDE")
+}
+
+// When the hold list is full of jobs that are all still wanted, the oldest
+// goes, and what it was for can ask again: the code login gets a code, and
+// a list asks for its page again and loads in full.
+@(test)
+evicted_held_jobs_are_asked_for_again :: proc(t: ^testing.T) {
+	s := data_state()
+	defer data_state_free(s)
+	d := &s.data
+	d.account = .Signed_Out
+	d.login.pkce = .Off
+	fill_with_covers(d)
+	hold_covers :: proc(d: ^app.Data, n: int) {
+		for _ in 0 ..< n {
+			app.push_job(d, {payload = app.Cover_Job{}}, app.PRIORITY_COVER)
+		}
+	}
+
+	app.request_login_code(d)
+	hold_covers(d, app.HELD_JOBS)
+	app.pkce_show(d)
+	app.device_begin(d)
+	free_slots(d, app.HELD_JOBS + 1)
+	app.data_retry(s)
+	testing.expect_value(t, login_starts(t, s), 1)
+
+	d.account = .Signed_In
+	fill_with_covers(d)
+	app.view_open(d, .Playlist, "pl", "pl", "", 300)
+	hold_covers(d, app.HELD_JOBS - 1)
+	free_slots(d, app.HELD_JOBS + 1)
+	app.data_retry(s)
+	v := &d.view
+	for page := 0; page < 10; page += 1 {
+		served := 0
+		for job in data_jobs(d) {
+			p := job.payload.(app.Tracks_Job) or_continue
+			res := app.Result{job = job, rows = fake_rows(min(int(p.limit), 300 - int(p.offset))), total = 300}
+			app.handle_result(s, &res, 0)
+			served += 1
+		}
+		if served == 0 {
+			break
+		}
+	}
+	testing.expect(t, v.done, "the list ended")
+	testing.expect_value(t, v.in_flight, 0)
+	testing.expect_value(t, v.loaded_rows, 300)
+}
+
 @(private = "file")
 fake_rows :: proc(n: int) -> []app.Row {
 	rows := make([]app.Row, n, context.temp_allocator)

@@ -315,6 +315,44 @@ artist_links_stop_at_the_edge :: proc(t: ^testing.T) {
 	testing.expect(t, first.frame[2] > 0)
 }
 
+// A search the full queue held gives way to the next query, which goes out
+// once there's room.
+@(test)
+held_search_gives_way_to_the_next_query :: proc(t: ^testing.T) {
+	arena: vmem.Arena
+	_ = vmem.arena_init_growing(&arena)
+	defer vmem.arena_destroy(&arena)
+	context.allocator = vmem.arena_allocator(&arena)
+	s := library_state(false)
+	defer library_state_free(s)
+	f: Frame
+	library_frame(t, s, &f)
+	for jobs.push(&s.data.queue, app.Job{payload = app.Cover_Job{}}, app.PRIORITY_COVER) {}
+	library_frame(t, s, &f, {kind = .Key_Down, key = .F, modifiers = {ui.PRIMARY}})
+	library_frame(t, s, &f, type_text(&f, "abc"))
+	library_frame(t, s, &f, {kind = .Key_Down, key = .Return})
+	library_frame(t, s, &f, type_text(&f, "d"))
+	library_frame(t, s, &f, {kind = .Key_Down, key = .Return})
+	testing.expect_value(t, search_jobs(s), 0)
+
+	for _ in 0 ..< 4 {
+		jobs.try_pop(&s.data.queue)
+	}
+	app.data_retry(s)
+	queries := make([dynamic]string, context.temp_allocator)
+	for {
+		job := jobs.try_pop(&s.data.queue) or_break
+		if p, search := job.payload.(app.Search_Job); search {
+			testing.expect_value(t, p.gen, s.search.gen)
+			append(&queries, strings.clone(app.small_str(&p.query), context.temp_allocator))
+		}
+	}
+	testing.expect_value(t, len(queries), 1)
+	if len(queries) == 1 {
+		testing.expect_value(t, queries[0], "abcd")
+	}
+}
+
 // Picking a sidebar entry while a search waits for its debounce, or while
 // its request is out, ends the search: its result mustn't bring the
 // results back over the playlist.
