@@ -542,7 +542,6 @@ mock_run_without_mock_url_keeps_off_tidal :: proc(t: ^testing.T) {
 		Case{keychain = keychain, api = strings.concatenate({"http://127.0.0.1:1/", strings.repeat("x", 300, context.temp_allocator)}, context.temp_allocator)},
 		Case{api = ""},
 		Case{pkce = "http://127.0.0.1:1/android/login/auth?code=mock-pkce-code-1"},
-		Case{service = app.KEYCHAIN_SERVICE},
 	)
 	when ODIN_DEBUG {
 		append(&cases, Case{api = "http://127.0.0.1:8787", keychain = keychain, service = keychain})
@@ -581,6 +580,37 @@ mock_run_without_mock_url_keeps_off_tidal :: proc(t: ^testing.T) {
 	}
 }
 
+// Only a run that asks for neither the mock nor fake data gets TIDAL and the
+// user's Keychain item. The mock gets its own item, and fake data, asked
+// for or fallen back to, gets none.
+@(test)
+run_decide_picks_the_run :: proc(t: ^testing.T) {
+	CONFIG :: "/config"
+	DEFAULT :: CONFIG + "/tidalfast/settings.json"
+	MOCK :: "http://127.0.0.1:8787"
+	Case :: struct {
+		env:  app.Run_Env,
+		want: app.Run,
+	}
+	cases := []Case {
+		{{config_dir = CONFIG}, {mode = .Real, keychain = app.KEYCHAIN_SERVICE, settings = DEFAULT}},
+		{{settings = "/s.json", config_dir = CONFIG}, {mode = .Real, keychain = app.KEYCHAIN_SERVICE, settings = "/s.json"}},
+		{{}, {mode = .Real, keychain = app.KEYCHAIN_SERVICE}},
+		{{bench = "covers", config_dir = CONFIG}, {mode = .Real, keychain = app.KEYCHAIN_SERVICE, settings = DEFAULT}},
+		{{api = MOCK, wants_mock = true, config_dir = CONFIG}, {mode = .Mock, keychain = app.KEYCHAIN_MOCK_SERVICE, settings = DEFAULT}},
+		{{api = MOCK, wants_mock = true, keychain = "tidalfast-test"}, {mode = .Mock, keychain = "tidalfast-test"}},
+		{{api = MOCK, wants_mock = true, keychain = app.KEYCHAIN_SERVICE}, {mode = .Mock, keychain = app.KEYCHAIN_MOCK_SERVICE}},
+		{{wants_mock = true, keychain = "tidalfast-test", settings = "/s.json", config_dir = CONFIG}, {mode = .Fake, fallback = true}},
+		{{fake = "1", settings = "/s.json", config_dir = CONFIG}, {mode = .Fake, settings = "/s.json"}},
+		{{fake = "1", wants_mock = true, config_dir = CONFIG}, {mode = .Fake, settings = DEFAULT}},
+		{{bench = "1", api = MOCK, wants_mock = true, config_dir = CONFIG}, {mode = .Fake, settings = DEFAULT}},
+		{{bench = "text", config_dir = CONFIG}, {mode = .Fake, settings = DEFAULT}},
+	}
+	for c in cases {
+		testing.expect_value(t, app.run_decide(c.env, context.temp_allocator), c.want)
+	}
+}
+
 // A run that fell back to the fake data, as above, plays its tones
 // without bit-perfect output or hog mode whatever the settings say, and
 // reads and writes no settings file: not the user's, not TIDALFAST_SETTINGS.
@@ -589,7 +619,6 @@ mock_fallback_leaves_bit_perfect_and_the_settings_alone :: proc(t: ^testing.T) {
 	sync.guard(&env_mutex)
 	saved := env_clear()
 	defer env_restore(saved)
-	user_path := app.settings_default_path(context.temp_allocator)
 	dir := fmt.tprintf("%s/tidalfast-settings-%d", temp_base(), time.now()._nsec)
 	defer os.remove_all(dir)
 	testing.expect(t, os.make_directory_all(dir) == nil)
@@ -610,7 +639,7 @@ mock_fallback_leaves_bit_perfect_and_the_settings_alone :: proc(t: ^testing.T) {
 		label := fmt.tprint(settings)
 		testing.expect(t, d.fake, label)
 		testing.expect_value(t, app.output_of(s.settings), audio.Output{})
-		testing.expect(t, d.settings_path != user_path, label)
+		testing.expect_value(t, d.settings_path, "")
 		if settings != nil {
 			st := s.settings
 			st.volume = 0.2

@@ -198,40 +198,41 @@ data_start :: proc(s: ^State, shell: ^platform.Shell) {
 	d.wake = shell.request_redraw
 	cover.init(&d.covers, COVER_BUDGET)
 	bench := os.get_env("TIDALFAST_BENCH", context.temp_allocator)
-	d.fake = os.get_env("TIDALFAST_FAKE", context.temp_allocator) != "" || (bench != "" && bench != "covers")
 	d.poison = ODIN_DEBUG
 	// Checked even with fake data, so a refused TIDALFAST_API is always
 	// logged.
 	api := api_override()
-	// Any of these, even empty, asks for the mock. Without a mock URL the
-	// app takes, falling back to TIDAL would use the user's login. The fake
-	// data shown instead gets no settings file, as the user's could turn on
-	// bit-perfect output for the loud test tones.
 	_, wants_api := os.lookup_env("TIDALFAST_API", context.temp_allocator)
 	_, wants_keychain := os.lookup_env("TIDALFAST_KEYCHAIN", context.temp_allocator)
 	_, wants_pkce := os.lookup_env("TIDALFAST_PKCE_REDIRECT", context.temp_allocator)
-	if api == "" && (wants_api || wants_keychain || wants_pkce) && !d.fake {
+	run := run_decide(
+		{
+			fake = os.get_env("TIDALFAST_FAKE", context.temp_allocator),
+			bench = bench,
+			api = api,
+			wants_mock = wants_api || wants_keychain || wants_pkce,
+			keychain = os.get_env("TIDALFAST_KEYCHAIN", context.temp_allocator),
+			settings = os.get_env("TIDALFAST_SETTINGS", context.temp_allocator),
+			config_dir = os_services.config_dir(context.temp_allocator),
+		},
+		runtime.heap_allocator(),
+	)
+	if run.fallback {
 		log.warn("app: TIDALFAST_API, TIDALFAST_KEYCHAIN or TIDALFAST_PKCE_REDIRECT is set without a mock URL the app takes, showing the fake data instead of TIDAL")
-		d.fake = true
-	} else {
-		d.settings_path = settings_default_path(runtime.heap_allocator())
 	}
+	d.settings_path = run.settings
 	s.settings, _ = settings_load(d.settings_path)
+	d.fake = run.mode == .Fake
 	if d.fake {
 		d.account = .Fake
 		return
 	}
+	d.mock = run.mode == .Mock
 	d.lists.memory = true
-	d.lists.root = lists_root(api != "")
+	d.lists.root = lists_root(d.mock)
 	d.bench.running = bench == "covers"
 	d.api = small(api)
-	d.mock = api != ""
-	d.keychain = small(KEYCHAIN_MOCK_SERVICE if d.mock else KEYCHAIN_SERVICE)
-	if d.mock {
-		if name := os.get_env("TIDALFAST_KEYCHAIN", context.temp_allocator); name != "" && name != KEYCHAIN_SERVICE {
-			d.keychain = small(name)
-		}
-	}
+	d.keychain = small(run.keychain)
 	session_open(d)
 	d.account = .Restoring
 	push_job(d, {kind = .Restore})
@@ -303,6 +304,60 @@ data_shutdown :: proc(s: ^State) {
 		vmem.arena_destroy(&d.retired)
 		d.has_retired = false
 	}
+}
+
+Run_Mode :: enum {
+	Real,
+	Mock,
+	Fake,
+}
+
+// Run_Env is what data_start reads from the environment to pick the run.
+Run_Env :: struct {
+	fake, bench: string, // TIDALFAST_FAKE, TIDALFAST_BENCH
+	api:         string, // api_override, "" for no mock URL
+	wants_mock:  bool, // TIDALFAST_API, TIDALFAST_KEYCHAIN or TIDALFAST_PKCE_REDIRECT is set, even empty
+	keychain:    string, // TIDALFAST_KEYCHAIN
+	settings:    string, // TIDALFAST_SETTINGS
+	config_dir:  string, // os_services.config_dir
+}
+
+Run :: struct {
+	mode:     Run_Mode,
+	fallback: bool, // Fake because the mock was asked for without a mock URL
+	keychain: string, // the Keychain service, "" for fake data
+	settings: string, // the settings file, "" for none, allocated with allocator
+}
+
+// run_decide picks fake data, the mock or TIDAL. A run that asks for the
+// mock without a mock URL the app takes gets the fake data, as falling back
+// to TIDAL would use the user's login, and no settings file, as the user's
+// could turn on bit-perfect output for the loud test tones.
+run_decide :: proc(env: Run_Env, allocator: runtime.Allocator) -> (run: Run) {
+	fake := env.fake != "" || (env.bench != "" && env.bench != "covers")
+	switch {
+	case fake:
+		run.mode = .Fake
+	case env.api == "" && env.wants_mock:
+		run.mode = .Fake
+		run.fallback = true
+		return
+	case env.api != "":
+		run.mode = .Mock
+		run.keychain = KEYCHAIN_MOCK_SERVICE
+		if env.keychain != "" && env.keychain != KEYCHAIN_SERVICE {
+			run.keychain = env.keychain
+		}
+	case:
+		run.mode = .Real
+		run.keychain = KEYCHAIN_SERVICE
+	}
+	if env.settings != "" {
+		run.settings = strings.clone(env.settings, allocator)
+	} else if env.config_dir != "" {
+		run.settings = strings.concatenate({env.config_dir, "/tidalfast/settings.json"}, allocator)
+	}
+	return
 }
 
 // MOCK_API lets an optimized build read TIDALFAST_API and
