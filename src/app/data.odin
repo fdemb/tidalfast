@@ -321,11 +321,11 @@ api_override :: proc() -> string {
 		return ""
 	}
 	when !ODIN_DEBUG && !MOCK_API {
-		log.warn("app: TIDALFAST_API is ignored in release builds")
+		log.warn("app: release builds don't take TIDALFAST_API")
 		return ""
 	} else {
 		if !is_loopback_url(api) || len(api) > len(Small{}.buf) {
-			log.warn("app: TIDALFAST_API must be an http(s) URL on 127.0.0.1, ::1 or localhost, ignoring it")
+			log.warn("app: TIDALFAST_API must be an http(s) URL on 127.0.0.1, ::1 or localhost")
 			return ""
 		}
 		return api

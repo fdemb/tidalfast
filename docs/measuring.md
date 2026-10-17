@@ -10,7 +10,7 @@
 ./build/measure/measure launches     # your own launches, from the app's launch log
 ```
 
-`./build.sh measure` builds an optimized app in `build/measure/app` (its own shell and dylib, hot reload off), `tests/mock_tidal` and the tool. The app is the release build plus `TIDALFAST_MOCK_API`, which lets it read `TIDALFAST_API` and `TIDALFAST_PKCE_REDIRECT`. The real release build never reads them (see [TIDAL data](tidal-data.md#the-mock-server)), so it can't run against the mock.
+`./build.sh measure` builds an optimized app in `build/measure/app` (its own shell and dylib, hot reload off), `tests/mock_tidal` and the tool. The app is the release build plus `TIDALFAST_MOCK_API`, which lets it read `TIDALFAST_API` and `TIDALFAST_PKCE_REDIRECT`. The real release build doesn't take them, so it can't run against the mock. With either one set it shows the fake data, as every build does without a mock URL it takes (see [Building](building.md)).
 
 Each run is a cold launch with `TIDALFAST_MEASURE` set, `TIDALFAST_AUDIO_NULL=1` and a settings file of its own, so bit-perfect output is off and your settings stay as they are. The runs share a list cache folder in the logs folder: the mock's first run starts with an empty cache, and later runs read the sidebar and Liked Songs from it. Other `TIDALFAST_` variables in your environment are dropped. The tool prints a table per scenario and setup, writes `build/measure/<time>.json`, and keeps each run's stderr in `build/measure/logs-<time>/`. Flags: `-runs=N`, `-setup=fake` or `mock` or `fake,mock`, `-app=path`, `-timeout=seconds` and `-out=path`.
 
