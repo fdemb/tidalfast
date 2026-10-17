@@ -5,6 +5,7 @@ import "core:mem"
 import vmem "core:mem/virtual"
 import "core:strings"
 import "core:testing"
+import "core:unicode/utf8"
 
 import app "../src/app"
 import "../src/cover"
@@ -813,4 +814,26 @@ back_finds_playlists_by_id :: proc(t: ^testing.T) {
 	s.data.sidebar.items = s.data.sidebar.items[1:]
 	library_frame(t, s, &f, press(s, "Forward"))
 	testing.expect_value(t, s.data.view.source, app.Source.Liked)
+}
+
+@(test)
+small_cuts_at_a_character :: proc(t: ^testing.T) {
+	cases := []struct {
+		pad:  int,
+		tail: string,
+		want: int,
+	} {
+		{118, "żółw", 118},
+		{117, "日本の歌", 117},
+		{116, "🎵🎶", 116},
+		{115, "🎵🎶", 119},
+	}
+	for c in cases {
+		name := strings.concatenate({strings.repeat("a", c.pad, context.temp_allocator), c.tail}, context.temp_allocator)
+		cut := app.small(name)
+		got := app.small_str(&cut)
+		testing.expect(t, utf8.valid_string(got))
+		testing.expect(t, strings.has_prefix(name, got))
+		testing.expect_value(t, len(got), c.want)
+	}
 }
