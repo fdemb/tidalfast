@@ -479,15 +479,7 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 	}
 	cell(track.duration, cols.duration, .Right)
 
-	more := ui.box_make("…##more", {.Clickable, .Draw_Text, .Draw_Hot_Effects}, ui.px(cols.more), ui.fill())
-	more.text_align = .Center
-	more.font_size = 16
-	more.text_color = TEXT
-	more.radius = 6
-	more.opacity = max(row.hot_t, 1 if selected else 0)
-	more_label := fmt.tprintf("More options for %s", track.title)
-	ui.accessible(more, .Button, more_label)
-	more_sig := ui.signal(more)
+	more, more_sig := icon_button("more", text.ICON_DOTS_THREE, .Icon, fmt.tprintf("More options for %s", track.title), TEXT, max(row.hot_t, 1 if selected else 0), cols.more)
 	if more_sig.clicked {
 		lib.selected = i
 		open_track_menu(s, i, {more.rect.x, more.rect.y + more.rect.h})
@@ -496,21 +488,39 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 	ui.spacer(ui.px(8))
 }
 
+// icon_button is a square icon button of side, centred in the cell it sits
+// in: the square is the click and hover area. hot is its opacity, so 0
+// hides it while it still clicks. Returns the button's box for anything
+// anchored to it, such as a menu.
+icon_button :: proc(id, icon: string, font: text.Font, name: string, color: render.Color, hot: f32, side: f32) -> (^ui.Box, ui.Signal) {
+	ui.column("", {}, ui.px(side), ui.fill())
+	ui.spacer(ui.fill())
+	b := ui.box_make(fmt.tprintf("%s###%s", icon, id), {.Clickable, .Draw_Text, .Draw_Hot_Effects}, ui.px(side), ui.px(side))
+	b.text_align = .Center
+	b.font = font
+	b.font_size = 16
+	b.text_color = color
+	b.radius = 6
+	b.opacity = hot
+	ui.accessible(b, .Button, name)
+	ui.spacer(ui.fill())
+	sig := ui.signal(b)
+	return b, sig
+}
+
 // heart_button is a filled heart in the accent when the track is liked,
 // and an outline in color at opacity hot otherwise (0 hides it, but it
 // still clicks).
-heart_button :: proc(id: string, liked: bool, name: string, color: render.Color, hot: f32, width: f32) -> ui.Signal {
-	b := ui.box_make(fmt.tprintf("%s###%s", text.ICON_HEART_FILL if liked else text.ICON_HEART, id), {.Clickable, .Draw_Text, .Draw_Hot_Effects}, ui.px(width), ui.fill())
-	b.text_align = .Center
-	b.font = .Icon_Fill if liked else .Icon
-	b.font_size = 16
-	b.text_color = ACCENT if liked else color
-	b.radius = 6
-	if !liked {
-		b.opacity = hot
-	}
-	ui.accessible(b, .Button, name)
-	sig := ui.signal(b)
+heart_button :: proc(id: string, liked: bool, name: string, color: render.Color, hot: f32, side: f32) -> ui.Signal {
+	_, sig := icon_button(
+		id,
+		text.ICON_HEART_FILL if liked else text.ICON_HEART,
+		.Icon_Fill if liked else .Icon,
+		name,
+		ACCENT if liked else color,
+		1 if liked else hot,
+		side,
+	)
 	ui.tooltip(sig, "Remove from Liked Songs" if liked else "Save to Liked Songs")
 	return sig
 }
@@ -758,7 +768,7 @@ draw_player_bar :: proc(s: ^State, w: f32) {
 				playing = pb.entries[pb.index].id
 			}
 			liked := liked_has(&s.data, playing)
-			if heart_button("heart_bar", liked, "Unlike" if liked else "Like", SECONDARY, 1, 24).clicked {
+			if heart_button("heart_bar", liked, "Unlike" if liked else "Like", SECONDARY, 1, 20).clicked {
 				liked_toggle(s, playing)
 				ui.data_changed()
 			}
