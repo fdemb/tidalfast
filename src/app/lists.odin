@@ -483,6 +483,10 @@ add_to_list :: proc(s: ^State, track, entry: int) {
 	if entry > 0 {
 		job.source = .Playlist
 		job.id = small(d.sidebar.items[entry - 1].id)
+	} else {
+		// Liked Songs. The heart changes at once; if TIDAL says no, the
+		// result puts it back.
+		liked_put(d, row.id, true)
 	}
 	push_job(d, {payload = job})
 	set_status(s, .Adding, track, entry)
@@ -490,8 +494,10 @@ add_to_list :: proc(s: ^State, track, entry: int) {
 
 // add_result takes an Add_Track. With the row as TIDAL now lists it, the
 // kept copies take it in place at the version TIDAL gave, so nothing is
-// fetched again. Without it they're dropped and the list is fetched again.
-// The status line says how it went if it still names this add.
+// fetched again. An unlike takes the row out the same way. Without either
+// row they're dropped and the list is fetched again. The heart was set
+// before the job went out, so a failed one puts it back. The status line
+// says how it went if it still names this add.
 add_result :: proc(s: ^State, res: ^Result, job: Add_Track_Job) {
 	d := &s.data
 	lib := &s.library
@@ -499,7 +505,7 @@ add_result :: proc(s: ^State, res: ^Result, job: Add_Track_Job) {
 	id := small_str(&job.id)
 	err, failed := res.err.?
 	added := res.added
-	if job.source == .Liked && len(res.rows) == 1 {
+	if job.source == .Liked && !job.remove && len(res.rows) == 1 {
 		// Liking a liked track adds nothing, and only the count tells.
 		added = res.version.count > i64(d.sidebar.liked_count)
 	}
@@ -508,10 +514,27 @@ add_result :: proc(s: ^State, res: ^Result, job: Add_Track_Job) {
 	case failed:
 		status = .Add_Failed
 		log.warnf("lists: adding a track to %s failed: %v", list_name(job.source, id), err)
+		if job.source == .Liked {
+			// The heart went ahead of TIDAL; it goes back.
+			liked_put(d, job.track, job.remove)
+		}
+	case job.remove:
+		// Unliking: the row leaves the kept copies, at the version the
+		// unliked list was at. The set was told when the job went out, so
+		// the version is recorded and the set isn't fetched again for it.
+		if res.version.count > 0 {
+			list_edited(s, job.source, id, false, Row{id = job.track}, res.version)
+			d.liked.version = res.version
+		} else {
+			list_forget(s, job.source, id)
+		}
 	case !added:
 		status = .Already_In
 	case len(res.rows) == 1:
 		list_edited(s, job.source, id, true, res.rows[0], res.version)
+		if job.source == .Liked {
+			d.liked.version = res.version
+		}
 	case:
 		list_forget(s, job.source, id)
 	}
@@ -683,6 +706,9 @@ sidebar_adopt :: proc(s: ^State, res: ^Result, from_disk: bool) {
 		select_playlist(s, 0)
 	} else if !from_disk {
 		list_check(d)
+	}
+	if !from_disk {
+		liked_fetch(d)
 	}
 }
 

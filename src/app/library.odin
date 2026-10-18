@@ -128,7 +128,7 @@ PLAYLISTS := [?]string {
 // Track_Columns is the width of each column in the track table; 0 hides it.
 // The title takes what's left.
 Track_Columns :: struct {
-	number, cover, album, added, duration, more: f32,
+	number, cover, album, added, heart, duration, more: f32,
 }
 
 // track_columns follows spotifast: the album shows above 560 pt and the date
@@ -139,6 +139,7 @@ track_columns :: proc(width: f32, dated: bool) -> Track_Columns {
 		cover = 52,
 		album = clamp(width * 0.28, 140, 360) if width > 560 else 0,
 		added = 120 if dated && width > 760 else 0,
+		heart = 36,
 		duration = 56,
 		more = 36,
 	}
@@ -324,6 +325,9 @@ draw_main_view :: proc(s: ^State, main_w: f32) {
 		ui.label("Title", ui.fill(), ui.fill())
 		header_cell("Album", cols.album, .Left)
 		header_cell("Date added", cols.added, .Left)
+		if cols.heart > 0 {
+			ui.spacer(ui.px(cols.heart))
+		}
 		header_cell("Time", cols.duration, .Right)
 		ui.spacer(ui.px(cols.more + 8 + ui.scroll_gutter("tracks")))
 	}
@@ -465,6 +469,14 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 		}
 	}
 	cell(track.added, cols.added, .Left)
+	key := i64(fake_row_index(s, i)) if s.data.fake else track.id
+	liked := liked_has(&s.data, key)
+	heart_sig := heart_button(fmt.tprintf("heart%d", i), liked, fmt.tprintf("%s %s", "Unlike" if liked else "Like", track.title), TEXT, max(row.hot_t, 1 if selected else 0), cols.heart)
+	if heart_sig.clicked {
+		lib.selected = i
+		liked_toggle(s, key)
+		ui.data_changed() // this frame drew the old heart
+	}
 	cell(track.duration, cols.duration, .Right)
 
 	more := ui.box_make("…##more", {.Clickable, .Draw_Text, .Draw_Hot_Effects}, ui.px(cols.more), ui.fill())
@@ -482,6 +494,25 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 	}
 	ui.tooltip(more_sig, "More")
 	ui.spacer(ui.px(8))
+}
+
+// heart_button is a filled heart in the accent when the track is liked,
+// and an outline in color at opacity hot otherwise (0 hides it, but it
+// still clicks).
+heart_button :: proc(id: string, liked: bool, name: string, color: render.Color, hot: f32, width: f32) -> ui.Signal {
+	b := ui.box_make(fmt.tprintf("%s###%s", text.ICON_HEART_FILL if liked else text.ICON_HEART, id), {.Clickable, .Draw_Text, .Draw_Hot_Effects}, ui.px(width), ui.fill())
+	b.text_align = .Center
+	b.font = .Icon_Fill if liked else .Icon
+	b.font_size = 16
+	b.text_color = ACCENT if liked else color
+	b.radius = 6
+	if !liked {
+		b.opacity = hot
+	}
+	ui.accessible(b, .Button, name)
+	sig := ui.signal(b)
+	ui.tooltip(sig, "Remove from Liked Songs" if liked else "Save to Liked Songs")
+	return sig
 }
 
 // row_link takes the signal of a link in row i of the track table, and
@@ -717,6 +748,19 @@ draw_player_bar :: proc(s: ^State, w: f32) {
 			ui.row("", {}, ui.fill(), ui.px(20))
 			if text_link(s, title, "###album", item.album_id != 0, ui.fill(), 0).clicked {
 				open_album(s, item.album_id, item.album, item.cover, item.row)
+			}
+			ui.spacer(ui.px(4))
+			pb := &s.playback
+			playing := i64(0)
+			if pb.fake {
+				playing = i64(item.row)
+			} else if pb.index < len(pb.entries) {
+				playing = pb.entries[pb.index].id
+			}
+			liked := liked_has(&s.data, playing)
+			if heart_button("heart_bar", liked, "Unlike" if liked else "Like", SECONDARY, 1, 24).clicked {
+				liked_toggle(s, playing)
+				ui.data_changed()
 			}
 		}
 		// A track that couldn't play says why in place of the artist, on

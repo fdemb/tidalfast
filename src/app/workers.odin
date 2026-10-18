@@ -20,6 +20,7 @@ import "base:runtime"
 import "core:fmt"
 import "core:log"
 import "core:mem"
+import "core:slice"
 import vmem "core:mem/virtual"
 import "core:os"
 import "core:strings"
@@ -89,6 +90,7 @@ Job_Payload :: union {
 	Save_Settings_Job,
 	Disk_Job,
 	Add_Track_Job,
+	Liked_Ids_Job,
 	Launch_Log_Job,
 }
 
@@ -173,11 +175,18 @@ Disk_Job :: struct {
 	blob:   []u8, // writes: the file, heap, freed by the disk thread
 }
 
-// Add_Track_Job likes a track or adds it to a playlist, see add_to_list.
+// Add_Track_Job likes a track, unlikes one, or adds it to a playlist, see
+// add_to_list.
 Add_Track_Job :: struct {
 	track:  i64,
 	source: Source, // .Liked or .Playlist
 	id:     Small, // the playlist's
+	remove: bool, // .Liked only: unlike it
+}
+
+// Liked_Ids_Job reads every liked track's id for the hearts, see liked.odin.
+Liked_Ids_Job :: struct {
+	version: List_Version, // the sidebar's Liked Songs version when it went out
 }
 
 // Launch_Log_Job appends this launch to the launch log, see launch_log.odin.
@@ -231,6 +240,7 @@ Result :: struct {
 	fetched:     i64, // Disk: when, unix seconds
 	queue:       Queue_Header, // Disk, Read_Queue: the play queue's place; its rows are in rows
 	added:       bool, // Add_Track: TIDAL added it rather than finding it there
+	liked_ids:   []i64, // Liked_Ids: every liked track's id, sorted
 }
 
 workers_start :: proc(d: ^Data) {
@@ -572,6 +582,8 @@ run_job :: proc(d: ^Data, job: Job) -> (res: Result) {
 		}
 	case Add_Track_Job:
 		run_add_track(s, p, &res, alloc)
+	case Liked_Ids_Job:
+		run_liked_ids(s, p, &res, alloc)
 	case Search_Job:
 		query := p.query
 		found, err := tidal.search(s, small_str(&query), {.Track, .Album, .Artist, .Playlist}, SEARCH_PAGE, 0, alloc)
@@ -710,15 +722,44 @@ run_playlists :: proc(s: ^tidal.Session, res: ^Result, alloc: mem.Allocator) {
 	res.playlists = items[:]
 }
 
-// run_add_track likes a track or adds it to the end of a playlist, then
-// asks for the list's version and the track as the list now has it, so
-// the kept copies can take it in place. If that second ask fails, the add
-// still stands and res.rows stays empty.
+// run_liked_ids reads every liked track's id in one request and sorts
+// them for the hearts' binary search. The version is the sidebar's from
+// when the job went out, since the ids don't say one.
+@(private = "file")
+run_liked_ids :: proc(s: ^tidal.Session, job: Liked_Ids_Job, res: ^Result, alloc: mem.Allocator) {
+	ids, err := tidal.favorites_track_ids(s, alloc)
+	if err != nil {
+		fail(res, err)
+		return
+	}
+	slice.sort(ids)
+	res.liked_ids = ids
+	res.version = job.version
+}
+
+// run_add_track likes, unlikes or adds a track to the end of a playlist,
+// then asks for the list's version and the track as the list now has it,
+// so the kept copies can take it in place. If that second ask fails, the
+// add still stands and res.rows stays empty.
 @(private = "file")
 run_add_track :: proc(s: ^tidal.Session, job: Add_Track_Job, res: ^Result, alloc: mem.Allocator) {
 	track := fmt.tprint(job.track)
 	id := job.id
 	if job.source == .Liked {
+		if job.remove {
+			if err := tidal.favorites_remove_track(s, track); err != nil {
+				fail(res, err)
+				return
+			}
+			// One track gives the count and the newest, which list_edited
+			// takes; the set holds the truth about the track itself.
+			newest, count, _ := tidal.favorites_tracks(s, 1, 0, .Date, .Descending, context.temp_allocator)
+			res.version = {count = i64(count)}
+			if len(newest) > 0 {
+				res.version.newest = newest[0].id
+			}
+			return
+		}
 		if err := tidal.favorites_add_track(s, {track}); err != nil {
 			fail(res, err)
 			return
