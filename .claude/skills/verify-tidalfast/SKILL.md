@@ -53,6 +53,7 @@ Teardown happens on its own: the last step is `quit`. If the app is still up 15 
 | `ax-dump` | logs the accessibility tree: role, label, value, frame, `focused`, `press` |
 | `ax-press=prefix` | presses the first pressable element whose label or value starts with prefix |
 | `capture=@name` | copies the last presented frame to `name.png` in the evidence directory |
+| `hide`, `unhide` | hides the app and shows it again, as Cmd-H and clicking its Dock icon do |
 | `quit` | quits the app |
 
 Prefer `ax-press` with a label from `ax-dump` over keys that depend on focus. Labels are in the app's words: search tabs are `Songs  203` (two spaces), track rows are `title, artist, album`, sidebar rows are `name, Playlist · N songs`. `ax-press` on a track row plays it, on a sidebar row opens the playlist, and on a button clicks it.
@@ -60,6 +61,8 @@ Prefer `ax-press` with a label from `ax-dump` over keys that depend on focus. La
 Allow 1.5 s between `size=` and a `capture`, and 2 s between typing a query and capturing results: the search debounce is 250 ms and the mock needs a round trip.
 
 Set `AUDIO_CAPTURE=1` before `$V run` to record what reaches the null device in `audio.wav`.
+
+`run` sets `TIDALFAST_CAPTURE` only when the steps have a `capture=`. With it the window's drawables stay full size while it's covered or hidden. Without it the shell shrinks them to a pixel then, so a run that measures memory around `hide` and `unhide` must not capture.
 
 The features in `features/` are the maintained recipes. Read `features/README.md` and the file for the feature you're proving.
 

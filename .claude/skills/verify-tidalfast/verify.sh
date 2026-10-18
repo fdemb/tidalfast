@@ -172,10 +172,12 @@ cmd_run() {
 	env_args=(
 		TIDALFAST_SETTINGS="$STATE/settings.json"
 		TIDALFAST_CACHE="$STATE/cache"
-		TIDALFAST_CAPTURE="$STATE/frame.tga"
 		TIDALFAST_SHELL_TEST="$steps"
 		TIDALFAST_AUDIO_NULL=1
 	)
+	# Only with captures: it keeps the window's drawables full size while
+	# the window is covered or hidden, see update_parking in shell.m.
+	case $steps in *capture=*) env_args+=(TIDALFAST_CAPTURE="$STATE/frame.tga") ;; esac
 	[ -n "${AUDIO_CAPTURE:-}" ] && env_args+=(TIDALFAST_AUDIO_CAPTURE="$EVIDENCE/audio.wav")
 	case $mode in
 	fake) env_args+=(TIDALFAST_FAKE=1) ;;

@@ -53,6 +53,8 @@ static uint32_t g_event_count;
 static uint32_t g_event_capacity;
 static atomic_bool g_needs_redraw;
 static bool g_animating;
+static bool g_parked; // the window can't be seen and its drawables are a pixel, see update_parking
+static bool g_never_park; // TIDALFAST_CAPTURE is set
 static double g_last_tick; // CACurrentMediaTime of the last display link frame
 static double g_tick_interval = 1.0 / 60;
 static CFRunLoopTimerRef g_tick_fallback;
@@ -959,7 +961,7 @@ static uint32_t scroll_phase(NSEventPhase phase) {
 - (void)update_drawable_size {
   CGFloat scale = self.window ? self.window.backingScaleFactor : 1;
   g_layer.contentsScale = scale;
-  g_layer.drawableSize = CGSizeMake(self.bounds.size.width * scale, self.bounds.size.height * scale);
+  g_layer.drawableSize = g_parked ? CGSizeMake(1, 1) : CGSizeMake(self.bounds.size.width * scale, self.bounds.size.height * scale);
 }
 
 - (void)resized {
@@ -1172,6 +1174,28 @@ static Event key_event(NSEvent *e, uint32_t kind) {
 
 @end
 
+// While the window can't be seen (minimized, hidden or covered), its
+// drawables shrink to a pixel and go back to the system: 44 MB at 1500x950
+// points on a 2x display. Each frame at that size replaces one of them, the
+// one on screen first, so parking draws three, the most the layer keeps: a
+// third from the display link can outlive the drop back to two, see
+// update_display_link. They take 1 to 12 ms each. Frames go on at that
+// size as playback asks for them. When the window can be seen again it
+// draws at full size straight away, as a resize does. Only a change parks,
+// not the state at launch, and TIDALFAST_CAPTURE turns it off, since a
+// capture of a covered window must still show the window. shown is an
+// unhide or a deminiaturize, after which the occlusion state can lag: the
+// window draws at full size, and a later change parks it again.
+static void update_parking(bool shown) {
+  bool visible = shown || (g_window.occlusionState & NSWindowOcclusionStateVisible) != 0;
+  bool park = !visible && !g_never_park;
+  if (park == g_parked) return;
+  g_parked = park;
+  [(Metal_View *)g_view update_drawable_size];
+  int frames = g_parked ? 3 : 1;
+  for (int i = 0; i < frames; i++) draw_frame();
+}
+
 // The link runs only while the app animates and the window is on screen. A
 // hidden or minimized window gets no animation frames, but explicit redraws
 // still draw.
@@ -1213,6 +1237,7 @@ static void update_display_link(void) {
 //   ime                 print what NSTextInputClient answers
 //   ax-dump             print the window's accessibility tree, as an assistive app reads it
 //   ax-press=label      AXPress on the first element whose label or value starts with label
+//   hide, unhide        hide the app and show it again, as Cmd-H and clicking its Dock icon do
 //   capture=path        copy the last TIDALFAST_CAPTURE frame to path
 //   quit
 
@@ -1361,6 +1386,11 @@ static void test_step(NSString *command, NSString *arg) {
       return;
     }
     [g_window setContentSize:NSMakeSize(w, h)];
+  } else if ([command isEqualToString:@"hide"]) {
+    [NSApp hide:nil];
+  } else if ([command isEqualToString:@"unhide"]) {
+    [NSApp unhide:nil];
+    [NSApp activateIgnoringOtherApps:YES];
   } else if ([command isEqualToString:@"quit"]) {
     [NSApp terminate:nil];
   } else {
@@ -1419,8 +1449,25 @@ static void setup_shell_test(void) {
                                                   object:g_window
                                                    queue:nil
                                               usingBlock:^(NSNotification *n) {
+                                                update_parking(false);
                                                 update_display_link();
                                               }];
+  // A hidden app's or a minimized window's occlusion changes without the
+  // notification above.
+  g_never_park = getenv("TIDALFAST_CAPTURE") != NULL;
+  NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
+  [center addObserverForName:NSApplicationDidHideNotification object:NSApp queue:nil usingBlock:^(NSNotification *n) {
+    update_parking(false);
+  }];
+  [center addObserverForName:NSApplicationDidUnhideNotification object:NSApp queue:nil usingBlock:^(NSNotification *n) {
+    update_parking(true);
+  }];
+  [center addObserverForName:NSWindowDidMiniaturizeNotification object:g_window queue:nil usingBlock:^(NSNotification *n) {
+    update_parking(false);
+  }];
+  [center addObserverForName:NSWindowDidDeminiaturizeNotification object:g_window queue:nil usingBlock:^(NSNotification *n) {
+    update_parking(true);
+  }];
   // The app stops the caret blinking without the keyboard.
   for (NSNotificationName name in @[ NSWindowDidBecomeKeyNotification, NSWindowDidResignKeyNotification ]) {
     [NSNotificationCenter.defaultCenter addObserverForName:name
