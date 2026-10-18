@@ -42,8 +42,12 @@ Mock :: struct {
 	mutex:      sync.Mutex,
 	items:      [dynamic]Mock_Item,
 	liked:      [dynamic]i64, // tracks liked by a POST, newest first, on top of the MOCK_LIKED
-	// Accept DELETEs without removing anything.
-	stuck:      bool,
+	// Tracks of the MOCK_LIKED range unliked with a DELETE; a POST likes
+	// one back where it was. Tracks liked by a POST go off liked itself,
+	// since they were listed on top of it.
+	liked_removed: [dynamic]i64,
+	// Stuck accepts DELETEs without removing anything.
+	stuck:         bool,
 	requests:   [dynamic]string, // "METHOD /path?query"
 	refreshes:  int, // POSTs to /token
 	last_query: map[string]string,
@@ -77,6 +81,7 @@ mock_start :: proc(m: ^Mock, items: []Mock_Item = nil) {
 	m.allocator = runtime.heap_allocator()
 	m.items = make([dynamic]Mock_Item, m.allocator)
 	m.liked = make([dynamic]i64, m.allocator)
+	m.liked_removed = make([dynamic]i64, m.allocator)
 	m.requests = make([dynamic]string, m.allocator)
 	m.poll_times = make([dynamic]time.Tick, m.allocator)
 	m.files = make(map[string][]u8, m.allocator)
@@ -315,6 +320,14 @@ mock_route :: proc(m: ^Mock, req: Mock_Request, target: string) -> (status: int,
 		return 200, `{}`, etag
 	case req.path == "/users/123/favorites/tracks" && req.method == "POST":
 		id, _ := strconv.parse_i64(req.form["trackId"] or_else "")
+		if id >= 1 && id <= MOCK_LIKED {
+			if at := removed_at(m, id); at >= 0 {
+				// Liked again after a DELETE took it off: it's back where
+				// it was among the MOCK_LIKED, not on top.
+				ordered_remove(&m.liked_removed, at)
+				return 200, `{}`, etag
+			}
+		}
 		liked := id >= 1 && id <= MOCK_LIKED
 		for l in m.liked {
 			liked ||= l == id
@@ -323,8 +336,19 @@ mock_route :: proc(m: ^Mock, req: Mock_Request, target: string) -> (status: int,
 			inject_at(&m.liked, 0, id)
 		}
 		return 200, `{}`, etag
+	case strings.has_prefix(req.path, "/users/123/favorites/tracks/") && req.method == "DELETE":
+		id, _ := strconv.parse_i64(strings.trim_prefix(req.path, "/users/123/favorites/tracks/"))
+		if at := liked_at(m, id); at >= 0 {
+			// Liked on top by a POST: off the list, not recorded.
+			ordered_remove(&m.liked, at)
+		} else if id >= 1 && id <= MOCK_LIKED {
+			if removed_at(m, id) < 0 {
+				append(&m.liked_removed, id)
+			}
+		}
+		return 200, `{}`, etag
 	case req.path == "/users/123/favorites/tracks":
-		return 200, mock_liked_page(req.query["offset"] or_else "0", req.query["limit"] or_else "50", m.liked[:]), etag
+		return 200, mock_liked_page(req.query["offset"] or_else "0", req.query["limit"] or_else "50", m.liked[:], m.liked_removed[:]), etag
 	case req.path == "/echo":
 		return 200, `{}`, etag
 	case req.path == "/refused":
@@ -462,15 +486,40 @@ MOCK_LIKED_LIMIT :: 100
 // can't be played. Track i has id i + 1.
 MOCK_UNAVAILABLE :: [?]int{120, 777, 1400}
 
+// liked_removed_at says where track id sits among the unliked ones, or -1.
+@(private = "file")
+liked_removed_at :: proc(removed: []i64, id: i64) -> int {
+	for r, at in removed {
+		if r == id {
+			return at
+		}
+	}
+	return -1
+}
+
+// liked_at says where track id sits among the ones liked by a POST, or -1.
+@(private = "file")
+liked_at :: proc(m: ^Mock, id: i64) -> int {
+	return liked_removed_at(m.liked[:], id)
+}
+
+// removed_at says the same of the MOCK_LIKED ones a DELETE took off, or -1.
+@(private = "file")
+removed_at :: proc(m: ^Mock, id: i64) -> int {
+	return liked_removed_at(m.liked_removed[:], id)
+}
+
 // mock_liked_page answers users/123/favorites/tracks as TIDAL does: at
 // most MOCK_LIKED_LIMIT a page, the unavailable tracks left out, and
-// totalNumberOfItems counting them. Tracks liked by a POST come first.
-mock_liked_page :: proc(offset_s, limit_s: string, liked: []i64 = nil) -> string {
+// totalNumberOfItems counting them. Tracks liked by a POST come first. A
+// track unliked with a DELETE is gone from both: it doesn't take a
+// position, like an unavailable one takes one and is left out.
+mock_liked_page :: proc(offset_s, limit_s: string, liked: []i64 = nil, removed: []i64 = nil) -> string {
 	offset, _ := strconv.parse_int(offset_s)
 	limit, _ := strconv.parse_int(limit_s)
 	limit = min(limit, MOCK_LIKED_LIMIT)
 	b := strings.builder_make(context.temp_allocator)
-	total := MOCK_LIKED + len(liked)
+	total := MOCK_LIKED - len(removed) + len(liked)
 	fmt.sbprintf(&b, `{{"limit":%d,"offset":%d,"totalNumberOfItems":%d,"items":[`, limit, offset, total)
 	first := true
 	outer: for at in offset ..< min(offset + limit, total) {
@@ -482,7 +531,19 @@ mock_liked_page :: proc(offset_s, limit_s: string, liked: []i64 = nil) -> string
 			fmt.sbprintf(&b, `{{"created":"2026-02-03T10:00:00.000+0000","item":{{"id":%d,"title":"t%d","duration":200,"artist":{{"id":1,"name":"A"}},"artists":[{{"id":1,"name":"A"}}],"album":{{"id":2,"title":"B","cover":""}}}}}}`, liked[at], liked[at])
 			continue
 		}
-		i := at - len(liked)
+		// Where at lands in the MOCK_LIKED range, the unliked ones not
+		// taking a position.
+		at_base := at - len(liked)
+		i := 0
+		for at_base > 0 {
+			i += 1
+			if liked_removed_at(removed, i64(i + 1)) < 0 {
+				at_base -= 1
+			}
+		}
+		for liked_removed_at(removed, i64(i + 1)) >= 0 {
+			i += 1
+		}
 		for u in MOCK_UNAVAILABLE {
 			if i == u {
 				continue outer

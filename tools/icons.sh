@@ -18,6 +18,8 @@ bold repeat e3f6
 bold repeat-once e3f8
 bold caret-left e138
 bold caret-right e13a
+bold heart e2a8
+fill heart e2a8
 "
 
 for weight in fill bold; do

@@ -56,7 +56,9 @@
 // its ETag, and POST /playlists/<uuid>/items with that ETag in If-None-Match
 // adds trackIds at the end, skipping one that's there already, and moves
 // lastUpdated on. A stale ETag gets 412. POST /users/123/favorites/tracks
-// likes trackId, unless it's liked already. Any track id from the mock can
+// likes trackId, unless it's liked already, and DELETE
+// /users/123/favorites/tracks/<id> unlikes it: it leaves the liked tracks
+// until the same POST likes it back. Any track id from the mock can
 // be added, and it's listed as it is elsewhere.
 //
 // It never prints tokens or Authorization headers.
@@ -128,6 +130,7 @@ Server :: struct {
 	pkce_codes:    int,
 	changes:       [len(PLAYLISTS)]int, // /mock/change calls per playlist
 	liked_added:   [dynamic]int, // track ids liked through /mock/change or a POST, oldest first; heap
+	liked_removed: [dynamic]int, // track ids unliked with a DELETE, oldest first; heap
 	added:         [len(PLAYLISTS)][dynamic]Added_Item, // tracks added by a POST; heap
 }
 
@@ -504,10 +507,30 @@ route :: proc(req: ^Request) -> Response {
 			return hires_playbackinfo(id, quality, pkce)
 		}
 		return playbackinfo_response(id)
+	case strings.has_prefix(path, fmt.tprintf("/users/%d/favorites/tracks/", USER_ID)) && req.method == "DELETE":
+		id, _ := parse_i(strings.trim_prefix(path, fmt.tprintf("/users/%d/favorites/tracks/", USER_ID)))
+		sync.guard(&server.mutex)
+		if at := liked_added_at(id); at >= 0 {
+			ordered_remove(&server.liked_added, at)
+			fmt.printfln("mock: unliked track %d, %d liked", id, LIKED + len(server.liked_added))
+		} else if is_liked(id) {
+			if !slice.contains(server.liked_removed[:], id) {
+				append(&server.liked_removed, id)
+			}
+			fmt.printfln("mock: unliked track %d, %d liked", id, LIKED - len(server.liked_removed))
+		} else {
+			fmt.printfln("mock: track %d is not liked", id)
+		}
+		return json_response(200, "{}")
 	case path == fmt.tprintf("/users/%d/favorites/tracks", USER_ID) && req.method == "POST":
 		id, _ := parse_i(req.form["trackId"] or_else "")
 		sync.guard(&server.mutex)
-		if is_liked(id) {
+		if at := removed_at(id); at >= 0 {
+			// Liked again after a DELETE took it off: it's where the rest
+			// of the liked tracks are again.
+			ordered_remove(&server.liked_removed, at)
+			fmt.printfln("mock: liked track %d again", id)
+		} else if is_liked(id) {
 			fmt.printfln("mock: track %d is liked already", id)
 		} else {
 			append(&server.liked_added, id)
@@ -517,9 +540,10 @@ route :: proc(req: ^Request) -> Response {
 	case path == fmt.tprintf("/users/%d/favorites/tracks", USER_ID):
 		sync.mutex_lock(&server.mutex)
 		liked_added := slice.clone(server.liked_added[:], context.temp_allocator)
+		removed := slice.clone(server.liked_removed[:], context.temp_allocator)
 		sync.mutex_unlock(&server.mutex)
 		extra := 0 if server.config.hires_only else len(liked_added)
-		liked := len(HIRES) if server.config.hires_only else LIKED + extra
+		liked := len(HIRES) if server.config.hires_only else LIKED - len(removed) + extra
 		limit = min(limit, LIKED_LIMIT)
 		b := list_begin(liked, offset, limit)
 		first := true
@@ -534,7 +558,10 @@ route :: proc(req: ^Request) -> Response {
 				strings.write_byte(&b, '}')
 				continue
 			}
-			i := at - extra
+			i := liked_base_at(at - extra, removed)
+			if i < 0 {
+				break
+			}
 			if !server.config.hires_only {
 				for u in UNAVAILABLE {
 					if i == u {
@@ -772,8 +799,16 @@ in_playlist :: proc(p, id: int) -> bool {
 	return true
 }
 
-// is_liked says whether track id is among the liked tracks. Hold the mutex.
+// is_liked says whether track id is among the liked tracks. A DELETE
+// records the id instead of having it forget where it came from: a base
+// track with it removed is unliked, so a POST can like it back. Hold the
+// mutex.
 is_liked :: proc(id: int) -> bool {
+	for r in server.liked_removed {
+		if r == id {
+			return false
+		}
+	}
 	for l in server.liked_added {
 		if l == id {
 			return true
@@ -789,6 +824,50 @@ is_liked :: proc(id: int) -> bool {
 		}
 	}
 	return at >= 3 + len(HIRES) && at < LIKED
+}
+
+// liked_added_at says where track id sits among the ones liked through
+// /mock/change or a POST, or -1. Hold the mutex.
+@(private = "file")
+liked_added_at :: proc(id: int) -> int {
+	for l, at in server.liked_added {
+		if l == id {
+			return at
+		}
+	}
+	return -1
+}
+
+// removed_at says where track id sits among the ones a DELETE took off,
+// or -1. Hold the mutex.
+@(private = "file")
+removed_at :: proc(id: int) -> int {
+	for r, at in server.liked_removed {
+		if r == id {
+			return at
+		}
+	}
+	return -1
+}
+
+// liked_base_at gives the liked track at position at of the liked range,
+// or -1 past the end. A DELETEd one doesn't take a position; an
+// unavailable one does, like TIDAL's totalNumberOfItems does, and is left
+// out of its page just the same.
+@(private = "file")
+liked_base_at :: proc(at: int, removed: []int) -> int {
+	pos := 0
+	for i in 0 ..< LIKED {
+		id := 99 * 1_000_000 + i
+		if slice.contains(removed, id) {
+			continue
+		}
+		if pos == at {
+			return i
+		}
+		pos += 1
+	}
+	return -1
 }
 
 list_begin :: proc(total, offset, limit: int) -> strings.Builder {

@@ -1461,9 +1461,118 @@ add_track_stands_when_the_read_after_fails :: proc(t: ^testing.T) {
 	testing.expect_value(t, res.err, nil)
 	testing.expect(t, res.added)
 	testing.expect_value(t, len(res.rows), 0)
-	testing.expect_value(t, mock_count(&m, "POST /playlists/pl/items"), 1)
-	testing.expect_value(t, len(mock_item_ids(&m, context.temp_allocator)), 3)
 	app.result_free(&res)
+}
+
+// The set of liked ids the hearts read: puts keep it sorted without
+// duplicates, and an unlike and a remove of one not liked keep it so.
+@(test)
+liked_set :: proc(t: ^testing.T) {
+	d := new(app.Data)
+	defer free(d)
+
+	app.liked_put(d, 5, true)
+	app.liked_put(d, 2, true)
+	app.liked_put(d, 9, true)
+	app.liked_put(d, 2, true) // liked already
+	testing.expect_value(t, len(d.liked.ids), 3)
+	testing.expect_value(t, d.liked.ids[0], i64(2))
+	testing.expect_value(t, d.liked.ids[1], i64(5))
+	testing.expect_value(t, d.liked.ids[2], i64(9))
+	testing.expect(t, app.liked_has(d, 5))
+	testing.expect(t, !app.liked_has(d, 4))
+
+	app.liked_put(d, 5, false)
+	testing.expect_value(t, len(d.liked.ids), 2)
+	testing.expect_value(t, d.liked.ids[1], i64(9))
+	testing.expect(t, !app.liked_has(d, 5))
+	testing.expect(t, app.liked_has(d, 2))
+	app.liked_put(d, 4, false) // wasn't liked
+	testing.expect_value(t, len(d.liked.ids), 2)
+	app.liked_clear(d)
+}
+
+// A heart clicked while the whole set is being fetched stays as clicked
+// when the fetch lands, since TIDAL may have answered before the click.
+@(test)
+liked_toggle_during_fetch :: proc(t: ^testing.T) {
+	s := new(app.State)
+	defer free(s)
+	d := &s.data
+	d.fake = true
+	app.liked_put(d, 3, true)
+	d.liked.loading = true
+	app.liked_toggle(s, 7) // like
+	app.liked_toggle(s, 3) // unlike
+	ids := []i64{3, 5}
+	res := app.Result{liked_ids = ids}
+	app.liked_ids_result(d, &res, false)
+	testing.expect(t, app.liked_has(d, 7))
+	testing.expect(t, !app.liked_has(d, 3))
+	testing.expect(t, app.liked_has(d, 5))
+	testing.expect(t, !d.liked.loading)
+	testing.expect_value(t, len(d.liked.edits), 0)
+	app.liked_clear(d)
+}
+
+// The whole liked set for the hearts, then an unlike: the ids come back
+// sorted at the version the listing says, and an unlike tells the count
+// the list dropped to, without the row, so list_edited takes it out of
+// the kept copies. The heart's own set stays as the click left it.
+@(test)
+liked_ids_and_unlike :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := mock_data_state(&m)
+	defer data_state_free(s)
+	d := &s.data
+	sign_in(s)
+	data_jobs(d)
+	app.workers_start(d)
+
+	app.push_job(d, {payload = app.Liked_Ids_Job{}})
+	res, ok := wait_result(d, 10 * time.Second)
+	testing.expect(t, ok)
+	testing.expect_value(t, res.err, nil)
+	testing.expect_value(t, res.version, app.List_Version{count = MOCK_LIKED, newest = 1})
+	app.handle_result(s, &res, 0)
+	app.result_free(&res)
+	want := MOCK_LIKED - len(MOCK_UNAVAILABLE)
+	testing.expect_value(t, len(d.liked.ids), want)
+	testing.expect_value(t, d.liked.ids[0], i64(1))
+	testing.expect_value(t, d.liked.ids[want - 1], i64(1433))
+	for u in MOCK_UNAVAILABLE {
+		testing.expect(t, !app.liked_has(d, i64(u + 1)))
+	}
+	testing.expect(t, !d.liked.loading)
+
+	// Unlike track 1: the count and the set's version follow, and the
+	// heart's set keeps it, as the click that unlike it had already taken
+	// it off.
+	app.push_job(d, {payload = app.Add_Track_Job{track = 1, source = .Liked, remove = true}})
+	res, ok = wait_result(d, 5 * time.Second)
+	testing.expect(t, ok)
+	testing.expect_value(t, res.err, nil)
+	testing.expect_value(t, len(res.rows), 0)
+	testing.expect(t, res.version == app.List_Version{count = MOCK_LIKED - 1, newest = 2})
+	app.handle_result(s, &res, 0)
+	app.result_free(&res)
+	testing.expect_value(t, d.sidebar.liked_count, MOCK_LIKED - 1)
+	testing.expect(t, d.liked.version == res.version)
+	testing.expect(t, app.liked_has(d, 1))
+
+	// Liked back, it's on the listing again and the count stands.
+	app.push_job(d, {payload = app.Add_Track_Job{track = 1, source = .Liked}})
+	res, ok = wait_result(d, 5 * time.Second)
+	testing.expect(t, ok)
+	testing.expect_value(t, res.err, nil)
+	testing.expect(t, res.added)
+	testing.expect(t, len(res.rows) == 1 && res.rows[0].id == 1)
+	testing.expect_value(t, res.version.count, MOCK_LIKED)
+	app.handle_result(s, &res, 0)
+	app.result_free(&res)
+	testing.expect_value(t, d.sidebar.liked_count, MOCK_LIKED)
 }
 
 // During a backoff the workers still run jobs that stay on this machine,

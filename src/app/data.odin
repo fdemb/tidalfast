@@ -211,6 +211,7 @@ Data :: struct {
 	queue_view:     u32,
 	next_gen:       u32, // the last Track_View.gen handed out
 	lists:          Lists, // closed lists and the disk cache, see lists.odin
+	liked:          Liked_Set, // the liked track ids the hearts show, see liked.odin
 	window_key:     bool, // the window had the keyboard last frame
 	// Debug builds and tests keep the last list freed (view_free) filled
 	// with POISON until the next one is, so a string or row still borrowed
@@ -324,6 +325,7 @@ data_shutdown :: proc(s: ^State) {
 	d.launch_log_path = ""
 	sidebar_free(d)
 	lists_shutdown(d)
+	liked_clear(d)
 	view_release(&d.view)
 	view_release(&d.queued)
 	view_release(&d.refresh)
@@ -695,7 +697,7 @@ hold_job :: proc(d: ^Data, job: Job, priority: u8) {
 @(private = "file")
 same_request :: proc(held, job: Job) -> bool {
 	#partial switch p in job.payload {
-	case Restore_Job, Login_Start_Job, Login_Wait_Job, Login_Pkce_Job, Playlists_Job, Search_Job, Save_Settings_Job:
+	case Restore_Job, Login_Start_Job, Login_Wait_Job, Login_Pkce_Job, Playlists_Job, Liked_Ids_Job, Search_Job, Save_Settings_Job:
 		return reflect.union_variant_typeid(held.payload) == reflect.union_variant_typeid(job.payload)
 	case Artwork_Job:
 		h, art := held.payload.(Artwork_Job)
@@ -744,6 +746,9 @@ held_drop :: proc(d: ^Data, job: ^Job) {
 		}
 	case Playlists_Job:
 		d.sidebar.loading = false
+	case Liked_Ids_Job:
+		d.liked.loading = false
+		clear(&d.liked.edits)
 	}
 	job_free(job)
 }
@@ -837,6 +842,7 @@ account_end :: proc(s: ^State) {
 	d.device_login = false
 	d.relogin = false
 	sidebar_free(d)
+	liked_clear(d)
 	view_close(d)
 	queued_drop(d)
 	lists_clear(d)
@@ -1104,6 +1110,8 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 		disk_result(s, res, p)
 	case Add_Track_Job:
 		add_result(s, res, p)
+	case Liked_Ids_Job:
+		liked_ids_result(d, res, failed)
 	case Tracks_Job:
 		r := &d.refresh
 		v := track_view(d, p.view)
