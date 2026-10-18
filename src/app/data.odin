@@ -12,6 +12,7 @@ import "core:encoding/json"
 import "core:fmt"
 import "core:log"
 import "core:math"
+import "core:mem"
 import vmem "core:mem/virtual"
 import "core:os"
 import "core:reflect"
@@ -117,8 +118,9 @@ Sidebar :: struct {
 }
 
 // Track_View is a track list: the open one, one kept in memory after it
-// closed (see lists.odin), or the open one being fetched again. Its rows
-// live in its arena. gen tells its pages from those of other lists.
+// closed (see lists.odin), or the open one being fetched again. Its rows,
+// their loaded flags and its gaps live in space, their strings in its arena.
+// gen tells its pages from those of other lists.
 Track_View :: struct {
 	gen:         u32,
 	source:      Source,
@@ -127,16 +129,17 @@ Track_View :: struct {
 	image:       Small,
 	hint:        int, // tracks TIDAL said the list has
 	arena:       vmem.Arena,
-	has_arena:   bool,
-	rows:        []Row,
-	loaded:      []bool,
+	has_arena:   bool, // arena and space are there
+	space:       []u8, // reserved, see ROWS_MAX
+	rows:        []Row, // in space
+	loaded:      []bool, // in space
 	loaded_rows: int,
 	count:       int, // rows shown, loaded or not
 	next_offset: int, // in TIDAL's offsets, which count the gaps
 	in_flight:   int,
 	done:        bool,
 	error:       Small,
-	gaps:        [dynamic]Gap, // in arena, by offset
+	gaps:        []Gap, // in space, by offset
 	longest:     int, // seconds, of the longest track loaded
 	version:     List_Version, // what TIDAL said the list was at when it was fetched
 	fetched:     i64, // unix seconds the rows came from TIDAL; 0 until they all have
@@ -209,12 +212,11 @@ Data :: struct {
 	next_gen:       u32, // the last Track_View.gen handed out
 	lists:          Lists, // closed lists and the disk cache, see lists.odin
 	window_key:     bool, // the window had the keyboard last frame
-	// Debug builds and tests keep the last list arena freed (arena_free),
-	// filled with POISON, until the next one is, so a string still borrowed
+	// Debug builds and tests keep the last list freed (view_free) filled
+	// with POISON until the next one is, so a string or row still borrowed
 	// from it reads as garbage instead of whatever the next list put there.
 	poison:         bool,
-	retired:        vmem.Arena,
-	has_retired:    bool,
+	retired:        Track_View,
 	covers:         cover.Cache,
 	message:        Small, // the last error worth showing
 	evicted:        [64]render.Texture,
@@ -322,16 +324,10 @@ data_shutdown :: proc(s: ^State) {
 	d.launch_log_path = ""
 	sidebar_free(d)
 	lists_shutdown(d)
-	if d.view.has_arena {
-		vmem.arena_destroy(&d.view.arena)
-	}
-	if d.queued.has_arena {
-		vmem.arena_destroy(&d.queued.arena)
-	}
-	if d.has_retired {
-		vmem.arena_destroy(&d.retired)
-		d.has_retired = false
-	}
+	view_release(&d.view)
+	view_release(&d.queued)
+	view_release(&d.refresh)
+	view_release(&d.retired)
 }
 
 Run_Mode :: enum {
@@ -792,9 +788,6 @@ job_free :: proc(job: ^Job) {
 	case Disk_Job:
 		delete(p.blob, runtime.heap_allocator())
 		p.blob = nil
-	case Launch_Log_Job:
-		delete(p.line, runtime.heap_allocator())
-		p.line = nil
 	}
 }
 
@@ -987,10 +980,7 @@ track_view :: proc(d: ^Data, gen: u32) -> ^Track_View {
 }
 
 sidebar_free :: proc(d: ^Data) {
-	if d.sidebar.arena != nil {
-		vmem.arena_destroy(d.sidebar.arena)
-		free(d.sidebar.arena, runtime.heap_allocator())
-	}
+	arena_release(d.sidebar.arena)
 	d.sidebar = {}
 }
 
@@ -1314,7 +1304,7 @@ view_close :: proc(d: ^Data) {
 		if d.lists.memory && view_complete(v) && v.fetched != 0 {
 			list_keep(d, v^)
 		} else {
-			arena_free(d, &v.arena)
+			view_free(d, v)
 		}
 	}
 	v^ = {gen = view_gen(d)}
@@ -1332,7 +1322,7 @@ queued_drop :: proc(d: ^Data) {
 		if d.lists.memory && view_complete(q) && q.fetched != 0 {
 			list_keep(d, q^)
 		} else {
-			arena_free(d, &q.arena)
+			view_free(d, q)
 		}
 	}
 	q^ = {}
@@ -1368,21 +1358,124 @@ view_fetch :: proc(d: ^Data, source: Source, id, name, image: string, hint: int)
 	v.hint = hint
 	v.count = hint
 	v.version = list_version_now(d, source, id).? or_else {}
-	v.has_arena = vmem.arena_init_growing(&v.arena) == nil
+	view_init(v)
 	view_reserve(v, max(hint, PAGE_FIRST))
 	view_request_pages(d)
 }
 
-// view_reserve makes room for n rows.
-view_reserve :: proc(v: ^Track_View, n: int) {
-	if n <= len(v.rows) || !v.has_arena {
+// A list's rows, their loaded flags and its gaps each have a range of one
+// reservation, committed as the list grows. So rows never move, a longer
+// list leaves no old copy behind, and a view can be moved by value. Pages
+// the list hasn't reached cost nothing.
+ROWS_MAX :: 1 << 18
+GAPS_MAX :: ROWS_MAX / PAGE_FIRST + 1 // a gap is a short page
+
+@(private = "file")
+SPACE_PAGE :: 1 << 16
+@(private = "file")
+LOADED_AT :: (ROWS_MAX * size_of(Row) + SPACE_PAGE - 1) / SPACE_PAGE * SPACE_PAGE
+@(private = "file")
+GAPS_AT :: LOADED_AT + (ROWS_MAX + SPACE_PAGE - 1) / SPACE_PAGE * SPACE_PAGE
+@(private = "file")
+SPACE_SIZE :: GAPS_AT + GAPS_MAX * size_of(Gap)
+
+// space_reserve reserves a list's space, with no rows yet.
+space_reserve :: proc() -> (space: []u8, ok: bool) {
+	err: mem.Allocator_Error
+	if space, err = vmem.reserve(SPACE_SIZE); err != nil {
+		return nil, false
+	}
+	if vmem.commit(&space[GAPS_AT], GAPS_MAX * size_of(Gap)) != nil {
+		space_release(space)
+		return nil, false
+	}
+	return space, true
+}
+
+space_release :: proc(space: []u8) {
+	if space != nil {
+		vmem.release(raw_data(space), len(space))
+	}
+}
+
+// space_rows commits room for n rows in space, up to ROWS_MAX, and returns
+// them and their loaded flags.
+space_rows :: proc(space: []u8, n: int) -> (rows: []Row, loaded: []bool, ok: bool) {
+	count := min(n, ROWS_MAX)
+	if count == 0 {
+		return nil, nil, true
+	}
+	if vmem.commit(&space[0], uint(count * size_of(Row))) != nil || vmem.commit(&space[LOADED_AT], uint(count)) != nil {
+		return nil, nil, false
+	}
+	return ([^]Row)(&space[0])[:count], ([^]bool)(&space[LOADED_AT])[:count], true
+}
+
+// view_init makes v's arena and space, with no rows yet. has_arena says
+// whether both are there.
+view_init :: proc(v: ^Track_View) {
+	v.has_arena = false
+	if vmem.arena_init_growing(&v.arena) != nil {
 		return
 	}
-	a := vmem.arena_allocator(&v.arena)
-	rows := make([]Row, max(n, 2 * len(v.rows)), a)
-	loaded := make([]bool, len(rows), a)
-	copy(rows, v.rows)
-	copy(loaded, v.loaded)
+	space, ok := space_reserve()
+	if !ok {
+		vmem.arena_destroy(&v.arena)
+		return
+	}
+	v.space = space
+	v.rows, v.loaded, v.gaps = nil, nil, nil
+	v.has_arena = true
+}
+
+// view_release frees v's arena and space.
+view_release :: proc(v: ^Track_View) {
+	if !v.has_arena {
+		return
+	}
+	vmem.arena_destroy(&v.arena)
+	space_release(v.space)
+	v.has_arena = false
+	v.space, v.rows, v.loaded, v.gaps = nil, nil, nil, nil
+}
+
+// view_free frees a list's memory. Debug builds and tests poison it and
+// keep it until the next one goes, see Data.poison.
+view_free :: proc(d: ^Data, v: ^Track_View) {
+	if !d.poison {
+		view_release(v)
+		return
+	}
+	for b := v.arena.curr_block; b != nil; b = b.prev {
+		mem.set(b.base, POISON, int(b.used))
+	}
+	mem.set(raw_data(v.rows), POISON, len(v.rows) * size_of(Row))
+	mem.set(raw_data(v.loaded), POISON, len(v.loaded))
+	mem.set(raw_data(v.gaps), POISON, len(v.gaps) * size_of(Gap))
+	view_release(&d.retired)
+	d.retired = v^
+	v.has_arena = false
+}
+
+// view_bytes is about what a list holds in memory.
+view_bytes :: proc(v: ^Track_View) -> int {
+	if !v.has_arena {
+		return 0
+	}
+	return arena_bytes(&v.arena) + int(mem.align_forward_uint(uint(len(v.rows) * size_of(Row) + len(v.loaded)), 16 << 10))
+}
+
+// view_reserve makes room for n rows, up to ROWS_MAX.
+view_reserve :: proc(v: ^Track_View, n: int) {
+	if n <= len(v.rows) || !v.has_arena || len(v.rows) == ROWS_MAX {
+		return
+	}
+	size := max(n, 2 * len(v.rows))
+	rows, loaded, ok := space_rows(v.space, size)
+	if !ok {
+		log.errorf("lists: no memory for %d rows", size)
+		return
+	}
 	v.rows, v.loaded = rows, loaded
 }
 
@@ -1421,6 +1514,7 @@ view_add_rows :: proc(v: ^Track_View, offset, limit: int, rows: []Row, total := 
 	if !v.has_arena {
 		return
 	}
+	rows = rows[:clamp(len(v.rows) - start, 0, len(rows))]
 	a := vmem.arena_allocator(&v.arena)
 	for r, i in rows {
 		v.rows[start + i] = row_clone(r, a)
@@ -1465,17 +1559,17 @@ view_close_gap :: proc(v: ^Track_View, offset, row, limit, got: int) {
 	for l in v.loaded[:min(v.count, len(v.loaded))] {
 		v.loaded_rows += int(l)
 	}
-	if !v.has_arena {
+	if !v.has_arena || len(v.gaps) == GAPS_MAX {
 		return
-	}
-	if v.gaps == nil {
-		v.gaps = make([dynamic]Gap, vmem.arena_allocator(&v.arena))
 	}
 	i := 0
 	for i < len(v.gaps) && v.gaps[i].offset < offset {
 		i += 1
 	}
-	inject_at(&v.gaps, i, Gap{offset, missing})
+	n := len(v.gaps)
+	v.gaps = ([^]Gap)(&v.space[GAPS_AT])[:n + 1]
+	copy(v.gaps[i + 1:], v.gaps[i:n])
+	v.gaps[i] = {offset, missing}
 }
 
 // view_request_pages keeps PAGES_IN_FLIGHT pages loading, for the open list

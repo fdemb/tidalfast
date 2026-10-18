@@ -41,7 +41,7 @@ MADV_FREE_REUSE :: 8
 Stream :: struct {
 	mutex:       sync.Mutex,
 	cond:        sync.Cond, // room in the window, a new request, or stop
-	url:         cstring, // heap, owned
+	url:         string, // borrowed from the slot until stream_clear
 	buf:         []u8, // the window, page aligned; file offset o lives at buf[o % len]
 	released:    bool, // buf's pages went back to the system; written again after MADV_FREE_REUSE
 	win_start:   i64, // oldest byte still held
@@ -51,10 +51,10 @@ Stream :: struct {
 	gen:         u64, // bumped by stream_restart; a transfer for an older gen stops
 	active:      bool, // has a URL; the fetch thread works on it
 	dash:        bool, // segments instead of url
-	seg_urls:    []cstring, // heap, owned
+	seg_urls:    []string, // borrowed, like url
 	seg_next:    int, // the segment being fetched
 	seg_base:    i64, // the offset its first byte lands at
-	seg_starts:  []i64, // each segment's first offset once known, -1 before; heap
+	seg_starts:  []i64, // each segment's first offset once known, -1 before; borrowed, like url
 	failed:      bool, // gave up after FETCH_RETRIES
 	http_status: int, // of the last failed response, 0 for transport errors
 	error:       [96]u8,
@@ -63,7 +63,7 @@ Stream :: struct {
 	thread:      posix.pthread_t,
 	// Header and seek data, filled by the decode thread once it has read them.
 	header:      Flac_Header,
-	head:        []u8, // the bytes before the first frame, heap
+	head:        []u8, // the bytes before the first frame, borrowed, like url
 	has_header:  bool,
 	logger:      runtime.Logger, // stream_init's caller's, for the fetch thread
 }
@@ -91,27 +91,28 @@ stream_destroy :: proc(st: ^Stream) {
 	vmem.release(raw_data(st.buf), uint(len(st.buf)))
 }
 
-// stream_open points the stream at a new URL, from offset 0.
+// stream_open points the stream at a new URL, from offset 0. The URL must
+// last until stream_clear.
 stream_open :: proc(st: ^Stream, url: string) {
 	sync.guard(&st.mutex)
 	stream_clear_locked(st)
-	st.url = strings.clone_to_cstring(url, runtime.heap_allocator())
+	st.url = url
 	st.active = true
 	st.gen += 1
 	sync.cond_broadcast(&st.cond)
 }
 
 // stream_open_segments points the stream at DASH segments, fetched in
-// order from the first.
-stream_open_segments :: proc(st: ^Stream, urls: []string) {
+// order from the first. starts has room for one offset per URL. Both must
+// last until stream_clear.
+stream_open_segments :: proc(st: ^Stream, urls: []string, starts: []i64) {
+	assert(len(starts) == len(urls))
 	sync.guard(&st.mutex)
 	stream_clear_locked(st)
-	heap := runtime.heap_allocator()
-	st.seg_urls = make([]cstring, len(urls), heap)
-	st.seg_starts = make([]i64, len(urls), heap)
-	for u, i in urls {
-		st.seg_urls[i] = strings.clone_to_cstring(u, heap)
-		st.seg_starts[i] = -1
+	st.seg_urls = urls
+	st.seg_starts = starts
+	for &v in st.seg_starts {
+		v = -1
 	}
 	if len(urls) > 0 {
 		st.seg_starts[0] = 0
@@ -144,7 +145,8 @@ stream_restart_segment :: proc(st: ^Stream, index: int) {
 	sync.cond_broadcast(&st.cond)
 }
 
-// stream_clear stops the transfer and forgets the URL and header.
+// stream_clear stops the transfer and forgets the URL and header. After it
+// the stream holds nothing it borrowed.
 stream_clear :: proc(st: ^Stream) {
 	sync.guard(&st.mutex)
 	stream_clear_locked(st)
@@ -160,15 +162,7 @@ stream_clear_locked :: proc(st: ^Stream) {
 		posix.posix_madvise(raw_data(st.buf), len(st.buf), transmute(posix.MAdvice)i32(MADV_FREE_REUSABLE))
 		st.released = true
 	}
-	heap := runtime.heap_allocator()
-	delete(st.url, heap)
-	delete(st.head, heap)
-	for u in st.seg_urls {
-		delete(u, heap)
-	}
-	delete(st.seg_urls, heap)
-	delete(st.seg_starts, heap)
-	st.url = nil
+	st.url = ""
 	st.head = nil
 	st.seg_urls = nil
 	st.seg_starts = nil
@@ -332,9 +326,9 @@ fetch_main :: proc "c" (arg: rawptr) -> rawptr {
 		url: string
 		if st.dash {
 			base = st.seg_base
-			url = strings.clone_from_cstring(st.seg_urls[st.seg_next], context.temp_allocator)
+			url = strings.clone(st.seg_urls[st.seg_next], context.temp_allocator)
 		} else {
-			url = strings.clone_from_cstring(st.url, context.temp_allocator)
+			url = strings.clone(st.url, context.temp_allocator)
 		}
 		sync.unlock(&st.mutex)
 

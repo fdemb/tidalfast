@@ -179,7 +179,8 @@ MONTHS := [?]string{"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep
 @(private = "file")
 SUFFIXES := [?]string{"", "", "", "", " (Remastered 2011)", " - Live at Wembley", " (feat. Kendrick Lamar)", " [Extended Mix]", " (Demo)"}
 
-make_rows :: proc() -> []Row {
+make_rows :: proc(allocator := context.allocator) -> []Row {
+	context.allocator = allocator
 	rows := make([]Row, ROW_COUNT)
 	for &row, i in rows {
 		h := u32(i) * 2654435761

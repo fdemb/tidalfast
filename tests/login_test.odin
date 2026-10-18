@@ -1486,7 +1486,7 @@ local_jobs_run_during_a_backoff :: proc(t: ^testing.T) {
 
 	app.push_job(d, {payload = app.Playlists_Job{}})
 	app.push_job(d, {payload = app.Cover_Job{key = 7, image = {id = app.small("cover-id"), size = 80, fetch = 80}}}, app.PRIORITY_COVER)
-	app.push_job(d, {payload = app.Launch_Log_Job{line = slice.clone([]u8{'x', '\n'}, runtime.heap_allocator())}})
+	app.push_job(d, {payload = app.Launch_Log_Job{}})
 	app.workers_start(d)
 	res, ok := wait_result(d, 2 * time.Second)
 	testing.expect(t, ok)

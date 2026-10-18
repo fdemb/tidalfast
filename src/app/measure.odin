@@ -363,7 +363,7 @@ measure_line :: proc(s: ^State, kind, name: string, ms: f64, fonts_resident: boo
 	pm := process_memory(&s.renderer)
 	pc := process_counters()
 	tc := thread_counters()
-	view_bytes := int(s.data.view.arena.total_used) if s.data.view.has_arena else 0
+	view_bytes := view_bytes(&s.data.view)
 	buf: [1024]u8
 	b := strings.builder_from_bytes(buf[:])
 	fmt.sbprintf(&b,

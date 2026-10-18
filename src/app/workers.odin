@@ -182,7 +182,7 @@ Add_Track_Job :: struct {
 
 // Launch_Log_Job appends this launch to the launch log, see launch_log.odin.
 Launch_Log_Job :: struct {
-	line: []u8, // heap, freed by the worker
+	launch: Launch,
 }
 
 // Priorities: lower runs first.
@@ -212,7 +212,9 @@ Result :: struct {
 	err:         Maybe(tidal.Error_Kind),
 	message:     Small,
 	arena:       ^vmem.Arena, // owns rows, playlists and their strings
-	rows:        []Row,
+	rows:        []Row, // in space for a list read from disk
+	space:       []u8, // Disk: the list's space, see space_reserve
+	loaded:      []bool, // Disk: in space
 	total:       int, // Tracks: the list's length TIDAL gave with the page, -1 if it didn't
 	playlists:   []Sidebar_Item,
 	liked_count: int,
@@ -428,12 +430,27 @@ requeued :: proc(job: Job, res: Result) -> Job {
 	return job
 }
 
-result_free :: proc(res: ^Result) {
-	if res.arena != nil {
-		vmem.arena_destroy(res.arena)
-		free(res.arena, runtime.heap_allocator())
-		res.arena = nil
+// arena_new makes a growing arena that lives in its own first block, so a
+// result can hand it on by pointer without a header on the heap. Free it
+// with arena_release: vmem.arena_destroy would write to it after unmapping
+// it, and vmem.arena_free_all would zero it.
+arena_new :: proc() -> ^vmem.Arena {
+	a, _ := vmem.arena_growing_bootstrap_new_by_offset(vmem.Arena, 0)
+	return a
+}
+
+arena_release :: proc(a: ^vmem.Arena) {
+	if a != nil {
+		home := a^
+		vmem.arena_destroy(&home)
 	}
+}
+
+result_free :: proc(res: ^Result) {
+	arena_release(res.arena)
+	res.arena = nil
+	space_release(res.space)
+	res.space = nil
 	cover.free_pixels(res.pixels)
 	res.pixels = nil
 }
@@ -478,10 +495,8 @@ run_job :: proc(d: ^Data, job: Job) -> (res: Result) {
 		run_cover(d, p.image, &res)
 		return
 	}
-	res.arena = new(vmem.Arena, runtime.heap_allocator())
-	if err := vmem.arena_init_growing(res.arena); err != nil {
-		free(res.arena, runtime.heap_allocator())
-		res.arena = nil
+	res.arena = arena_new()
+	if res.arena == nil {
 		res.err = .Io
 		res.message = small("out of memory")
 		return
@@ -490,7 +505,7 @@ run_job :: proc(d: ^Data, job: Job) -> (res: Result) {
 	switch p in job.payload {
 	case Cover_Job, Artwork_Job, Disk_Job:
 	case Launch_Log_Job:
-		if !launch_log_append(d.launch_log_path, p.line) {
+		if !launch_log_append(d.launch_log_path, launch_log_line(p.launch, context.temp_allocator)) {
 			res.err = .Io
 		}
 	case Save_Settings_Job:

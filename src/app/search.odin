@@ -96,10 +96,7 @@ search_shutdown :: proc(s: ^State) {
 
 @(private = "file")
 found_free :: proc(sr: ^Search) {
-	if sr.arena != nil {
-		vmem.arena_destroy(sr.arena)
-		free(sr.arena, runtime.heap_allocator())
-	}
+	arena_release(sr.arena)
 	sr.arena = nil
 	sr.found = {}
 }
@@ -269,7 +266,7 @@ search_result :: proc(s: ^State, res: ^Result, job: Search_Job) {
 	v.source = .Search
 	v.id = sr.query
 	v.name = small(fmt.tprintf("Results for “%s”", q))
-	v.has_arena = vmem.arena_init_growing(&v.arena) == nil
+	view_init(v)
 	if v.has_arena {
 		v.found = found_clone(sr.found, vmem.arena_allocator(&v.arena))
 	}
@@ -297,10 +294,8 @@ search_from_memory :: proc(s: ^State, q: string) -> bool {
 	sr.loading = false
 	sr.error = {}
 	found_free(sr)
-	sr.arena = new(vmem.Arena, runtime.heap_allocator())
-	if vmem.arena_init_growing(sr.arena) != nil {
-		free(sr.arena, runtime.heap_allocator())
-		sr.arena = nil
+	sr.arena = arena_new()
+	if sr.arena == nil {
 		return false
 	}
 	sr.found = found_clone(e.found, vmem.arena_allocator(sr.arena))

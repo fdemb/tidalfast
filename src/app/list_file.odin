@@ -63,7 +63,8 @@ File_Error :: enum u8 {
 	Magic,
 	Format, // another FILE_FORMAT
 	Other, // another list's file
-	Damaged, // its sum or a string's bounds are wrong
+	Damaged, // its sum or a string's bounds are wrong, or it has more than ROWS_MAX rows
+	Memory, // no memory for its rows, which says nothing about the file
 }
 
 @(private = "file")
@@ -235,27 +236,59 @@ list_decode :: proc(data: []u8, source: Source, id: string, allocator: runtime.A
 	if err != .None {
 		return
 	}
-	file_rows := ([^]File_Row)(recs)[:h.count]
 	rows = make([]Row, h.count, allocator)
+	if err = list_rows(recs, text, rows, allocator); err != .None {
+		return nil, nil, err
+	}
+	return
+}
+
+// list_decode_into is list_decode with the rows in a list's space (see
+// space_rows) instead of the arena, so the list can take them as they are.
+// loaded is the rows' loaded flags, not yet set.
+list_decode_into :: proc(data: []u8, source: Source, id: string, space: []u8, allocator: runtime.Allocator) -> (h: ^File_Header, rows: []Row, loaded: []bool, err: File_Error) {
+	recs: rawptr
+	text: []u8
+	h, recs, text, err = file_check(data, source, id)
+	if err != .None {
+		return
+	}
+	if h.count > ROWS_MAX {
+		return nil, nil, nil, .Damaged
+	}
+	ok: bool
+	if rows, loaded, ok = space_rows(space, int(h.count)); !ok {
+		return nil, nil, nil, .Memory
+	}
+	if err = list_rows(recs, text, rows, allocator); err != .None {
+		return nil, nil, nil, err
+	}
+	return
+}
+
+// list_rows fills rows from a checked file's records and text.
+@(private = "file")
+list_rows :: proc(recs: rawptr, text: []u8, rows: []Row, allocator: runtime.Allocator) -> File_Error {
+	file_rows := ([^]File_Row)(recs)[:len(rows)]
 	for &f, i in file_rows {
 		r := &rows[i]
 		strs := [6]^string{&r.title, &r.artist, &r.album, &r.added, &r.duration, &r.cover}
 		for p, j in strs {
 			ok: bool
 			if p^, ok = file_str(text, f.text[j]); !ok {
-				return nil, nil, .Damaged
+				return .Damaged
 			}
 		}
 		ok: bool
 		if r.artists, ok = file_artists(text, f.artists, len(r.artist), allocator); !ok {
-			return nil, nil, .Damaged
+			return .Damaged
 		}
 		r.seconds = int(f.seconds)
 		r.track = int(f.track)
 		r.id = f.id
 		r.album_id = f.album_id
 	}
-	return
+	return .None
 }
 
 // sidebar_decode turns a sidebar file into items whose strings point into

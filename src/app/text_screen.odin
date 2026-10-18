@@ -20,7 +20,7 @@ DIM_COLOR :: render.Color{0.64, 0.64, 0.64, 1}
 draw_text_screen :: proc(s: ^State, w, h: f32) {
 	r := &s.renderer
 	if s.rows == nil {
-		s.rows = make_rows() // only the fake data makes them at start
+		s.rows = make_rows(persistent_allocator(s)) // only the fake data makes them at start
 	}
 	render.push_rect(r, {0, 0, w, h}, {0.07, 0.07, 0.08, 1})
 

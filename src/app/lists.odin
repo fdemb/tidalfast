@@ -178,23 +178,6 @@ arena_bytes :: proc(a: ^vmem.Arena) -> int {
 	return n
 }
 
-// arena_free frees a list's arena. Debug builds and tests poison it and
-// keep it until the next one goes, see Data.poison.
-arena_free :: proc(d: ^Data, a: ^vmem.Arena) {
-	if !d.poison {
-		vmem.arena_destroy(a)
-		return
-	}
-	for b := a.curr_block; b != nil; b = b.prev {
-		mem.set(b.base, POISON, int(b.used))
-	}
-	if d.has_retired {
-		vmem.arena_destroy(&d.retired)
-	}
-	d.retired = a^
-	d.has_retired = true
-}
-
 // list_name names a list for the log: its kind and TIDAL id.
 list_name :: proc(source: Source, id: string) -> string {
 	return fmt.tprintf("%v %s", source, id) if id != "" else fmt.tprint(source)
@@ -231,7 +214,7 @@ lru_remove :: proc(d: ^Data, i: int) -> Track_View {
 
 lru_drop :: proc(d: ^Data, i: int) {
 	v := lru_remove(d, i)
-	arena_free(d, &v.arena)
+	view_free(d, &v)
 }
 
 @(private = "file")
@@ -259,7 +242,7 @@ list_keep :: proc(d: ^Data, v: Track_View) {
 		lru_drop(d, lru_oldest(d))
 	}
 	l.clock += 1
-	bytes := arena_bytes(&v.arena)
+	bytes := view_bytes(&v)
 	l.entries[l.count] = {v, l.clock, bytes}
 	l.count += 1
 	l.bytes += bytes
@@ -380,7 +363,7 @@ refresh_start :: proc(d: ^Data) {
 	}
 	r.hint = int(r.version.count) if r.version.count > 0 else v.hint
 	r.count = r.hint
-	r.has_arena = vmem.arena_init_growing(&r.arena) == nil
+	view_init(r)
 	view_reserve(r, max(r.hint, PAGE_FIRST))
 	view_pages(d, r)
 }
@@ -388,9 +371,7 @@ refresh_start :: proc(d: ^Data) {
 // refresh_drop forgets the refresh. Its rows were never drawn.
 refresh_drop :: proc(d: ^Data) {
 	r := &d.refresh
-	if r.has_arena {
-		vmem.arena_destroy(&r.arena)
-	}
+	view_release(r)
 	r^ = {}
 }
 
@@ -471,7 +452,7 @@ refresh_land :: proc(s: ^State) {
 	d.view.fetched = unix_now()
 	d.refresh = {}
 	if old.has_arena {
-		arena_free(d, &old.arena)
+		view_free(d, &old)
 	}
 	rows_moved(s, marks)
 	log.debugf("lists: %s fetched again, %d rows", list_name(d.view.source, small_str(&d.view.id)), d.view.count)
@@ -600,7 +581,7 @@ list_edited :: proc(s: ^State, source: Source, id: string, add: bool, row: Row, 
 		view_edit(&e.view, add, row)
 		e.view.version = version
 		d.lists.bytes -= e.bytes
-		e.bytes = arena_bytes(&e.view.arena)
+		e.bytes = view_bytes(&e.view)
 		d.lists.bytes += e.bytes
 		list_save(d, &e.view)
 		lists_trim(d)
@@ -618,6 +599,9 @@ view_edit :: proc(v: ^Track_View, add: bool, row: Row) -> bool {
 	n := min(v.count, len(v.rows))
 	if add {
 		view_reserve(v, n + 1)
+		if len(v.rows) < n + 1 {
+			return false
+		}
 		at := 0 if v.source == .Liked else n
 		copy(v.rows[at + 1:n + 1], v.rows[at:n])
 		v.rows[at] = row_clone(row, vmem.arena_allocator(&v.arena))
@@ -921,10 +905,8 @@ queue_path :: proc(dir: string, allocator: runtime.Allocator) -> string {
 // A file that's damaged or of another format is deleted.
 @(private = "file")
 queue_read :: proc(res: ^Result, path: string) {
-	res.arena = new(vmem.Arena, runtime.heap_allocator())
-	if vmem.arena_init_growing(res.arena) != nil {
-		free(res.arena, runtime.heap_allocator())
-		res.arena = nil
+	res.arena = arena_new()
+	if res.arena == nil {
 		return
 	}
 	a := vmem.arena_allocator(res.arena)
@@ -959,10 +941,8 @@ queue_write_now :: proc(d: ^Data, blob: []u8) {
 // deleted.
 @(private = "file")
 disk_read :: proc(res: ^Result, path: string, source: Source, id: string) {
-	res.arena = new(vmem.Arena, runtime.heap_allocator())
-	if vmem.arena_init_growing(res.arena) != nil {
-		free(res.arena, runtime.heap_allocator())
-		res.arena = nil
+	res.arena = arena_new()
+	if res.arena == nil {
 		return
 	}
 	a := vmem.arena_allocator(res.arena)
@@ -975,7 +955,13 @@ disk_read :: proc(res: ^Result, path: string, source: Source, id: string) {
 	if source == .None {
 		h, res.playlists, err = sidebar_decode(data, a)
 	} else {
-		h, res.rows, err = list_decode(data, source, id, a)
+		if res.space, ok = space_reserve(); !ok {
+			return
+		}
+		h, res.rows, res.loaded, err = list_decode_into(data, source, id, res.space, a)
+	}
+	if err == .Memory {
+		return
 	}
 	if err != .None {
 		log.warnf("lists: dropping a cache file (%v)", err)
@@ -1135,13 +1121,14 @@ disk_result :: proc(s: ^State, res: ^Result, job: Disk_Job) {
 		view_fetch(d, v.source, small_str(&v.id), small_str(&v.name), small_str(&v.image), v.hint)
 		return
 	}
+	// The disk thread decoded the rows into the list's space and their
+	// strings into the arena, so the view takes both as they are. The
+	// arena's copy of itself left in its first block is dead.
 	v.arena = res.arena^
-	free(res.arena, runtime.heap_allocator())
-	res.arena = nil
+	v.space, v.rows, v.loaded = res.space, res.rows, res.loaded
 	v.has_arena = true
-	n := len(res.rows)
-	v.rows = res.rows
-	v.loaded = make([]bool, n, vmem.arena_allocator(&v.arena))
+	res.arena, res.space = nil, nil
+	n := len(v.rows)
 	slice.fill(v.loaded, true)
 	v.count = n
 	v.loaded_rows = n
