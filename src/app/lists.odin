@@ -955,7 +955,13 @@ disk_read :: proc(res: ^Result, path: string, source: Source, id: string) {
 	if source == .None {
 		h, res.playlists, err = sidebar_decode(data, a)
 	} else {
-		h, res.rows, err = list_decode(data, source, id, a)
+		if res.space, ok = space_reserve(); !ok {
+			return
+		}
+		h, res.rows, res.loaded, err = list_decode_into(data, source, id, res.space, a)
+	}
+	if err == .Memory {
+		return
 	}
 	if err != .None {
 		log.warnf("lists: dropping a cache file (%v)", err)
@@ -1115,20 +1121,14 @@ disk_result :: proc(s: ^State, res: ^Result, job: Disk_Job) {
 		view_fetch(d, v.source, small_str(&v.id), small_str(&v.name), small_str(&v.image), v.hint)
 		return
 	}
-	view_init(v)
-	if !v.has_arena {
-		return
-	}
-	// The strings move to the view with the arena's blocks, the rows to its
-	// space. The arena's copy left in its first block is dead.
-	vmem.arena_destroy(&v.arena)
+	// The disk thread decoded the rows into the list's space and their
+	// strings into the arena, so the view takes both as they are. The
+	// arena's copy of itself left in its first block is dead.
 	v.arena = res.arena^
-	res.arena = nil
-	view_reserve(v, len(res.rows))
-	n := min(len(res.rows), len(v.rows))
-	copy(v.rows, res.rows[:n])
-	v.rows = v.rows[:n]
-	v.loaded = v.loaded[:n]
+	v.space, v.rows, v.loaded = res.space, res.rows, res.loaded
+	v.has_arena = true
+	res.arena, res.space = nil, nil
+	n := len(v.rows)
 	slice.fill(v.loaded, true)
 	v.count = n
 	v.loaded_rows = n

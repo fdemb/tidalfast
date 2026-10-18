@@ -390,3 +390,22 @@ queued_list_keeps_its_gaps :: proc(t: ^testing.T) {
 	app.view_close(d)
 	testing.expect_value(t, app.view_row_at(&d.queued, 900), 810)
 }
+
+// A freed list's gaps read as POISON, like its rows, so a late borrow of
+// them shows.
+@(test)
+freed_list_poisons_its_gaps :: proc(t: ^testing.T) {
+	d := new(app.Data)
+	defer free(d)
+	d.poison = true
+	defer app.view_release(&d.retired)
+	rows := make([]app.Row, 90, context.temp_allocator)
+	app.view_open(d, .Playlist, "a", "a", "", 300)
+	app.view_add_rows(&d.view, 0, 100, rows, 300)
+	gaps := d.view.gaps
+	if !testing.expect_value(t, len(gaps), 1) {
+		return
+	}
+	app.view_close(d)
+	testing.expect_value(t, u64(gaps[0].offset), u64(0xdbdb_dbdb_dbdb_dbdb))
+}

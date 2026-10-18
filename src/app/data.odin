@@ -1379,6 +1379,38 @@ GAPS_AT :: LOADED_AT + (ROWS_MAX + SPACE_PAGE - 1) / SPACE_PAGE * SPACE_PAGE
 @(private = "file")
 SPACE_SIZE :: GAPS_AT + GAPS_MAX * size_of(Gap)
 
+// space_reserve reserves a list's space, with no rows yet.
+space_reserve :: proc() -> (space: []u8, ok: bool) {
+	err: mem.Allocator_Error
+	if space, err = vmem.reserve(SPACE_SIZE); err != nil {
+		return nil, false
+	}
+	if vmem.commit(&space[GAPS_AT], GAPS_MAX * size_of(Gap)) != nil {
+		space_release(space)
+		return nil, false
+	}
+	return space, true
+}
+
+space_release :: proc(space: []u8) {
+	if space != nil {
+		vmem.release(raw_data(space), len(space))
+	}
+}
+
+// space_rows commits room for n rows in space, up to ROWS_MAX, and returns
+// them and their loaded flags.
+space_rows :: proc(space: []u8, n: int) -> (rows: []Row, loaded: []bool, ok: bool) {
+	count := min(n, ROWS_MAX)
+	if count == 0 {
+		return nil, nil, true
+	}
+	if vmem.commit(&space[0], uint(count * size_of(Row))) != nil || vmem.commit(&space[LOADED_AT], uint(count)) != nil {
+		return nil, nil, false
+	}
+	return ([^]Row)(&space[0])[:count], ([^]bool)(&space[LOADED_AT])[:count], true
+}
+
 // view_init makes v's arena and space, with no rows yet. has_arena says
 // whether both are there.
 view_init :: proc(v: ^Track_View) {
@@ -1386,11 +1418,8 @@ view_init :: proc(v: ^Track_View) {
 	if vmem.arena_init_growing(&v.arena) != nil {
 		return
 	}
-	space, err := vmem.reserve(SPACE_SIZE)
-	if err != nil || vmem.commit(&space[GAPS_AT], GAPS_MAX * size_of(Gap)) != nil {
-		if err == nil {
-			vmem.release(raw_data(space), SPACE_SIZE)
-		}
+	space, ok := space_reserve()
+	if !ok {
 		vmem.arena_destroy(&v.arena)
 		return
 	}
@@ -1405,7 +1434,7 @@ view_release :: proc(v: ^Track_View) {
 		return
 	}
 	vmem.arena_destroy(&v.arena)
-	vmem.release(raw_data(v.space), len(v.space))
+	space_release(v.space)
 	v.has_arena = false
 	v.space, v.rows, v.loaded, v.gaps = nil, nil, nil, nil
 }
@@ -1422,6 +1451,7 @@ view_free :: proc(d: ^Data, v: ^Track_View) {
 	}
 	mem.set(raw_data(v.rows), POISON, len(v.rows) * size_of(Row))
 	mem.set(raw_data(v.loaded), POISON, len(v.loaded))
+	mem.set(raw_data(v.gaps), POISON, len(v.gaps) * size_of(Gap))
 	view_release(&d.retired)
 	d.retired = v^
 	v.has_arena = false
@@ -1440,13 +1470,13 @@ view_reserve :: proc(v: ^Track_View, n: int) {
 	if n <= len(v.rows) || !v.has_arena || len(v.rows) == ROWS_MAX {
 		return
 	}
-	size := min(max(n, 2 * len(v.rows)), ROWS_MAX)
-	if vmem.commit(&v.space[0], uint(size * size_of(Row))) != nil || vmem.commit(&v.space[LOADED_AT], uint(size)) != nil {
+	size := max(n, 2 * len(v.rows))
+	rows, loaded, ok := space_rows(v.space, size)
+	if !ok {
 		log.errorf("lists: no memory for %d rows", size)
 		return
 	}
-	v.rows = ([^]Row)(&v.space[0])[:size]
-	v.loaded = ([^]bool)(&v.space[LOADED_AT])[:size]
+	v.rows, v.loaded = rows, loaded
 }
 
 // view_add_rows copies the page asked for at offset with limit into the

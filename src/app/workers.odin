@@ -212,7 +212,9 @@ Result :: struct {
 	err:         Maybe(tidal.Error_Kind),
 	message:     Small,
 	arena:       ^vmem.Arena, // owns rows, playlists and their strings
-	rows:        []Row,
+	rows:        []Row, // in space for a list read from disk
+	space:       []u8, // Disk: the list's space, see space_reserve
+	loaded:      []bool, // Disk: in space
 	total:       int, // Tracks: the list's length TIDAL gave with the page, -1 if it didn't
 	playlists:   []Sidebar_Item,
 	liked_count: int,
@@ -447,6 +449,8 @@ arena_release :: proc(a: ^vmem.Arena) {
 result_free :: proc(res: ^Result) {
 	arena_release(res.arena)
 	res.arena = nil
+	space_release(res.space)
+	res.space = nil
 	cover.free_pixels(res.pixels)
 	res.pixels = nil
 }
