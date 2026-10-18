@@ -47,6 +47,9 @@ import "core:c"
 import "core:fmt"
 import "core:log"
 import "core:math"
+import "core:mem"
+import vmem "core:mem/virtual"
+import "core:slice"
 import "core:strings"
 import "core:sync"
 import "core:sys/posix"
@@ -60,6 +63,7 @@ TICK :: 250 * time.Millisecond // how often a playing player wakes the UI
 WANT_NEXT_SECONDS :: 30 // ask for the next track this long before the end at the latest
 NEAR_SECONDS :: 0.3 // a seek decodes and drops at most about this much
 LOW_WATER :: RING_FRAMES / 4 // the decode thread checks the ring before this much has played
+MAX_CHANNELS :: 8 // FLAC's
 
 Source_Kind :: enum u8 {
 	None,
@@ -168,7 +172,11 @@ Slot :: struct {
 	player:      ^Player,
 	source:      Source, // its url and segments aren't kept: the stream has them
 	stream:      Stream,
-	decoder:     ^ma.decoder, // heap, nil when closed
+	// The track's URLs, the stream's segment tables and its header. Emptied
+	// when the slot gets another source.
+	track:       vmem.Arena,
+	decoder:     ma.decoder,
+	decoding:    bool, // decoder is open
 	vpos:        i64, // dr_flac's position in the stream it sees: header, then frames from frame_off
 	frame_off:   i64,
 	next_sample: i64, // sample of the next frame the decoder returns
@@ -188,30 +196,30 @@ Slot :: struct {
 // 0 at the segment the stream last started from.
 @(private)
 Dash_Demux :: struct {
-	starts:      [dynamic]i64, // each media segment's first sample, in the source's timescale; heap
+	starts:      []i64, // each media segment's first sample, in the source's timescale; in track
 	init:        Mp4_Init, // flac_head is in stream.head instead
 	pos:         i64, // the next box header
 	moof:        i64, // where the current fragment's moof starts
 	covered:     i64, // where its samples end
-	samples:     [dynamic]Mp4_Sample, // the current fragment's; heap
+	samples:     [dynamic]Mp4_Sample, // the current fragment's, at most MP4_MAX_SAMPLES; fixed, it never grows
 	sample:      int, // the next one to read
 	consumed:    i64, // bytes of it read
 	fpos:        i64, // frame bytes handed out since the decoder opened
 	after_init:  bool, // the stream is right after the init segment, at the first media segment
 	target:      i64, // the sample the decoder was opened for
 	synced:      bool, // the first fragment's tfdt has set next_sample
-	box:         [dynamic]u8, // a moof being read; heap
+	box:         []u8, // MP4_MAX_BOX bytes for a moof being read
 }
 
 @(private)
 Commands :: struct {
-	play:         Maybe(Source),
+	play:         Maybe(Source_Copy),
 	play_at:      i64,
 	play_paused:  bool,
 	seek:         Maybe(i64),
 	seek_serial:  u64, // the source the seek is for; it's dropped if that isn't playing
 	seek_id:      u32,
-	next:         Maybe(Source), // kind None clears it
+	next:         Maybe(Source_Copy), // kind None clears it
 	paused:       Maybe(bool),
 	output:       Maybe(Output),
 	quit:         bool,
@@ -219,6 +227,7 @@ Commands :: struct {
 }
 
 Player :: struct {
+	arena:           vmem.Arena, // the Player and the buffers that live as long as it
 	wake_ui:         proc "c" (),
 	logger:          runtime.Logger, // the creator's, for the decode thread
 	thread:          posix.pthread_t,
@@ -232,12 +241,12 @@ Player :: struct {
 	slots:           [2]Slot,
 	cur:             int,
 	prev_alive:      bool, // slots[1-cur] is the previous track, its tail still audible
-	pending_next:    Source, // a set_next that waits for the tail to finish
+	pending_next:    Source_Copy, // a set_next that waits for the tail to finish
 	has_pending:     bool,
 	paused:          bool,
 	device:          ^ma.device,
 	null_output:     bool, // miniaudio's null backend: real-time callbacks, no sound
-	null_ctx:        ^ma.context_type, // heap, for null_output
+	null_ctx:        ^ma.context_type, // for null_output
 	output:          Output,
 	hal:             Hal,
 	hal_scratch:     []f32, // for devices whose buffers don't match the ring's layout
@@ -265,7 +274,7 @@ Player :: struct {
 
 	// The ring and the marks, shared with the callback.
 	pcm:             Pcm_Ring,
-	pcm_data:        []f32,
+	pcm_data:        []f32, // room for MAX_CHANNELS
 	marks:           Mark_Queue,
 	capture:         Pcm_Ring,
 	capturing:       bool,
@@ -300,34 +309,38 @@ Player :: struct {
 // null_output the callback runs on miniaudio's null device, in real time
 // but silent, for tests.
 create :: proc(wake_ui: proc "c" (), volume: f32, capture_path := "", window := STREAM_WINDOW, null_output := false, output := Output{}) -> ^Player {
-	heap := runtime.heap_allocator()
-	p := new(Player, heap)
+	p, err := vmem.arena_growing_bootstrap_new(Player, "arena")
+	assert(err == nil, "audio: no memory for the player")
+	a := vmem.arena_allocator(&p.arena)
 	p.wake_ui = wake_ui
 	p.logger = context.logger
 	p.null_output = null_output
 	p.output = output
 	p.capture_fd = -1
 	set_volume(p, volume)
-	p.scratch = make([]f32, CHUNK * 8, heap)
-	p.hal_scratch = make([]f32, HAL_MAX_FRAMES * 8, heap)
-	p.device = new(ma.device, heap)
-	p.watch = new(Device_Watch, heap)
+	// Pages nobody writes cost nothing, so these are as big as they can need.
+	p.scratch = make([]f32, CHUNK * MAX_CHANNELS, a)
+	p.hal_scratch = make([]f32, HAL_MAX_FRAMES * MAX_CHANNELS, a)
+	p.pcm_data = make([]f32, RING_FRAMES * MAX_CHANNELS, a)
+	p.device = new(ma.device, a)
+	p.watch = new(Device_Watch, runtime.heap_allocator())
 	if !null_output {
 		listen(SYSTEM_OBJECT, PROP_DEFAULT_OUTPUT, device_listener, p.watch)
 	}
 	if capture_path != "" {
 		p.capture_fd = posix.open(strings.clone_to_cstring(capture_path, context.temp_allocator), {.WRONLY, .CREAT, .TRUNC}, {.IRUSR, .IWUSR, .IRGRP, .IROTH})
 		if p.capture_fd >= 0 {
-			cap_data := make([]f32, CAPTURE_FRAMES * 8, heap)
+			cap_data := make([]f32, CAPTURE_FRAMES * MAX_CHANNELS, a)
 			ring_init(&p.capture, cap_data, CAPTURE_FRAMES, 2)
 			log.info("audio: capturing output to", capture_path)
 		}
 	}
 	for &sl in p.slots {
 		sl.player = p
-		sl.dash.starts = make([dynamic]i64, heap)
-		sl.dash.samples = make([dynamic]Mp4_Sample, heap)
-		sl.dash.box = make([dynamic]u8, heap)
+		terr := vmem.arena_init_growing(&sl.track)
+		assert(terr == nil, "audio: no memory for a track")
+		sl.dash.samples = slice.into_dynamic(make([]Mp4_Sample, MP4_MAX_SAMPLES, a))
+		sl.dash.box = make([]u8, MP4_MAX_BOX, a)
 		stream_init(&sl.stream, &p.watch.sema, max(window, 64 << 10))
 	}
 	posix.pthread_create(&p.thread, nil, decode_main, p)
@@ -349,22 +362,16 @@ destroy :: proc(p: ^Player) {
 	if !p.null_output {
 		unlisten(SYSTEM_OBJECT, PROP_DEFAULT_OUTPUT, device_listener, p.watch)
 	}
-	heap := runtime.heap_allocator()
 	for &sl in p.slots {
 		slot_close(&sl)
 		stream_destroy(&sl.stream)
-		delete(sl.dash.starts)
-		delete(sl.dash.samples)
-		delete(sl.dash.box)
+		vmem.arena_destroy(&sl.track)
 	}
 	commands_free(&p.cmd)
 	source_free(&p.pending_next)
-	delete(p.scratch, heap)
-	delete(p.hal_scratch, heap)
-	delete(p.pcm_data, heap)
-	delete(p.capture.data, heap)
-	free(p.device, heap)
-	free(p, heap)
+	// The arena's first block holds the Player, so destroy a copy of it.
+	arena := p.arena
+	vmem.arena_destroy(&arena)
 }
 
 // play replaces whatever plays with source, from sample at. The audio
@@ -373,7 +380,7 @@ destroy :: proc(p: ^Player) {
 play :: proc(p: ^Player, source: Source, at: i64 = 0, paused := false) {
 	sync.lock(&p.cmd_mutex)
 	commands_free(&p.cmd)
-	p.cmd.play = source_clone(source)
+	p.cmd.play = source_copy(source, runtime.heap_allocator())
 	p.cmd.play_at = at
 	p.cmd.play_paused = paused
 	p.cmd.paused = nil
@@ -410,7 +417,7 @@ set_next :: proc(p: ^Player, source: Source) {
 	if old, ok := p.cmd.next.?; ok {
 		source_free(&old)
 	}
-	p.cmd.next = source_clone(source)
+	p.cmd.next = source_copy(source, runtime.heap_allocator())
 	sync.unlock(&p.cmd_mutex)
 	post(p)
 }
@@ -521,31 +528,52 @@ post :: proc(p: ^Player) {
 	sync.atomic_sema_post(&p.watch.sema)
 }
 
-// source_clone copies s with its URL and segments on the heap.
-source_clone :: proc(s: Source) -> Source {
-	heap := runtime.heap_allocator()
-	c := s
-	c.url = strings.clone(s.url, heap)
-	c.segments = nil
-	if len(s.segments) > 0 {
-		c.segments = make([]Segment, len(s.segments), heap)
-		for seg, i in s.segments {
-			c.segments[i] = {strings.clone(seg.url, heap), seg.start}
-		}
-	}
-	return c
+// Source_Copy is a Source whose URL and segments are in block.
+@(private)
+Source_Copy :: struct {
+	using source: Source,
+	block:        []u8,
 }
 
-// source_free frees what source_clone copied.
-source_free :: proc(s: ^Source) {
-	heap := runtime.heap_allocator()
-	delete(s.url, heap)
+// source_copy copies s with its URL and segments into one block from
+// allocator.
+@(private)
+source_copy :: proc(s: Source, allocator: runtime.Allocator) -> (c: Source_Copy) {
+	c.source = s
+	c.url = ""
+	c.segments = nil
+	size := len(s.segments) * size_of(Segment) + len(s.url)
 	for seg in s.segments {
-		delete(seg.url, heap)
+		size += len(seg.url)
 	}
-	delete(s.segments, heap)
-	s.url = ""
-	s.segments = nil
+	if size == 0 {
+		return
+	}
+	c.block, _ = mem.alloc_bytes_non_zeroed(size, align_of(Segment), allocator)
+	if c.block == nil {
+		return
+	}
+	segments := ([^]Segment)(raw_data(c.block))[:len(s.segments)]
+	rest := c.block[len(segments) * size_of(Segment):]
+	put :: proc(rest: ^[]u8, s: string) -> string {
+		n := copy(rest^, s)
+		out := string((rest^)[:n])
+		rest^ = (rest^)[n:]
+		return out
+	}
+	c.url = put(&rest, s.url)
+	for seg, i in s.segments {
+		segments[i] = {put(&rest, seg.url), seg.start}
+	}
+	c.segments = segments
+	return
+}
+
+// source_free frees a copy source_copy made on the heap.
+@(private)
+source_free :: proc(c: ^Source_Copy) {
+	delete(c.block, runtime.heap_allocator())
+	c^ = {}
 }
 
 @(private = "file")
@@ -599,7 +627,6 @@ decode_main :: proc "c" (arg: rawptr) -> rawptr {
 	device_close(p, restore = true)
 	if p.null_ctx != nil {
 		ma.context_uninit(p.null_ctx)
-		free(p.null_ctx, runtime.heap_allocator())
 	}
 	capture_close(p)
 	runtime.default_temp_allocator_destroy(&runtime.global_default_temp_allocator_data)
@@ -685,7 +712,6 @@ do_play :: proc(p: ^Player, src: Source, at: i64, paused: bool) {
 	}
 	p.prev_alive = false
 	source_free(&p.pending_next)
-	p.pending_next = {}
 	p.has_pending = false
 	p.paused = paused
 	p.end_pushed = false
@@ -720,7 +746,9 @@ do_play :: proc(p: ^Player, src: Source, at: i64, paused: bool) {
 @(private = "file")
 slot_assign :: proc(sl: ^Slot, src: Source) {
 	slot_close(sl)
+	// The stream lets go of the old track's URLs before they go.
 	stream_clear(&sl.stream)
+	vmem.arena_free_all(&sl.track)
 	sl.source = src
 	sl.source.url = ""
 	sl.source.segments = nil
@@ -728,18 +756,21 @@ slot_assign :: proc(sl: ^Slot, src: Source) {
 	sl.next_sample = 0
 	sl.discard = 0
 	sl.rate, sl.channels, sl.bits, sl.total = 0, 0, 0, 0
-	clear(&sl.dash.starts)
+	sl.dash.starts = nil
+	a := vmem.arena_allocator(&sl.track)
 	switch src.kind {
 	case .Flac:
-		stream_open(&sl.stream, src.url)
+		stream_open(&sl.stream, strings.clone(src.url, a))
 	case .Dash:
-		urls := make([]string, len(src.segments) + 1, context.temp_allocator)
-		urls[0] = src.url
-		for seg, i in src.segments {
+		c := source_copy(src, a)
+		urls := make([]string, len(c.segments) + 1, a)
+		sl.dash.starts = make([]i64, len(c.segments), a)
+		urls[0] = c.url
+		for seg, i in c.segments {
 			urls[i + 1] = seg.url
-			append(&sl.dash.starts, seg.start)
+			sl.dash.starts[i] = seg.start
 		}
-		stream_open_segments(&sl.stream, urls)
+		stream_open_segments(&sl.stream, urls, make([]i64, len(urls), a))
 	case .None, .Tone:
 	}
 }
@@ -748,7 +779,7 @@ slot_assign :: proc(sl: ^Slot, src: Source) {
 do_set_next :: proc(p: ^Player, src: Source) {
 	if p.prev_alive {
 		source_free(&p.pending_next)
-		p.pending_next = source_clone(src)
+		p.pending_next = source_copy(src, runtime.heap_allocator())
 		p.has_pending = true
 		return
 	}
@@ -913,7 +944,7 @@ step :: proc(p: ^Player) -> bool {
 	if sl.finished {
 		return advance(p)
 	}
-	if (sl.source.kind == .Flac || sl.source.kind == .Dash) && sl.decoder == nil {
+	if (sl.source.kind == .Flac || sl.source.kind == .Dash) && !sl.decoding {
 		if !slot_open(p, sl) {
 			return true // a command interrupted it, or it failed and advance comes next
 		}
@@ -1156,11 +1187,9 @@ slot_open :: proc(p: ^Player, sl: ^Slot) -> bool {
 // decoder_open starts dr_flac on the slot's stream as vread presents it.
 @(private = "file")
 decoder_open :: proc(p: ^Player, sl: ^Slot) -> bool {
-	dec := new(ma.decoder, runtime.heap_allocator())
 	cfg := ma.decoder_config_init(.f32, 0, 0)
 	cfg.encodingFormat = .flac
-	if r := ma.decoder_init(vread, vseek, sl, &cfg, dec); r != .SUCCESS {
-		free(dec, runtime.heap_allocator())
+	if r := ma.decoder_init(vread, vseek, sl, &cfg, &sl.decoder); r != .SUCCESS {
 		if sl.interrupted {
 			sl.interrupted = false
 			return false
@@ -1170,7 +1199,7 @@ decoder_open :: proc(p: ^Player, sl: ^Slot) -> bool {
 		}
 		return false
 	}
-	sl.decoder = dec
+	sl.decoding = true
 	return true
 }
 
@@ -1224,9 +1253,7 @@ slot_open_dash :: proc(p: ^Player, sl: ^Slot) -> bool {
 read_init :: proc(p: ^Player, sl: ^Slot) -> bool {
 	st := &sl.stream
 	dm := &sl.dash
-	heap := runtime.heap_allocator()
-	buf := make([dynamic]u8, 0, 16 << 10, heap)
-	defer delete(buf)
+	buf := make([dynamic]u8, 0, 16 << 10, context.temp_allocator)
 	chunk: [4096]u8
 	for {
 		n, res := stream_read(st, i64(len(buf)), chunk[:], interrupt, p)
@@ -1239,13 +1266,12 @@ read_init :: proc(p: ^Player, sl: ^Slot) -> bool {
 			slot_fail(p, sl, status, fmt.tprintf("download failed: %s", msg))
 			return false
 		}
-		init, used, ist := parse_mp4_init(buf[:], heap)
+		init, used, ist := parse_mp4_init(buf[:], vmem.arena_allocator(&sl.track))
 		switch ist {
 		case .Ok:
 			head := init.flac_head
 			init.flac_head = nil
 			if parse_flac_header(head, &st.header) != .Ok {
-				delete(head, heap)
 				slot_fail(p, sl, 0, "the FLAC header in the MP4 is broken")
 				return false
 			}
@@ -1312,8 +1338,8 @@ demux_read :: proc(p: ^Player, sl: ^Slot, dst: []u8) -> (n: int, res: Read_Resul
 				slot_fail(p, sl, 0, "a moof box is too big")
 				return n, .Failed
 			}
-			resize(&dm.box, int(size))
-			got, rr := stream_read(st, dm.pos, dm.box[:], interrupt, p)
+			moof := dm.box[:size]
+			got, rr := stream_read(st, dm.pos, moof, interrupt, p)
 			if rr != .Ok {
 				return n, rr
 			}
@@ -1333,7 +1359,7 @@ demux_read :: proc(p: ^Player, sl: ^Slot, dst: []u8) -> (n: int, res: Read_Resul
 				return n, .Failed
 			}
 			moof_at := dm.pos - stream_segment_start(st, dm.pos)
-			frag, fst := parse_mp4_moof(dm.box[:], &dm.init, &dm.samples, size + i64(mdat.header), size + mdat.size, moof_at)
+			frag, fst := parse_mp4_moof(moof, &dm.init, &dm.samples, size + i64(mdat.header), size + mdat.size, moof_at)
 			if fst != .Ok {
 				slot_fail(p, sl, 0, fmt.tprintf("a moof box is broken: %s", frag.reason))
 				return n, .Failed
@@ -1430,10 +1456,9 @@ dash_segment_sample :: proc(starts: []i64, timescale: i64, rate: int, k: int) ->
 
 @(private = "file")
 slot_close :: proc(sl: ^Slot) {
-	if sl.decoder != nil {
-		ma.decoder_uninit(sl.decoder)
-		free(sl.decoder, runtime.heap_allocator())
-		sl.decoder = nil
+	if sl.decoding {
+		ma.decoder_uninit(&sl.decoder)
+		sl.decoding = false
 	}
 	sl.interrupted = false
 }
@@ -1442,9 +1467,7 @@ slot_close :: proc(sl: ^Slot) {
 @(private = "file")
 read_header :: proc(p: ^Player, sl: ^Slot) -> bool {
 	st := &sl.stream
-	heap := runtime.heap_allocator()
-	buf := make([dynamic]u8, 0, 64 << 10, heap)
-	defer delete(buf)
+	buf := make([dynamic]u8, 0, 64 << 10, context.temp_allocator)
 	chunk: [16 << 10]u8
 	for {
 		n, res := stream_read(st, i64(len(buf)), chunk[:], interrupt, p)
@@ -1464,7 +1487,7 @@ read_header :: proc(p: ^Player, sl: ^Slot) -> bool {
 			// seek put us. It must not stop at the file's sample count
 			// counted from the first frame it sees, so that goes to 0
 			// (unknown) in its copy.
-			st.head = make([]u8, h.audio_start, heap)
+			st.head = make([]u8, h.audio_start, vmem.arena_allocator(&sl.track))
 			copy(st.head, buf[:h.audio_start])
 			s := h.streaminfo
 			st.head[s + 13] &= 0xf0
@@ -1636,7 +1659,7 @@ decode_chunk :: proc(p: ^Player, sl: ^Slot) {
 			}
 		}
 	} else {
-		ma.decoder_read_pcm_frames(sl.decoder, raw_data(buf), CHUNK, &frames)
+		ma.decoder_read_pcm_frames(&sl.decoder, raw_data(buf), CHUNK, &frames)
 		if sl.interrupted {
 			// A command cut the read short; the decoder is reopened for it.
 			sl.interrupted = false
@@ -1667,12 +1690,9 @@ HAL_MAX_FRAMES :: 8192 // per IOProc call, when the device's buffers need rearra
 
 @(private = "file")
 device_open :: proc(p: ^Player, rate, channels, bits: int) -> bool {
-	heap := runtime.heap_allocator()
 	if p.pcm.channels != channels {
-		delete(p.pcm_data, heap)
-		p.pcm_data = make([]f32, RING_FRAMES * channels, heap)
 		w := p.pcm.write
-		ring_init(&p.pcm, p.pcm_data, RING_FRAMES, channels)
+		ring_init(&p.pcm, p.pcm_data[:RING_FRAMES * channels], RING_FRAMES, channels)
 		// Positions carry on, so marks pushed before still line up.
 		p.pcm.write, p.pcm.read, p.pcm.flush_to = w, w, w
 	}
@@ -1706,14 +1726,13 @@ device_open :: proc(p: ^Player, rate, channels, bits: int) -> bool {
 		cfg.pUserData = p
 		cfg.noPreSilencedOutputBuffer = true
 		if p.null_output && p.null_ctx == nil {
-			p.null_ctx = new(ma.context_type, heap)
+			ctx := new(ma.context_type, vmem.arena_allocator(&p.arena))
 			backends := [1]ma.backend{.null}
-			if r := ma.context_init(&backends[0], 1, nil, p.null_ctx); r != .SUCCESS {
+			if r := ma.context_init(&backends[0], 1, nil, ctx); r != .SUCCESS {
 				log.errorf("audio: no null backend: %v", r)
-				free(p.null_ctx, heap)
-				p.null_ctx = nil
 				return false
 			}
+			p.null_ctx = ctx
 		}
 		if r := ma.device_init(p.null_ctx, &cfg, p.device); r != .SUCCESS {
 			log.errorf("audio: device_init failed: %v", r)

@@ -360,3 +360,33 @@ player_bar_fits_at_every_width :: proc(t: ^testing.T) {
 	}
 	free_all(context.temp_allocator)
 }
+
+// A list still loading when it closes goes on loading in d.queued. Gaps
+// that come in after that belong to it, not to the list opened next, so
+// they survive that list being freed.
+@(test)
+queued_list_keeps_its_gaps :: proc(t: ^testing.T) {
+	d := new(app.Data)
+	defer free(d)
+	d.poison = true
+	defer app.view_release(&d.retired)
+	defer app.queued_drop(d)
+	defer app.view_close(d)
+	rows := make([]app.Row, 90, context.temp_allocator)
+	for &r in rows {
+		r.title = "x"
+	}
+	// Every page of 100 comes back with 90: a gap of 10 each.
+	app.view_open(d, .Playlist, "a", "a", "", 2000)
+	d.queue_view = d.view.gen
+	for i in 0 ..< 8 {
+		app.view_add_rows(&d.view, i * 100, 100, rows, 2000)
+	}
+	app.view_close(d)
+	testing.expect_value(t, d.queued.gen, d.queue_view)
+
+	app.view_open(d, .Playlist, "b", "b", "", 100)
+	app.view_add_rows(&d.queued, 800, 100, rows, 2000)
+	app.view_close(d)
+	testing.expect_value(t, app.view_row_at(&d.queued, 900), 810)
+}

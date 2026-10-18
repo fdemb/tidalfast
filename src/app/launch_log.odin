@@ -56,19 +56,34 @@ launch_log_push :: proc(s: ^State) {
 		return
 	}
 	m := &s.measure
-	pm := process_memory(&s.renderer)
-	pc := process_counters()
-	tc := thread_counters()
+	launch := Launch {
+		time            = time.to_unix_seconds(time.now()),
+		mark_ms         = m.mark_ms,
+		ui_instructions = thread_counters().instructions,
+		instructions    = process_counters().instructions,
+		footprint       = process_memory(&s.renderer).footprint,
+	}
+	jobs.push(&d.queue, Job{auth = d.auth_gen, payload = Launch_Log_Job{launch}}, PRIORITY_DATA)
+}
+
+// Launch is what the launch log keeps of one launch.
+Launch :: struct {
+	time:            i64, // unix seconds
+	mark_ms:         [Mark]f64,
+	ui_instructions: u64,
+	instructions:    u64,
+	footprint:       int,
+}
+
+// launch_log_line is l as a line of the launch log.
+launch_log_line :: proc(l: Launch, allocator: runtime.Allocator) -> []u8 {
 	line := fmt.aprintf(
 		`{{"time":%d,"commit":%q,"build":"%s","init":%.1f,"first_frame":%.1f,"library":%.1f,"tracks":%.1f,` +
 		`"ui_instructions":%d,"instructions":%d,"footprint":%d}}` + "\n",
-		time.to_unix_seconds(time.now()), TIDALFAST_COMMIT, "debug" when ODIN_DEBUG else "release",
-		m.mark_ms[.Init], m.mark_ms[.First_Frame], m.mark_ms[.Library], m.mark_ms[.Tracks],
-		tc.instructions, pc.instructions, pm.footprint, allocator = runtime.heap_allocator())
-	job := Job{auth = d.auth_gen, payload = Launch_Log_Job{line = transmute([]u8)line}}
-	if !jobs.push(&d.queue, job, PRIORITY_DATA) {
-		delete(line, runtime.heap_allocator())
-	}
+		l.time, TIDALFAST_COMMIT, "debug" when ODIN_DEBUG else "release",
+		l.mark_ms[.Init], l.mark_ms[.First_Frame], l.mark_ms[.Library], l.mark_ms[.Tracks],
+		l.ui_instructions, l.instructions, l.footprint, allocator = allocator)
+	return transmute([]u8)line
 }
 
 // launch_log_append adds line to the file at path, first cutting the file

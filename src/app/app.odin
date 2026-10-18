@@ -348,12 +348,46 @@ hash_type :: proc(h: u64, ti: ^runtime.Type_Info, seen: ^map[^runtime.Type_Info]
 	return h
 }
 
+// app_context is the context for every call into the app. Its allocator
+// isn't the persistent arena: that never frees, so a make or clone that
+// forgot its allocator would grow it for good. start takes the arena by
+// name, see persistent_allocator.
 app_context :: proc(s: ^State) -> runtime.Context {
 	c := runtime.default_context()
 	c.logger = app_logger()
-	c.allocator = {persistent_allocator_proc, &s.arena}
+	c.allocator = {closed_allocator_proc, nil}
 	c.temp_allocator = mem.arena_allocator(&s.frame_arena)
 	return c
+}
+
+persistent_allocator :: proc(s: ^State) -> runtime.Allocator {
+	return {persistent_allocator_proc, &s.arena}
+}
+
+@(private = "file")
+closed_logged: bool
+
+// closed_allocator_proc is context.allocator outside start. Debug builds
+// stop at an allocation that forgot its allocator. Release builds log the
+// first one and leak it to the heap, which unlike the persistent arena has
+// no fixed size to run out of.
+closed_allocator_proc :: proc(data: rawptr, mode: mem.Allocator_Mode, size, alignment: int, old_memory: rawptr, old_size: int, loc := #caller_location) -> ([]byte, mem.Allocator_Error) {
+	#partial switch mode {
+	case .Alloc, .Alloc_Non_Zeroed, .Resize, .Resize_Non_Zeroed, .Free_All:
+		when ODIN_DEBUG {
+			log.panicf("app: %v of %d bytes from context.allocator at %v, pass an allocator", mode, size, loc)
+		}
+		if !closed_logged {
+			closed_logged = true
+			log.errorf("app: %v of %d bytes from context.allocator at %v, pass an allocator", mode, size, loc)
+		}
+		if mode == .Free_All {
+			return nil, .Mode_Not_Implemented
+		}
+	case .Free:
+		return nil, nil
+	}
+	return runtime.heap_allocator_proc(nil, mode, size, alignment, old_memory, old_size, loc)
 }
 
 // persistent_allocator_proc is the persistent arena without zeroing. The
@@ -366,6 +400,8 @@ persistent_allocator_proc :: proc(data: rawptr, mode: mem.Allocator_Mode, size, 
 }
 
 start :: proc(s: ^State, shell: ^platform.Shell) {
+	// The caches and pools made here last as long as State.
+	context.allocator = persistent_allocator(s)
 	measure_start(s, shell)
 	// Off unless asked for. The benches draw it, so their numbers include it.
 	bench := os.get_env("TIDALFAST_BENCH", context.temp_allocator)
