@@ -1531,7 +1531,7 @@ liked_ids_and_unlike :: proc(t: ^testing.T) {
 	data_jobs(d)
 	app.workers_start(d)
 
-	app.push_job(d, {payload = app.Liked_Ids_Job{}})
+	app.push_job(d, {payload = app.Liked_Ids_Job{version = {count = MOCK_LIKED, newest = 1}}})
 	res, ok := wait_result(d, 10 * time.Second)
 	testing.expect(t, ok)
 	testing.expect_value(t, res.err, nil)

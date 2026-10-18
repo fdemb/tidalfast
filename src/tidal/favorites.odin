@@ -3,6 +3,7 @@ package tidal
 import "core:encoding/json"
 import "core:fmt"
 import "core:slice"
+import "core:strconv"
 import "core:strings"
 
 // Favorites of the logged in user.
@@ -255,6 +256,28 @@ favorites_tracks :: proc(s: ^Session, limit := 50, offset := 0, order: Maybe(Ite
 }
 
 // Includes tracks that may not be available for playback.
+// favorites_track_ids returns the id of every liked track in one request,
+// from users/<id>/favorites/ids. TIDAL doesn't document it; the web player
+// and other clients use it, and it lists the ids as strings.
+favorites_track_ids :: proc(s: ^Session, allocator := context.allocator) -> (ids: []i64, err: Error) {
+	scratch_begin(allocator)
+	base := favorites_base(s) or_return
+	obj := request_object(s, {method = .GET, path = fmt.tprintf("%s/ids", base)}, context.temp_allocator) or_return
+	list, _ := obj["TRACK"].(json.Array)
+	out := make([dynamic]i64, 0, len(list), allocator)
+	for v in list {
+		#partial switch x in v {
+		case json.String:
+			if id, ok := strconv.parse_i64(x); ok {
+				append(&out, id)
+			}
+		case json.Integer:
+			append(&out, x)
+		}
+	}
+	return out[:], nil
+}
+
 favorites_tracks_count :: proc(s: ^Session) -> (int, Error) {
 	return favorites_count(s, "tracks")
 }

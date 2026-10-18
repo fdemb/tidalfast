@@ -58,8 +58,9 @@
 // lastUpdated on. A stale ETag gets 412. POST /users/123/favorites/tracks
 // likes trackId, unless it's liked already, and DELETE
 // /users/123/favorites/tracks/<id> unlikes it: it leaves the liked tracks
-// until the same POST likes it back. Any track id from the mock can
-// be added, and it's listed as it is elsewhere.
+// until the same POST likes it back. GET /users/123/favorites/ids lists
+// the liked track ids. Any track id from the mock can be added, and it's
+// listed as it is elsewhere.
 //
 // It never prints tokens or Authorization headers.
 package mock_tidal
@@ -537,6 +538,40 @@ route :: proc(req: ^Request) -> Response {
 			fmt.printfln("mock: liked track %d, %d liked", id, LIKED + len(server.liked_added))
 		}
 		return json_response(200, "{}")
+	case path == fmt.tprintf("/users/%d/favorites/ids", USER_ID):
+		b := strings.builder_make(context.temp_allocator)
+		strings.write_string(&b, `{"ALBUM":[],"ARTIST":[],"PLAYLIST":[],"VIDEO":[],"TRACK":[`)
+		sync.mutex_lock(&server.mutex)
+		candidates := slice.clone(server.liked_added[:], context.temp_allocator)
+		sync.mutex_unlock(&server.mutex)
+		ids := make([dynamic]int, 0, LIKED + len(candidates), context.temp_allocator)
+		append(&ids, ..candidates)
+		for k in 0 ..< len(HIRES) {
+			append(&ids, HIRES_TRACK_ID + k)
+		}
+		if !server.config.hires_only {
+			for k in 0 ..< 3 {
+				append(&ids, ALBUM_TRACK_ID + k)
+			}
+			for i in 3 + len(HIRES) ..< LIKED {
+				append(&ids, 99 * 1_000_000 + i)
+			}
+		}
+		first := true
+		sync.mutex_lock(&server.mutex)
+		for id in ids {
+			if server.config.hires_only && !(id >= HIRES_TRACK_ID && id < HIRES_TRACK_ID + len(HIRES)) || !server.config.hires_only && !is_liked(id) {
+				continue
+			}
+			if !first {
+				strings.write_byte(&b, ',')
+			}
+			first = false
+			fmt.sbprintf(&b, `"%d"`, id)
+		}
+		sync.mutex_unlock(&server.mutex)
+		strings.write_string(&b, "]}")
+		return json_response(200, strings.to_string(b))
 	case path == fmt.tprintf("/users/%d/favorites/tracks", USER_ID):
 		sync.mutex_lock(&server.mutex)
 		liked_added := slice.clone(server.liked_added[:], context.temp_allocator)

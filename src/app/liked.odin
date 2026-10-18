@@ -81,7 +81,7 @@ liked_fetch :: proc(d: ^Data) {
 		return
 	}
 	d.liked.loading = true
-	push_job(d, {payload = Liked_Ids_Job{}})
+	push_job(d, {payload = Liked_Ids_Job{version = v}})
 }
 
 // liked_ids_result takes a Liked_Ids: the worker's ids and version, copied

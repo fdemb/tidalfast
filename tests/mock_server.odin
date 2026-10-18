@@ -347,6 +347,8 @@ mock_route :: proc(m: ^Mock, req: Mock_Request, target: string) -> (status: int,
 			}
 		}
 		return 200, `{}`, etag
+	case req.path == "/users/123/favorites/ids":
+		return 200, mock_liked_ids(m.liked[:], m.liked_removed[:]), etag
 	case req.path == "/users/123/favorites/tracks":
 		return 200, mock_liked_page(req.query["offset"] or_else "0", req.query["limit"] or_else "50", m.liked[:], m.liked_removed[:]), etag
 	case req.path == "/echo":
@@ -507,6 +509,36 @@ liked_at :: proc(m: ^Mock, id: i64) -> int {
 @(private = "file")
 removed_at :: proc(m: ^Mock, id: i64) -> int {
 	return liked_removed_at(m.liked_removed[:], id)
+}
+
+// mock_liked_ids answers users/123/favorites/ids with the ids the
+// favorites pages list, as strings, as TIDAL does.
+mock_liked_ids :: proc(liked: []i64, removed: []i64) -> string {
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_string(&b, `{"ALBUM":[],"ARTIST":[],"PLAYLIST":[],"VIDEO":[],"TRACK":[`)
+	first := true
+	write :: proc(b: ^strings.Builder, first: ^bool, id: i64) {
+		if !first^ {
+			strings.write_byte(b, ',')
+		}
+		first^ = false
+		fmt.sbprintf(b, `"%d"`, id)
+	}
+	for id in liked {
+		write(&b, &first, id)
+	}
+	outer: for i in 0 ..< MOCK_LIKED {
+		for u in MOCK_UNAVAILABLE {
+			if i == u {
+				continue outer
+			}
+		}
+		if liked_removed_at(removed, i64(i + 1)) < 0 {
+			write(&b, &first, i64(i + 1))
+		}
+	}
+	strings.write_string(&b, "]}")
+	return strings.to_string(b)
 }
 
 // mock_liked_page answers users/123/favorites/tracks as TIDAL does: at
