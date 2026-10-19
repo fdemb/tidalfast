@@ -351,6 +351,12 @@ browse_begin :: proc(s: ^State) {
 // that isn't in the sidebar, for pending_apply. With the fake data it lists
 // the rows of an album or artist.
 open_list :: proc(s: ^State, p: ^Pending) {
+	if p.source == .Artist {
+		artist_visit(s, artist_key(s, p), p.name, p.image)
+		if artist_list_open(s, p) {
+			return // the page, its full top tracks and its grids share it
+		}
+	}
 	if s.data.fake {
 		fake_filter(s, p.source, p.index)
 		return
@@ -634,6 +640,11 @@ view_cover :: proc(s: ^State) -> (kind: cover.Kind, id: string, show: bool) {
 	case .Album:
 		return .Album, small_str(&v.image), true
 	case .Artist:
+		// Opened from a row the list has no picture; the page's Info has.
+		n, _ := strconv.parse_i64(small_str(&v.id))
+		if page := artist_find(&s.data, n); page != nil && page.picture.len > 0 {
+			return .Artist, small_str(&page.picture), true
+		}
 		return .Artist, small_str(&v.image), true
 	}
 	return .Playlist, small_str(&v.image), true

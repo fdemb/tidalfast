@@ -51,6 +51,7 @@ Artist_Page :: struct {
 	used:          u64, // the visit it was last opened in
 	name, picture: Small, // what it was opened with, then the Info part's
 	parts:         [Artist_Part]Artist_Part_State,
+	bio:           Bio_Layout, // the biography's lines, see artist.odin
 }
 
 // Artist_Part_State is nil before it's asked for, and again after a held
@@ -252,6 +253,9 @@ artist_ready :: proc(page: ^Artist_Page, part: Artist_Part, arena: ^vmem.Arena, 
 			page.picture = info.picture
 		}
 	}
+	if part == .Bio {
+		page.bio.valid = false
+	}
 	page.parts[part] = Artist_Ready{arena, content}
 }
 
@@ -270,6 +274,7 @@ artist_page_free :: proc(page: ^Artist_Page) {
 			arena_release(ready.arena)
 		}
 	}
+	bio_free(&page.bio)
 	page^ = {}
 }
 
