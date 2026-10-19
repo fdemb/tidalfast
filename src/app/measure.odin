@@ -80,6 +80,7 @@ Measure :: struct {
 	rows:         int,
 	covers:       int,
 	covers_ready: int,
+	bio_wraps:    int, // artist biographies broken into lines, which caches
 	stage:        Memory_Stage,
 	deadline:     time.Tick, // the stage's wait ends; zero for none
 	wake_at:      i64, // the deadline for the thread, which wakes the UI at it (atomic)
@@ -184,6 +185,7 @@ measure_frame_begin :: proc(s: ^State) {
 	m.rows = 0
 	m.covers = 0
 	m.covers_ready = 0
+	m.bio_wraps = 0
 }
 
 // measure_count_cover is for cover_art: a cover drawn this frame, and

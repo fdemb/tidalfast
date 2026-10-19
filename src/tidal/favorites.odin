@@ -1,5 +1,6 @@
 package tidal
 
+import "base:runtime"
 import "core:encoding/json"
 import "core:fmt"
 import "core:slice"
@@ -255,15 +256,27 @@ favorites_tracks :: proc(s: ^Session, limit := 50, offset := 0, order: Maybe(Ite
 	return favorites_list(s, "tracks", list_params(limit, offset, order_name(ITEM_ORDER_NAMES, order), order_direction), Track, parse_track_in_album, allocator)
 }
 
-// Includes tracks that may not be available for playback.
-// favorites_track_ids returns the id of every liked track in one request,
-// from users/<id>/favorites/ids. TIDAL doesn't document it; the web player
+// Favorite_Ids is every liked track's id and every followed artist's.
+Favorite_Ids :: struct {
+	tracks:  []i64,
+	artists: []i64,
+}
+
+// favorites_ids returns the ids of every liked track, which may include
+// tracks that can't be played, and every followed artist, in one request
+// to users/<id>/favorites/ids. TIDAL doesn't document it; the web player
 // and other clients use it, and it lists the ids as strings.
-favorites_track_ids :: proc(s: ^Session, allocator := context.allocator) -> (ids: []i64, err: Error) {
+favorites_ids :: proc(s: ^Session, allocator := context.allocator) -> (ids: Favorite_Ids, err: Error) {
 	scratch_begin(allocator)
 	base := favorites_base(s) or_return
 	obj := request_object(s, {method = .GET, path = fmt.tprintf("%s/ids", base)}, context.temp_allocator) or_return
-	list, _ := obj["TRACK"].(json.Array)
+	return {tracks = id_list(obj["TRACK"], allocator), artists = id_list(obj["ARTIST"], allocator)}, nil
+}
+
+// id_list reads a favorites/ids list, skipping what isn't an id.
+@(private = "file")
+id_list :: proc(value: json.Value, allocator: runtime.Allocator) -> []i64 {
+	list, _ := value.(json.Array)
 	out := make([dynamic]i64, 0, len(list), allocator)
 	for v in list {
 		#partial switch x in v {
@@ -275,7 +288,7 @@ favorites_track_ids :: proc(s: ^Session, allocator := context.allocator) -> (ids
 			append(&out, x)
 		}
 	}
-	return out[:], nil
+	return out[:]
 }
 
 favorites_tracks_count :: proc(s: ^Session) -> (int, Error) {

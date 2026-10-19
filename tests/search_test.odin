@@ -8,115 +8,9 @@ import "core:testing"
 import "core:unicode/utf8"
 
 import app "../src/app"
-import "../src/cover"
 import "../src/jobs"
-import "../src/platform"
-import "../src/text"
 import "../src/tidal"
 import "../src/ui"
-
-// A State for drawing the library screen without a window: no renderer,
-// text system or workers. Closed lists' arenas are poisoned, so a string
-// the frame still borrows from one reads as POISON bytes. Like the app's,
-// it allocates from an arena, given as context.allocator.
-@(private = "file")
-library_state :: proc(fake: bool) -> ^app.State {
-	s := new(app.State)
-	ui.init(&s.ui)
-	app.library_init(&s.library)
-	cover.init(&s.data.covers, 1 << 20)
-	s.playback.index = -1
-	s.data.poison = true
-	s.data.fake = fake
-	if fake {
-		s.rows = app.make_rows()
-	} else {
-		sign_in(s)
-	}
-	app.search_init(s)
-	return s
-}
-
-@(private = "file")
-library_state_free :: proc(s: ^app.State) {
-	app.search_shutdown(s)
-	app.data_shutdown(s)
-	test_state_free(s)
-}
-
-@(private = "file")
-Frame :: struct {
-	now:   f64,
-	bytes: [256]u8,
-	fonts: ^Fonts, // nil measures every label as empty
-}
-
-// library_frame builds and lays out one frame of the library screen with
-// events, then does what the frame asked for, as the app does after
-// drawing. It fails the test if the accessibility tree, which end_frame
-// copies from the boxes' strings, holds a poisoned byte.
-@(private = "file")
-library_frame :: proc(t: ^testing.T, s: ^app.State, f: ^Frame, events: ..platform.Event, dt := 0.016, loc := #caller_location) {
-	f.now += dt
-	free_all(context.temp_allocator)
-	texts: ^text.State
-	if f.fonts != nil {
-		texts = f.fonts.state
-		text.begin_frame(texts, &f.fonts.r)
-	}
-	ui.begin_frame(&s.ui, events, nil, texts, 1000, 700, f.now, nil, f.bytes[:])
-	app.draw_library(s, 1000, 700)
-	ui.end_frame()
-	nodes, _ := ui.access_tree(&s.ui)
-	for n in nodes {
-		for c in ([2]cstring{n.label, n.value}) {
-			testing.expectf(t, strings.index_byte(string(c), app.POISON) < 0, "node %v reads freed memory: %q", n.role, string(c), loc = loc)
-		}
-	}
-	app.pending_apply(s)
-}
-
-// node finds the first node in the last frame's tree whose label starts
-// with label.
-@(private = "file")
-node :: proc(s: ^app.State, label: string) -> (platform.Access_Node, bool) {
-	nodes, _ := ui.access_tree(&s.ui)
-	for n in nodes {
-		if strings.has_prefix(string(n.label), label) {
-			return n, true
-		}
-	}
-	return {}, false
-}
-
-@(private = "file")
-press :: proc(s: ^app.State, label: string) -> platform.Event {
-	n, ok := node(s, label)
-	assert(ok, label)
-	return {kind = .Access_Press, target = n.id}
-}
-
-@(private = "file")
-right_click :: proc(s: ^app.State, label: string) -> (down, up: platform.Event) {
-	n, ok := node(s, label)
-	assert(ok, label)
-	x, y := n.frame[0] + n.frame[2] / 2, n.frame[1] + n.frame[3] / 2
-	return {kind = .Mouse_Down, x = x, y = y, button = .Right, click_count = 1}, {kind = .Mouse_Up, x = x, y = y, button = .Right}
-}
-
-@(private = "file")
-left_click :: proc(s: ^app.State, label: string) -> (down, up: platform.Event) {
-	n, ok := node(s, label)
-	assert(ok, label)
-	x, y := n.frame[0] + n.frame[2] / 2, n.frame[1] + n.frame[3] / 2
-	return {kind = .Mouse_Down, x = x, y = y, button = .Left, click_count = 1}, {kind = .Mouse_Up, x = x, y = y, button = .Left}
-}
-
-@(private = "file")
-type_text :: proc(f: ^Frame, s: string) -> platform.Event {
-	copy(f.bytes[:], s)
-	return {kind = .Text, text_length = u32(len(s))}
-}
 
 @(private = "file")
 search_jobs :: proc(s: ^app.State) -> int {
@@ -223,7 +117,7 @@ artist_and_album_links :: proc(t: ^testing.T) {
 	down, up = right_click(s, "Second song")
 	library_frame(t, s, &f, down, up)
 	library_frame(t, s, &f)
-	_, single := node(s, "Go to artist")
+	_, single := access_node(s, "Go to artist")
 	testing.expect(t, !single)
 	library_frame(t, s, &f, press(s, "Go to Kali Uchis"))
 	testing.expect_value(t, app.small_str(&s.data.view.id), "41")
@@ -300,11 +194,11 @@ artist_links_stop_at_the_edge :: proc(t: ^testing.T) {
 		library_frame(t, s, &f)
 	}
 
-	first, ok := node(s, "Artist number 0")
+	first, ok := access_node(s, "Artist number 0")
 	testing.expect(t, ok)
-	_, last := node(s, "Artist number 11")
+	_, last := access_node(s, "Artist number 11")
 	testing.expect(t, !last)
-	title, _ := node(s, "Crowded song")
+	title, _ := access_node(s, "Crowded song")
 	right := title.frame[0] + title.frame[2]
 	shown := 0
 	nodes, _ := ui.access_tree(&s.ui)
@@ -440,18 +334,6 @@ fake_search_lists_albums_and_artists :: proc(t: ^testing.T) {
 	}
 }
 
-@(private = "file")
-key :: proc(code: platform.Key, modifiers: platform.Modifiers = {}) -> platform.Event {
-	return {kind = .Key_Down, key = code, modifiers = modifiers}
-}
-
-// text_at is a Text event for s, copied into the frame's bytes at offset.
-@(private = "file")
-text_at :: proc(f: ^Frame, at: int, s: string) -> platform.Event {
-	copy(f.bytes[at:], s)
-	return {kind = .Text, text_offset = u32(at), text_length = u32(len(s))}
-}
-
 // The fake library with "Jóga" searched for and the field focused.
 @(private = "file")
 searched_state :: proc(t: ^testing.T, f: ^Frame) -> ^app.State {
@@ -527,14 +409,6 @@ field_shortcuts_keep_their_order :: proc(t: ^testing.T) {
 	library_frame(t, s, &f, text_at(&f, 0, "b"), key(.Escape), key(.Escape), key(.F, {ui.PRIMARY}), text_at(&f, 1, "c"))
 	testing.expect_value(t, ui.field_text(field), "c")
 	testing.expect(t, ui.has_focus(node_box(s, "Search")))
-}
-
-// node_box is the box behind the first node whose label starts with label.
-@(private = "file")
-node_box :: proc(s: ^app.State, label: string) -> ^ui.Box {
-	n, ok := node(s, label)
-	assert(ok, label)
-	return ui.box_lookup(&s.ui, ui.Key(n.id))
 }
 
 // The track menu belongs to the list and the track it opened on. When a
@@ -633,7 +507,7 @@ search_results_come_back_from_memory :: proc(t: ^testing.T) {
 	testing.expect_value(t, app.view_count(s), 2)
 	testing.expect_value(t, len(sr.found.albums), 1)
 	library_frame(t, s, &f)
-	_, ok := node(s, "Found song")
+	_, ok := access_node(s, "Found song")
 	testing.expect(t, ok)
 
 	// Five minutes on, it's asked for again.
@@ -645,14 +519,6 @@ search_results_come_back_from_memory :: proc(t: ^testing.T) {
 	library_frame(t, s, &f, {kind = .Key_Down, key = .Return})
 	testing.expect_value(t, search_jobs(s), 1)
 	testing.expect(t, app.lru_find(&s.data, .Search, "abc") < 0)
-}
-
-// enabled says whether the last frame's button labelled label takes input.
-@(private = "file")
-enabled :: proc(s: ^app.State, label: string) -> bool {
-	n, ok := node(s, label)
-	assert(ok, label)
-	return .Disabled not_in n.flags
 }
 
 // go_to_first_album opens the album of the open list's first row from its

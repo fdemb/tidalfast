@@ -212,6 +212,8 @@ Data :: struct {
 	next_gen:       u32, // the last Track_View.gen handed out
 	lists:          Lists, // closed lists and the disk cache, see lists.odin
 	liked:          Liked_Set, // the liked track ids the hearts show, see liked.odin
+	followed:       Followed_Set, // the followed artist ids the Follow buttons show, see followed.odin
+	artists:        Artist_Cache, // artist pages, see artist_data.odin
 	window_key:     bool, // the window had the keyboard last frame
 	// Debug builds and tests keep the last list freed (view_free) filled
 	// with POISON until the next one is, so a string or row still borrowed
@@ -326,6 +328,8 @@ data_shutdown :: proc(s: ^State) {
 	sidebar_free(d)
 	lists_shutdown(d)
 	liked_clear(d)
+	followed_clear(d)
+	artist_clear(d)
 	view_release(&d.view)
 	view_release(&d.queued)
 	view_release(&d.refresh)
@@ -693,7 +697,8 @@ hold_job :: proc(d: ^Data, job: Job, priority: u8) {
 // same_request says whether two jobs ask for the same thing. The kinds that
 // wait behind a flag or are sent one at a time each ask for one thing, and
 // an Artwork asks for its track's serial. A Stream's serial and a page's
-// offset are never asked for twice, and every add is its own.
+// offset are never asked for twice, and every add is its own. Only one
+// follow change per artist is out, see Follow_Out.
 @(private = "file")
 same_request :: proc(held, job: Job) -> bool {
 	#partial switch p in job.payload {
@@ -702,14 +707,18 @@ same_request :: proc(held, job: Job) -> bool {
 	case Artwork_Job:
 		h, art := held.payload.(Artwork_Job)
 		return art && h.serial == p.serial
+	case Artist_Job:
+		h, artist := held.payload.(Artist_Job)
+		return artist && h == p
 	}
 	return false
 }
 
 // held_victim is the held job to drop for a new one: one no longer wanted,
 // else the oldest Stream, Artwork or Add_Track, whose track has most likely
-// moved on. hold_job keeps one of each other kind and view_pages one page
-// per list, so they never fill the list.
+// moved on, Artist, whose page asks again, or Follow, whose button goes
+// back. hold_job keeps one of each other kind and view_pages one page per
+// list, so they never fill the list.
 @(private = "file")
 held_victim :: proc(d: ^Data) -> int {
 	held := d.held[:d.held_count]
@@ -720,7 +729,7 @@ held_victim :: proc(d: ^Data) -> int {
 	}
 	for h, i in held {
 		#partial switch _ in h.job.payload {
-		case Stream_Job, Artwork_Job, Add_Track_Job:
+		case Stream_Job, Artwork_Job, Add_Track_Job, Artist_Job, Follow_Job:
 			return i
 		}
 	}
@@ -731,7 +740,8 @@ held_victim :: proc(d: ^Data) -> int {
 }
 
 // held_drop lets go of a held job that won't be pushed. Its caller counted
-// it as out, so the flag holding back the next one is cleared.
+// it as out, so the flag holding back the next one is cleared. A follow
+// change never reached TIDAL, so its button goes back.
 @(private = "file")
 held_drop :: proc(d: ^Data, job: ^Job) {
 	l := &d.login
@@ -749,6 +759,11 @@ held_drop :: proc(d: ^Data, job: ^Job) {
 	case Liked_Ids_Job:
 		d.liked.loading = false
 		clear(&d.liked.edits)
+		clear(&d.followed.edits)
+	case Follow_Job:
+		follow_answer(d, p.artist, false)
+	case Artist_Job:
+		artist_job_dropped(d, p)
 	}
 	job_free(job)
 }
@@ -843,6 +858,8 @@ account_end :: proc(s: ^State) {
 	d.relogin = false
 	sidebar_free(d)
 	liked_clear(d)
+	followed_clear(d)
+	artist_clear(d)
 	view_close(d)
 	queued_drop(d)
 	lists_clear(d)
@@ -970,6 +987,8 @@ held_wanted :: proc(d: ^Data, job: Job) -> bool {
 		return d.account == .Signed_In
 	case Tracks_Job:
 		return track_view(d, p.view) != nil
+	case Artist_Job:
+		return artist_waiting(d, p) != nil
 	}
 	return true
 }
@@ -1112,6 +1131,11 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 		add_result(s, res, p)
 	case Liked_Ids_Job:
 		liked_ids_result(d, res, failed)
+		followed_ids_result(d, res, failed)
+	case Follow_Job:
+		follow_result(d, res, p, failed)
+	case Artist_Job:
+		artist_result(d, res, p)
 	case Tracks_Job:
 		r := &d.refresh
 		v := track_view(d, p.view)

@@ -46,6 +46,8 @@ The queue plays its items in an order, `Playback.order`: each item once, in list
 
 Repeat goes off, all, one. On repeat all, the end of the order goes round to its start; a shuffled queue goes round in the same order. On repeat one, the current track is preloaded as its own next track, so it loops gaplessly; next still moves on, and previous behaves as usual. A track that fails to resolve skips forward without going round, so a queue where nothing plays stops at its end instead of asking for streams forever. Changing shuffle or repeat drops a preloaded next track that isn't audible yet, and the player asks for the right one.
 
+Play and Shuffle on an artist page set the shuffle setting before they play: Play turns it off and plays the top tracks from the first, and Shuffle turns it on and starts from a loaded track picked at random, with the rest shuffled after it. Both go through the frame's `.Play` with a `Play_Order` (`In_Order` or `Shuffled`), and change the setting only when it differs. Playing a row, from the page or any table, leaves the setting as it is (`Keep`).
+
 Album gain looks at the neighbours in play order, so a shuffled album gets track gain. Both settings are in the settings file. The play order isn't in the queue file: a restored queue with shuffle on starts with the saved track and shuffles the rest.
 
 ## Resuming after a restart

@@ -27,6 +27,36 @@ text_width :: proc(font: text.Font, size: f32, s: string) -> f32 {
 	return text.measure(u.texts, font, size, s).width
 }
 
+// cluster_widths is how wide each grapheme cluster of s is in font at
+// size, between the offsets bounds from cluster_bounds, from one shaping
+// of s. Without a text system it guesses from the length.
+cluster_widths :: proc(font: text.Font, size: f32, s: string, bounds: []int, allocator := context.temp_allocator) -> []f32 {
+	widths := make([]f32, len(bounds) - 1, allocator)
+	u := ctx
+	if u == nil || u.texts == nil {
+		for &w, i in widths {
+			w = f32(bounds[i + 1] - bounds[i]) * size * 0.6
+		}
+		return widths
+	}
+	// A glyph's cluster is a codepoint index; of_rune maps it to its
+	// grapheme cluster.
+	of_rune := make([dynamic]int, 0, len(s), context.temp_allocator)
+	c := 0
+	for _, i in s {
+		for i >= bounds[c + 1] {
+			c += 1
+		}
+		append(&of_rune, c)
+	}
+	for g in text.shape(u.texts, font, size, s).glyphs {
+		if int(g.cluster) < len(of_rune) {
+			widths[of_rune[g.cluster]] += g.advance
+		}
+	}
+	return widths
+}
+
 // counter_width is how wide a counter in the shape of pattern can get, such
 // as "-3:45" for a time left: every digit is taken as the widest digit.
 // Inter's digits differ in width, so a label this wide never cuts off
@@ -100,7 +130,7 @@ scroll_view :: proc(id: string, width, height: Size, flags: Box_Flags = {}) -> ^
 // scrollbar. A header above the list leaves the same, so its columns line
 // up with the rows'.
 scroll_gutter :: proc(id: string) -> f32 {
-	b := box_lookup(ctx, key_from_string(seed_key(top_parent()), id))
+	b := find(id)
 	return gutter_of(b) if b != nil else 0
 }
 

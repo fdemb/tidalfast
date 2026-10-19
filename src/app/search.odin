@@ -55,6 +55,13 @@ Found :: struct {
 	artists:  []Artist_Ref,
 }
 
+FOUND_COVER := [Search_Tab]cover.Kind {
+	.Songs     = .Album,
+	.Albums    = .Album,
+	.Artists   = .Artist,
+	.Playlists = .Playlist,
+}
+
 Found_Lists :: struct {
 	albums, artists, playlists: []Found,
 }
@@ -72,6 +79,9 @@ Search :: struct {
 	// A list that isn't a sidebar entry is showing. Picking a sidebar entry
 	// ends it.
 	browsing:    bool,
+	// The history place Back or Forward went to, which the history moves
+	// to when its results show. nil for a new search.
+	place:       Maybe(int),
 	// The fake data's lists: indices into State.rows, and for the tabs
 	// indices of rows (albums, artists) and of PLAYLISTS.
 	fake:        []i32,
@@ -123,7 +133,6 @@ draw_search_field :: proc(s: ^State) {
 		switch {
 		case sig.submitted && submitted != "" && sig.submitted_text != ui.field_text(&sr.field):
 			search_stop(s)
-			history_visit(s, {kind = .Search, id = small(submitted)})
 			search_send(s, submitted)
 			search_edited(s)
 		case sig.submitted && submitted != "":
@@ -138,7 +147,6 @@ draw_search_field :: proc(s: ^State) {
 	// Nothing goes while the input method is still composing.
 	if sr.due > 0 && !sr.field.marked {
 		if s.ui.time >= sr.due {
-			history_visit(s, {kind = .Search, id = small(search_query(s))})
 			search_send(s, search_query(s))
 		} else {
 			ui.wake_at(sr.due)
@@ -175,6 +183,7 @@ search_stop :: proc(s: ^State) {
 	sr.gen += 1
 	sr.due = 0
 	sr.loading = false
+	sr.place = nil
 	if !s.data.fake {
 		jobs.remove_if(&s.data.queue, drop_search_jobs, nil)
 		held_remove_if(&s.data, drop_search_jobs, nil)
@@ -197,11 +206,28 @@ search_send :: proc(s: ^State, q: string) {
 	push_job(&s.data, {payload = Search_Job{gen = sr.gen, query = small(q)}})
 }
 
-// search_again puts q in the field and searches for it, for Back and
-// Forward.
-search_again :: proc(s: ^State, q: string) {
+// search_go puts q in the field and searches for it, for Back and Forward
+// to the search at history place at.
+search_go :: proc(s: ^State, q: string, at: Maybe(int)) {
+	search_stop(s)
+	s.search.place = at
 	ui.field_set_text(&s.search.field, q)
 	search_send(s, q)
+}
+
+// search_shown records the results that just became the open list in the
+// history: at the place Back or Forward went to, or as a new place. Until
+// then the history stays at the place still showing, so a search cleared
+// or failed before its results came leaves the history as it was.
+@(private = "file")
+search_shown :: proc(s: ^State) {
+	sr := &s.search
+	if at, ok := sr.place.?; ok {
+		s.history.at = at
+		sr.place = nil
+		return
+	}
+	history_visit(s, {kind = .Search, id = sr.query})
 }
 
 // search_close leaves the results for the sidebar's playlist.
@@ -274,6 +300,7 @@ search_result :: proc(s: ^State, res: ^Result, job: Search_Job) {
 	v.next_offset = SEARCH_PAGE
 	view_request_pages(d)
 	list_loaded(d, v)
+	search_shown(s)
 }
 
 // search_from_memory shows the results kept for q, if they're recent
@@ -307,6 +334,7 @@ search_from_memory :: proc(s: ^State, q: string) -> bool {
 	kept.gen = d.view.gen
 	d.view = kept
 	log.infof("search: \"%s\": %d songs from memory", q, d.view.count)
+	search_shown(s)
 	return true
 }
 
@@ -344,6 +372,12 @@ browse_begin :: proc(s: ^State) {
 // that isn't in the sidebar, for pending_apply. With the fake data it lists
 // the rows of an album or artist.
 open_list :: proc(s: ^State, p: ^Pending) {
+	if p.source == .Artist {
+		artist_visit(s, artist_key(s, p), p.name, p.image)
+		if artist_list_open(s, p) {
+			return // the page, its full top tracks and its grids share it
+		}
+	}
 	if s.data.fake {
 		fake_filter(s, p.source, p.index)
 		return
@@ -559,8 +593,8 @@ draw_found_list :: proc(s: ^State) {
 			open_found(s, tab, f)
 		}
 		ui.spacer(ui.px(16))
-		kind := cover.Kind.Album if tab == .Albums else .Playlist
-		cover_art(s, kind, f.image, u32(i) * 2654435761 >> 7, 40, ui.px(52))
+		kind := FOUND_COVER[tab]
+		cover_art(s, kind, f.image, u32(i) * 2654435761 >> 7, 40, ui.px(52), 20 if kind == .Artist else 4)
 		ui.spacer(ui.px(8))
 		ui.column("", {}, ui.fill(), ui.fill())
 		ui.spacer(ui.px(9))
@@ -626,6 +660,13 @@ view_cover :: proc(s: ^State) -> (kind: cover.Kind, id: string, show: bool) {
 		return
 	case .Album:
 		return .Album, small_str(&v.image), true
+	case .Artist:
+		// Opened from a row the list has no picture; the page's Info has.
+		n, _ := strconv.parse_i64(small_str(&v.id))
+		if page := artist_find(&s.data, n); page != nil && page.picture.len > 0 {
+			return .Artist, small_str(&page.picture), true
+		}
+		return .Artist, small_str(&v.image), true
 	}
 	return .Playlist, small_str(&v.image), true
 }
@@ -730,6 +771,7 @@ fake_search :: proc(s: ^State, q: string) {
 	sr.fake_source = .Search
 	sr.fake_title = small(fmt.tprintf("Results for “%s”", q))
 	log.infof("search: \"%s\": %d songs, %d albums, %d artists, %d playlists", q, sr.fake_count, sr.fake_counts[0], sr.fake_counts[1], sr.fake_counts[2])
+	search_shown(s)
 }
 
 // fake_filter lists the fake rows of the album or artist of row at.
