@@ -6,6 +6,7 @@ package app
 
 import "core:fmt"
 import "core:math"
+import "core:math/rand"
 import "core:strings"
 
 import "../audio"
@@ -85,6 +86,7 @@ Status :: enum u8 {
 	Playing,
 	Added,
 	Copied,
+	Copied_Artist, // the open artist's link
 	Adding,
 	Already_In,
 	Add_Failed,
@@ -290,12 +292,18 @@ draw_main_view :: proc(s: ^State, main_w: f32) {
 	// track's count of minute digits.
 	cols.duration = max(cols.duration, ui.counter_width(.Regular, 13, fmt.tprintf("%d:00", max(s.data.view.longest / 60, 10))) + 2 * CELL_PAD)
 	ui.column("main", {.Clip}, ui.fill(), ui.fill())
+	if p := artist_place(s); p != nil {
+		if _, table := p.artist_view.(Artist_Top_Tracks); !table {
+			draw_artist(s, p, main_w)
+			return
+		}
+	}
 
 	{
 		ui.row("", {}, ui.fill(), ui.px(124))
 		ui.spacer(ui.px(24))
 		if kind, image, show := view_cover(s); show {
-			cover_art(s, kind, image, u32(lib.playlist) * 7919 + 13, 92, ui.px(92))
+			cover_art(s, kind, image, u32(lib.playlist) * 7919 + 13, 92, ui.px(92), 46 if kind == .Artist else 4)
 			ui.spacer(ui.px(18))
 		}
 		ui.column("", {}, ui.fill(), ui.fill())
@@ -354,7 +362,10 @@ draw_main_view :: proc(s: ^State, main_w: f32) {
 	lib.anchor_row = -1
 	lib.top_row = int(list.view_off.y / TRACK_ROW_H)
 	lib.top_offset = list.view_off.y - f32(lib.top_row) * TRACK_ROW_H
-	table_keys(s, list)
+	if table_keys(s, list, view_count(s)) {
+		ui.scroll_to(list, f32(lib.selected) * TRACK_ROW_H, f32(lib.selected + 1) * TRACK_ROW_H)
+	}
+
 	{
 		rows := ui.virtual_rows(list, view_count(s), TRACK_ROW_H)
 		for i in rows.first ..< rows.last {
@@ -374,19 +385,22 @@ header_cell :: proc(label: string, width: f32, align: ui.Align) {
 	b.text_align = align
 }
 
-// table_keys moves the selection with the arrow keys while the table has
-// the focus, and plays the selected row with Enter or Space.
-table_keys :: proc(s: ^State, list: ^ui.Box) {
+// table_keys moves the selection among the first count rows with the
+// arrow keys while the table has the focus, and plays the selected row with
+// Enter or Space. A row selected past count, as in an artist's full top
+// tracks, isn't one of them. It returns true when the selection moved, for
+// the caller to scroll it into view.
+table_keys :: proc(s: ^State, list: ^ui.Box, count: int) -> (moved: bool) {
 	lib := &s.library
-	if ui.signal(list).keyboard && lib.selected >= 0 {
-		play(s, lib.selected)
+	sel := lib.selected if lib.selected < count else -1
+	if ui.signal(list).keyboard && sel >= 0 {
+		play(s, sel)
 	}
 	if !ui.has_focus(list) {
 		return
 	}
 	page := max(int(list.rect.h / TRACK_ROW_H) - 1, 1)
-	sel := lib.selected
-	moved := true
+	moved = true
 	switch {
 	case ui.take_key(.Down):
 		sel += 1
@@ -399,14 +413,14 @@ table_keys :: proc(s: ^State, list: ^ui.Box) {
 	case ui.take_key(.Home):
 		sel = 0
 	case ui.take_key(.End):
-		sel = view_count(s) - 1
+		sel = count - 1
 	case:
 		moved = false
 	}
 	if moved {
-		lib.selected = clamp(sel, 0, view_count(s) - 1)
-		ui.scroll_to(list, f32(lib.selected) * TRACK_ROW_H, f32(lib.selected + 1) * TRACK_ROW_H)
+		lib.selected = clamp(sel, 0, count - 1)
 	}
+	return
 }
 
 track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
@@ -491,11 +505,12 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 // icon_button is a square icon button of side, centred in the cell it sits
 // in: the square is the click and hover area. hot is its opacity, so 0
 // hides it while it still clicks. Returns the button's box for anything
-// anchored to it, such as a menu.
-icon_button :: proc(id, icon: string, font: text.Font, name: string, color: render.Color, hot: f32, side: f32) -> (^ui.Box, ui.Signal) {
+// anchored to it, such as a menu. flags adds to the button's, such as
+// Focusable for one outside a row.
+icon_button :: proc(id, icon: string, font: text.Font, name: string, color: render.Color, hot: f32, side: f32, flags: ui.Box_Flags = {}) -> (^ui.Box, ui.Signal) {
 	ui.column("", {}, ui.px(side), ui.fill())
 	ui.spacer(ui.fill())
-	b := ui.box_make(fmt.tprintf("%s###%s", icon, id), {.Clickable, .Draw_Text, .Draw_Hot_Effects}, ui.px(side), ui.px(side))
+	b := ui.box_make(fmt.tprintf("%s###%s", icon, id), {.Clickable, .Draw_Text, .Draw_Hot_Effects} + flags, ui.px(side), ui.px(side))
 	b.text_align = .Center
 	b.font = font
 	b.font_size = 16
@@ -991,6 +1006,43 @@ play :: proc(s: ^State, i: int) {
 	set_status(s, .Playing, i)
 }
 
+// row_playable says whether row i of the open list is loaded and can play.
+row_playable :: proc(s: ^State, i: int) -> bool {
+	row := view_row(s, i)
+	return row != nil && (row.id != 0 || s.data.fake)
+}
+
+// play_ordered plays the row of a .Play. With an order it first sets
+// shuffle to match, then plays the first row, or a loaded row picked at
+// random. It returns false when there's nothing to play.
+play_ordered :: proc(s: ^State, p: Pending) -> bool {
+	i := p.index
+	switch p.order {
+	case .Keep:
+	case .In_Order:
+		i = 0
+	case .Shuffled:
+		// Each playable row is picked with the same chance, in one pass.
+		seen := 0
+		for j in 0 ..< view_count(s) {
+			if row_playable(s, j) {
+				seen += 1
+				if rand.int_max(seen) == 0 {
+					i = j
+				}
+			}
+		}
+	}
+	if !row_playable(s, i) {
+		return false
+	}
+	if p.order != .Keep && s.settings.shuffle != (p.order == .Shuffled) {
+		playback_set_shuffle(s, p.order == .Shuffled)
+	}
+	play(s, i)
+	return true
+}
+
 set_status :: proc(s: ^State, status: Status, track: int, list := -1) {
 	s.library.status = status
 	s.library.status_track = track
@@ -1001,6 +1053,9 @@ status_text :: proc(s: ^State) -> string {
 	lib := &s.library
 	if status := data_status(s); status != "" {
 		return status
+	}
+	if lib.status == .Copied_Artist {
+		return fmt.tprintf("Copied the link to %s", view_title(s))
 	}
 	t := view_row(s, lib.status_track)
 	if lib.status == .None || t == nil {
@@ -1020,6 +1075,7 @@ status_text :: proc(s: ^State) -> string {
 		return fmt.tprintf("Couldn't add %s to %s", t.title, sidebar_entry(s, lib.status_list).name)
 	case .Copied:
 		return fmt.tprintf("Copied the link to %s", t.title)
+	case .Copied_Artist:
 	}
 	return ""
 }
@@ -1041,13 +1097,25 @@ Pending :: struct {
 	name:   Small,
 	image:  Small,
 	hint:   int,
+	// .List of .Artist: the page, its full top tracks or a shelf's grid.
+	artist_view: Artist_View,
+	order:  Play_Order, // .Play
+}
+
+// Play_Order is what Play and Shuffle on a page ask .Play for: the first
+// row with shuffle off, or a random row with it on. Keep plays index and
+// leaves shuffle as it is.
+Play_Order :: enum u8 {
+	Keep,
+	In_Order,
+	Shuffled,
 }
 
 Pending_Kind :: enum u8 {
 	None,
 	Playlist, // open a sidebar entry
 	List, // open an album, an artist or a playlist that isn't in the sidebar
-	Search, // search for id again
+	Search, // a search in the history, never pending: id is the query
 	Close_Search,
 	Play,
 	Back,
@@ -1064,9 +1132,9 @@ pending_apply :: proc(s: ^State) -> bool {
 	p := s.pending
 	s.pending = {}
 	switch p.kind {
-	case .None:
+	case .None, .Search:
 		return false
-	case .Playlist, .List, .Search:
+	case .Playlist, .List:
 		history_visit(s, p)
 		place_go(s, &p)
 	case .Close_Search:
@@ -1075,23 +1143,30 @@ pending_apply :: proc(s: ^State) -> bool {
 		}
 		search_close(s)
 	case .Play:
-		play(s, p.index)
+		if !play_ordered(s, p) {
+			return false
+		}
 	case .Back, .Forward:
 		h := &s.history
-		to := h.at - 1 if p.kind == .Back else h.at + 1
+		to := history_from(s) - 1 if p.kind == .Back else history_from(s) + 1
 		if to < 0 || to >= h.count {
 			return false
 		}
-		h.at = to
 		place := h.places[to]
-		place_go(s, &place)
+		if place.kind == .Search {
+			search_go(s, small_str(&place.id), to)
+		} else {
+			h.at = to
+			place_go(s, &place)
+		}
 	}
 	ui.data_changed()
 	return true
 }
 
-// place_go shows a place, a Pending of kind .Playlist, .List or .Search,
-// without recording it in the history.
+// place_go shows a place, a Pending of kind .Playlist or .List, without
+// recording it in the history. A search's place is recorded when its
+// results show (search_shown).
 place_go :: proc(s: ^State, p: ^Pending) {
 	search_stop(s)
 	#partial switch p.kind {
@@ -1099,8 +1174,6 @@ place_go :: proc(s: ^State, p: ^Pending) {
 		select_playlist(s, playlist_index(s, p))
 	case .List:
 		open_list(s, p)
-	case .Search:
-		search_again(s, small_str(&p.id))
 	}
 }
 
@@ -1127,7 +1200,7 @@ history_visit :: proc(s: ^State, p: Pending) {
 		p = playlist_place(s, p.index)
 	}
 	now := &h.places[h.at]
-	if now.kind == p.kind && now.source == p.source && now.index == p.index && now.id == p.id {
+	if now.kind == p.kind && now.source == p.source && now.index == p.index && now.id == p.id && same_artist_view(now.artist_view, p.artist_view) {
 		return
 	}
 	if now.kind != .Search || p.kind != .Search {
@@ -1165,12 +1238,19 @@ playlist_index :: proc(s: ^State, p: ^Pending) -> int {
 	return -1
 }
 
+// history_from is the place Back and Forward step from: the search they
+// went to, which the history moves to only once its results show, or else
+// the place showing.
+history_from :: proc(s: ^State) -> int {
+	return s.search.place.? or_else s.history.at
+}
+
 history_can_back :: proc(s: ^State) -> bool {
-	return s.history.at > 0
+	return history_from(s) > 0
 }
 
 history_can_forward :: proc(s: ^State) -> bool {
-	return s.history.at + 1 < s.history.count
+	return history_from(s) + 1 < s.history.count
 }
 
 mix :: proc(a, b: render.Color, t: f32) -> render.Color {

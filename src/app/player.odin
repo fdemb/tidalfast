@@ -326,7 +326,7 @@ queue_fill :: proc(pb: ^Playback, i: int, row: ^Row, a: runtime.Allocator) {
 // list queued after it. A track preloaded from the old queue isn't reused,
 // even at the same row.
 playback_play_row :: proc(s: ^State, i: int) {
-	if row := view_row(s, i); row == nil || (row.id == 0 && !s.data.fake) {
+	if !row_playable(s, i) {
 		return
 	}
 	queue_snapshot(s, &s.data.view)

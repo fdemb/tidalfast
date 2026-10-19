@@ -3,6 +3,7 @@ package tidal_tests
 import "base:runtime"
 import "core:fmt"
 import "core:net"
+import "core:slice"
 import "core:strconv"
 import "core:strings"
 import "core:sync"
@@ -12,7 +13,8 @@ import "core:time"
 // A one-connection-at-a-time HTTP server on 127.0.0.1 standing in for TIDAL.
 // It models one playlist's items, adding tracks to it and liking tracks,
 // the session endpoints, an echo endpoint, a rate-limited endpoint, a slow
-// one, token refresh and the device login, and records every request line.
+// one, token refresh, the device login and the parts of an artist page,
+// and records every request line.
 
 Mock_Item :: struct {
 	kind: string, // "track" or "video"
@@ -46,6 +48,7 @@ Mock :: struct {
 	// one back where it was. Tracks liked by a POST go off liked itself,
 	// since they were listed on top of it.
 	liked_removed: [dynamic]i64,
+	followed:      [dynamic]i64, // artists followed by a POST, oldest first
 	// Stuck accepts DELETEs without removing anything.
 	stuck:         bool,
 	requests:   [dynamic]string, // "METHOD /path?query"
@@ -73,6 +76,9 @@ Mock :: struct {
 	token_form: map[string]string, // the last POST to /token or /oauth2/token, decoded
 	// playbackinfopostpaywall's answer for each audioquality; 404 for others.
 	playback:   map[string]Mock_Answer,
+	// Paths answered with these instead of their route, such as a failure.
+	// A request with a filter is looked up as "path?filter=value".
+	answers:    map[string]Mock_Answer,
 
 	allocator:  runtime.Allocator,
 }
@@ -82,11 +88,13 @@ mock_start :: proc(m: ^Mock, items: []Mock_Item = nil) {
 	m.items = make([dynamic]Mock_Item, m.allocator)
 	m.liked = make([dynamic]i64, m.allocator)
 	m.liked_removed = make([dynamic]i64, m.allocator)
+	m.followed = make([dynamic]i64, m.allocator)
 	m.requests = make([dynamic]string, m.allocator)
 	m.poll_times = make([dynamic]time.Tick, m.allocator)
 	m.files = make(map[string][]u8, m.allocator)
 	m.token_form = make(map[string]string, m.allocator)
 	m.playback = make(map[string]Mock_Answer, m.allocator)
+	m.answers = make(map[string]Mock_Answer, m.allocator)
 	append(&m.items, ..items)
 
 	sock, err := net.listen_tcp({address = net.IP4_Loopback, port = 0})
@@ -112,6 +120,7 @@ mock_stop :: proc(m: ^Mock) {
 	delete(m.requests)
 	delete(m.items)
 	delete(m.liked)
+	delete(m.followed)
 	delete(m.poll_times)
 	clear_query(&m.last_query, m.allocator)
 	delete(m.last_query)
@@ -119,6 +128,7 @@ mock_stop :: proc(m: ^Mock) {
 	delete(m.token_form)
 	delete(m.files)
 	delete(m.playback)
+	delete(m.answers)
 	delete(m.base_url, m.allocator)
 }
 
@@ -290,6 +300,13 @@ mock_route :: proc(m: ^Mock, req: Mock_Request, target: string) -> (status: int,
 	if data, ok := m.files[req.path]; ok {
 		return 200, string(data), etag
 	}
+	answer_key := req.path
+	if filter, ok := req.query["filter"]; ok {
+		answer_key = fmt.tprintf("%s?filter=%s", req.path, filter)
+	}
+	if a, ok := m.answers[answer_key]; ok {
+		return a.status, a.body, etag
+	}
 
 	if strings.has_suffix(req.path, "/playbackinfopostpaywall") {
 		a, ok := m.playback[req.query["audioquality"] or_else ""]
@@ -347,8 +364,21 @@ mock_route :: proc(m: ^Mock, req: Mock_Request, target: string) -> (status: int,
 			}
 		}
 		return 200, `{}`, etag
+	case req.path == "/users/123/favorites/artists" && req.method == "POST":
+		for id_s in strings.split(req.form["artistId"] or_else "", ",", context.temp_allocator) {
+			if id, ok := strconv.parse_i64(id_s); ok && !slice.contains(m.followed[:], id) {
+				append(&m.followed, id)
+			}
+		}
+		return 200, `{}`, etag
+	case strings.has_prefix(req.path, "/users/123/favorites/artists/") && req.method == "DELETE":
+		id, _ := strconv.parse_i64(strings.trim_prefix(req.path, "/users/123/favorites/artists/"))
+		if at, found := slice.linear_search(m.followed[:], id); found {
+			ordered_remove(&m.followed, at)
+		}
+		return 200, `{}`, etag
 	case req.path == "/users/123/favorites/ids":
-		return 200, mock_liked_ids(m.liked[:], m.liked_removed[:]), etag
+		return 200, mock_liked_ids(m.liked[:], m.liked_removed[:], m.followed[:]), etag
 	case req.path == "/users/123/favorites/tracks":
 		return 200, mock_liked_page(req.query["offset"] or_else "0", req.query["limit"] or_else "50", m.liked[:], m.liked_removed[:]), etag
 	case req.path == "/echo":
@@ -476,6 +506,12 @@ mock_route :: proc(m: ^Mock, req: Mock_Request, target: string) -> (status: int,
 		}
 		strings.write_string(&b, "]}")
 		return 200, strings.to_string(b), etag
+	case req.path == "/search":
+		// Every search finds artist 7 and one of its songs.
+		return 200, `{"artists":{"items":[{"id":7,"name":"Artist 7","picture":"pic-7"}]},"tracks":{"items":[{"id":700,"title":"Top 1 of Artist 7","duration":200,"artist":{"id":7,"name":"Artist 7"},"artists":[{"id":7,"name":"Artist 7"}],"album":{"id":7000,"title":"Album 7000","cover":"cover-7000"}}]},"albums":{"items":[]},"playlists":{"items":[]}}`, etag
+	case strings.has_prefix(req.path, "/artists/"):
+		status, body = mock_artist(req)
+		return status, body, etag
 	case req.path == "/playlists/pl":
 		return 200, fmt.tprintf(`{{"uuid":"pl","title":"pl","numberOfTracks":%d,"numberOfVideos":%d,"type":"USER","lastUpdated":"2026-03-01T10:00:%02d.000+0000"}}`, tracks, videos, len(m.items) % 60), etag
 	}
@@ -512,10 +548,14 @@ removed_at :: proc(m: ^Mock, id: i64) -> int {
 }
 
 // mock_liked_ids answers users/123/favorites/ids with the ids the
-// favorites pages list, as strings, as TIDAL does.
-mock_liked_ids :: proc(liked: []i64, removed: []i64) -> string {
+// favorites pages list and the followed artists, as strings, as TIDAL does.
+mock_liked_ids :: proc(liked: []i64, removed: []i64, followed: []i64) -> string {
 	b := strings.builder_make(context.temp_allocator)
-	strings.write_string(&b, `{"ALBUM":[],"ARTIST":[],"PLAYLIST":[],"VIDEO":[],"TRACK":[`)
+	strings.write_string(&b, `{"ALBUM":[],"PLAYLIST":[],"VIDEO":[],"ARTIST":[`)
+	for id, i in followed {
+		fmt.sbprintf(&b, `%s"%d"`, "," if i > 0 else "", id)
+	}
+	strings.write_string(&b, `],"TRACK":[`)
 	first := true
 	write :: proc(b: ^strings.Builder, first: ^bool, id: i64) {
 		if !first^ {
@@ -589,4 +629,65 @@ mock_liked_page :: proc(offset_s, limit_s: string, liked: []i64 = nil, removed: 
 	}
 	strings.write_string(&b, "]}")
 	return strings.to_string(b)
+}
+
+MOCK_ARTIST_ALBUMS :: 73 // artist 1's albums; the others have 9
+MOCK_TOP_TRACKS :: 8 // every artist's
+
+// mock_artist answers /artists/<n> and its bio, albums (with filter
+// EPSANDSINGLES or COMPILATIONS), top tracks and similar artists. Artist n is
+// "Artist n", and artist 1 has MOCK_ARTIST_ALBUMS albums, more than a page.
+@(private = "file")
+mock_artist :: proc(req: Mock_Request) -> (status: int, body: string) {
+	id_str, _, what := strings.partition(strings.trim_prefix(req.path, "/artists/"), "/")
+	id, _ := strconv.parse_int(id_str)
+	if id <= 0 {
+		return 404, `{"status":404,"userMessage":"Artist not found"}`
+	}
+	offset, _ := strconv.parse_int(req.query["offset"] or_else "0")
+	limit, _ := strconv.parse_int(req.query["limit"] or_else "10")
+	b := strings.builder_make(context.temp_allocator)
+	switch what {
+	case "":
+		return 200, fmt.tprintf(`{{"id":%d,"name":"Artist %d","picture":"pic-%d"}}`, id, id, id)
+	case "bio":
+		return 200, fmt.tprintf(`{{"source":"mock","text":"Artist %d plays with [wimpLink artistId=\"%d\"]Artist %d[/wimpLink].<br/>Second line."}}`, id, id + 1, id + 1)
+	case "albums":
+		count, base, kind := MOCK_ARTIST_ALBUMS if id == 1 else 9, 0, "ALBUM"
+		switch req.query["filter"] or_else "" {
+		case "EPSANDSINGLES":
+			count, base, kind = 4, 100, "EP"
+		case "COMPILATIONS":
+			count, base = 2, 200
+		}
+		fmt.sbprintf(&b, `{{"limit":%d,"offset":%d,"totalNumberOfItems":%d,"items":[`, limit, offset, count)
+		for i in offset ..< min(offset + limit, count) {
+			if i > offset {
+				strings.write_byte(&b, ',')
+			}
+			album := id * 1000 + base + i
+			fmt.sbprintf(&b, `{{"id":%d,"title":"Album %d","cover":"cover-%d","numberOfTracks":10,"type":"%s","releaseDate":"2020-01-01","artist":{{"id":%d,"name":"Artist %d"}},"artists":[{{"id":%d,"name":"Artist %d"}}]}}`, album, album, album, kind, id, id, id, id)
+		}
+	case "toptracks":
+		fmt.sbprintf(&b, `{{"limit":%d,"offset":%d,"totalNumberOfItems":%d,"items":[`, limit, offset, MOCK_TOP_TRACKS)
+		for i in offset ..< min(offset + limit, MOCK_TOP_TRACKS) {
+			if i > offset {
+				strings.write_byte(&b, ',')
+			}
+			track := id * 100 + i
+			fmt.sbprintf(&b, `{{"id":%d,"title":"Top %d of Artist %d","duration":200,"artist":{{"id":%d,"name":"Artist %d"}},"artists":[{{"id":%d,"name":"Artist %d"}}],"album":{{"id":%d,"title":"Album %d","cover":"cover-%d"}}}}`, track, i + 1, id, id, id, id, id, id * 1000, id * 1000, id * 1000)
+		}
+	case "similar":
+		strings.write_string(&b, `{"limit":10,"offset":0,"totalNumberOfItems":3,"items":[`)
+		for i in 1 ..= 3 {
+			if i > 1 {
+				strings.write_byte(&b, ',')
+			}
+			fmt.sbprintf(&b, `{{"id":%d,"name":"Artist %d","picture":"pic-%d"}}`, id + i, id + i, id + i)
+		}
+	case:
+		return 404, `{"userMessage":"not found"}`
+	}
+	strings.write_string(&b, "]}")
+	return 200, strings.to_string(b)
 }

@@ -73,6 +73,9 @@ ICON_CARET_RIGHT :: "\ue13a" // Icon
 ICON_HEART :: "\ue2a8" // Icon
 ICON_HEART_FILL :: "\ue2a8" // Icon_Fill
 ICON_DOTS_THREE :: "\ue1fe" // Icon
+ICON_SHARE_NETWORK :: "\ue408" // Icon
+ICON_PLUS :: "\ue3d4" // Icon
+ICON_CHECK :: "\ue182" // Icon
 
 MAX_FACES :: 32 // also kb_text_shape's font stack limit
 FALLBACK_CAPACITY :: 4096 // to start with; it doubles when three quarters full
@@ -408,6 +411,11 @@ Piece :: struct {
 
 @(private)
 shape_uncached :: proc(t: ^State, font: Font, size: f32, s: string) -> Run {
+	// kb_text_shape crashes on no codepoints.
+	if len(s) == 0 {
+		face := &t.faces[font]
+		return {size = size, font = font, ascent = face.ascent * size, descent = face.descent * size, generation = t.generation}
+	}
 	runes := make([dynamic]rune, 0, len(s), context.temp_allocator)
 	for r in s {
 		append(&runes, r)

@@ -562,3 +562,16 @@ test_emoji_next_to_hebrew_is_colour :: proc(t: ^testing.T) {
 		}
 	}
 }
+
+// An empty string measures as nothing. kb_text_shape crashes on no
+// codepoints, so a label with no text must never reach it.
+@(test)
+test_measure_empty :: proc(t: ^testing.T) {
+	f: Fonts
+	if !testing.expect(t, fonts_init(&f)) {
+		return
+	}
+	defer fonts_destroy(&f)
+	m := text.measure(f.state, .Semibold, 14, "")
+	testing.expect_value(t, m.width, f32(0))
+}

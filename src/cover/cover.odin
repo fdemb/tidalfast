@@ -24,12 +24,14 @@ RETRY_SECONDS :: 30 // a failed cover still on screen is tried again after this
 Kind :: enum u8 {
 	Album, // album covers, also used for tracks
 	Playlist, // a playlist's square image
+	Artist, // an artist's picture
 }
 
 // The square sizes resources.tidal.com serves, smallest first.
 SIZES := [Kind][]int {
 	.Album    = {80, 160, 320, 640, 1280},
 	.Playlist = {160, 320, 480, 640, 750, 1080},
+	.Artist   = {160, 320, 480, 750},
 }
 
 // pick_size returns the smallest size of kind at least points * scale
