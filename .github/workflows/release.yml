@@ -1,5 +1,6 @@
 # Builds the macOS .dmg and the Linux AppImage with ./build.sh dist. A tag
-# v1.2.3 publishes both as the GitHub release v1.2.3; a manual run only
+# v1.2.3 publishes both as the GitHub release v1.2.3, or adds them to it when
+# the release was made in GitHub's UI, which pushes the tag. A manual run only
 # uploads them as workflow artifacts.
 name: release
 
@@ -88,5 +89,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          case "$GITHUB_REF_NAME" in *-*) pre=--prerelease ;; *) pre= ;; esac
-          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes $pre
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            case "$GITHUB_REF_NAME" in *-*) pre=--prerelease ;; *) pre= ;; esac
+            gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes $pre
+          fi

@@ -28,7 +28,7 @@ On Linux it makes `TIDALfast-<version>-<arch>.AppImage` with [linuxdeploy](https
 
 `packaging/icon.svg` is the icon. `tools/icon.sh` renders it to `packaging/macos/AppIcon.icns` and `packaging/linux/tidalfast.png`, which are committed so the build needs no SVG renderer. It needs `rsvg-convert` (`brew install librsvg`) and `iconutil`.
 
-`.github/workflows/release.yml` runs `./build.sh dist` on macOS 15 and Ubuntu 24.04 when a `v*` tag is pushed, and publishes the .dmg and the AppImage as that tag's GitHub release. A tag with a hyphen, such as `v0.2.0-beta.1`, makes a prerelease. Running the workflow by hand builds both and keeps them as workflow artifacts without releasing anything.
+`.github/workflows/release.yml` runs `./build.sh dist` on macOS 15 and Ubuntu 24.04 when a `v*` tag is pushed, and publishes the .dmg and the AppImage as that tag's GitHub release. A tag with a hyphen, such as `v0.2.0-beta.1`, makes a prerelease. A release made in GitHub's UI pushes its tag too, and the workflow adds the two files to that release instead of making another, so the title, notes and prerelease box are whatever the UI was given. Running the workflow by hand builds both and keeps them as workflow artifacts without releasing anything.
 
 ## Logging and environment variables
 
