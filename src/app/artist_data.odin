@@ -236,6 +236,11 @@ artist_result :: proc(d: ^Data, res: ^Result, job: Artist_Job) {
 	}
 	artist_ready(page, job.part, res.arena, res.artist)
 	res.arena = nil
+	v := &d.view
+	if _, info := res.artist.(Artist_Info); info && v.source == .Artist && small_str(&v.id) == fmt.tprint(job.artist) {
+		v.name = page.name
+		v.image = page.picture
+	}
 }
 
 // artist_ready puts a part's content in its page, which takes its arena.
