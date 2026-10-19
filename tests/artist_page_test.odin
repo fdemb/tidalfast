@@ -2,6 +2,8 @@ package tidal_tests
 
 import "core:fmt"
 import "core:mem"
+import "core:reflect"
+import "core:slice"
 import "core:strings"
 import "core:testing"
 import "core:time"
@@ -889,4 +891,225 @@ bio_more_asks_for_a_frame :: proc(t: ^testing.T) {
 	testing.expect(t, has(s, "Read less", .Button), "the rest shows")
 	library_frame(t, s, &f, press_exact(t, s, "Read less"))
 	testing.expect(t, f.animating, "Less asks for a frame")
+}
+
+// run_jobs runs the queued jobs of kinds against the mock, on this thread,
+// until no more come, and drops the rest.
+@(private = "file")
+run_jobs :: proc(s: ^app.State, kinds: ..typeid) {
+	for {
+		queued := data_jobs(&s.data)
+		if len(queued) == 0 {
+			return
+		}
+		for &job in queued {
+			if slice.contains(kinds, reflect.union_variant_typeid(job.payload)) {
+				run_now(s, job)
+			} else {
+				app.job_free(&job)
+			}
+		}
+	}
+}
+
+// sidebar_mock gives the mock an empty list of playlists, so the sidebar
+// loads and sends the liked ids' fetch.
+@(private = "file")
+sidebar_mock :: proc(m: ^Mock) {
+	m.answers["/users/123/playlistsAndFavoritePlaylists"] = {200, `{"limit":50,"offset":0,"totalNumberOfItems":0,"items":[]}`}
+}
+
+// The one favorites/ids request after sign-in fills both the hearts and
+// the Follow button, which waits for it. An account with no liked songs
+// sends it too, though the Liked Songs version it goes on hasn't moved.
+@(test)
+one_fetch_fills_the_hearts_and_the_follow_button :: proc(t: ^testing.T) {
+	fonts: Fonts
+	if !testing.expect(t, fonts_init(&fonts)) {
+		return
+	}
+	defer fonts_destroy(&fonts)
+	context.allocator = mem.arena_allocator(&fonts.arena)
+
+	for no_liked in ([]bool{false, true}) {
+		m: Mock
+		mock_start(&m)
+		defer mock_stop(&m)
+		sidebar_mock(&m)
+		append(&m.followed, 7)
+		if no_liked {
+			m.answers["/users/123/favorites/tracks"] = {200, `{"limit":1,"offset":0,"totalNumberOfItems":0,"items":[]}`}
+		}
+		s := library_state(false, &m)
+		defer library_state_free(s)
+		f := Frame{fonts = &fonts, size = {1100, 2400}}
+		fetch: Maybe(app.Job)
+		for &job in data_jobs(&s.data) {
+			if _, sidebar := job.payload.(app.Playlists_Job); sidebar {
+				run_now(s, job)
+			} else {
+				app.job_free(&job)
+			}
+		}
+		for &job in data_jobs(&s.data) {
+			if _, ids := job.payload.(app.Liked_Ids_Job); ids {
+				fetch = job
+			} else {
+				app.job_free(&job)
+			}
+		}
+		testing.expect_value(t, s.data.sidebar.liked_count, 0 if no_liked else MOCK_LIKED)
+		job, sent := fetch.?
+		if !testing.expect(t, sent, "the sidebar sends the liked ids' fetch") {
+			continue
+		}
+		mock_page(t, s, &f, 7)
+		testing.expect(t, has(s, "Follow", .Button) && !enabled_exact(s, "Follow"), "Follow waits for the set")
+		run_now(s, job)
+		library_frame(t, s, &f)
+		library_frame(t, s, &f)
+		testing.expect_value(t, mock_count(&m, "GET /users/123/favorites/ids"), 1)
+		testing.expect(t, enabled_exact(s, "Following"), "the artist is followed")
+		if !no_liked {
+			testing.expect(t, has(s, "Unlike Top 1 of Artist 7", .Button), "the top track is liked")
+		}
+	}
+}
+
+// The page's Follow button follows the artist on TIDAL and reads Following
+// at once; pressed again it unfollows.
+@(test)
+follow_button_follows_the_artist :: proc(t: ^testing.T) {
+	fonts: Fonts
+	if !testing.expect(t, fonts_init(&fonts)) {
+		return
+	}
+	defer fonts_destroy(&fonts)
+	context.allocator = mem.arena_allocator(&fonts.arena)
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	sidebar_mock(&m)
+	s := library_state(false, &m)
+	defer library_state_free(s)
+	f := Frame{fonts = &fonts, size = {1100, 2400}}
+	run_jobs(s, app.Playlists_Job, app.Liked_Ids_Job)
+	mock_page(t, s, &f, 7)
+
+	testing.expect(t, enabled_exact(s, "Follow"), "Follow")
+	library_frame(t, s, &f, press_exact(t, s, "Follow"))
+	library_frame(t, s, &f)
+	testing.expect(t, has(s, "Following", .Button) && !has(s, "Follow", .Button), "Following at once")
+	run_jobs(s, app.Follow_Job)
+	library_frame(t, s, &f)
+	testing.expect(t, has(s, "Following", .Button), "Following once TIDAL took it")
+	testing.expect(t, slice.contains(m.followed[:], 7), "followed on TIDAL")
+
+	library_frame(t, s, &f, press_exact(t, s, "Following"))
+	library_frame(t, s, &f)
+	testing.expect(t, has(s, "Follow", .Button), "Follow again")
+	run_jobs(s, app.Follow_Job)
+	testing.expect_value(t, len(m.followed), 0)
+}
+
+// Follow, unfollow, follow pressed before TIDAL answers send one change,
+// and unfollow, follow after it send the second only once the first is
+// answered. The button ends Following, and so does TIDAL.
+@(test)
+quick_presses_end_followed :: proc(t: ^testing.T) {
+	fonts: Fonts
+	if !testing.expect(t, fonts_init(&fonts)) {
+		return
+	}
+	defer fonts_destroy(&fonts)
+	context.allocator = mem.arena_allocator(&fonts.arena)
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	sidebar_mock(&m)
+	s := library_state(false, &m)
+	defer library_state_free(s)
+	f := Frame{fonts = &fonts, size = {1100, 2400}}
+	run_jobs(s, app.Playlists_Job, app.Liked_Ids_Job)
+	mock_page(t, s, &f, 7)
+
+	for label in ([]string{"Follow", "Following", "Follow"}) {
+		library_frame(t, s, &f, press_exact(t, s, label))
+		library_frame(t, s, &f)
+	}
+	queued := data_jobs(&s.data)
+	testing.expect_value(t, len(queued), 1)
+	for &job in queued {
+		run_now(s, job)
+	}
+	testing.expect_value(t, len(data_jobs(&s.data)), 0)
+
+	for label in ([]string{"Following", "Follow"}) {
+		library_frame(t, s, &f, press_exact(t, s, label))
+		library_frame(t, s, &f)
+	}
+	for _ in 0 ..< 2 {
+		queued = data_jobs(&s.data)
+		testing.expect_value(t, len(queued), 1)
+		for &job in queued {
+			run_now(s, job)
+		}
+	}
+	testing.expect_value(t, len(data_jobs(&s.data)), 0)
+	library_frame(t, s, &f)
+	testing.expect(t, has(s, "Following", .Button), "the button ends Following")
+	testing.expect(t, slice.contains(m.followed[:], 7), "TIDAL ends with the artist followed")
+	testing.expect_value(t, mock_count(&m, "POST /users/123/favorites/artists"), 2)
+	testing.expect_value(t, mock_count(&m, "DELETE /users/123/favorites/artists/7"), 1)
+}
+
+// TIDAL refuses the follow: the button goes back to Follow.
+@(test)
+refused_follow_puts_the_button_back :: proc(t: ^testing.T) {
+	fonts: Fonts
+	if !testing.expect(t, fonts_init(&fonts)) {
+		return
+	}
+	defer fonts_destroy(&fonts)
+	context.allocator = mem.arena_allocator(&fonts.arena)
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	sidebar_mock(&m)
+	m.answers["/users/123/favorites/artists"] = {403, `{"status":403,"userMessage":"no"}`}
+	s := library_state(false, &m)
+	defer library_state_free(s)
+	f := Frame{fonts = &fonts, size = {1100, 2400}}
+	run_jobs(s, app.Playlists_Job, app.Liked_Ids_Job)
+	mock_page(t, s, &f, 7)
+
+	library_frame(t, s, &f, press_exact(t, s, "Follow"))
+	library_frame(t, s, &f)
+	testing.expect(t, has(s, "Following", .Button), "Following at once")
+	run_jobs(s, app.Follow_Job)
+	library_frame(t, s, &f)
+	testing.expect(t, enabled_exact(s, "Follow"), "Follow again once TIDAL refused")
+	testing.expect_value(t, len(m.followed), 0)
+}
+
+// With the fake data the button follows locally.
+@(test)
+fake_follow :: proc(t: ^testing.T) {
+	fonts: Fonts
+	if !testing.expect(t, fonts_init(&fonts)) {
+		return
+	}
+	defer fonts_destroy(&fonts)
+	context.allocator = mem.arena_allocator(&fonts.arena)
+	s := library_state(true)
+	defer library_state_free(s)
+	f := Frame{fonts = &fonts, size = {1100, 2400}}
+	fake_page(t, s, &f)
+	library_frame(t, s, &f, press_exact(t, s, "Follow"))
+	library_frame(t, s, &f)
+	testing.expect(t, has(s, "Following", .Button), "Following")
+	library_frame(t, s, &f, press_exact(t, s, "Following"))
+	library_frame(t, s, &f)
+	testing.expect(t, has(s, "Follow", .Button), "Follow")
+	testing.expect_value(t, len(data_jobs(&s.data)), 0)
 }
