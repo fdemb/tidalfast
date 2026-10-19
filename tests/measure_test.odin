@@ -114,7 +114,7 @@ test_measure_compare :: proc(t: ^testing.T) {
 test_measure_frames :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	run :: proc(fps, gpu: string) -> []measure.Line {
-		return measure.parse_log(strings.concatenate({`measure: {"frames":"warm","count":240,"fps":`, fps, `,"interval_p95":9.1,"cpu_median":1.5,"cpu_p95":2.2,"gpu_median":`, gpu, `,"gpu_p95":6.0}`}))
+		return measure.parse_log(strings.concatenate({`measure: {"frames":"warm","count":240,"fps":`, fps, `,"interval_p95":9.1,"cpu_median":1.5,"cpu_p95":2.2,"gpu_median":`, gpu, `,"gpu_p95":6.0,"slot_wait_p95":0.1,"drawable_wait_p95":0.2}`}))
 	}
 	runs := [][]measure.Line{run("118", "4.0"), run("120", "5.0"), run("90", "4.5")}
 	l, ok := measure.find_frames(runs[0], "warm")
@@ -126,6 +126,8 @@ test_measure_frames :: proc(t: ^testing.T) {
 	testing.expect_value(t, fps, 118)
 	gpu, _ := measure.find_metric(a.metrics[:], "frames", "fake", "warm", "gpu_median")
 	testing.expect_value(t, gpu, 4.5)
+	wait, _ := measure.find_metric(a.metrics[:], "frames", "fake", "warm", "drawable_wait_p95")
+	testing.expect_value(t, wait, 0.2)
 	_, has_cold := measure.find_metric(a.metrics[:], "frames", "fake", "cold", "fps")
 	testing.expect(t, !has_cold)
 

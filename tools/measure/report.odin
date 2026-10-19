@@ -50,6 +50,10 @@ Line :: struct {
 	cpu_p95:            f64,
 	gpu_median:         f64,
 	gpu_p95:            f64,
+	slot_wait_median:   f64,
+	slot_wait_p95:      f64,
+	drawable_wait_median: f64,
+	drawable_wait_p95:  f64,
 }
 
 // The marks in the order they happen. The shell prints main, launched,
@@ -72,6 +76,10 @@ FRAME_FIELDS := [?]struct {
 	{"cpu_p95", "ms"},
 	{"gpu_median", "ms"},
 	{"gpu_p95", "ms"},
+	{"slot_wait_median", "ms"},
+	{"slot_wait_p95", "ms"},
+	{"drawable_wait_median", "ms"},
+	{"drawable_wait_p95", "ms"},
 }
 
 // Memory fields kept per sample: name in the line, and whether it's bytes
@@ -128,6 +136,10 @@ line_field :: proc(l: ^Line, name: string) -> f64 {
 	case "cpu_p95":            return l.cpu_p95
 	case "gpu_median":         return l.gpu_median
 	case "gpu_p95":            return l.gpu_p95
+	case "slot_wait_median":   return l.slot_wait_median
+	case "slot_wait_p95":      return l.slot_wait_p95
+	case "drawable_wait_median": return l.drawable_wait_median
+	case "drawable_wait_p95":  return l.drawable_wait_p95
 	}
 	return 0
 }
@@ -396,8 +408,8 @@ write_tables :: proc(b: ^strings.Builder, r: ^Results) {
 		fmt.sbprintln(b)
 	}
 	for setup in setups(r.metrics[:], "frames") {
-		fmt.sbprintfln(b, "frames, %s: the library bench's phases, medians over the runs; times in ms", setup)
-		fmt.sbprintfln(b, "  %-6s %7s %13s %10s %8s %10s %8s", "phase", "fps", "interval p95", "cpu median", "cpu p95", "gpu median", "gpu p95")
+		fmt.sbprintfln(b, "frames, %s: the library bench's phases, medians over the runs; times in ms, cpu without the waits", setup)
+		fmt.sbprintfln(b, "  %-6s %7s %13s %10s %8s %10s %8s %9s", "phase", "fps", "interval p95", "cpu median", "cpu p95", "gpu median", "gpu p95", "wait p95")
 		for phase in FRAME_PHASES {
 			fps, has := find_metric(r.metrics[:], "frames", setup, phase, "fps")
 			if !has {
@@ -407,8 +419,10 @@ write_tables :: proc(b: ^strings.Builder, r: ^Results) {
 				x, _ := find_metric(r.metrics[:], "frames", setup, phase, field)
 				return fmt.tprintf("%.2f", x)
 			}
-			fmt.sbprintfln(b, "  %-6s %7s %13s %10s %8s %10s %8s", phase, fmt.tprintf("%.1f", fps), v(r, setup, phase, "interval_p95"), v(r, setup, phase, "cpu_median"),
-				v(r, setup, phase, "cpu_p95"), v(r, setup, phase, "gpu_median"), v(r, setup, phase, "gpu_p95"))
+			slot, _ := find_metric(r.metrics[:], "frames", setup, phase, "slot_wait_p95")
+			drawable, _ := find_metric(r.metrics[:], "frames", setup, phase, "drawable_wait_p95")
+			fmt.sbprintfln(b, "  %-6s %7s %13s %10s %8s %10s %8s %9s", phase, fmt.tprintf("%.1f", fps), v(r, setup, phase, "interval_p95"), v(r, setup, phase, "cpu_median"),
+				v(r, setup, phase, "cpu_p95"), v(r, setup, phase, "gpu_median"), v(r, setup, phase, "gpu_p95"), fmt.tprintf("%.2f", max(slot, drawable)))
 		}
 		fmt.sbprintln(b)
 	}

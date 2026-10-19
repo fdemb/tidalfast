@@ -181,6 +181,10 @@ Renderer :: struct {
 	// Milliseconds the GPU took on the newest frame it has finished, a frame
 	// or two behind; 0 where the backend can't tell.
 	gpu_ms:         f32,
+	// Milliseconds this frame waited: for the GPU to finish with its slot's
+	// instance buffer (begin_frame), and for a drawable (end_frame).
+	slot_wait_ms:     f32,
+	drawable_wait_ms: f32,
 	// Debug: when set, end_frame waits for the GPU and writes each frame to
 	// this path as a TGA. Set it before init.
 	capture_path:   string,

@@ -106,8 +106,12 @@ Frame_Samples :: struct {
 	last:     f64, // the frame before's time, 0 for none in the phase
 	count:    int,
 	interval: [MAX_FRAME_SAMPLES]f32, // ms since the frame before
-	cpu:      [MAX_FRAME_SAMPLES]f32, // ms building and encoding the frame
+	cpu:      [MAX_FRAME_SAMPLES]f32, // ms building and encoding the frame, not counting the waits
 	gpu:      [MAX_FRAME_SAMPLES]f32, // ms the GPU took, render.Renderer.gpu_ms
+	// ms the frame spent waiting for the GPU to finish with its slot and for
+	// a drawable
+	slot_wait:     [MAX_FRAME_SAMPLES]f32,
+	drawable_wait: [MAX_FRAME_SAMPLES]f32,
 }
 
 Process_Memory :: struct {
@@ -337,8 +341,10 @@ measure_step :: proc(s: ^State) {
 // the fake data's list with the library bench, and for each phase it
 // measures print the frame rate and the CPU and GPU time a frame took. The
 // bench asks for the next frame as soon as one is done, so the frame rate
-// is what the display and the GPU let through. The GPU time is of a frame
-// or two before (render.Renderer.gpu_ms).
+// is what the display and the GPU let through. The CPU time leaves out the
+// waits for the GPU and for a drawable, which go with the window and the
+// display more than with the frame. The GPU time is of a frame or two
+// before (render.Renderer.gpu_ms).
 @(private = "file")
 measure_frames_step :: proc(s: ^State) {
 	m := &s.measure
@@ -369,8 +375,12 @@ measure_frames_step :: proc(s: ^State) {
 		if phase.name != "settle" && b.frame >= phase.skip && f.count < MAX_FRAME_SAMPLES {
 			if f.last > 0 {
 				f.interval[f.count] = f32((m.frame_time - f.last) * 1000)
-				f.cpu[f.count] = s.frame_ms[(s.frame_count + FRAME_HISTORY - 1) % FRAME_HISTORY]
-				f.gpu[f.count] = s.renderer.gpu_ms
+				r := &s.renderer
+				waited := r.slot_wait_ms + r.drawable_wait_ms
+				f.cpu[f.count] = max(s.frame_ms[(s.frame_count + FRAME_HISTORY - 1) % FRAME_HISTORY] - waited, 0)
+				f.gpu[f.count] = r.gpu_ms
+				f.slot_wait[f.count] = r.slot_wait_ms
+				f.drawable_wait[f.count] = r.drawable_wait_ms
 				f.count += 1
 			}
 			f.last = m.frame_time
@@ -386,7 +396,8 @@ measure_frames_step :: proc(s: ^State) {
 
 // frames_flush prints the frames recorded for a phase: their count, the
 // frame rate, the 95th percentile of the time between frames, and the
-// median and 95th percentile of the CPU and GPU times.
+// median and 95th percentile of the CPU time spent working on a frame, of
+// the GPU's time, and of the two waits left out of the CPU time.
 @(private = "file")
 frames_flush :: proc(s: ^State) {
 	f := &s.measure.frames
@@ -403,10 +414,12 @@ frames_flush :: proc(s: ^State) {
 	for v in f.interval[:n] {
 		total += f64(v)
 	}
-	buf: [512]u8
-	measure_write(fmt.bprintf(buf[:], `{{"frames":"%s","count":%d,"fps":%.1f,"interval_p95":%.2f,"cpu_median":%.3f,"cpu_p95":%.3f,"gpu_median":%.3f,"gpu_p95":%.3f}}`,
+	buf: [768]u8
+	measure_write(fmt.bprintf(buf[:], `{{"frames":"%s","count":%d,"fps":%.1f,"interval_p95":%.2f,"cpu_median":%.3f,"cpu_p95":%.3f,"gpu_median":%.3f,"gpu_p95":%.3f,` +
+		`"slot_wait_median":%.3f,"slot_wait_p95":%.3f,"drawable_wait_median":%.3f,"drawable_wait_p95":%.3f}}`,
 		bench_phases(&s.bench)[f.phase].name, n, f64(n) * 1000 / max(total, 1e-6), pct(f.interval[:n], 0.95),
-		pct(f.cpu[:n], 0.5), pct(f.cpu[:n], 0.95), pct(f.gpu[:n], 0.5), pct(f.gpu[:n], 0.95)))
+		pct(f.cpu[:n], 0.5), pct(f.cpu[:n], 0.95), pct(f.gpu[:n], 0.5), pct(f.gpu[:n], 0.95),
+		pct(f.slot_wait[:n], 0.5), pct(f.slot_wait[:n], 0.95), pct(f.drawable_wait[:n], 0.5), pct(f.drawable_wait[:n], 0.95)))
 }
 
 // measure_wait moves to stage, whose wait ends after wait (none for 0).

@@ -3,6 +3,7 @@ package render
 
 import "core:log"
 import "core:mem"
+import "core:time"
 import MTL "vendor:darwin/Metal"
 
 BACKDROPS :: true
@@ -412,8 +413,11 @@ gpu_frame_begin :: proc(r: ^Renderer) -> [^]Instance {
 	g := &r.gpu
 	read_gpu_time(r)
 	// The GPU usually finished this slot two frames ago, so this rarely waits.
+	r.slot_wait_ms = 0
 	if cmd := g.in_flight[r.slot]; cmd != nil {
+		wait := time.tick_now()
 		msg(cmd, "waitUntilCompleted")
+		r.slot_wait_ms = f32(time.duration_milliseconds(time.tick_since(wait)))
 		release(cmd)
 		g.in_flight[r.slot] = nil
 	}
@@ -484,7 +488,9 @@ end_frame :: proc(r: ^Renderer) {
 	if g.pipeline == nil || r.width <= 0 || r.height <= 0 {
 		return
 	}
+	wait := time.tick_now()
 	drawable := msg(g.layer, "nextDrawable")
+	r.drawable_wait_ms = f32(time.duration_milliseconds(time.tick_since(wait)))
 	if drawable == nil {
 		return
 	}
