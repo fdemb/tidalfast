@@ -128,6 +128,8 @@ The player bar has an "Output" button, left of the volume. In bit-perfect mode i
 
 Every `ui.scroll_view` draws a 6 pt scrollbar over its right edge while its content is taller than it. The "Settings" button in the sidebar's header opens a menu with three modes, saved as `scrollbars` in the settings file. Floating, the default, fades in when the view moves and out a second after it stops, unless the mouse is on it; it asks for one wake-up to hide and draws nothing in between. Docked always shows and takes a 10 pt gutter from the rows. Never draws none. Pressing the thumb drags it; pressing beside it centres the thumb there. The drag is applied when the view is built, before its rows, so the virtual rows match the new offset.
 
+Under the scrollbar modes the same menu has the player bar's, saved as `bar`, only where the renderer has backdrops (macOS). Blurred, the default, floats the bar over the views' bottoms and blurs them (see [UI](ui.md#the-window-on-macos)). Solid puts it back under the views, with nothing drawn under it.
+
 Saving goes through `settings_queue`: it puts the settings in Data's `Settings_Store` as the newest, with a generation number, and has a worker flush them. A flush holds the store's write mutex for the whole write, reads the newest settings when it starts, and skips the write if the file already has that generation. So with four workers there's still one write at a time, older settings never land after newer ones, and a burst of clicks makes few writes. Each write goes to a temp file of its own name, which is synced and renamed over the file. The path is the store's own copy, freed only after the workers have stopped.
 
 ## Checking hi-res and bit-perfect output

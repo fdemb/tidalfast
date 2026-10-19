@@ -78,7 +78,8 @@ State :: struct {
 	history:      History,
 	access_sent:  u64, // hash of the accessibility tree the shell has
 	// The views run under the player bar, which covers their bottoms with a
-	// blur of them, where the renderer has backdrops (render.BACKDROPS).
+	// blur of them, where the renderer has backdrops (render.BACKDROPS) and
+	// Settings.bar says so.
 	bar_over_content: bool,
 	// TIDALFAST_BLUR_REFERENCE: the bar is left out, and the shell blurs
 	// where it goes, to compare the renderer's blur with.
@@ -418,7 +419,6 @@ start :: proc(s: ^State, shell: ^platform.Shell) {
 	s.log_events = os.get_env("TIDALFAST_LOG_EVENTS", context.temp_allocator) != ""
 	s.log_render = os.get_env("TIDALFAST_LOG_RENDER", context.temp_allocator) != ""
 	s.blur_reference = os.get_env("TIDALFAST_BLUR_REFERENCE", context.temp_allocator) != ""
-	s.bar_over_content = render.BACKDROPS || s.blur_reference
 
 	// TIDALFAST_SPALL=path writes a spall trace of every frame to path. Only
 	// the fd is used after this; the os.File it came from is dropped so State
@@ -509,6 +509,7 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input, shell: ^platfor
 	lists_window_key(s, bool(input.key_window))
 	playback_update(s, events)
 	s.ui.scrollbars = s.settings.scrollbars
+	s.bar_over_content = s.blur_reference || (render.BACKDROPS && s.settings.bar == .Blurred)
 
 	// Backtick toggles the frame-time overlay.
 	if ui.take_key(.Grave) {
