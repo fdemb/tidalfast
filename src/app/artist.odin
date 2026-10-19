@@ -417,9 +417,10 @@ hero_background :: proc(s: ^State, page: ^Artist_Page, w, h: f32) {
 }
 
 // pill is a round-ended button with an icon and a label, light for the
-// main action.
+// main action. widest, when given, is the longest label it takes, so its
+// width doesn't change between them.
 @(private = "file")
-pill :: proc(id, icon, label: string, light, enabled: bool) -> ui.Signal {
+pill :: proc(id, icon, label: string, light, enabled: bool, widest := "") -> ui.Signal {
 	flags := ui.Box_Flags{.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects}
 	if !enabled {
 		flags += {.Disabled}
@@ -437,7 +438,11 @@ pill :: proc(id, icon, label: string, light, enabled: bool) -> ui.Signal {
 	glyph.text_align = .Center
 	ui.spacer(ui.px(8))
 	ui.text_style(.Semibold, 14, fg)
-	ui.label(label, ui.text_size(), ui.fill())
+	w := ui.text_width(.Semibold, 14, label)
+	if widest != "" {
+		w = max(w, ui.text_width(.Semibold, 14, widest))
+	}
+	ui.label(label, ui.px(w), ui.fill())
 	ui.spacer(ui.px(20))
 	return ui.signal(b)
 }
@@ -477,7 +482,7 @@ draw_artist_actions :: proc(s: ^State, p: ^Pending, page: ^Artist_Page) {
 			if following {
 				icon, label = text.ICON_CHECK, "Following"
 			}
-			if pill("artist_follow", icon, label, false, known).clicked {
+			if pill("artist_follow", icon, label, false, known, "Following").clicked {
 				follow_toggle(s, page.id)
 			}
 			ui.spacer(ui.fill())
