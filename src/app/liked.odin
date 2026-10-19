@@ -176,6 +176,8 @@ liked_answer :: proc(d: ^Data, track: i64, took: bool) -> (resent: bool) {
 	}
 	if took {
 		h.confirmed = h.sent
+		// A fetch out may have listed the set before TIDAL took it.
+		liked_change(d, track, h.want)
 	} else {
 		// Clicks since go too: the heart shows what TIDAL has.
 		h.want = h.confirmed
