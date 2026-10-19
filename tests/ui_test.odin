@@ -692,6 +692,62 @@ test_ui_scrollbar_header_gutter :: proc(t: ^testing.T) {
 	testing.expect_value(t, head.rect.x, cell.rect.x)
 }
 
+// A list's pad keeps its rows off both sides, inside the gutter, and off
+// the top and the bottom of its content. The scrollbar stays at the view's
+// edge, and the rows built are still the ones in view when scrolled to the
+// end. The pad is taller than a row, so rows missed at the top would show.
+@(test)
+test_ui_pad :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	u.scrollbars = .Docked
+	now := 0.0
+	view, first, last: ^ui.Box
+	first_i, built: int
+	frame :: proc(u: ^ui.State, now: ^f64, scroll: f32) -> (view, first, last: ^ui.Box, first_i, built: int) {
+		now^ += 1.0 / 120
+		ui.begin_frame(u, {}, nil, nil, 300, 200, now^)
+		ui.column("main", {}, ui.fill(), ui.fill())
+		{
+			view = ui.scroll_view("view", ui.fill(), ui.fill())
+			view.pad = {16, 25}
+			view.view_off.y = scroll
+			rows := ui.virtual_rows(view, 100, 10)
+			for i in rows.first ..< rows.last {
+				r := ui.row(fmt.tprintf("##row%d", i), {}, ui.fill(), ui.px(10))
+				if i == rows.first {
+					first, first_i = r, i
+				}
+				last = r
+				built = i
+			}
+		}
+		ui.end_frame()
+		return
+	}
+	for _ in 0 ..< 10 {
+		view, first, last, first_i, built = frame(&u, &now, 0)
+	}
+	testing.expect_value(t, first.rect.x, f32(16))
+	testing.expect_value(t, first.rect.w, f32(300 - 32 - ui.SCROLLBAR_TRACK))
+	testing.expect_value(t, first.rect.y, f32(25))
+	testing.expect_value(t, view.last.rect.x, f32(300 - ui.SCROLLBAR_TRACK))
+	testing.expect_value(t, view.view_bounds.y, f32(100 * 10 + 50))
+
+	// Row 0 still shows from 25 to 35, under a view scrolled by 30.
+	for _ in 0 ..< 2 {
+		view, first, last, first_i, built = frame(&u, &now, 30)
+	}
+	testing.expect_value(t, first_i, 0)
+
+	for _ in 0 ..< 2 {
+		view, first, last, first_i, built = frame(&u, &now, 100 * 10 + 50 - 200)
+	}
+	testing.expect_value(t, built, 99)
+	testing.expect_value(t, last.rect.y + last.rect.h, f32(200 - 25))
+}
+
 @(test)
 test_ui_scrollbar_drag :: proc(t: ^testing.T) {
 	u: ui.State

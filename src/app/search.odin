@@ -121,14 +121,14 @@ draw_search_field :: proc(s: ^State) {
 	ui.spacer(ui.px(2))
 	{
 		ui.row("", {}, ui.fill(), ui.px(32))
-		ui.spacer(ui.px(12))
+		ui.spacer(ui.px(SIDEBAR_INDENT - ui.FIELD_PAD))
 		ui.text_style(.Regular, 13, TEXT)
 		sig := ui.text_field("search", &sr.field, "Search", ui.fill(), ui.px(32))
 		sig.box.background = SURFACE
 		sig.box.border_color = ACCENT if sig.focused else OUTLINE
 		ui.focus_shortcut(sig.box, .F, {ui.PRIMARY})
 		ui.focus_shortcut(sig.box, .L, {ui.PRIMARY})
-		ui.spacer(ui.px(12))
+		ui.spacer(ui.px(SIDEBAR_INDENT - ui.FIELD_PAD))
 		// Return searches for the text it was pressed on. Edits after it in
 		// the same frame start the debounce over, as they would in the next.
 		submitted := strings.trim_space(sig.submitted_text)
@@ -511,7 +511,7 @@ draw_search_tabs :: proc(s: ^State) -> (songs: bool) {
 	ui.spacer(ui.px(4))
 	{
 		ui.row("search_tabs", {}, ui.fill(), ui.px(30))
-		ui.spacer(ui.px(20))
+		ui.spacer(ui.px(LIST_PAD))
 		for tab in Search_Tab {
 			ui.text_style(.Medium, 13, TEXT if sr.tab == tab else SECONDARY)
 			label := fmt.tprintf("%s  %d###tab%d", names[tab], counts[tab], int(tab))
@@ -582,6 +582,7 @@ draw_found_list :: proc(s: ^State) {
 	sr := &s.search
 	tab := sr.tab
 	list := ui.scroll_view("found", ui.fill(), ui.fill(), inset_end = bar_inset(s))
+	list.pad = {LIST_PAD, LIST_PAD_Y}
 	ui.accessible(list, .List, fmt.tprintf("%v", tab))
 	n := found_count(s, tab)
 	rows := ui.virtual_rows(list, n, TRACK_ROW_H)

@@ -125,6 +125,7 @@ Build :: struct {
 	fixed_pos:                 [2]f32, // relative to the parent
 	fixed_size:                [2]f32,
 	gutter:                    f32, // points at the right that children's widths leave out
+	pad:                       [2]f32, // points before and after the children on each axis, inside the box
 	inset_end:                 f32, // a scroll view's bottom under something drawn over it, see scroll_view
 	id:                        string, // as given; must live until end_frame
 	label:                     string, // the part of id before "##"

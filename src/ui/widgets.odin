@@ -289,7 +289,7 @@ virtual_rows_end :: proc(v: Virtual_Rows) {
 // onto it and scroll it into view.
 @(deferred_out = virtual_rows_end)
 virtual_rows :: proc(view: ^Box, count: int, row_h: f32) -> Virtual_Rows {
-	first, last := virtual_range(view.view_off.y, view.rect.h, row_h, count)
+	first, last := virtual_range(view.view_off.y - view.pad.y, view.rect.h, row_h, count)
 	if last > first {
 		first, last = max(first - 1, 0), min(last + 1, count)
 	}

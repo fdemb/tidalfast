@@ -64,6 +64,11 @@ BAR_TINT :: render.Color{PANEL.r, PANEL.g, PANEL.b, 0.75}
 TRACK_ROW_H :: 56
 PLAYLIST_ROW_H :: 56
 HEADER_H :: 34
+SIDEBAR_PAD :: 8 // between the sidebar's edges and its rows
+ROW_PAD :: 10 // between a sidebar row's edge and its cover
+SIDEBAR_INDENT :: SIDEBAR_PAD + ROW_PAD // where the covers, the heading and the search text start
+LIST_PAD :: 16 // between the main view's sides and its rows
+LIST_PAD_Y :: 8 // above the first row and below the last
 
 Library :: struct {
 	sidebar_w:     f32,
@@ -256,7 +261,7 @@ draw_sidebar :: proc(s: ^State) {
 	draw_history_buttons(s)
 	{
 		ui.row("", {}, ui.fill(), ui.px(40))
-		ui.spacer(ui.px(16))
+		ui.spacer(ui.px(SIDEBAR_INDENT))
 		ui.text_style(.Semibold, 15, TEXT)
 		heading := ui.label("Your Library", ui.fill(), ui.fill())
 		ui.accessible(heading, .Static_Text, heading.label)
@@ -266,10 +271,11 @@ draw_sidebar :: proc(s: ^State) {
 			draw_settings_button(s)
 			ui.spacer(ui.fill())
 		}
-		ui.spacer(ui.px(10))
+		ui.spacer(ui.px(SIDEBAR_PAD))
 	}
 	draw_search_field(s)
 	list := ui.scroll_view("playlists", ui.fill(), ui.fill(), inset_end = bar_inset(s))
+	list.pad.x = SIDEBAR_PAD
 	ui.accessible(list, .List, "Playlists")
 	for i in 0 ..< sidebar_count(s) {
 		entry := sidebar_entry(s, i)
@@ -289,7 +295,7 @@ draw_sidebar :: proc(s: ^State) {
 		if sig.clicked {
 			pending_set(s, {kind = .Playlist, index = i})
 		}
-		ui.spacer(ui.px(10))
+		ui.spacer(ui.px(ROW_PAD))
 		cover_art(s, .Playlist, entry.image, entry.seed, 40, ui.px(40))
 		ui.spacer(ui.px(12))
 		ui.column("", {}, ui.fill(), ui.fill())
@@ -299,6 +305,8 @@ draw_sidebar :: proc(s: ^State) {
 		ui.text_style(.Regular, 12, SECONDARY)
 		ui.label(entry.subtitle, ui.fill(), ui.px(17))
 	}
+	// Only below: the search field's margin is already above.
+	ui.spacer(ui.px(LIST_PAD_Y))
 }
 
 draw_sidebar_handle :: proc(s: ^State, window_w: f32) {
@@ -324,7 +332,7 @@ draw_main_view :: proc(s: ^State, main_w: f32) {
 	// Only playlists and Liked Songs say when a track was added. The fake
 	// data's .None is its playlists.
 	source := s.search.fake_source if s.data.fake else s.data.view.source
-	cols := track_columns(main_w, source in bit_set[Source]{.None, .Liked, .Playlist})
+	cols := track_columns(main_w - 2 * LIST_PAD, source in bit_set[Source]{.None, .Liked, .Playlist})
 	// Durations are m:ss however long, so the widest has the longest
 	// track's count of minute digits.
 	cols.duration = max(cols.duration, ui.counter_width(.Regular, 13, fmt.tprintf("%d:00", max(s.data.view.longest / 60, 10))) + 2 * CELL_PAD)
@@ -371,7 +379,7 @@ draw_main_view :: proc(s: ^State, main_w: f32) {
 	{
 		ui.row("", {}, ui.fill(), ui.px(HEADER_H))
 		ui.text_style(.Regular, 12, SECONDARY)
-		ui.spacer(ui.px(8))
+		ui.spacer(ui.px(LIST_PAD + 8))
 		num := ui.label("#", ui.px(cols.number), ui.fill())
 		num.text_align = .Center
 		ui.spacer(ui.px(cols.cover))
@@ -382,17 +390,13 @@ draw_main_view :: proc(s: ^State, main_w: f32) {
 			ui.spacer(ui.px(cols.heart))
 		}
 		header_cell("Time", cols.duration, .Right)
-		ui.spacer(ui.px(cols.more + 8 + ui.scroll_gutter("tracks")))
+		ui.spacer(ui.px(cols.more + 8 + ui.scroll_gutter("tracks") + LIST_PAD))
 	}
-	{
-		ui.row("", {}, ui.fill(), ui.px(1))
-		ui.spacer(ui.px(16))
-		line := ui.box_make("", {.Draw_Background}, ui.fill(), ui.px(1))
-		line.background = OUTLINE
-		ui.spacer(ui.px(16))
-	}
+	line := ui.box_make("", {.Draw_Background}, ui.fill(), ui.px(1))
+	line.background = OUTLINE
 
 	list := ui.scroll_view("tracks", ui.fill(), ui.fill(), {.Focusable}, bar_inset(s))
+	list.pad = {LIST_PAD, LIST_PAD_Y}
 	ui.accessible(list, .Table, view_title(s))
 	if s.bench.running && s.bench.ui {
 		list.view_off.y = bench_offset(s, list.rect.h)
@@ -401,14 +405,15 @@ draw_main_view :: proc(s: ^State, main_w: f32) {
 		list.view_off.y = cover_bench_offset(s, list)
 		list.view_off_target.y = list.view_off.y
 	} else if lib.anchor_row >= 0 {
-		list.view_off.y = f32(lib.anchor_row) * TRACK_ROW_H + lib.anchor_offset
+		list.view_off.y = LIST_PAD_Y + f32(lib.anchor_row) * TRACK_ROW_H + lib.anchor_offset
 		list.view_off_target.y = list.view_off.y
 	}
 	lib.anchor_row = -1
-	lib.top_row = int(list.view_off.y / TRACK_ROW_H)
-	lib.top_offset = list.view_off.y - f32(lib.top_row) * TRACK_ROW_H
+	lib.top_row = int((list.view_off.y - LIST_PAD_Y) / TRACK_ROW_H)
+	lib.top_offset = list.view_off.y - LIST_PAD_Y - f32(lib.top_row) * TRACK_ROW_H
 	if table_keys(s, list, view_count(s)) {
-		ui.scroll_to(list, f32(lib.selected) * TRACK_ROW_H, f32(lib.selected + 1) * TRACK_ROW_H)
+		// With the padding above and below, so the first and last rows show it.
+		ui.scroll_to(list, f32(lib.selected) * TRACK_ROW_H, f32(lib.selected + 1) * TRACK_ROW_H + 2 * LIST_PAD_Y)
 	}
 
 	{

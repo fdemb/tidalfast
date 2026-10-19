@@ -11,7 +11,7 @@
 //    proportion, until the overflow is gone or nothing is left to give.
 //    Across it, a child larger than its parent is cut to the parent's size.
 //    Boxes that allow overflow (scroll views) skip this on that axis.
-//    A box's gutter comes off its width before its children get any.
+//    A box's gutter and pad come off its size before its children get any.
 // 5. Positions: children are placed one after another along the child axis,
 //    shifted by the parent's view_off, and the parent's view_bounds is set
 //    to the size of its content.
@@ -50,10 +50,11 @@ overflow_on :: proc(b: ^Box, axis: Axis) -> bool {
 	return (.Allow_Overflow_X if axis == .X else .Allow_Overflow_Y) in b.flags
 }
 
-// content_size is the room b has for its children, less its gutter.
+// content_size is the room b has for its children, less its gutter and pad.
 @(private)
 content_size :: proc(b: ^Box, axis: Axis) -> f32 {
-	return max(b.fixed_size[axis] - b.gutter, 0) if axis == .X else b.fixed_size[axis]
+	gutter := b.gutter if axis == .X else 0
+	return max(b.fixed_size[axis] - gutter - 2 * b.pad[axis], 0)
 }
 
 sizes_standalone :: proc(b: ^Box, axis: Axis) {
@@ -105,7 +106,7 @@ sizes_downwards :: proc(b: ^Box, axis: Axis) {
 				sum = max(sum, c.fixed_size[axis])
 			}
 		}
-		b.fixed_size[axis] = sum
+		b.fixed_size[axis] = sum + 2 * b.pad[axis]
 	}
 }
 
@@ -154,7 +155,8 @@ solve_violations :: proc(b: ^Box, axis: Axis) {
 }
 
 position :: proc(b: ^Box, axis: Axis) {
-	at, bounds: f32
+	at := b.pad[axis]
+	bounds: f32
 	origin := b.rect.x if axis == .X else b.rect.y
 	for c := b.first; c != nil; c = c.next {
 		if !floating_on(c, axis) {
@@ -175,6 +177,7 @@ position :: proc(b: ^Box, axis: Axis) {
 			c.rect.h = c.fixed_size.y
 		}
 	}
+	bounds += 2 * b.pad[axis]
 	if axis == .Y {
 		bounds += b.inset_end
 	}
