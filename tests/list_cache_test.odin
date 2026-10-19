@@ -1145,3 +1145,63 @@ queue_file_round_trip :: proc(t: ^testing.T) {
 	testing.expect_value(t, err, app.File_Error.None)
 	testing.expect_value(t, head.sample, 0)
 }
+
+// Liking a row by dropping it on Liked Songs while the liked set is being
+// fetched: the fetch's answer predates the like, so the heart has to stay.
+@(test)
+like_from_a_drop_during_fetch :: proc(t: ^testing.T) {
+	dir := cache_dir("like-drop")
+	defer delete(dir, runtime.heap_allocator())
+	defer os.remove_all(dir)
+	s := cache_state(dir)
+	defer cache_state_free(s)
+	d := &s.data
+	sidebar(s, updated = 1, count = 3)
+	run_disk(s)
+	serve(s, rows_of(LIKED_IDS))
+	app.select_playlist(s, 2)
+	run_disk(s)
+	serve(s, rows_of({700, 701}))
+	run_disk(s)
+	track_jobs(s)
+
+	d.liked.loading = true
+	app.add_to_list(s, 0, 0)
+	ids := LIKED_IDS
+	res := app.Result {
+		liked_ids = ids,
+	}
+	app.liked_ids_result(d, &res, false)
+	testing.expect(t, app.liked_has(d, 700))
+}
+
+// A liked row dropped on Liked Songs still sends the like, and if TIDAL
+// refuses it the heart stays: TIDAL still has it liked.
+@(test)
+refused_drop_of_a_liked_row :: proc(t: ^testing.T) {
+	dir := cache_dir("like-drop-refused")
+	defer delete(dir, runtime.heap_allocator())
+	defer os.remove_all(dir)
+	s := cache_state(dir)
+	defer cache_state_free(s)
+	d := &s.data
+	sidebar(s, updated = 1, count = 3)
+	run_disk(s)
+	serve(s, rows_of(LIKED_IDS))
+	app.select_playlist(s, 2)
+	run_disk(s)
+	serve(s, rows_of({700, 701}))
+	run_disk(s)
+	track_jobs(s)
+
+	app.liked_put(d, 700, true)
+	app.add_to_list(s, 0, 0)
+	job, ok := add_job(s)
+	testing.expect(t, ok)
+	res := app.Result {
+		job = job,
+		err = tidal.Error_Kind.Http,
+	}
+	app.handle_result(s, &res, 0)
+	testing.expect(t, app.liked_has(d, 700))
+}

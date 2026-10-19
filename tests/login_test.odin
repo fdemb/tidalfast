@@ -1515,6 +1515,49 @@ liked_toggle_during_fetch :: proc(t: ^testing.T) {
 	app.liked_clear(d)
 }
 
+// A heart clicked while the whole set is being fetched, that TIDAL then
+// refuses, ends as TIDAL has it whether the refusal comes before the fetch
+// lands or after.
+@(test)
+liked_refused_during_fetch :: proc(t: ^testing.T) {
+	s := data_state()
+	defer data_state_free(s)
+	d := &s.data
+	sign_in(s)
+	data_jobs(d)
+	failed := app.Result {
+		err = tidal.Error_Kind.Network,
+	}
+	ids := []i64{3, 5}
+
+	app.liked_put(d, 3, true)
+	d.liked.loading = true
+	app.liked_toggle(s, 7) // like
+	app.liked_toggle(s, 3) // unlike
+	sent := data_jobs(d)
+	testing.expect_value(t, len(sent), 2)
+	app.add_result(s, &failed, sent[0].payload.(app.Add_Track_Job))
+	app.add_result(s, &failed, sent[1].payload.(app.Add_Track_Job))
+	res := app.Result{liked_ids = ids}
+	app.liked_ids_result(d, &res, false)
+	testing.expect(t, !app.liked_has(d, 7))
+	testing.expect(t, app.liked_has(d, 3))
+	testing.expect(t, app.liked_has(d, 5))
+
+	d.liked.loading = true
+	app.liked_toggle(s, 7)
+	app.liked_toggle(s, 3)
+	sent = data_jobs(d)
+	testing.expect_value(t, len(sent), 2)
+	app.liked_ids_result(d, &res, false)
+	app.add_result(s, &failed, sent[0].payload.(app.Add_Track_Job))
+	app.add_result(s, &failed, sent[1].payload.(app.Add_Track_Job))
+	testing.expect(t, !app.liked_has(d, 7))
+	testing.expect(t, app.liked_has(d, 3))
+	testing.expect(t, app.liked_has(d, 5))
+	app.liked_clear(d)
+}
+
 // The whole liked set for the hearts, then an unlike: the ids come back
 // sorted at the version the listing says, and an unlike tells the count
 // the list dropped to, without the row, so list_edited takes it out of
@@ -1978,4 +2021,251 @@ pkce_retry_keeps_the_tokens :: proc(t: ^testing.T) {
 		data_state_free(s)
 		mock_stop(&m)
 	}
+}
+
+// A like whose job is pushed out of a full hold list never reached TIDAL,
+// so its heart goes back, and a fetch that was out doesn't bring it back.
+@(test)
+like_dropped_from_the_hold_list :: proc(t: ^testing.T) {
+	s := data_state()
+	defer data_state_free(s)
+	d := &s.data
+	sign_in(s)
+	data_jobs(d)
+	fill_with_covers(d)
+
+	d.liked.loading = true
+	for track in 1 ..= app.HELD_JOBS + 1 {
+		app.liked_toggle(s, i64(track))
+	}
+	testing.expect(t, !app.liked_has(d, 1), "the oldest like was dropped and its heart put back")
+	testing.expect(t, app.liked_has(d, 2))
+	res := app.Result{}
+	app.liked_ids_result(d, &res, false)
+	testing.expect(t, !app.liked_has(d, 1), "the fetch didn't replay the dropped like")
+	testing.expect(t, app.liked_has(d, i64(app.HELD_JOBS + 1)))
+	app.liked_clear(d)
+}
+
+// Like, unlike, like on one track with the queue full hold one job, so
+// likes of other tracks up to a full hold list drop none of it: the heart
+// stays, through a fetch that lands without it.
+@(test)
+clicks_on_one_heart_hold_one_job :: proc(t: ^testing.T) {
+	s := data_state()
+	defer data_state_free(s)
+	d := &s.data
+	sign_in(s)
+	data_jobs(d)
+	fill_with_covers(d)
+
+	d.liked.loading = true
+	app.liked_toggle(s, 1)
+	app.liked_toggle(s, 1)
+	app.liked_toggle(s, 1)
+	for track in 2 ..= app.HELD_JOBS {
+		app.liked_toggle(s, i64(track))
+	}
+	testing.expect(t, app.liked_has(d, 1), "its like is still held")
+	res := app.Result{}
+	app.liked_ids_result(d, &res, false)
+	testing.expect(t, app.liked_has(d, 1), "the fetch kept the like that's out")
+	app.liked_clear(d)
+}
+
+// The same with a liked track unliked, liked and unliked: it stays unliked.
+@(test)
+clicks_on_one_liked_heart_hold_one_job :: proc(t: ^testing.T) {
+	s := data_state()
+	defer data_state_free(s)
+	d := &s.data
+	sign_in(s)
+	data_jobs(d)
+	fill_with_covers(d)
+
+	app.liked_put(d, 1, true)
+	d.liked.loading = true
+	app.liked_toggle(s, 1)
+	app.liked_toggle(s, 1)
+	app.liked_toggle(s, 1)
+	for track in 2 ..= app.HELD_JOBS {
+		app.liked_toggle(s, i64(track))
+	}
+	testing.expect(t, !app.liked_has(d, 1), "its unlike is still held")
+	ids := []i64{1}
+	res := app.Result{liked_ids = ids}
+	app.liked_ids_result(d, &res, false)
+	testing.expect(t, !app.liked_has(d, 1), "the fetch kept the unlike that's out")
+	app.liked_clear(d)
+}
+
+// Like, unlike, like on one track, and TIDAL refuses the like: the clicks
+// since go with it, so the heart shows what TIDAL has and nothing more goes.
+@(test)
+refused_heart_takes_back_later_clicks :: proc(t: ^testing.T) {
+	s := data_state()
+	defer data_state_free(s)
+	d := &s.data
+	sign_in(s)
+	data_jobs(d)
+	failed := app.Result {
+		err = tidal.Error_Kind.Network,
+	}
+
+	app.liked_toggle(s, 7)
+	app.liked_toggle(s, 7)
+	app.liked_toggle(s, 7)
+	sent := heart_jobs(d)
+	if !testing.expect_value(t, len(sent), 1) {
+		return
+	}
+	app.add_result(s, &failed, sent[0])
+	testing.expect(t, !app.liked_has(d, 7))
+	testing.expect_value(t, len(heart_jobs(d)), 0)
+	app.liked_clear(d)
+}
+
+// heart_jobs empties the queue and returns the heart changes in it.
+@(private = "file")
+heart_jobs :: proc(d: ^app.Data) -> [dynamic]app.Add_Track_Job {
+	out := make([dynamic]app.Add_Track_Job, context.temp_allocator)
+	for job in data_jobs(d) {
+		if p, add := job.payload.(app.Add_Track_Job); add && p.source == .Liked {
+			append(&out, p)
+		}
+	}
+	return out
+}
+
+// Two clicks on one heart before TIDAL answers send one change at a time,
+// so the two can't reach TIDAL out of order: the unlike goes once the like
+// is answered, and nothing goes after it.
+@(test)
+one_heart_change_out_at_a_time :: proc(t: ^testing.T) {
+	s := data_state()
+	defer data_state_free(s)
+	d := &s.data
+	sign_in(s)
+	data_jobs(d)
+	took := app.Result {
+		added = true,
+	}
+
+	app.liked_toggle(s, 7)
+	app.liked_toggle(s, 7)
+	defer app.liked_clear(d)
+	sent := heart_jobs(d)
+	if !testing.expect_value(t, len(sent), 1) {
+		return
+	}
+	testing.expect(t, !sent[0].remove)
+	app.add_result(s, &took, sent[0])
+	sent = heart_jobs(d)
+	if !testing.expect_value(t, len(sent), 1) {
+		return
+	}
+	testing.expect(t, sent[0].remove)
+	app.add_result(s, &took, sent[0])
+	testing.expect_value(t, len(heart_jobs(d)), 0)
+	testing.expect(t, !app.liked_has(d, 7))
+}
+
+// Like then unlike before TIDAL answers, and TIDAL refuses: the heart ends
+// unliked as TIDAL has it, with nothing more sent, whether the refusal
+// comes before a fetch that's out lands or after.
+@(test)
+refused_like_then_unlike :: proc(t: ^testing.T) {
+	s := data_state()
+	defer data_state_free(s)
+	d := &s.data
+	defer app.liked_clear(d)
+	sign_in(s)
+	data_jobs(d)
+	failed := app.Result {
+		err = tidal.Error_Kind.Network,
+	}
+	without := app.Result {
+		liked_ids = []i64{5},
+	}
+
+	app.liked_toggle(s, 7)
+	app.liked_toggle(s, 7)
+	sent := heart_jobs(d)
+	testing.expect_value(t, len(sent), 1)
+	#reverse for job in sent {
+		app.add_result(s, &failed, job)
+	}
+	testing.expect(t, !app.liked_has(d, 7))
+	testing.expect_value(t, len(heart_jobs(d)), 0)
+
+	d.liked.loading = true
+	app.liked_toggle(s, 7)
+	app.liked_toggle(s, 7)
+	sent = heart_jobs(d)
+	testing.expect_value(t, len(sent), 1)
+	#reverse for job in sent {
+		app.add_result(s, &failed, job)
+	}
+	app.liked_ids_result(d, &without, false)
+	testing.expect(t, !app.liked_has(d, 7), "refused before the fetch landed")
+	testing.expect_value(t, len(heart_jobs(d)), 0)
+
+	d.liked.loading = true
+	app.liked_toggle(s, 7)
+	app.liked_toggle(s, 7)
+	sent = heart_jobs(d)
+	testing.expect_value(t, len(sent), 1)
+	app.liked_ids_result(d, &without, false)
+	#reverse for job in sent {
+		app.add_result(s, &failed, job)
+	}
+	testing.expect(t, !app.liked_has(d, 7), "refused after the fetch landed")
+	testing.expect_value(t, len(heart_jobs(d)), 0)
+}
+
+// Like, unlike, like before TIDAL answers, and TIDAL takes the like: the
+// heart already says what TIDAL has, so nothing more goes.
+@(test)
+like_unlike_like_sends_one :: proc(t: ^testing.T) {
+	s := data_state()
+	defer data_state_free(s)
+	d := &s.data
+	defer app.liked_clear(d)
+	sign_in(s)
+	data_jobs(d)
+	took := app.Result {
+		added = true,
+	}
+
+	app.liked_toggle(s, 7)
+	app.liked_toggle(s, 7)
+	app.liked_toggle(s, 7)
+	sent := heart_jobs(d)
+	if !testing.expect_value(t, len(sent), 1) {
+		return
+	}
+	app.add_result(s, &took, sent[0])
+	testing.expect_value(t, len(heart_jobs(d)), 0)
+	testing.expect(t, app.liked_has(d, 7))
+}
+
+// A like sent with no fetch out, then a fetch that starts and lands without
+// the track while the like is still out: TIDAL may not have had it yet when
+// it listed the set, so the heart stays.
+@(test)
+like_out_when_a_fetch_starts :: proc(t: ^testing.T) {
+	s := data_state()
+	defer data_state_free(s)
+	d := &s.data
+	defer app.liked_clear(d)
+	sign_in(s)
+	data_jobs(d)
+	without := app.Result {
+		liked_ids = []i64{5},
+	}
+
+	app.liked_toggle(s, 7)
+	d.liked.loading = true
+	app.liked_ids_result(d, &without, false)
+	testing.expect(t, app.liked_has(d, 7))
 }
