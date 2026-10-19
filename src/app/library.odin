@@ -172,9 +172,8 @@ draw_library :: proc(s: ^State, w, h: f32) {
 	lib.sidebar_w = clamp(lib.sidebar_w, SIDEBAR_MIN, sidebar_limit(w))
 	lib.drop_target = -1
 
-	// No background of its own: the sidebar shows the glass behind the
-	// window, so the others draw theirs.
-	bg := ui.box_make("", {}, ui.fill(), ui.fill())
+	bg := ui.box_make("", {.Draw_Background}, ui.fill(), ui.fill())
+	bg.background = WINDOW_BG
 	bg.child_axis = .Y
 	ui.parent(bg)
 	{
@@ -312,14 +311,12 @@ draw_sidebar_handle :: proc(s: ^State, window_w: f32) {
 	if sig.held || sig.released {
 		lib.sidebar_w = clamp(lib.drag_from_w + sig.drag_delta.x, SIDEBAR_MIN, sidebar_limit(window_w))
 	}
-	// The sidebar's background runs up to the line and the main view's after it.
+	// The sidebar's background runs up to the line.
 	side := ui.box_make("", {.Draw_Background}, ui.px(2), ui.fill())
 	side.background = PANEL
 	line := ui.box_make("", {.Draw_Background}, ui.px(1), ui.fill())
 	t := max(handle.hot_t, handle.active_t)
 	line.background = mix(OUTLINE, ACCENT, t)
-	main := ui.box_make("", {.Draw_Background}, ui.fill(), ui.fill())
-	main.background = WINDOW_BG
 }
 
 draw_main_view :: proc(s: ^State, main_w: f32) {
@@ -331,8 +328,7 @@ draw_main_view :: proc(s: ^State, main_w: f32) {
 	// Durations are m:ss however long, so the widest has the longest
 	// track's count of minute digits.
 	cols.duration = max(cols.duration, ui.counter_width(.Regular, 13, fmt.tprintf("%d:00", max(s.data.view.longest / 60, 10))) + 2 * CELL_PAD)
-	main := ui.column("main", {.Clip, .Draw_Background}, ui.fill(), ui.fill())
-	main.background = WINDOW_BG
+	ui.column("main", {.Clip}, ui.fill(), ui.fill())
 	if s.titlebar_h > 0 {
 		// Over the artist page's picture, or above the other views.
 		strip := ui.box_make("", {.Window_Drag}, ui.px(main_w), ui.px(s.titlebar_h))
@@ -795,7 +791,7 @@ draw_drag_ghost :: proc(s: ^State) {
 
 draw_player_bar :: proc(s: ^State, w, h: f32) {
 	bar := ui.column("player", {.Draw_Background}, ui.px(w), ui.px(PLAYER_BAR_H))
-	bar.background = GLASS_BG
+	bar.background = PANEL
 	if s.bar_over_content {
 		// Over the bottom of the views, blurring them. Clickable so a press
 		// on it doesn't reach the row under it.

@@ -986,8 +986,6 @@ static uint32_t scroll_phase(NSEventPhase phase) {
   g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm_sRGB;
   g_layer.colorspace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
   g_layer.framebufferOnly = YES;
-  // Premultiplied alpha, so the glass view behind shows through.
-  g_layer.opaque = NO;
   // Two drawables while idle, see update_display_link.
   g_layer.maximumDrawableCount = 2;
   return g_layer;
@@ -1478,7 +1476,7 @@ static void setup_shell_test(void) {
 // TIDALFAST_BLUR_REFERENCE=<material>[,<height>] puts AppKit's blur of the
 // window's own content over its bottom, where the player bar goes, to
 // compare the renderer's blur with. The app leaves the bar out then.
-static void setup_blur_reference(NSView *parent) {
+static void setup_blur_reference(void) {
   const char *env = getenv("TIDALFAST_BLUR_REFERENCE");
   if (!env || !*env) return;
   NSArray<NSString *> *parts = [@(env) componentsSeparatedByString:@","];
@@ -1504,12 +1502,15 @@ static void setup_blur_reference(NSView *parent) {
     return;
   }
   CGFloat height = parts.count > 1 ? parts[1].doubleValue : 88;
-  NSVisualEffectView *blur = [[NSVisualEffectView alloc] initWithFrame:NSMakeRect(0, 0, parent.bounds.size.width, height)];
+  // Over the Metal view's layer: g_view is flipped, so the bottom is at
+  // its height and the margin above the blur is what stretches.
+  NSSize size = g_view.bounds.size;
+  NSVisualEffectView *blur = [[NSVisualEffectView alloc] initWithFrame:NSMakeRect(0, size.height - height, size.width, height)];
   blur.material = material.integerValue;
   blur.blendingMode = NSVisualEffectBlendingModeWithinWindow;
   blur.state = NSVisualEffectStateActive;
-  blur.autoresizingMask = NSViewWidthSizable | NSViewMaxYMargin;
-  [parent addSubview:blur positioned:NSWindowAbove relativeTo:g_view];
+  blur.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
+  [g_view addSubview:blur];
 }
 
 @implementation App_Delegate
@@ -1531,19 +1532,9 @@ static void setup_blur_reference(NSView *parent) {
   g_window.acceptsMouseMovedEvents = YES;
   g_window.releasedWhenClosed = NO;
 
-  // The blurred desktop behind the window, which shows wherever the app
-  // draws with alpha below 1: the sidebar.
-  NSVisualEffectView *glass = [[NSVisualEffectView alloc] initWithFrame:frame];
-  glass.material = NSVisualEffectMaterialSidebar;
-  glass.blendingMode = NSVisualEffectBlendingModeBehindWindow;
-  glass.state = NSVisualEffectStateFollowsWindowActiveState;
-  glass.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
-  g_window.contentView = glass;
-
   g_view = [[Metal_View alloc] initWithFrame:frame];
-  g_view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-  [glass addSubview:g_view];
-  setup_blur_reference(glass);
+  g_window.contentView = g_view;
+  setup_blur_reference();
   [g_window center];
 
   g_display_link = [g_view displayLinkWithTarget:g_view selector:@selector(display_link_tick:)];

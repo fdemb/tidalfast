@@ -148,11 +148,12 @@ fragment float4 rect_fragment(Fragment_In in [[stage_in]],
 
 	if (r.flags & BACKDROP) {
 		// The blur under the tint, its colours pulled away from their
-		// luminance by the saturation.
-		float3 b = backdrop_tex.sample(linear_sampler, mix(r.src.xy, r.src.zw, t)).rgb;
-		float luma = dot(b, float3(0.2126, 0.7152, 0.0722));
-		b = max(mix(float3(luma), b, r.extra), 0.0);
-		color += float4(b, 1.0) * (1.0 - color.a);
+		// luminance by the saturation. It's premultiplied and keeps its
+		// alpha, so what was translucent under it stays so.
+		float4 b = backdrop_tex.sample(linear_sampler, mix(r.src.xy, r.src.zw, t));
+		float luma = dot(b.rgb, float3(0.2126, 0.7152, 0.0722));
+		b.rgb = max(mix(float3(luma), b.rgb, r.extra), 0.0);
+		color += b * (1.0 - color.a);
 	} else if (r.flags & TEXTURED) {
 		float2 uv = mix(r.src.xy, r.src.zw, t);
 		if (r.flags & COVERAGE) {

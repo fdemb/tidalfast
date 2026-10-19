@@ -149,7 +149,7 @@ app_reload :: proc "c" (m: ^platform.Memory, shell: ^platform.Shell) {
 	data_reload(s, shell)
 	playback_reload(s, shell)
 	measure_reload(s, shell)
-	log.infof("app: reloaded at frame %d, clear colour %v", s.frame_count, FRAME_CLEAR)
+	log.infof("app: reloaded at frame %d, clear colour %v", s.frame_count, CLEAR_COLOR)
 }
 
 app_unload :: proc "c" (m: ^platform.Memory) {
@@ -470,7 +470,7 @@ start :: proc(s: ^State, shell: ^platform.Shell) {
 		s.bench.ui = true
 	}
 	dev_start(s)
-	log.infof("app: started, clear colour %v", FRAME_CLEAR)
+	log.infof("app: started, clear colour %v", CLEAR_COLOR)
 	measure_mark(s, .Init)
 }
 
@@ -498,7 +498,7 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input, shell: ^platfor
 	s.titlebar_h = input.titlebar_height
 	s.titlebar_inset = input.titlebar_inset
 	r := &s.renderer
-	render.begin_frame(r, w, h, input.scale, FRAME_CLEAR)
+	render.begin_frame(r, w, h, input.scale, CLEAR_COLOR)
 	ui_begin := time.tick_now()
 	measure_frame_begin(s)
 	text.begin_frame(&s.text, r)
