@@ -55,6 +55,13 @@ Found :: struct {
 	artists:  []Artist_Ref,
 }
 
+FOUND_COVER := [Search_Tab]cover.Kind {
+	.Songs     = .Album,
+	.Albums    = .Album,
+	.Artists   = .Artist,
+	.Playlists = .Playlist,
+}
+
 Found_Lists :: struct {
 	albums, artists, playlists: []Found,
 }
@@ -559,8 +566,8 @@ draw_found_list :: proc(s: ^State) {
 			open_found(s, tab, f)
 		}
 		ui.spacer(ui.px(16))
-		kind := cover.Kind.Album if tab == .Albums else .Playlist
-		cover_art(s, kind, f.image, u32(i) * 2654435761 >> 7, 40, ui.px(52))
+		kind := FOUND_COVER[tab]
+		cover_art(s, kind, f.image, u32(i) * 2654435761 >> 7, 40, ui.px(52), 20 if kind == .Artist else 4)
 		ui.spacer(ui.px(8))
 		ui.column("", {}, ui.fill(), ui.fill())
 		ui.spacer(ui.px(9))
@@ -626,6 +633,8 @@ view_cover :: proc(s: ^State) -> (kind: cover.Kind, id: string, show: bool) {
 		return
 	case .Album:
 		return .Album, small_str(&v.image), true
+	case .Artist:
+		return .Artist, small_str(&v.image), true
 	}
 	return .Playlist, small_str(&v.image), true
 }

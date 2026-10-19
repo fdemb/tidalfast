@@ -295,7 +295,7 @@ draw_main_view :: proc(s: ^State, main_w: f32) {
 		ui.row("", {}, ui.fill(), ui.px(124))
 		ui.spacer(ui.px(24))
 		if kind, image, show := view_cover(s); show {
-			cover_art(s, kind, image, u32(lib.playlist) * 7919 + 13, 92, ui.px(92))
+			cover_art(s, kind, image, u32(lib.playlist) * 7919 + 13, 92, ui.px(92), 46 if kind == .Artist else 4)
 			ui.spacer(ui.px(18))
 		}
 		ui.column("", {}, ui.fill(), ui.fill())

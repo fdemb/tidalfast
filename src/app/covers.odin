@@ -16,13 +16,14 @@ DATA_SLOTS :: 16 // job queue slots covers leave free for data jobs
 
 // cover_art draws a cover size points square, centred in a cell of width
 // cell_w. Without an image id it draws the fake data's gradient for seed.
-cover_art :: proc(s: ^State, kind: cover.Kind, id: string, seed: u32, size: f32, cell_w: ui.Size) {
+// A radius of half the size draws it round, as artist pictures are.
+cover_art :: proc(s: ^State, kind: cover.Kind, id: string, seed: u32, size: f32, cell_w: ui.Size, radius: f32 = 4) {
 	ui.column("", {}, cell_w, ui.fill())
 	ui.spacer(ui.fill())
 	{
 		ui.row("", {}, ui.fill(), ui.px(size))
 		b := ui.box_make("", {.Draw_Background}, ui.px(size), ui.px(size))
-		b.radius = 4
+		b.radius = radius
 		if id == "" {
 			hue := f32(seed % 997) / 997
 			b.background = hsv(hue, 0.55, 0.75)
