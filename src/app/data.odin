@@ -212,6 +212,7 @@ Data :: struct {
 	next_gen:       u32, // the last Track_View.gen handed out
 	lists:          Lists, // closed lists and the disk cache, see lists.odin
 	liked:          Liked_Set, // the liked track ids the hearts show, see liked.odin
+	artists:        Artist_Cache, // artist pages, see artist_data.odin
 	window_key:     bool, // the window had the keyboard last frame
 	// Debug builds and tests keep the last list freed (view_free) filled
 	// with POISON until the next one is, so a string or row still borrowed
@@ -326,6 +327,7 @@ data_shutdown :: proc(s: ^State) {
 	sidebar_free(d)
 	lists_shutdown(d)
 	liked_clear(d)
+	artist_clear(d)
 	view_release(&d.view)
 	view_release(&d.queued)
 	view_release(&d.refresh)
@@ -702,14 +704,18 @@ same_request :: proc(held, job: Job) -> bool {
 	case Artwork_Job:
 		h, art := held.payload.(Artwork_Job)
 		return art && h.serial == p.serial
+	case Artist_Job:
+		h, artist := held.payload.(Artist_Job)
+		return artist && h == p
 	}
 	return false
 }
 
 // held_victim is the held job to drop for a new one: one no longer wanted,
 // else the oldest Stream, Artwork or Add_Track, whose track has most likely
-// moved on. hold_job keeps one of each other kind and view_pages one page
-// per list, so they never fill the list.
+// moved on, or Artist, whose page asks again. hold_job keeps one of each
+// other kind and view_pages one page per list, so they never fill the
+// list.
 @(private = "file")
 held_victim :: proc(d: ^Data) -> int {
 	held := d.held[:d.held_count]
@@ -720,7 +726,7 @@ held_victim :: proc(d: ^Data) -> int {
 	}
 	for h, i in held {
 		#partial switch _ in h.job.payload {
-		case Stream_Job, Artwork_Job, Add_Track_Job:
+		case Stream_Job, Artwork_Job, Add_Track_Job, Artist_Job:
 			return i
 		}
 	}
@@ -749,6 +755,8 @@ held_drop :: proc(d: ^Data, job: ^Job) {
 	case Liked_Ids_Job:
 		d.liked.loading = false
 		clear(&d.liked.edits)
+	case Artist_Job:
+		artist_job_dropped(d, p)
 	}
 	job_free(job)
 }
@@ -843,6 +851,7 @@ account_end :: proc(s: ^State) {
 	d.relogin = false
 	sidebar_free(d)
 	liked_clear(d)
+	artist_clear(d)
 	view_close(d)
 	queued_drop(d)
 	lists_clear(d)
@@ -970,6 +979,8 @@ held_wanted :: proc(d: ^Data, job: Job) -> bool {
 		return d.account == .Signed_In
 	case Tracks_Job:
 		return track_view(d, p.view) != nil
+	case Artist_Job:
+		return artist_waiting(d, p) != nil
 	}
 	return true
 }
@@ -1112,6 +1123,8 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 		add_result(s, res, p)
 	case Liked_Ids_Job:
 		liked_ids_result(d, res, failed)
+	case Artist_Job:
+		artist_result(d, res, p)
 	case Tracks_Job:
 		r := &d.refresh
 		v := track_view(d, p.view)

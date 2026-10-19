@@ -92,6 +92,7 @@ Job_Payload :: union {
 	Add_Track_Job,
 	Liked_Ids_Job,
 	Launch_Log_Job,
+	Artist_Job,
 }
 
 // Restore_Job reads the tokens from the Keychain into the session.
@@ -241,6 +242,7 @@ Result :: struct {
 	queue:       Queue_Header, // Disk, Read_Queue: the play queue's place; its rows are in rows
 	added:       bool, // Add_Track: TIDAL added it rather than finding it there
 	liked_ids:   []i64, // Liked_Ids: every liked track's id, sorted
+	artist:      Artist_Content, // Artist: strings in arena
 }
 
 workers_start :: proc(d: ^Data) {
@@ -584,6 +586,13 @@ run_job :: proc(d: ^Data, job: Job) -> (res: Result) {
 		run_add_track(s, p, &res, alloc)
 	case Liked_Ids_Job:
 		run_liked_ids(s, p, &res, alloc)
+	case Artist_Job:
+		content, err := artist_part_spec(p.part).load(s, p.artist, alloc)
+		if err != nil {
+			fail(&res, err)
+			return
+		}
+		res.artist = content
 	case Search_Job:
 		query := p.query
 		found, err := tidal.search(s, small_str(&query), {.Track, .Album, .Artist, .Playlist}, SEARCH_PAGE, 0, alloc)
