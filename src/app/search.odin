@@ -124,7 +124,7 @@ draw_search_field :: proc(s: ^State) {
 		ui.spacer(ui.px(12))
 		ui.text_style(.Regular, 13, TEXT)
 		sig := ui.text_field("search", &sr.field, "Search", ui.fill(), ui.px(32))
-		sig.box.background = SEARCH_BG
+		sig.box.background = SURFACE
 		sig.box.border_color = ACCENT if sig.focused else OUTLINE
 		ui.focus_shortcut(sig.box, .F, {ui.PRIMARY})
 		ui.focus_shortcut(sig.box, .L, {ui.PRIMARY})

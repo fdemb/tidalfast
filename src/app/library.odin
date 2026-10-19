@@ -22,10 +22,15 @@ SURFACE_ACTIVE :: render.Color{0x31 / 255.0, 0x31 / 255.0, 0x31 / 255.0, 1}
 // Row highlights: a selected row, or the open playlist, is a step brighter
 // than a hovered one. Solid, one set per background, because the renderer
 // blends in linear light, where a few percent of white over a dark grey
-// comes out far brighter than the same numbers in CSS. SIDEBAR_ROWS is in
-// glass_darwin.odin and glass_linux.odin.
+// comes out far brighter than the same numbers in CSS.
 Row_Colors :: struct {
 	selected, hover, selected_hover: render.Color,
+}
+
+SIDEBAR_ROWS :: Row_Colors {
+	selected       = {0x27 / 255.0, 0x27 / 255.0, 0x27 / 255.0, 1},
+	hover          = {0x20 / 255.0, 0x20 / 255.0, 0x20 / 255.0, 1},
+	selected_hover = {0x2e / 255.0, 0x2e / 255.0, 0x2e / 255.0, 1},
 }
 
 LIST_ROWS :: Row_Colors {
@@ -236,7 +241,7 @@ history_button :: proc(id, name: string, enabled: bool) -> ui.Signal {
 draw_sidebar :: proc(s: ^State) {
 	lib := &s.library
 	side := ui.column("sidebar", {.Draw_Background, .Clip}, ui.px(lib.sidebar_w), ui.fill())
-	side.background = GLASS_BG
+	side.background = PANEL
 	draw_history_buttons(s)
 	{
 		ui.row("", {}, ui.fill(), ui.px(40))
@@ -297,7 +302,7 @@ draw_sidebar_handle :: proc(s: ^State, window_w: f32) {
 	}
 	// The sidebar's background runs up to the line and the main view's after it.
 	side := ui.box_make("", {.Draw_Background}, ui.px(2), ui.fill())
-	side.background = GLASS_BG
+	side.background = PANEL
 	line := ui.box_make("", {.Draw_Background}, ui.px(1), ui.fill())
 	t := max(handle.hot_t, handle.active_t)
 	line.background = mix(OUTLINE, ACCENT, t)
@@ -778,7 +783,7 @@ draw_drag_ghost :: proc(s: ^State) {
 
 draw_player_bar :: proc(s: ^State, w: f32) {
 	bar := ui.column("player", {.Draw_Background}, ui.fill(), ui.px(PLAYER_BAR_H))
-	bar.background = PANEL
+	bar.background = GLASS_BG
 	line := ui.box_make("", {.Draw_Background}, ui.fill(), ui.px(1))
 	line.background = OUTLINE
 	ui.row("", {}, ui.fill(), ui.fill())
