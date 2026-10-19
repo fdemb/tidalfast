@@ -1134,9 +1134,11 @@ pending_apply :: proc(s: ^State) -> bool {
 	switch p.kind {
 	case .None:
 		return false
-	case .Playlist, .List, .Search:
+	case .Playlist, .List:
 		history_visit(s, p)
 		place_go(s, &p)
+	case .Search:
+		search_go(s, small_str(&p.id), nil)
 	case .Close_Search:
 		if search_showing(s) {
 			history_visit(s, {kind = .Playlist, index = s.library.playlist})
@@ -1152,16 +1154,21 @@ pending_apply :: proc(s: ^State) -> bool {
 		if to < 0 || to >= h.count {
 			return false
 		}
-		h.at = to
 		place := h.places[to]
-		place_go(s, &place)
+		if place.kind == .Search {
+			search_go(s, small_str(&place.id), to)
+		} else {
+			h.at = to
+			place_go(s, &place)
+		}
 	}
 	ui.data_changed()
 	return true
 }
 
-// place_go shows a place, a Pending of kind .Playlist, .List or .Search,
-// without recording it in the history.
+// place_go shows a place, a Pending of kind .Playlist or .List, without
+// recording it in the history. A search's place is recorded when its
+// results show (search_go).
 place_go :: proc(s: ^State, p: ^Pending) {
 	search_stop(s)
 	#partial switch p.kind {
@@ -1169,8 +1176,6 @@ place_go :: proc(s: ^State, p: ^Pending) {
 		select_playlist(s, playlist_index(s, p))
 	case .List:
 		open_list(s, p)
-	case .Search:
-		search_again(s, small_str(&p.id))
 	}
 }
 

@@ -8,6 +8,8 @@ The songs become the open track list, a `Track_View` with source `.Search`. So c
 
 Opening any list, from the sidebar, the tabs or the track menu, ends a search that's still waiting for its debounce or its answer. The generation goes up and the queued Search job goes, so the answer can't bring the results back over the list. The text stays in the field, and Return searches for it again.
 
+A search becomes a place in the history when its results show, not when it's sent. A search cleared, or one that fails, before its results come leaves the history at the place still showing, such as an artist's page. Back or Forward to a search moves the history there once the results come, and leaves it where it was if they don't.
+
 Signing out clears the field, the results and the history Back and Forward go through, so the next account starts with none of them.
 
 An album result's artists are links to their pages. The track menu's Go to album and Go to artist open the same lists, from the row's album and artist ids. A song by several artists gets a Go to item for each of them in place of Go to artist. The menu offers these only when the row has the ids. Copy song link puts `https://tidal.com/browse/track/<id>` on the clipboard. The menu belongs to the list and the track it was opened on: when another list replaces that list (a search result, a sidebar entry, an album), or the row holds another track, the menu closes and its actions do nothing. Add to queue is gone from the menu until the player has a queue API to call.
