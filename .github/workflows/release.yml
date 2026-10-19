@@ -1,0 +1,92 @@
+# Builds the macOS .dmg and the Linux AppImage with ./build.sh dist. A tag
+# v1.2.3 publishes both as the GitHub release v1.2.3; a manual run only
+# uploads them as workflow artifacts.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  ODIN_VERSION: dev-2026-10
+  TIDALFAST_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+
+jobs:
+  macos:
+    runs-on: macos-15
+    env:
+      # miniaudio.a, built below, otherwise targets the runner's macOS.
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Odin
+        run: |
+          mkdir -p "$RUNNER_TEMP/odin"
+          curl -fsSL "https://github.com/odin-lang/Odin/releases/download/$ODIN_VERSION/odin-macos-arm64-$ODIN_VERSION.tar.gz" |
+            tar xz -C "$RUNNER_TEMP/odin" --strip-components=1
+          echo "$RUNNER_TEMP/odin" >> "$GITHUB_PATH"
+      - name: Build miniaudio
+        run: sh "$(odin root)/vendor/miniaudio/src/build_miniaudio.sh"
+      - run: ./build.sh dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: build/dist/*.dmg
+          if-no-files-found: error
+
+  linux:
+    runs-on: ubuntu-24.04
+    env:
+      # linuxdeploy is an AppImage itself, and the runner has no FUSE to mount it.
+      APPIMAGE_EXTRACT_AND_RUN: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang pkg-config libwayland-dev wayland-protocols libxkbcommon-dev \
+            libvulkan-dev glslang-tools libfreetype-dev libfontconfig-dev libcurl4-openssl-dev
+      - name: Install Odin
+        run: |
+          mkdir -p "$RUNNER_TEMP/odin"
+          curl -fsSL "https://github.com/odin-lang/Odin/releases/download/$ODIN_VERSION/odin-linux-amd64-$ODIN_VERSION.tar.gz" |
+            tar xz -C "$RUNNER_TEMP/odin" --strip-components=1
+          echo "$RUNNER_TEMP/odin" >> "$GITHUB_PATH"
+      - name: Build miniaudio and stb
+        run: |
+          sh "$(odin root)/vendor/miniaudio/src/build_miniaudio.sh"
+          cd "$(odin root)/vendor/stb/src" && sh build_stb.sh
+      - name: Install linuxdeploy
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin" && cd "$RUNNER_TEMP/bin"
+          curl -fsSLO https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          curl -fsSLO https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-x86_64.AppImage
+          chmod +x ./*.AppImage
+          ln -s linuxdeploy-x86_64.AppImage linuxdeploy
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - run: ./build.sh dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: build/dist/*.AppImage
+          if-no-files-found: error
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: [macos, linux]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          case "$GITHUB_REF_NAME" in *-*) pre=--prerelease ;; *) pre= ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes $pre

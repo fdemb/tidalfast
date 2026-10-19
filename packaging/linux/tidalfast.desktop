@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=TIDALfast
+Comment=Native TIDAL client
+Exec=tidalfast
+Icon=tidalfast
+Categories=AudioVideo;Audio;Player;
+Terminal=false
+StartupWMClass=tidalfast

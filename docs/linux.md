@@ -1,9 +1,9 @@
 # Linux
 
-The Linux build runs on Wayland, draws with Vulkan, plays through miniaudio and keeps the login in the Secret Service. It needs Odin, a C compiler and pkg-config, plus the development files for wayland-client, wayland-cursor, wayland-protocols, xkbcommon, Vulkan, FreeType, fontconfig and curl, and the `wayland-scanner` and `glslangValidator` tools. On Debian and Ubuntu:
+The Linux build runs on Wayland, draws with Vulkan, plays through miniaudio and keeps the login in the Secret Service. It needs Odin, clang (Odin links with it), a C compiler and pkg-config, plus the development files for wayland-client, wayland-cursor, wayland-protocols, xkbcommon, Vulkan, FreeType, fontconfig and curl, and the `wayland-scanner` and `glslangValidator` tools. On Debian and Ubuntu:
 
 ```
-apt install build-essential pkg-config libwayland-dev wayland-protocols libxkbcommon-dev libvulkan-dev \
+apt install build-essential clang pkg-config libwayland-dev wayland-protocols libxkbcommon-dev libvulkan-dev \
     glslang-tools libfreetype-dev libfontconfig-dev libcurl4-openssl-dev
 ```
 

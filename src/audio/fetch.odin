@@ -27,6 +27,8 @@ import "core:sys/posix"
 import "core:time"
 import curl "vendor:curl"
 
+import "../cacert"
+
 STREAM_WINDOW :: 3 << 20 // bytes kept per track, about 17 s of 16/44.1 FLAC, 5 s of 24/192
 KEEP_BEHIND :: 256 << 10 // bytes kept before the read position, for short seeks back
 FETCH_RETRIES :: 5
@@ -413,6 +415,9 @@ transfer :: proc(h: ^curl.CURL, t: ^Transfer, url: string, start: i64) -> curl.c
 	curl.easy_setopt(h, .NOSIGNAL, c.long(1))
 	curl.easy_setopt(h, .FOLLOWLOCATION, c.long(1))
 	curl.easy_setopt(h, .CONNECTTIMEOUT, c.long(15))
+	if ca := cacert.path(); ca != nil {
+		curl.easy_setopt(h, .CAINFO, ca)
+	}
 	// A stalled connection, or one we left alone while paused, ends after
 	// 30 s below 1 byte/s; the loop then resumes from where it got to.
 	curl.easy_setopt(h, .LOW_SPEED_LIMIT, c.long(1))

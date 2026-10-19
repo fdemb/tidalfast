@@ -16,6 +16,7 @@ src/tidal/      TIDAL API library, see src/tidal/README.md
 src/audio/      FLAC and DASH streaming, fMP4, decoding, miniaudio and CoreAudio HAL output, the play queue's rules, ReplayGain
 src/jobs/       a thread-safe priority queue for jobs and results
 src/cover/      cover sizes, decoding and the texture cache
+src/cacert/     the CA bundle for libcurl on Linux distributions it wasn't built for
 src/os_services/  secret store (the Keychain), opening URLs, settings and cache folders, one file per OS
 tests/          `odin test tests`
 tests/mock_tidal/  a stand-in TIDAL server for running the app without an account
@@ -23,6 +24,7 @@ tests/audio_check/ compares a capture of the audio output with the source it cam
 tests/bitperfect_check/ checks a bit-perfect capture against integer source WAVs, bit for bit
 tests/dashgen/  cuts FLAC into TIDAL-style DASH (fMP4 segments and an MPD), for the mock and the tests
 examples/cli/   CLI on top of src/tidal
+packaging/      the icon, Info.plist and the Linux .desktop file for ./build.sh dist
 ```
 
 ## Building and running
@@ -31,6 +33,7 @@ examples/cli/   CLI on top of src/tidal
 ./build.sh              # debug: build/tidalfast and build/app.dylib
 ./build.sh app          # rebuild only the dylib
 ./build.sh release      # optimized, hot reload off
+./build.sh dist         # TIDALfast.app and a .dmg on macOS, an AppImage on Linux
 ./build/tidalfast
 ```
 
@@ -38,7 +41,7 @@ It needs macOS 14 or later, Odin and the Xcode command line tools. Run `./build.
 
 ## Docs
 
-- [Building and running](docs/building.md): build details, the kb_text_shape patches, environment variables and debug keys
+- [Building and running](docs/building.md): build details, packaging and releases, the kb_text_shape patches, environment variables and debug keys
 - [Linux](docs/linux.md): dependencies, the Wayland shell, Vulkan, fonts, what isn't done yet and checking it without a display
 - [Renderer](docs/renderer.md): the instanced quad renderer, colour, textures and batching
 - [Text](docs/text.md): fonts, shaping, fallback, right-to-left text and the glyph atlas

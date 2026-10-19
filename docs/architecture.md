@@ -15,6 +15,7 @@ src/tidal/        the TIDAL API library (package `tidal`)
 src/audio/        decoding, playback, CoreAudio device control
 src/jobs/         bounded priority queues between the UI thread and the workers, plain data that survives a hot reload
 src/cover/        cover art sizes, decoding on a worker, and the texture cache
+src/cacert/       where libcurl finds CA certificates on Linux when its built-in path is missing
 src/os_services/  secret store (Keychain, libsecret), opening URLs, settings and cache paths
 src/kbts/         kb_text_shape's C source and Odin bindings, which build.sh compiles into build/kbts
 tests/            `odin test tests`
@@ -22,7 +23,10 @@ examples/cli/     CLI on top of src/tidal
 tools/measure/    startup and memory measurement (docs/measuring.md)
 tools/save_cost/  times what a list save and a queue save cost the UI thread
 tools/icons.sh    cuts the Phosphor icon fonts down to the icons the app draws
-build.sh          builds everything; `./build.sh app` rebuilds only the dylib for hot reload
+tools/icon.sh     renders the app icon in packaging/ for macOS and Linux
+packaging/        Info.plist, the .desktop file and the app icon for `./build.sh dist`
+build.sh          builds everything; `./build.sh app` rebuilds only the dylib for hot reload, `./build.sh dist` packages a release
+.github/          the release workflow: a v* tag publishes the .dmg and the AppImage
 ```
 
 The API library is one component. Only `src/app` knows about all the others.
