@@ -1,57 +1,64 @@
-# TIDALfast
+<h1>
+<p align="center">
+  <img src="packaging/linux/tidalfast.png" alt="TIDALfast icon" width="128">
+  <br>TIDALfast
+</p>
+</h1>
+<p align="center">
+  A native TIDAL client for macOS and Linux.
+  <br>
+  Lossless, hi-res, gapless and bit-perfect, in under 100 MB of memory.
+  <br>
+  <br>
+  <a href="#about">About</a>
+  ·
+  <a href="https://github.com/fdemb/tidalfast/releases">Download</a>
+  ·
+  <a href="#status">Status</a>
+  ·
+  <a href="CONTRIBUTING.md">Contributing</a>
+</p>
 
-A native TIDAL client in Odin, for macOS and Linux (Wayland). A small shell owns the window and talks to the OS: Obj-C on macOS, C on Linux. Everything else is an Odin dylib that the shell reloads while it runs. `docs/architecture.md` has the layout and the main decisions, and the other files in `docs/` describe each part in detail.
+<p align="center">
+  <img src="docs/screenshot.png" alt="Björk's artist page in TIDALfast" width="900">
+</p>
 
+## About
+
+TIDALfast is a TIDAL player written from scratch in Odin. It doesn't embed a browser. It draws its own UI on the GPU, with Metal on macOS and Vulkan on Linux, and decodes FLAC itself.
+
+On an M1 MacBook Air it shows your library about 180 ms after launch. It takes about 70 MB of memory at start and stays under 100 MB while it plays. An idle window uses no CPU, because the app draws only when something changes. The numbers and how they were measured are in [docs/measuring.md](docs/measuring.md).
+
+## Features
+
+- **Lossless and hi-res.** TIDAL's FLAC streams, from CD quality up to 24-bit 192 kHz.
+- **Gapless playback.** The next track downloads before the current one ends and plays straight after it, so live albums and DJ mixes play without a break.
+- **Bit-perfect output.** On macOS the app can switch your DAC to each track's sample rate and bit depth and send it the samples unchanged, with hog mode if you want it. When a track can't play bit-perfect, the app tells you why.
+- **ReplayGain.** Albums played in order get album gain, and everything else gets track gain, so a playlist of singles plays at one level.
+- **Your library.** Playlists, Liked Songs and followed artists from your account. Drag a song onto a playlist to add it, or click its heart to like it.
+- **Search and artist pages.** Results for songs, albums, artists and playlists show as you type. Artist pages have top tracks, albums, EPs and singles, appearances and similar artists.
+- **Media keys and Now Playing.** On macOS the keyboard's media keys and Control Center control playback.
+- **Keyboard and VoiceOver.** Tab, the arrow keys and Enter reach every control, and VoiceOver reads them on macOS.
+- **Every script.** Right-to-left text, emoji, and input methods for Japanese, Chinese and Korean in the search field.
+
+## Download
+
+Get the `.dmg` (macOS 14 or later, Apple silicon) or the AppImage (Linux on Wayland, x86_64) from [Releases](https://github.com/fdemb/tidalfast/releases). You need a TIDAL subscription.
+
+The macOS app isn't notarized yet, so Gatekeeper blocks it the first time. Allow it in System Settings > Privacy & Security, or run:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/TIDALfast.app
 ```
-shell/          the executable: window, event queue, dylib loader, input methods and clipboard. shell.m is
-                the macOS one (CAMetalLayer, media keys, Now Playing, accessibility), shell_wayland.c the Linux one
-src/platform/   the ABI between shell and app (shell/platform.h mirrors it)
-src/app/        the hot-reloaded app dylib
-src/render/     renderer, with Metal (metal_darwin.odin) or Vulkan (vulkan_linux.odin) as its backend
-src/text/       fonts, shaping (kb_text_shape), rasterizing (CoreText or FreeType), glyph atlas
-src/ui/         box tree, layout, input, animation, menus, tooltips and the text field
-src/kbts/       kb_text_shape 2.21: C source and Odin bindings
-assets/fonts/   Inter 4.1, static Regular/Medium/SemiBold/Bold, with its OFL licence
-src/tidal/      TIDAL API library, see src/tidal/README.md
-src/audio/      FLAC and DASH streaming, fMP4, decoding, miniaudio and CoreAudio HAL output, the play queue's rules, ReplayGain
-src/jobs/       a thread-safe priority queue for jobs and results
-src/cover/      cover sizes, decoding and the texture cache
-src/cacert/     the CA bundle for libcurl on Linux distributions it wasn't built for
-src/os_services/  secret store (the Keychain), opening URLs, settings and cache folders, one file per OS
-tests/          `odin test tests`
-tests/mock_tidal/  a stand-in TIDAL server for running the app without an account
-tests/audio_check/ compares a capture of the audio output with the source it came from
-tests/bitperfect_check/ checks a bit-perfect capture against integer source WAVs, bit for bit
-tests/dashgen/  cuts FLAC into TIDAL-style DASH (fMP4 segments and an MPD), for the mock and the tests
-examples/cli/   CLI on top of src/tidal
-packaging/      the icon, Info.plist and the Linux .desktop file for ./build.sh dist
-```
 
-## Building and running
+## Status
 
-```
-./build.sh              # debug: build/tidalfast and build/app.dylib
-./build.sh app          # rebuild only the dylib
-./build.sh release      # optimized, hot reload off
-./build.sh dist         # TIDALfast.app and a .dmg on macOS, an AppImage on Linux
-./build/tidalfast
-```
+TIDALfast is in early pre-release, so expect rough edges.
 
-It needs macOS 14 or later, Odin and the Xcode command line tools. Run `./build.sh` once before `odin test tests`. `TIDALFAST_FAKE=1` runs the app on fake data without an account. The environment variables, keys and the patches to kb_text_shape are in [docs/building.md](docs/building.md). Linux needs a few packages first; see [docs/linux.md](docs/linux.md).
+On Linux, bit-perfect output, media keys, Now Playing and screen readers aren't done yet. On compositors without server-side decorations, such as GNOME, the window has no title bar. Windows isn't supported.
 
-## Docs
+## Contributing
 
-- [Building and running](docs/building.md): build details, packaging and releases, the kb_text_shape patches, environment variables and debug keys
-- [Linux](docs/linux.md): dependencies, the Wayland shell, Vulkan, fonts, what isn't done yet and checking it without a display
-- [Renderer](docs/renderer.md): the instanced quad renderer, colour, textures and batching
-- [Text](docs/text.md): fonts, shaping, fallback, right-to-left text and the glyph atlas
-- [UI](docs/ui.md): the box tree, layout, input, scrolling, animation and the library screen
-- [TIDAL data](docs/tidal-data.md): login, the Keychain, jobs and threads, memory, the list cache, covers and the mock server
-- [Playback](docs/playback.md): streams, buffers, gapless, seeking, Now Playing, DASH, bit-perfect output and how to check it
-- [Text input](docs/text-input.md): the text field, input methods and the platform ABI versions that came with them
-- [Search](docs/search.md)
-- [Accessibility](docs/accessibility.md)
-- [Hot reload](docs/hot-reload.md)
-- [Redraw policy](docs/redraw.md)
-- [Measuring RAM and startup](docs/measuring.md): the measure tool, what the app prints and the baseline numbers
-- [Architecture](docs/architecture.md): the layout, the main decisions and what isn't done yet
+To build TIDALfast from source or work on it, read [CONTRIBUTING.md](CONTRIBUTING.md). [docs/architecture.md](docs/architecture.md) explains how the app fits together.
+
+TIDALfast isn't affiliated with or endorsed by TIDAL.
