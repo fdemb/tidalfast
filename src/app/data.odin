@@ -740,8 +740,8 @@ held_victim :: proc(d: ^Data) -> int {
 }
 
 // held_drop lets go of a held job that won't be pushed. Its caller counted
-// it as out, so the flag holding back the next one is cleared. A follow
-// change never reached TIDAL, so its button goes back.
+// it as out, so the flag holding back the next one is cleared. A like,
+// unlike or follow change never reached TIDAL, so its button goes back.
 @(private = "file")
 held_drop :: proc(d: ^Data, job: ^Job) {
 	l := &d.login
@@ -760,6 +760,10 @@ held_drop :: proc(d: ^Data, job: ^Job) {
 		d.liked.loading = false
 		clear(&d.liked.edits)
 		clear(&d.followed.edits)
+	case Add_Track_Job:
+		if p.source == .Liked {
+			liked_answer(d, p.track, false)
+		}
 	case Follow_Job:
 		follow_answer(d, p.artist, false)
 	case Artist_Job:
