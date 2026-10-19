@@ -2269,3 +2269,28 @@ like_out_when_a_fetch_starts :: proc(t: ^testing.T) {
 	app.liked_ids_result(d, &without, false)
 	testing.expect(t, app.liked_has(d, 7))
 }
+
+// A like sent before a fetch started and answered before the fetch lands:
+// the fetch may have listed the set before TIDAL took the like.
+@(test)
+like_answered_while_a_fetch_is_out :: proc(t: ^testing.T) {
+	s := data_state()
+	defer data_state_free(s)
+	d := &s.data
+	defer app.liked_clear(d)
+	sign_in(s)
+	data_jobs(d)
+	without := app.Result {
+		liked_ids = []i64{5},
+	}
+
+	app.liked_toggle(s, 7)
+	job := data_jobs(d)[0]
+	d.liked.loading = true
+	took := app.Result {
+		job = job,
+	}
+	app.add_result(s, &took, job.payload.(app.Add_Track_Job))
+	app.liked_ids_result(d, &without, false)
+	testing.expect(t, app.liked_has(d, 7))
+}
