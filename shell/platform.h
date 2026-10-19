@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#define PLATFORM_ABI_VERSION 6
+#define PLATFORM_ABI_VERSION 7
 
 typedef enum {
   EVENT_NONE,
@@ -252,8 +252,10 @@ typedef struct {
   // Copies up to capacity bytes of the clipboard's text, returns its length.
   size_t (*get_clipboard)(uint8_t *buffer, size_t capacity);
   void (*set_accessibility)(const Access_Node *nodes, uint32_t count); // copied
+  // x, y, w, h in view points for each rect where a press moves the window; copied
+  void (*set_drag_regions)(const float (*rects)[4], uint32_t count);
 } Shell;
-_Static_assert(sizeof(Shell) == 56, "Shell size must match platform.odin");
+_Static_assert(sizeof(Shell) == 64, "Shell size must match platform.odin");
 
 typedef struct {
   Event *events;
@@ -265,9 +267,11 @@ typedef struct {
   uint32_t text_length;
   uint32_t key_window;
   uint32_t mouse_buttons; // 1 << Mouse_Button for each held down now, in any app
+  float titlebar_height; // points of the view's top under the window's buttons, 0 for none
+  float titlebar_inset; // where the window's buttons end, from the left edge
   uint32_t _pad;
 } Frame_Input;
-_Static_assert(sizeof(Frame_Input) == 56, "Frame_Input size must match platform.odin");
+_Static_assert(sizeof(Frame_Input) == 64, "Frame_Input size must match platform.odin");
 
 typedef struct {
   int32_t animating;

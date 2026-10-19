@@ -30,6 +30,9 @@ draw_login :: proc(s: ^State) {
 	bg.background = WINDOW_BG
 	bg.child_axis = .Y
 	ui.parent(bg)
+	if s.titlebar_h > 0 {
+		ui.box_make("", {.Window_Drag}, ui.fill(), ui.px(s.titlebar_h))
+	}
 	ui.spacer(ui.fill())
 	{
 		ui.row("", {}, ui.fill(), ui.px(LOGIN_H))
@@ -209,13 +212,17 @@ device_card :: proc(s: ^State) {
 	ui.spacer(ui.px(24))
 }
 
+login_notice_shown :: proc(s: ^State) -> bool {
+	return s.data.device_login && !s.data.notice_hidden
+}
+
 // draw_login_notice is the library's line for a device-code login, which
 // TIDAL gives only AAC, until the user hides it. They can browse meanwhile.
 draw_login_notice :: proc(s: ^State) {
-	d := &s.data
-	if !d.device_login || d.notice_hidden {
+	if !login_notice_shown(s) {
 		return
 	}
+	d := &s.data
 	bar := ui.row("login_notice", {.Draw_Background}, ui.fill(), ui.px(48))
 	bar.background = SURFACE
 	ui.spacer(ui.px(16))

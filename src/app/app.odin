@@ -77,6 +77,9 @@ State :: struct {
 	pending:      Pending, // what the frame being built asked for, done after it
 	history:      History,
 	access_sent:  u64, // hash of the accessibility tree the shell has
+	drag_sent:    u64, // hash of the drag regions the shell has
+	titlebar_h:   f32, // this frame's Frame_Input.titlebar_height
+	titlebar_inset: f32,
 	bench:        Bench,
 	measure:      Measure,
 	dev:          Dev,
@@ -139,7 +142,7 @@ app_reload :: proc "c" (m: ^platform.Memory, shell: ^platform.Shell) {
 	data_reload(s, shell)
 	playback_reload(s, shell)
 	measure_reload(s, shell)
-	log.infof("app: reloaded at frame %d, clear colour %v", s.frame_count, CLEAR_COLOR)
+	log.infof("app: reloaded at frame %d, clear colour %v", s.frame_count, FRAME_CLEAR)
 }
 
 app_unload :: proc "c" (m: ^platform.Memory) {
@@ -459,7 +462,7 @@ start :: proc(s: ^State, shell: ^platform.Shell) {
 		s.bench.ui = true
 	}
 	dev_start(s)
-	log.infof("app: started, clear colour %v", CLEAR_COLOR)
+	log.infof("app: started, clear colour %v", FRAME_CLEAR)
 	measure_mark(s, .Init)
 }
 
@@ -484,8 +487,10 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input, shell: ^platfor
 		}
 	}
 	w, h := input.width, input.height
+	s.titlebar_h = input.titlebar_height
+	s.titlebar_inset = input.titlebar_inset
 	r := &s.renderer
-	render.begin_frame(r, w, h, input.scale, CLEAR_COLOR)
+	render.begin_frame(r, w, h, input.scale, FRAME_CLEAR)
 	ui_begin := time.tick_now()
 	measure_frame_begin(s)
 	text.begin_frame(&s.text, r)

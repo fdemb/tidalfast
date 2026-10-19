@@ -84,6 +84,7 @@ Box_Flag :: enum u32 {
 	Draw_Hot_Underline, // the label is underlined while hot
 	Text_Input, // a text field: with the focus it takes Return, Space, the arrows and Escape
 	Click_On_Release, // clicked on a release over it rather than on the press, for drag sources
+	Window_Drag, // empty titlebar space: a press there moves the window, see drag_regions
 }
 Box_Flags :: bit_set[Box_Flag; u32]
 
@@ -224,6 +225,8 @@ State :: struct {
 	box_count:      int,
 	hits:           []Hit,
 	hit_count:      int,
+	drag_rects:     [8]render.Rect, // the Window_Drag boxes, from end_frame
+	drag_count:     int,
 
 	frame:          u64,
 	time:           f64,
@@ -953,6 +956,7 @@ end_frame :: proc() -> bool {
 	layout(u.root)
 	layout(u.floating_root)
 	u.hit_count = 0
+	u.drag_count = 0
 	mismatch := false
 	finish(u, u.root, {0, 0, u.width, u.height}, 0, 0, false, false, &mismatch)
 	finish(u, u.floating_root, {0, 0, u.width, u.height}, 0, 0, true, false, &mismatch)
@@ -1046,6 +1050,10 @@ finish :: proc(u: ^State, b: ^Box, clip: render.Rect, focus_parent, click_parent
 			in_menu      = in_menu,
 		}
 		u.hit_count += 1
+	}
+	if .Window_Drag in b.flags && u.drag_count < len(u.drag_rects) {
+		u.drag_rects[u.drag_count] = b.clip
+		u.drag_count += 1
 	}
 	inner := rect_intersect(clip, b.rect) if .Clip in b.flags else clip
 	fp := b.key if .Focusable in b.flags && b.key != 0 else focus_parent
@@ -1474,6 +1482,12 @@ text_input :: proc(u: ^State) -> (input: platform.Text_Input, changed: bool) {
 	u.text_sent = h
 	u.text_resend = false
 	return
+}
+
+// drag_regions is where a press moves the window, for the shell, valid
+// after end_frame until the next begin_frame.
+drag_regions :: proc(u: ^State) -> []render.Rect {
+	return u.drag_rects[:u.drag_count]
 }
 
 // access_tree is this frame's accessibility tree and a hash of it, valid

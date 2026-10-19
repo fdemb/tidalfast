@@ -119,6 +119,9 @@ static void draw_frame(void) {
   atomic_store(&g_needs_redraw, false);
 
   NSSize size = g_view.bounds.size;
+  // Full screen hides the titlebar, and the layout rect is then the view.
+  float titlebar = size.height - g_window.contentLayoutRect.size.height;
+  NSButton *zoom = [g_window standardWindowButton:NSWindowZoomButton];
   Frame_Input input = {
       .events = g_events,
       .event_count = g_event_count,
@@ -130,6 +133,8 @@ static void draw_frame(void) {
       .text_length = g_text_len,
       .key_window = g_window.isKeyWindow,
       .mouse_buttons = held_mouse_buttons(),
+      .titlebar_height = titlebar > 0 ? titlebar : 0,
+      .titlebar_inset = titlebar > 0 && zoom ? NSMaxX(zoom.frame) : 0,
   };
   Frame_Result result;
   @autoreleasepool {
@@ -697,6 +702,38 @@ static void set_text_input(const Text_Input *ti) {
   if (moved) [g_view.inputContext invalidateCharacterCoordinates];
 }
 
+// Window dragging
+
+// The view draws under the titlebar, so the app says which parts of it are
+// empty and move the window, as the titlebar itself would.
+#define MAX_DRAG_REGIONS 16
+static NSRect g_drag_regions[MAX_DRAG_REGIONS];
+static uint32_t g_drag_region_count;
+
+static void set_drag_regions(const float (*rects)[4], uint32_t count) {
+  g_drag_region_count = count < MAX_DRAG_REGIONS ? count : MAX_DRAG_REGIONS;
+  for (uint32_t i = 0; i < g_drag_region_count; i++) {
+    g_drag_regions[i] = NSMakeRect(rects[i][0], rects[i][1], rects[i][2], rects[i][3]);
+  }
+}
+
+static bool in_drag_region(NSPoint p) {
+  for (uint32_t i = 0; i < g_drag_region_count; i++) {
+    if (NSPointInRect(p, g_drag_regions[i])) return true;
+  }
+  return false;
+}
+
+// A double-click does what System Settings says a titlebar's does.
+static void titlebar_double_click(void) {
+  NSString *action = [NSUserDefaults.standardUserDefaults stringForKey:@"AppleActionOnDoubleClick"];
+  if ([action isEqualToString:@"Minimize"]) {
+    [g_window performMiniaturize:nil];
+  } else if (![action isEqualToString:@"None"]) {
+    [g_window performZoom:nil];
+  }
+}
+
 // Clipboard
 
 static void set_clipboard(const uint8_t *text, size_t length) {
@@ -949,12 +986,17 @@ static uint32_t scroll_phase(NSEventPhase phase) {
   g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm_sRGB;
   g_layer.colorspace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
   g_layer.framebufferOnly = YES;
+  // Premultiplied alpha, so the glass view behind shows through.
+  g_layer.opaque = NO;
   // Two drawables while idle, see update_display_link.
   g_layer.maximumDrawableCount = 2;
   return g_layer;
 }
 
 - (BOOL)isFlipped { return YES; }
+// A view that isn't opaque moves the window from under the titlebar unless
+// it says no. The app's buttons are there, and set_drag_regions does the rest.
+- (BOOL)mouseDownCanMoveWindow { return NO; }
 - (BOOL)acceptsFirstResponder { return YES; }
 - (BOOL)acceptsFirstMouse:(NSEvent *)event { return YES; }
 
@@ -1011,7 +1053,17 @@ static Event mouse_event(NSView *view, NSEvent *e, uint32_t kind, uint32_t butto
   };
 }
 
-- (void)mouseDown:(NSEvent *)e { push_event(mouse_event(self, e, EVENT_MOUSE_DOWN, MOUSE_BUTTON_LEFT)); }
+- (void)mouseDown:(NSEvent *)e {
+  if (in_drag_region([self convertPoint:e.locationInWindow fromView:nil])) {
+    if (e.clickCount == 2) {
+      titlebar_double_click();
+    } else {
+      [g_window performWindowDragWithEvent:e];
+    }
+    return;
+  }
+  push_event(mouse_event(self, e, EVENT_MOUSE_DOWN, MOUSE_BUTTON_LEFT));
+}
 - (void)mouseUp:(NSEvent *)e { push_event(mouse_event(self, e, EVENT_MOUSE_UP, MOUSE_BUTTON_LEFT)); }
 - (void)rightMouseDown:(NSEvent *)e { push_event(mouse_event(self, e, EVENT_MOUSE_DOWN, MOUSE_BUTTON_RIGHT)); }
 - (void)rightMouseUp:(NSEvent *)e { push_event(mouse_event(self, e, EVENT_MOUSE_UP, MOUSE_BUTTON_RIGHT)); }
@@ -1431,15 +1483,29 @@ static void setup_shell_test(void) {
   g_window = [[NSWindow alloc]
       initWithContentRect:frame
                 styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable |
-                          NSWindowStyleMaskResizable
+                          NSWindowStyleMaskResizable | NSWindowStyleMaskFullSizeContentView
                   backing:NSBackingStoreBuffered
                     defer:NO];
   g_window.title = @"TIDALfast";
+  // The app draws the titlebar: the view goes under it and only the window's
+  // buttons stay.
+  g_window.titleVisibility = NSWindowTitleHidden;
+  g_window.titlebarAppearsTransparent = YES;
   g_window.acceptsMouseMovedEvents = YES;
   g_window.releasedWhenClosed = NO;
 
+  // The blurred desktop behind the window, which shows wherever the app
+  // draws with alpha below 1: the sidebar.
+  NSVisualEffectView *glass = [[NSVisualEffectView alloc] initWithFrame:frame];
+  glass.material = NSVisualEffectMaterialSidebar;
+  glass.blendingMode = NSVisualEffectBlendingModeBehindWindow;
+  glass.state = NSVisualEffectStateFollowsWindowActiveState;
+  glass.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
+  g_window.contentView = glass;
+
   g_view = [[Metal_View alloc] initWithFrame:frame];
-  g_window.contentView = g_view;
+  g_view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+  [glass addSubview:g_view];
   [g_window center];
 
   g_display_link = [g_view displayLinkWithTarget:g_view selector:@selector(display_link_tick:)];
@@ -1486,6 +1552,7 @@ static void setup_shell_test(void) {
       .set_clipboard = set_clipboard,
       .get_clipboard = get_clipboard,
       .set_accessibility = set_accessibility,
+      .set_drag_regions = set_drag_regions,
   };
   setup_remote_commands();
 
