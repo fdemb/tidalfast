@@ -312,6 +312,29 @@ artist_page_owns_its_memory :: proc(t: ^testing.T) {
 	}
 }
 
+// An artist's top tracks opened from a track's artist link have no
+// picture yet: the artist's info gives the open list its name and picture.
+@(test)
+artist_info_names_the_open_list :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := artist_state(&m)
+	defer artist_state_free(s)
+	d := &s.data
+	sign_in(s)
+	data_jobs(d)
+
+	app.list_open(d, .Artist, "7", "", "", 0)
+	page := visit(s, 7)
+	for job in artist_jobs(d) {
+		run_now(s, job)
+	}
+	testing.expect(t, app.small_str(&page.picture) != "")
+	testing.expect_value(t, app.small_str(&d.view.name), app.small_str(&page.name))
+	testing.expect_value(t, app.small_str(&d.view.image), app.small_str(&page.picture))
+}
+
 // TIDAL answers 404 for an artist without a biography: an empty one, not
 // a part that failed.
 @(test)
