@@ -725,7 +725,7 @@ bio_breaks_words_wider_than_the_column :: proc(t: ^testing.T) {
 	defer mock_stop(&m)
 	cjk := strings.repeat("日本語の文章は単語の間に空白を入れずに書かれます。", 6)
 	url := strings.concatenate({"https://example.com/", strings.repeat("long-path-", 30)})
-	m.answers["/artists/7/bio"] = {200, fmt.tprintf(`{{"source":"mock","text":"%s<br/>Site: %s"}}`, cjk, url)}
+	m.answers["/artists/7/bio"] = {200, fmt.aprintf(`{{"source":"mock","text":"%s<br/>Site: %s"}}`, cjk, url)}
 	s := library_state(false, &m)
 	defer library_state_free(s)
 	f := Frame{fonts = &fonts, size = {1100, 2400}}
