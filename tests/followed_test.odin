@@ -193,3 +193,26 @@ sign_out_clears_the_followed :: proc(t: ^testing.T) {
 	testing.expect(t, !app.followed_has(d, 7), "no button takes a press before the set is known")
 	testing.expect_value(t, len(follow_jobs(d)), 0)
 }
+
+// A fetch that fails while a follow is out leaves the follow showing and
+// out, and the set known: its answer then settles it as usual.
+@(test)
+follow_out_through_a_failed_fetch :: proc(t: ^testing.T) {
+	s := follow_state()
+	defer follow_state_free(s)
+	d := &s.data
+
+	app.follow_toggle(s, 7)
+	sent := follow_jobs(d)
+	d.liked.loading = true
+	failed := app.Result {
+		job = {auth = d.auth_gen, payload = app.Liked_Ids_Job{}},
+		err = tidal.Error_Kind.Network,
+	}
+	app.handle_result(s, &failed, 0)
+	testing.expect(t, d.followed.known)
+	testing.expect(t, app.followed_has(d, 7), "the follow still shows")
+	answer(s, sent[0], true)
+	testing.expect(t, app.followed_has(d, 7))
+	testing.expect_value(t, len(follow_jobs(d)), 0)
+}
