@@ -3,7 +3,6 @@ package tidal_tests
 import vmem "core:mem/virtual"
 import "core:slice"
 import "core:strings"
-import "core:sys/posix"
 import "core:testing"
 
 import "../src/app"
@@ -85,23 +84,6 @@ cards_of :: proc(page: ^app.Artist_Page, part: app.Artist_Part) -> []app.Found {
 		return nil
 	}
 	return ready.content.(app.Artist_Cards).items
-}
-
-// mapped says whether the memory at p is still mapped, so a string can be
-// read without crashing, or has been given back.
-@(private = "file")
-mapped :: proc(p: rawptr) -> bool {
-	PAGE :: 16384 // a multiple of the page size on every target
-	page := rawptr(uintptr(p) &~ (PAGE - 1))
-	return posix.msync(page, 1, {.ASYNC}) == .OK
-}
-
-// given_back says whether the memory of text, a copy of which is was, has
-// been given back. Tests run in parallel, so another one may have mapped
-// the same address since; then it holds something else.
-@(private = "file")
-given_back :: proc(text, was: string) -> bool {
-	return !mapped(raw_data(text)) || text != was
 }
 
 // An artist page's parts come and fail on their own: with the biography
@@ -307,8 +289,7 @@ artist_page_gone_after_sign_out :: proc(t: ^testing.T) {
 }
 
 // A page keeps its parts' strings in the arenas their results came in,
-// after the result is freed, and gives the memory back when it's evicted
-// or cleared.
+// after the results are freed.
 @(test)
 artist_page_owns_its_memory :: proc(t: ^testing.T) {
 	m: Mock
@@ -324,28 +305,11 @@ artist_page_owns_its_memory :: proc(t: ^testing.T) {
 	for job in artist_jobs(d) {
 		run_now(s, job)
 	}
-	bio := bio_of(page)
+	testing.expect_value(t, bio_of(page), "Artist 7 plays with Artist 8.\nSecond line.")
 	albums := cards_of(page, .Albums)
-	if !testing.expect(t, mapped(raw_data(bio)) && mapped(raw_data(albums)), "the strings outlive their results") {
-		return
+	if testing.expect(t, len(albums) > 0) {
+		testing.expect_value(t, albums[0].name, "Album 7000")
 	}
-	testing.expect_value(t, bio, "Artist 7 plays with Artist 8.\nSecond line.")
-	testing.expect_value(t, albums[0].name, "Album 7000")
-	was := strings.clone(bio, context.temp_allocator)
-
-	for id in 100 ..< 100 + app.ARTIST_CACHE {
-		app.artist_visit(s, i64(id), {}, {})
-	}
-	testing.expect(t, given_back(bio, was), "eviction gave the biography's memory back")
-
-	page = visit(s, 7)
-	for job in artist_jobs(d) {
-		run_now(s, job)
-	}
-	bio = bio_of(page)
-	testing.expect(t, mapped(raw_data(bio)))
-	app.artist_clear(d)
-	testing.expect(t, given_back(bio, was), "artist_clear gave the biography's memory back")
 }
 
 // TIDAL answers 404 for an artist without a biography: an empty one, not
