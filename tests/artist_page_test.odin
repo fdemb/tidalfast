@@ -512,3 +512,248 @@ leaving_the_artist_page :: proc(t: ^testing.T) {
 }
 
 
+
+// Up and Down on the focused top tracks move the selection along them,
+// rather than the focus to the buttons of the shelves below.
+@(test)
+top_tracks_arrows_move_the_selection :: proc(t: ^testing.T) {
+	fonts: Fonts
+	if !testing.expect(t, fonts_init(&fonts)) {
+		return
+	}
+	defer fonts_destroy(&fonts)
+	context.allocator = mem.arena_allocator(&fonts.arena)
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := library_state(false, &m)
+	defer library_state_free(s)
+	f := Frame{fonts = &fonts, size = {1100, 2400}}
+	mock_page(t, s, &f, 7)
+	down, up := left_click(s, "Top 1 of Artist 7, ")
+	library_frame(t, s, &f, down, up)
+	library_frame(t, s, &f)
+	table, _ := exact(s, "Top tracks", .Table)
+	library_frame(t, s, &f, {kind = .Access_Focus, target = table.id})
+	library_frame(t, s, &f, key(.Down))
+	library_frame(t, s, &f)
+	testing.expect_value(t, focused(s), "Top tracks")
+	second, _ := exact(s, "Top 2 of Artist 7, Artist 7, Album 7000", .Row)
+	testing.expect(t, .Selected in second.flags, "Down selects the second track")
+	library_frame(t, s, &f, key(.Up))
+	library_frame(t, s, &f)
+	first, _ := exact(s, "Top 1 of Artist 7, Artist 7, Album 7000", .Row)
+	testing.expect(t, .Selected in first.flags, "Up selects the first again")
+}
+
+// A track selected in the full top tracks below the five the page shows
+// isn't played by Enter on the page, and Down there starts at the first.
+@(test)
+top_tracks_play_only_what_they_show :: proc(t: ^testing.T) {
+	fonts: Fonts
+	if !testing.expect(t, fonts_init(&fonts)) {
+		return
+	}
+	defer fonts_destroy(&fonts)
+	context.allocator = mem.arena_allocator(&fonts.arena)
+	s := library_state(true)
+	defer library_state_free(s)
+	s.playback.player = audio.create(proc "c" () {}, 0, null_output = true)
+	defer app.playback_shutdown(s)
+	f := Frame{fonts = &fonts, size = {1100, 2400}}
+	name := fake_page(t, s, &f)
+	testing.expect(t, app.view_count(s) > app.TOP_TRACKS, "more top tracks than the page shows")
+	library_frame(t, s, &f, press_exact(t, s, "View all top tracks"))
+	library_frame(t, s, &f)
+	full, ok := exact(s, name, .Table)
+	testing.expect(t, ok, "the full top tracks")
+	library_frame(t, s, &f, {kind = .Access_Focus, target = full.id})
+	library_frame(t, s, &f, key(.End))
+	library_frame(t, s, &f, press(s, "Back"))
+	library_frame(t, s, &f)
+	testing.expect(t, page_showing(s), "Back to the page")
+
+	table, _ := exact(s, "Top tracks", .Table)
+	library_frame(t, s, &f, {kind = .Access_Focus, target = table.id})
+	library_frame(t, s, &f, key(.Return))
+	library_frame(t, s, &f)
+	testing.expect(t, app.playback_item(s) == nil, "Enter plays nothing the page doesn't show")
+	library_frame(t, s, &f, key(.Down))
+	library_frame(t, s, &f, key(.Return))
+	item := app.playback_item(s)
+	testing.expect(t, item != nil && item.title == app.view_row(s, 0).title, "Down selects the first track, which Enter plays")
+}
+
+// A search that's cleared, or that fails, before its results show leaves
+// the artist page showing, and the history where it was. So does going
+// Back to a search that then fails.
+@(test)
+abandoned_search_keeps_the_artist_page :: proc(t: ^testing.T) {
+	fonts: Fonts
+	if !testing.expect(t, fonts_init(&fonts)) {
+		return
+	}
+	defer fonts_destroy(&fonts)
+	context.allocator = mem.arena_allocator(&fonts.arena)
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := library_state(false, &m)
+	defer library_state_free(s)
+	f := Frame{fonts = &fonts, size = {1100, 2400}}
+	library_frame(t, s, &f)
+	library_frame(t, s, &f, key(.F, {ui.PRIMARY}))
+	library_frame(t, s, &f, type_text(&f, "seven"))
+	library_frame(t, s, &f, dt = 1)
+	run_page_jobs(s)
+	library_frame(t, s, &f)
+	library_frame(t, s, &f, press_exact(t, s, "Artist 7"))
+	library_frame(t, s, &f)
+	run_page_jobs(s)
+	library_frame(t, s, &f)
+	testing.expect(t, page_showing(s), "the page")
+
+	library_frame(t, s, &f, key(.F, {ui.PRIMARY}))
+	library_frame(t, s, &f, type_text(&f, "zzz"))
+	library_frame(t, s, &f, dt = 1)
+	library_frame(t, s, &f, key(.A, {ui.PRIMARY}), key(.Backspace))
+	library_frame(t, s, &f)
+	run_page_jobs(s)
+	library_frame(t, s, &f)
+	testing.expect(t, page_showing(s), "the page after a search cleared before it came back")
+
+	m.answers["/search"] = {500, `{"userMessage":"down"}`}
+	library_frame(t, s, &f, type_text(&f, "zzz"))
+	library_frame(t, s, &f, dt = 1)
+	run_page_jobs(s)
+	library_frame(t, s, &f)
+	library_frame(t, s, &f)
+	testing.expect(t, page_showing(s), "the page after a failed search")
+	testing.expect(t, !enabled(s, "Forward"), "nothing to go Forward to")
+
+	library_frame(t, s, &f, press(s, "Back"))
+	library_frame(t, s, &f)
+	run_page_jobs(s)
+	library_frame(t, s, &f)
+	testing.expect(t, page_showing(s), "the page after Back to a search that failed")
+	delete_key(&m.answers, "/search")
+	library_frame(t, s, &f, press(s, "Back"))
+	library_frame(t, s, &f)
+	run_page_jobs(s)
+	library_frame(t, s, &f)
+	testing.expect(t, has(s, "Results for “seven”", .Static_Text), "Back to the search once it answers")
+	testing.expect(t, enabled(s, "Forward"), "the page to go Forward to")
+}
+
+// In a View all grid Down and Up move the focus by a row of cards, Left
+// and Right by one card. A resize that changes how many cards fit in a row
+// keeps the focused card focused, under the same accessibility id.
+@(test)
+grid_arrows_and_resize :: proc(t: ^testing.T) {
+	fonts: Fonts
+	if !testing.expect(t, fonts_init(&fonts)) {
+		return
+	}
+	defer fonts_destroy(&fonts)
+	context.allocator = mem.arena_allocator(&fonts.arena)
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := library_state(false, &m)
+	defer library_state_free(s)
+	f := Frame{fonts = &fonts, size = {1100, 2400}}
+	mock_page(t, s, &f, 1)
+	card :: proc(i: int) -> string {
+		return fmt.tprintf("Album %d, 2020 · Album", 1000 + i)
+	}
+	per_row :: proc(s: ^app.State) -> int {
+		c0, _ := exact(s, card(0), .Button)
+		n := 0
+		for i in 0 ..< MOCK_ARTIST_ALBUMS {
+			c, ok := exact(s, card(i), .Button)
+			if ok && c.frame[1] == c0.frame[1] {
+				n += 1
+			}
+		}
+		return n
+	}
+	library_frame(t, s, &f, press_exact(t, s, "View all Albums"))
+	library_frame(t, s, &f)
+	library_frame(t, s, &f)
+	cols := per_row(s)
+	testing.expect(t, cols >= 2, "a row holds more than one card")
+
+	first, _ := exact(s, card(0), .Button)
+	library_frame(t, s, &f, {kind = .Access_Focus, target = first.id})
+	library_frame(t, s, &f, key(.Down))
+	library_frame(t, s, &f)
+	testing.expect_value(t, focused(s), card(cols))
+	library_frame(t, s, &f, key(.Right))
+	library_frame(t, s, &f)
+	testing.expect_value(t, focused(s), card(cols + 1))
+	library_frame(t, s, &f, key(.Up))
+	library_frame(t, s, &f)
+	testing.expect_value(t, focused(s), card(1))
+	library_frame(t, s, &f, key(.Down))
+	library_frame(t, s, &f, key(.Left))
+	library_frame(t, s, &f)
+	testing.expect_value(t, focused(s), card(cols))
+
+	before, _ := exact(s, card(cols), .Button)
+	f.size = {820, 2400}
+	library_frame(t, s, &f)
+	library_frame(t, s, &f)
+	testing.expect(t, per_row(s) != cols, "the resize changes the cards in a row")
+	after, _ := exact(s, card(cols), .Button)
+	testing.expect_value(t, after.id, before.id)
+	testing.expect_value(t, focused(s), card(cols))
+}
+
+// A biography paragraph without spaces, as Chinese and Japanese are
+// written, and a link wider than the column break between characters, so
+// no line is wider than the column and nothing is lost.
+@(test)
+bio_breaks_words_wider_than_the_column :: proc(t: ^testing.T) {
+	fonts: Fonts
+	if !testing.expect(t, fonts_init(&fonts)) {
+		return
+	}
+	defer fonts_destroy(&fonts)
+	context.allocator = mem.arena_allocator(&fonts.arena)
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	cjk := strings.repeat("日本語の文章は単語の間に空白を入れずに書かれます。", 6)
+	url := strings.concatenate({"https://example.com/", strings.repeat("long-path-", 30)})
+	m.answers["/artists/7/bio"] = {200, fmt.tprintf(`{{"source":"mock","text":"%s<br/>Site: %s"}}`, cjk, url)}
+	s := library_state(false, &m)
+	defer library_state_free(s)
+	f := Frame{fonts = &fonts, size = {1100, 2400}}
+	mock_page(t, s, &f, 7)
+	for same := 0; same < 5; {
+		generation := fonts.state.generation
+		time.sleep(20 * time.Millisecond)
+		library_frame(t, s, &f)
+		same = same + 1 if fonts.state.generation == generation else 0
+	}
+	testing.expect(t, has(s, "Read more", .Button), "the biography is longer than three lines")
+	library_frame(t, s, &f, press_exact(t, s, "Read more"))
+	library_frame(t, s, &f)
+
+	bio := strings.concatenate({cjk, "\nSite: ", url})
+	joined := strings.builder_make()
+	lines := 0
+	nodes, _ := ui.access_tree(&s.ui)
+	for n in nodes {
+		label := string(n.label)
+		if n.role != .Static_Text || label == "" || !strings.contains(bio, label) {
+			continue
+		}
+		lines += 1
+		strings.write_string(&joined, label)
+		testing.expectf(t, n.frame[2] <= app.BIO_W - 2 * app.CARD_PAD - 48 + 0.5, "line %q is %v wide", label, n.frame[2])
+	}
+	testing.expect(t, lines > app.BIO_LINES, "more lines than show before Read more")
+	testing.expect(t, strings.contains(strings.to_string(joined), cjk), "the whole paragraph without spaces")
+	testing.expect(t, strings.contains(strings.to_string(joined), url), "the whole link")
+}
