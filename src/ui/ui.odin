@@ -841,43 +841,68 @@ menu_blocks :: proc(u: ^State, key: Key) -> bool {
 	return true
 }
 
-// focus_arrow moves the focus to the previous or next focusable box with
-// the same keyed parent. In an open menu it moves among the menu's items.
+// focus_arrow moves the focus to the nearest focusable box with the same
+// keyed parent in the arrow's direction: past the focused box along axis
+// and overlapping it across, so a column moves up and down, a row left and
+// right, and a grid both ways. In an open menu it moves among the menu's
+// items, starting at the first or last when none has the focus.
 @(private)
 focus_arrow :: proc(u: ^State, axis: Axis, dir: int) -> bool {
 	group := Key(0)
-	at := -1
-	for h, i in u.hits[:u.hit_count] {
+	for h in u.hits[:u.hit_count] {
 		if h.key == u.focus && .Focusable in h.flags {
 			group = h.group
-			at = i
 			break
 		}
 	}
-	if u.menu != 0 && u.menu_open {
-		if at < 0 || group != u.menu {
-			at = -1 if dir > 0 else u.hit_count
-			group = u.menu
+	if u.menu != 0 && u.menu_open && group != u.menu {
+		for i := 0 if dir > 0 else u.hit_count - 1; i >= 0 && i < u.hit_count; i += dir {
+			h := u.hits[i]
+			if .Focusable in h.flags && h.group == u.menu {
+				move_focus(u, h.key, true)
+				u.focus_reveal = true
+				return true
+			}
 		}
-	}
-	if group == 0 {
 		return false
 	}
-	if axis == .X {
-		g := box_lookup(u, group)
-		if g == nil || g.child_axis != .X {
-			return false
+	from := box_lookup(u, u.focus)
+	if group == 0 || from == nil {
+		return false
+	}
+	span :: proc(r: render.Rect, axis: Axis) -> (lo, hi: f32) {
+		if axis == .X {
+			return r.x, r.x + r.w
+		}
+		return r.y, r.y + r.h
+	}
+	cross := Axis.Y if axis == .X else .X
+	lo, hi := span(from.rect, axis)
+	clo, chi := span(from.rect, cross)
+	best := Key(0)
+	best_gap, best_off: f32
+	for h in u.hits[:u.hit_count] {
+		b := box_lookup(u, h.key)
+		if h.key == u.focus || .Focusable not_in h.flags || h.group != group || b == nil {
+			continue
+		}
+		blo, bhi := span(b.rect, axis)
+		gap := blo - hi if dir > 0 else lo - bhi
+		bclo, bchi := span(b.rect, cross)
+		if gap < -0.5 || bclo >= chi || bchi <= clo {
+			continue
+		}
+		off := abs((bclo + bchi) - (clo + chi))
+		if best == 0 || gap < best_gap - 0.5 || (gap <= best_gap + 0.5 && off < best_off) {
+			best, best_gap, best_off = h.key, gap, off
 		}
 	}
-	for i := at + dir; i >= 0 && i < u.hit_count; i += dir {
-		h := u.hits[i]
-		if .Focusable in h.flags && h.group == group {
-			move_focus(u, h.key, true)
-			u.focus_reveal = true
-			return true
-		}
+	if best == 0 {
+		return false
 	}
-	return false
+	move_focus(u, best, true)
+	u.focus_reveal = true
+	return true
 }
 
 // hit_at is the clickable box drawn last under pos in the last frame.

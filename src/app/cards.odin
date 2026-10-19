@@ -172,7 +172,9 @@ card_grid :: proc(s: ^State, id, title: string, items: []Found, source: Source, 
 	ui.accessible(view, .List, title)
 	rows := ui.virtual_rows(view, (n + cols - 1) / cols, row_h)
 	for r in rows.first ..< rows.last {
-		ui.row(fmt.tprintf("##grid%d", r), {}, ui.fill(), ui.px(row_h))
+		// Unkeyed, so a card's key and the arrow keys' group are the
+		// view's, whatever row a resize puts it in.
+		ui.row("", {}, ui.fill(), ui.px(row_h))
 		for i in r * cols ..< min((r + 1) * cols, n) {
 			if card(s, i, items[i], kind, true).clicked {
 				clicked = i
