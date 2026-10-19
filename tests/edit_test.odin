@@ -529,3 +529,38 @@ field_ui_destroy :: proc(u: ^ui.State) {
 	delete(u.hits)
 	free_all(context.temp_allocator)
 }
+
+// A field in a row beside a button: Left and Right move the caret, and
+// never the focus to the button, though the row takes them otherwise.
+@(test)
+test_text_field_keeps_arrows_in_a_row :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer field_ui_destroy(&u)
+	f := new(ui.Text_Field)
+	defer free(f)
+	ui.field_insert(f, "ab")
+	now := 0.0
+	frame :: proc(u: ^ui.State, f: ^ui.Text_Field, now: ^f64, events: ..platform.Event) -> ui.Field_Signal {
+		now^ += 0.016
+		ui.begin_frame(u, events, nil, nil, 300, 200, now^)
+		ui.row("bar", {}, ui.fill(), ui.px(30))
+		sig := ui.text_field("search", f, "Search", ui.px(200), ui.px(30))
+		ui.box_make("go", {.Clickable, .Focusable}, ui.px(40), ui.px(30))
+		ui.end_frame()
+		return sig
+	}
+	frame(&u, f, &now)
+	frame(&u, f, &now)
+	sig := frame(&u, f, &now, {kind = .Mouse_Down, x = 50, y = 15, button = .Left, click_count = 1}, {kind = .Mouse_Up, x = 50, y = 15, button = .Left})
+	testing.expect(t, sig.focused)
+	ui.field_move(f, 1, .Line, false)
+
+	sig = frame(&u, f, &now, {kind = .Key_Down, key = .Left})
+	testing.expect_value(t, f.cursor, 1)
+	sig = frame(&u, f, &now, {kind = .Key_Down, key = .Right})
+	testing.expect_value(t, f.cursor, 2)
+	sig = frame(&u, f, &now, {kind = .Key_Down, key = .Right})
+	sig = frame(&u, f, &now)
+	testing.expect(t, sig.focused, "Right at the end stays in the field")
+}
