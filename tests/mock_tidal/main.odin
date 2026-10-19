@@ -21,7 +21,8 @@
 // /bio, /albums (filter EPSANDSINGLES or COMPILATIONS too) and /similar
 // the rest of an artist page. Artist 1 has 73 albums, so they take two
 // pages of 50; every fifth artist has no biography and gets a 404, as
-// TIDAL answers.
+// TIDAL answers. YOASOBI's biography is Japanese, without spaces, and ends
+// in a link wider than the page's column.
 //
 // The PKCE login: GET /authorize redirects to /android/login/auth with a
 // code, and POST /oauth2/token trades it, with the Android client's id,
@@ -1184,6 +1185,11 @@ artist_response :: proc(path: string, query: map[string]string, offset, limit: i
 		}
 		other := (ar + 1) % len(ARTISTS)
 		text := fmt.tprintf("%s is a made-up artist the mock serves, here to fill an artist page without a TIDAL account. Their sound owes a lot to [wimpLink artistId=\"%d\"]%s[/wimpLink], whom they toured with for years.<br/><br/>The albums below are generated from the artist's number, each with a cover drawn from its id, and the songs are the mock's usual quiet tones.", ARTISTS[ar], other + 1, ARTISTS[other])
+		if ARTISTS[ar] == "YOASOBI" {
+			// Japanese has no spaces between words, and the link is wider
+			// than the biography's column, so both have to break inside.
+			text = "YOASOBIはコンポーザーのAyaseとボーカルのikuraによる二人組の音楽ユニットで、小説を音楽にすることをコンセプトに活動している。デビュー曲の夜に駆けるは小説投稿サイトに掲載された短編小説を原作とし、配信開始から間もなく各種チャートで一位を獲得した。その後も小説や物語を原作とした楽曲を次々と発表し、国内外の音楽祭やテレビ番組に出演している。<br/><br/>Discography: https://www.example.com/artists/yoasobi/discography/singles-and-albums/2019-to-2026/sorted-by-release-date/with-lyrics-and-credits/index.html"
+		}
 		return json_response(200, fmt.tprintf(`{{"source":"mock","text":%q}}`, text))
 	case "albums":
 		filter := query["filter"] or_else ""
