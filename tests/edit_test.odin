@@ -530,8 +530,6 @@ field_ui_destroy :: proc(u: ^ui.State) {
 	free_all(context.temp_allocator)
 }
 
-// A field in a row beside a button: Left and Right move the caret, and
-// never the focus to the button, though the row takes them otherwise.
 @(test)
 test_text_field_keeps_arrows_in_a_row :: proc(t: ^testing.T) {
 	u: ui.State

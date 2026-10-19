@@ -252,8 +252,6 @@ State :: struct {
 	drag_moved:     bool, // past DRAG_THRESHOLD since the press
 	control_click:  bool, // the left button is down as a control-click
 	buttons_stale:  platform.Mouse_Buttons, // held here but up in hardware last frame
-	// Per axis, so a row that scrolls sideways inside a page that scrolls
-	// down takes only the sideways part of a scroll, and the page the rest.
 	scroll_latch:   [2]Key, // the scroll views a trackpad gesture started over
 	scroll_key:     [2]Key, // this frame's scroll goes to these boxes
 	scroll:         [2]f32, // points, this frame
@@ -845,7 +843,6 @@ menu_blocks :: proc(u: ^State, key: Key) -> bool {
 
 // focus_arrow moves the focus to the previous or next focusable box with
 // the same keyed parent. In an open menu it moves among the menu's items.
-// Along X it moves only in a parent that lays its children out across.
 @(private)
 focus_arrow :: proc(u: ^State, axis: Axis, dir: int) -> bool {
 	group := Key(0)

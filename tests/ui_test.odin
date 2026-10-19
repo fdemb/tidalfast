@@ -432,8 +432,6 @@ test_ui_scroll_per_axis :: proc(t: ^testing.T) {
 	now := 0.0
 	shelf_settle(&u, &now)
 
-	// A diagonal trackpad scroll over the shelf: it takes the sideways part
-	// and the page the rest, through the momentum too, wherever the mouse is.
 	page, shelf, _, _ := shelf_frame(&u, &now, {kind = .Mouse_Move, x = 50, y = 40}, {kind = .Scroll, dx = -40, dy = -30, precise = true, phase = .Began})
 	testing.expect_value(t, shelf.view_off.x, f32(40))
 	testing.expect_value(t, page.view_off.y, f32(30))
@@ -442,7 +440,6 @@ test_ui_scroll_per_axis :: proc(t: ^testing.T) {
 	testing.expect_value(t, page.view_off.y, f32(40))
 	shelf_settle(&u, &now)
 
-	// A wheel over the shelf with no sideways delta scrolls the page.
 	page, shelf, _, _ = shelf_frame(&u, &now, {kind = .Mouse_Move, x = 50, y = 20}, {kind = .Scroll, dy = -2})
 	testing.expect_value(t, page.view_off_target.y, f32(40 + 2 * ui.SCROLL_LINE))
 	testing.expect_value(t, shelf.view_off_target.x, f32(50))
@@ -485,7 +482,6 @@ test_ui_left_right_in_a_row :: proc(t: ^testing.T) {
 	shelf_frame(&u, &now, {kind = .Key_Down, key = .Left})
 	testing.expect_value(t, u.focus, card(shelf, 0))
 
-	// The page lays its children out down, so Right goes to the app.
 	shelf_frame(&u, &now, {kind = .Mouse_Down, x = 50, y = 10, click_count = 1}, {kind = .Mouse_Up, x = 50, y = 10, click_count = 1})
 	item := ui.key_from_string(page.key, "##item")
 	testing.expect_value(t, u.focus, item)
