@@ -77,6 +77,12 @@ State :: struct {
 	pending:      Pending, // what the frame being built asked for, done after it
 	history:      History,
 	access_sent:  u64, // hash of the accessibility tree the shell has
+	// The views run under the player bar, which covers their bottoms with a
+	// blur of them, where the renderer has backdrops (render.BACKDROPS).
+	bar_over_content: bool,
+	// TIDALFAST_BLUR_REFERENCE: the bar is left out, and the shell blurs
+	// where it goes, to compare the renderer's blur with.
+	blur_reference:   bool,
 	drag_sent:    u64, // hash of the drag regions the shell has
 	titlebar_h:   f32, // this frame's Frame_Input.titlebar_height
 	titlebar_inset: f32,
@@ -411,6 +417,8 @@ start :: proc(s: ^State, shell: ^platform.Shell) {
 	s.show_overlay = os.get_env("TIDALFAST_OVERLAY", context.temp_allocator) != "" || bench != ""
 	s.log_events = os.get_env("TIDALFAST_LOG_EVENTS", context.temp_allocator) != ""
 	s.log_render = os.get_env("TIDALFAST_LOG_RENDER", context.temp_allocator) != ""
+	s.blur_reference = os.get_env("TIDALFAST_BLUR_REFERENCE", context.temp_allocator) != ""
+	s.bar_over_content = render.BACKDROPS || s.blur_reference
 
 	// TIDALFAST_SPALL=path writes a spall trace of every frame to path. Only
 	// the fd is used after this; the os.File it came from is dropped so State
@@ -554,7 +562,8 @@ hsv :: proc(h, s, v: f32) -> render.Color {
 // draw_frame_overlay draws the CPU time of the last FRAME_HISTORY frames as
 // bars, newest on the right, with lines at 120 Hz and 60 Hz budgets. Under
 // the bars: the last frame's CPU time in total and building the frame (the
-// UI, before end_frame), then its draw calls (blue), instances (green), and
+// UI, before end_frame), and on macOS the GPU's time on the newest frame it
+// has finished, then its draw calls (blue), instances (green), and
 // the text cache's runs and atlas pages, then the keyed boxes in use, in red
 // when the pool ran out this frame, then the process's memory footprint (as
 // Activity Monitor shows it) and what Metal has allocated on the GPU.
@@ -588,6 +597,9 @@ draw_frame_overlay :: proc(s: ^State, view_width: f32) {
 	y := y0 + PANEL_H + 6
 	ms := s.frame_ms[(s.frame_count + FRAME_HISTORY - 1) % FRAME_HISTORY]
 	line := fmt.tprintf("frame %.2f ms   ui %.2f ms", ms, s.ui_ms)
+	if r.gpu_ms > 0 {
+		line = fmt.tprintf("%s   gpu %.2f ms", line, r.gpu_ms)
+	}
 	text.draw(t, r, .Medium, 11, {x0 + 8, y}, {1, 1, 1, 0.9}, line)
 	y += 16
 	render.push_rect(r, {x0 + 8, y + 4, 6, 6}, {0.35, 0.60, 1, 1}, 3)

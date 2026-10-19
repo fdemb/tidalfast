@@ -179,6 +179,7 @@ cmd_run() {
 	# the window is covered or hidden, see update_parking in shell.m.
 	case $steps in *capture=*) env_args+=(TIDALFAST_CAPTURE="$STATE/frame.tga") ;; esac
 	[ -n "${AUDIO_CAPTURE:-}" ] && env_args+=(TIDALFAST_AUDIO_CAPTURE="$EVIDENCE/audio.wav")
+	[ -n "${BLUR_REFERENCE:-}" ] && env_args+=(TIDALFAST_BLUR_REFERENCE="$BLUR_REFERENCE")
 	case $mode in
 	fake) env_args+=(TIDALFAST_FAKE=1) ;;
 	mock)

@@ -581,7 +581,7 @@ found_at :: proc(s: ^State, tab: Search_Tab, i: int) -> Found {
 draw_found_list :: proc(s: ^State) {
 	sr := &s.search
 	tab := sr.tab
-	list := ui.scroll_view("found", ui.fill(), ui.fill())
+	list := ui.scroll_view("found", ui.fill(), ui.fill(), inset_end = bar_inset(s))
 	ui.accessible(list, .List, fmt.tprintf("%v", tab))
 	n := found_count(s, tab)
 	rows := ui.virtual_rows(list, n, TRACK_ROW_H)

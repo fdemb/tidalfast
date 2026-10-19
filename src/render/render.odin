@@ -24,14 +24,25 @@
 //
 // The backend is picked by file: metal_darwin.odin on macOS and
 // vulkan_linux.odin on Linux. Each defines Gpu and Gpu_Texture, the
-// backend's part of Renderer and of a texture slot, and the procs this file
-// leaves out: init, reload, destroy, end_frame and gpu_allocated, and
-// privately new_texture_slot, gpu_texture_free, gpu_texture_write,
+// backend's part of Renderer and of a texture slot, BACKDROPS, and the procs
+// this file leaves out: init, reload, destroy, end_frame and gpu_allocated,
+// and privately new_texture_slot, gpu_texture_free, gpu_texture_write,
 // gpu_texture_copy, gpu_frame_begin and grow_instances.
+//
+// Backdrop: push_backdrop fills a rect with a blur of what was pushed before
+// it, as a window's material over content scrolling under it. The frame
+// then draws twice. First the instances before the backdrop go to an
+// offscreen texture half the size of the rect plus the blur's reach, which
+// the backend blurs with a dual Kawase filter: each level halves the size,
+// then the levels add back up. Then the whole frame draws to the drawable
+// as usual, the backdrop instance sampling the blurred texture. The first
+// part is skipped while backdrop_hash stays the same. Only one backdrop a
+// frame, and only where BACKDROPS is true.
 package render
 
 import "base:runtime"
 import "core:fmt"
+import "core:hash"
 import "core:log"
 import "core:math"
 import "core:os"
@@ -86,6 +97,7 @@ Instance_Flag :: enum u32 {
 	Textured,
 	Nearest,
 	Coverage, // sample the R8 texture, bound in its own slot
+	Backdrop, // sample the blurred backdrop, see push_backdrop
 }
 Instance_Flags :: bit_set[Instance_Flag; u32]
 
@@ -99,7 +111,7 @@ Instance :: struct {
 	border:   f32,
 	softness: f32,
 	flags:    Instance_Flags,
-	_:        f32,
+	extra:    f32, // Backdrop: the saturation
 	clip:     [4]f32, // x0 y0 x1 y1
 }
 #assert(size_of(Instance) == 144)
@@ -129,6 +141,19 @@ Stats :: struct {
 	instances:  int,
 }
 
+MAX_BLUR_LEVELS :: 6
+
+// What end_frame needs for the frame's backdrop.
+Backdrop_Pass :: struct {
+	batch:  int, // the backdrop's batch; the ones before it are what it blurs
+	region: [4]f32, // x0 y0 x1 y1, the drawable's pixels the blur reads
+	levels: int, // halvings, 2 to MAX_BLUR_LEVELS
+	// Of what the blur reads: the instances before the backdrop that reach
+	// into region, their textures, and the rest that changes the result.
+	// end_frame blurs again only when it changes.
+	hash:   u64,
+}
+
 // Renderer is plain data so it can live in the app's persistent memory.
 Renderer :: struct {
 	gpu:            Gpu,
@@ -150,8 +175,12 @@ Renderer :: struct {
 	batch_count:    int,
 	clips:          [MAX_CLIP_DEPTH][4]f32, // pixels
 	clip_depth:     int,
+	backdrop:       Backdrop_Pass, // batch is -1 without one
 
 	stats:          Stats, // of the last frame end_frame drew
+	// Milliseconds the GPU took on the newest frame it has finished, a frame
+	// or two behind; 0 where the backend can't tell.
+	gpu_ms:         f32,
 	// Debug: when set, end_frame waits for the GPU and writes each frame to
 	// this path as a TGA. Set it before init.
 	capture_path:   string,
@@ -318,6 +347,7 @@ begin_frame :: proc(r: ^Renderer, width, height, scale: f32, clear: Color) {
 	r.batch_count = 0
 	r.clip_depth = 1
 	r.clips[0] = {-1e9, -1e9, 1e9, 1e9}
+	r.backdrop = {batch = -1}
 }
 
 // corners returns v for all four corners, for Style.colors and Style.radii.
@@ -369,13 +399,18 @@ push :: proc(r: ^Renderer, rect: Rect, style: Style) {
 	}
 	inst.softness = style.softness * r.scale
 	inst.clip = r.clips[min(r.clip_depth, MAX_CLIP_DEPTH) - 1]
+	append_instance(r, inst, texture, kind)
+}
 
-	// Open a new batch only when this instance needs a texture other than
-	// the one the current batch binds for its kind.
+// append_instance adds inst to the frame. It opens a new batch only when
+// inst needs a texture other than the one the current batch binds for its
+// kind, or new_batch is set.
+@(private)
+append_instance :: proc(r: ^Renderer, inst: Instance, texture: Texture, kind: int, new_batch := false) -> bool {
 	b := &r.batches[max(r.batch_count - 1, 0)]
-	if r.batch_count == 0 || (texture != 0 && b.textures[kind] != 0 && b.textures[kind] != texture) {
+	if r.batch_count == 0 || new_batch || (texture != 0 && b.textures[kind] != 0 && b.textures[kind] != texture) {
 		if r.batch_count == MAX_BATCHES {
-			return
+			return false
 		}
 		b = &r.batches[r.batch_count]
 		b^ = {first = u32(r.instance_count)}
@@ -386,17 +421,86 @@ push :: proc(r: ^Renderer, rect: Rect, style: Style) {
 	}
 
 	if r.instances == nil {
-		return
+		return false
 	}
 	if r.instance_count == r.capacity[r.slot] {
 		grow_instances(r)
 		if r.instance_count == r.capacity[r.slot] {
-			return
+			return false
 		}
 	}
 	r.instances[r.instance_count] = inst
 	r.instance_count += 1
 	b.count += 1
+	return true
+}
+
+// push_backdrop fills rect, with corners of radius, with a blur of what was
+// pushed before it there: reaching blur points, its colours saturated by
+// saturation (1 keeps them), and tint drawn over it. A frame's second
+// backdrop, or one where BACKDROPS is false, draws tint at full alpha.
+push_backdrop :: proc(r: ^Renderer, rect: Rect, blur, saturation: f32, tint: Color, radius: f32 = 0) {
+	if !BACKDROPS || r.backdrop.batch >= 0 {
+		push_rect(r, rect, {tint.r, tint.g, tint.b, 1}, radius)
+		return
+	}
+	inst: Instance
+	inst.dst = snap(r, rect)
+	if inst.dst.x >= inst.dst.z || inst.dst.y >= inst.dst.w {
+		return
+	}
+	// The blur reads past the rect as far as it reaches, within the
+	// drawable, whose edges it repeats.
+	reach := math.round(blur * r.scale)
+	w, h := math.round(r.width * r.scale), math.round(r.height * r.scale)
+	region := [4]f32{max(inst.dst.x - reach, 0), max(inst.dst.y - reach, 0), min(inst.dst.z + reach, w), min(inst.dst.w + reach, h)}
+	size := [2]f32{region.z - region.x, region.w - region.y}
+	if size.x <= 0 || size.y <= 0 {
+		return
+	}
+	inst.flags = {.Backdrop}
+	inst.src = {(inst.dst.x - region.x) / size.x, (inst.dst.y - region.y) / size.y, (inst.dst.z - region.x) / size.x, (inst.dst.w - region.y) / size.y}
+	inst.extra = saturation
+	for c in Corner {
+		inst.colors[c] = tint
+		inst.radii[c] = radius * r.scale
+	}
+	inst.clip = r.clips[min(r.clip_depth, MAX_CLIP_DEPTH) - 1]
+	batch := r.batch_count
+	if !append_instance(r, inst, 0, 0, new_batch = true) {
+		return
+	}
+	// Each level of the dual filter about doubles the reach, starting from
+	// a couple of pixels.
+	levels := clamp(int(math.round(math.log2(max(reach, 2) / 2))), 2, MAX_BLUR_LEVELS)
+	r.backdrop = {batch, region, levels, backdrop_hash(r, batch, region, levels)}
+}
+
+// backdrop_hash hashes what a backdrop over region blurs: the instances in
+// the batches before batch that draw into region, those batches' textures,
+// and the levels, scale and clear colour.
+@(private)
+backdrop_hash :: proc(r: ^Renderer, batch: int, region: [4]f32, levels: int) -> u64 {
+	bytes :: proc(v: ^$T) -> []byte {
+		return ([^]byte)(v)[:size_of(T)]
+	}
+	region, levels, scale, clear := region, levels, r.scale, r.clear
+	h := hash.fnv64a(bytes(&region))
+	h = hash.fnv64a(bytes(&levels), h)
+	h = hash.fnv64a(bytes(&scale), h)
+	h = hash.fnv64a(bytes(&clear), h)
+	for &b in r.batches[:batch] {
+		h = hash.fnv64a(bytes(&b.textures), h)
+		for &inst in r.instances[b.first:b.first + b.count] {
+			pad := inst.softness + 1
+			x0, y0 := max(inst.dst.x - pad, inst.clip.x), max(inst.dst.y - pad, inst.clip.y)
+			x1, y1 := min(inst.dst.z + pad, inst.clip.z), min(inst.dst.w + pad, inst.clip.w)
+			if x0 < region.z && x1 > region.x && y0 < region.w && y1 > region.y {
+				h = hash.fnv64a(bytes(&inst), h)
+			}
+		}
+	}
+	return h
 }
 
 push_rect :: proc(r: ^Renderer, rect: Rect, color: Color, radius: f32 = 0, border: f32 = 0) {

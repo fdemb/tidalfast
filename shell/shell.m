@@ -1475,6 +1475,43 @@ static void setup_shell_test(void) {
 @interface App_Delegate : NSObject <NSApplicationDelegate>
 @end
 
+// TIDALFAST_BLUR_REFERENCE=<material>[,<height>] puts AppKit's blur of the
+// window's own content over its bottom, where the player bar goes, to
+// compare the renderer's blur with. The app leaves the bar out then.
+static void setup_blur_reference(NSView *parent) {
+  const char *env = getenv("TIDALFAST_BLUR_REFERENCE");
+  if (!env || !*env) return;
+  NSArray<NSString *> *parts = [@(env) componentsSeparatedByString:@","];
+  NSDictionary<NSString *, NSNumber *> *materials = @{
+    @"titlebar" : @(NSVisualEffectMaterialTitlebar),
+    @"selection" : @(NSVisualEffectMaterialSelection),
+    @"menu" : @(NSVisualEffectMaterialMenu),
+    @"popover" : @(NSVisualEffectMaterialPopover),
+    @"sidebar" : @(NSVisualEffectMaterialSidebar),
+    @"headerView" : @(NSVisualEffectMaterialHeaderView),
+    @"sheet" : @(NSVisualEffectMaterialSheet),
+    @"windowBackground" : @(NSVisualEffectMaterialWindowBackground),
+    @"hudWindow" : @(NSVisualEffectMaterialHUDWindow),
+    @"fullScreenUI" : @(NSVisualEffectMaterialFullScreenUI),
+    @"toolTip" : @(NSVisualEffectMaterialToolTip),
+    @"contentBackground" : @(NSVisualEffectMaterialContentBackground),
+    @"underWindowBackground" : @(NSVisualEffectMaterialUnderWindowBackground),
+    @"underPageBackground" : @(NSVisualEffectMaterialUnderPageBackground),
+  };
+  NSNumber *material = materials[parts[0]];
+  if (!material) {
+    fprintf(stderr, "shell: TIDALFAST_BLUR_REFERENCE: no material %s\n", parts[0].UTF8String);
+    return;
+  }
+  CGFloat height = parts.count > 1 ? parts[1].doubleValue : 88;
+  NSVisualEffectView *blur = [[NSVisualEffectView alloc] initWithFrame:NSMakeRect(0, 0, parent.bounds.size.width, height)];
+  blur.material = material.integerValue;
+  blur.blendingMode = NSVisualEffectBlendingModeWithinWindow;
+  blur.state = NSVisualEffectStateActive;
+  blur.autoresizingMask = NSViewWidthSizable | NSViewMaxYMargin;
+  [parent addSubview:blur positioned:NSWindowAbove relativeTo:g_view];
+}
+
 @implementation App_Delegate
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
@@ -1506,6 +1543,7 @@ static void setup_shell_test(void) {
   g_view = [[Metal_View alloc] initWithFrame:frame];
   g_view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
   [glass addSubview:g_view];
+  setup_blur_reference(glass);
   [g_window center];
 
   g_display_link = [g_view displayLinkWithTarget:g_view selector:@selector(display_link_tick:)];

@@ -157,7 +157,7 @@ draw_artist :: proc(s: ^State, p: ^Pending, main_w: f32) {
 		draw_artist_grid(s, page, grid.part, content_w)
 		return
 	}
-	view := ui.scroll_view(fmt.tprintf("artist##%d", page.id), ui.fill(), ui.fill())
+	view := ui.scroll_view(fmt.tprintf("artist##%d", page.id), ui.fill(), ui.fill(), inset_end = bar_inset(s))
 	ui.accessible(view, .Group, small_str(&page.name))
 	draw_artist_hero(s, page, main_w, content_w)
 	centred(content_w)

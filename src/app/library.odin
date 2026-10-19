@@ -57,6 +57,10 @@ SIDEBAR_DEFAULT :: 250
 MAIN_MIN :: 360 // the sidebar stops growing before the main view gets narrower
 HANDLE_W :: 5
 PLAYER_BAR_H :: 88
+// The player bar's blur of the views under it.
+BAR_BLUR :: 20
+BAR_SATURATION :: 1.8
+BAR_TINT :: render.Color{PANEL.r, PANEL.g, PANEL.b, 0.75}
 TRACK_ROW_H :: 56
 PLAYLIST_ROW_H :: 56
 HEADER_H :: 34
@@ -179,7 +183,9 @@ draw_library :: proc(s: ^State, w, h: f32) {
 		draw_sidebar_handle(s, w)
 		draw_main_view(s, w - lib.sidebar_w - HANDLE_W)
 	}
-	draw_player_bar(s, w)
+	if !s.blur_reference {
+		draw_player_bar(s, w, h)
+	}
 	draw_track_menu(s)
 	draw_drag_ghost(s)
 }
@@ -214,6 +220,12 @@ hero_under_titlebar :: proc(s: ^State) -> f32 {
 		return 0
 	}
 	return s.titlebar_h
+}
+
+// bar_inset is how much of a view that reaches the window's bottom the
+// player bar covers.
+bar_inset :: proc(s: ^State) -> f32 {
+	return PLAYER_BAR_H if s.bar_over_content else 0
 }
 
 // titlebar_space is empty room in a row of the titlebar, which moves the
@@ -258,7 +270,7 @@ draw_sidebar :: proc(s: ^State) {
 		ui.spacer(ui.px(10))
 	}
 	draw_search_field(s)
-	list := ui.scroll_view("playlists", ui.fill(), ui.fill())
+	list := ui.scroll_view("playlists", ui.fill(), ui.fill(), inset_end = bar_inset(s))
 	ui.accessible(list, .List, "Playlists")
 	for i in 0 ..< sidebar_count(s) {
 		entry := sidebar_entry(s, i)
@@ -384,7 +396,7 @@ draw_main_view :: proc(s: ^State, main_w: f32) {
 		ui.spacer(ui.px(16))
 	}
 
-	list := ui.scroll_view("tracks", ui.fill(), ui.fill(), {.Focusable})
+	list := ui.scroll_view("tracks", ui.fill(), ui.fill(), {.Focusable}, bar_inset(s))
 	ui.accessible(list, .Table, view_title(s))
 	if s.bench.running && s.bench.ui {
 		list.view_off.y = bench_offset(s, list.rect.h)
@@ -781,9 +793,17 @@ draw_drag_ghost :: proc(s: ^State) {
 	b.text_pad = 12
 }
 
-draw_player_bar :: proc(s: ^State, w: f32) {
-	bar := ui.column("player", {.Draw_Background}, ui.fill(), ui.px(PLAYER_BAR_H))
+draw_player_bar :: proc(s: ^State, w, h: f32) {
+	bar := ui.column("player", {.Draw_Background}, ui.px(w), ui.px(PLAYER_BAR_H))
 	bar.background = GLASS_BG
+	if s.bar_over_content {
+		// Over the bottom of the views, blurring them. Clickable so a press
+		// on it doesn't reach the row under it.
+		bar.flags += {.Draw_Backdrop, .Clickable, .Floating_X, .Floating_Y}
+		bar.fixed_pos = {0, h - PLAYER_BAR_H}
+		bar.background = BAR_TINT
+		bar.backdrop = {blur = BAR_BLUR, saturation = BAR_SATURATION}
+	}
 	line := ui.box_make("", {.Draw_Background}, ui.fill(), ui.px(1))
 	line.background = OUTLINE
 	ui.row("", {}, ui.fill(), ui.fill())

@@ -66,6 +66,10 @@ Gpu_Buffer :: struct {
 	size:   int,
 }
 
+// Not yet: push_backdrop draws its tint, and the app keeps the player bar
+// off the content.
+BACKDROPS :: false
+
 Gpu :: struct {
 	instance:         vk.Instance,
 	physical:         vk.PhysicalDevice,

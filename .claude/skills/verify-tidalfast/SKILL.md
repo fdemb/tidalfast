@@ -60,7 +60,7 @@ Prefer `ax-press` with a label from `ax-dump` over keys that depend on focus. La
 
 Allow 1.5 s between `size=` and a `capture`, and 2 s between typing a query and capturing results: the search debounce is 250 ms and the mock needs a round trip.
 
-Set `AUDIO_CAPTURE=1` before `$V run` to record what reaches the null device in `audio.wav`.
+Set `AUDIO_CAPTURE=1` before `$V run` to record what reaches the null device in `audio.wav`. Set `BLUR_REFERENCE=<material>[,<height>]` to pass `TIDALFAST_BLUR_REFERENCE` (see `docs/ui.md`); the captures show the content under the bar without AppKit's blur, which only the screen shows.
 
 `run` sets `TIDALFAST_CAPTURE` only when the steps have a `capture=`. With it the window's drawables stay full size while it's covered or hidden. Without it the shell shrinks them to a pixel then, so a run that measures memory around `hide` and `unhide` must not capture.
 

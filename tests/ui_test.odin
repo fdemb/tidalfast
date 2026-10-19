@@ -1249,3 +1249,44 @@ test_ui_arrows_reach_every_box :: proc(t: ^testing.T) {
 	move(&u, &now, in_panel(grid, "##card3"), .Down)
 	testing.expect_value(t, u.focus, in_panel(grid, "##card3"))
 }
+
+// A scroll view whose bottom 50 pt something covers, as the player bar
+// covers the lists under it: the content scrolls up clear of it, scroll_to
+// keeps a row above it, and the scrollbar stops above it.
+@(test)
+scroll_view_inset_end :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	frame :: proc(u: ^ui.State, now: ^f64, last: bool) -> (view: ^ui.Box, animating: bool) {
+		now^ += 1.0 / 120
+		ui.begin_frame(u, nil, nil, nil, 300, 200, now^)
+		{
+			view = ui.scroll_view("view", ui.fill(), ui.fill(), inset_end = 50)
+			rows := ui.virtual_rows(view, 100, 10)
+			for i in rows.first ..< rows.last {
+				ui.box_make(fmt.tprintf("##row%d", i), {}, ui.fill(), ui.px(10))
+			}
+			if last {
+				ui.scroll_to(view, 990, 1000)
+			}
+		}
+		animating = ui.end_frame()
+		return
+	}
+	now: f64
+	view, _ := frame(&u, &now, false)
+	testing.expect_value(t, view.view_bounds.y, f32(1050))
+	view, _ = frame(&u, &now, true)
+	testing.expect_value(t, view.view_off_target.y, f32(850))
+	for _ in 0 ..< 300 {
+		animating: bool
+		view, animating = frame(&u, &now, false)
+		if !animating {
+			break
+		}
+	}
+	testing.expect_value(t, view.view_off.y, f32(850))
+	bar := view.last
+	testing.expect(t, bar != nil && bar.rect.h == 150, "the scrollbar stops above the inset")
+}

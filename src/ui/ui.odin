@@ -85,6 +85,7 @@ Box_Flag :: enum u32 {
 	Text_Input, // a text field: with the focus it takes Return, Space, the arrows and Escape
 	Click_On_Release, // clicked on a release over it rather than on the press, for drag sources
 	Window_Drag, // empty titlebar space: a press there moves the window, see drag_regions
+	Draw_Backdrop, // background over a blur of what's under the box, see render.push_backdrop
 }
 Box_Flags :: bit_set[Box_Flag; u32]
 
@@ -124,6 +125,7 @@ Build :: struct {
 	fixed_pos:                 [2]f32, // relative to the parent
 	fixed_size:                [2]f32,
 	gutter:                    f32, // points at the right that children's widths leave out
+	inset_end:                 f32, // a scroll view's bottom under something drawn over it, see scroll_view
 	id:                        string, // as given; must live until end_frame
 	label:                     string, // the part of id before "##"
 	font:                      text.Font,
@@ -132,6 +134,7 @@ Build :: struct {
 	text_align:                Align,
 	text_pad:                  f32, // left and right of the label
 	background:                render.Color,
+	backdrop:                  Backdrop, // with Draw_Backdrop, background tints it
 	gradient:                  render.Color, // bottom colour of the background, when its alpha isn't 0
 	border_color:              render.Color,
 	hover_color:               render.Color,
@@ -148,6 +151,12 @@ Build :: struct {
 	access_label:              string,
 	access_value:              string,
 	access_selected:           bool,
+}
+
+// Backdrop is the blur a Draw_Backdrop box draws its background over.
+Backdrop :: struct {
+	blur:       f32, // points it reaches
+	saturation: f32, // 1 keeps the colours
 }
 
 Signal :: struct {
@@ -1087,6 +1096,9 @@ reveal_focus :: proc(u: ^State) {
 			}
 			done[axis] = true
 			t := v.view_off_target[axis]
+			if axis == 1 {
+				view.y -= v.inset_end
+			}
 			if pos[axis] < t {
 				t = pos[axis]
 			} else if pos[axis] + size[axis] > t + view[axis] {
