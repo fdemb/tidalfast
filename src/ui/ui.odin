@@ -844,8 +844,10 @@ menu_blocks :: proc(u: ^State, key: Key) -> bool {
 // focus_arrow moves the focus to the nearest focusable box with the same
 // keyed parent in the arrow's direction: past the focused box along axis
 // and overlapping it across, so a column moves up and down, a row left and
-// right, and a grid both ways. In an open menu it moves among the menu's
-// items, starting at the first or last when none has the focus.
+// right, and a grid both ways. With none overlapping it goes to the
+// nearest box past it at all, so no box in a group is out of the arrows'
+// reach. In an open menu it moves among the menu's items, starting at the
+// first or last when none has the focus.
 @(private)
 focus_arrow :: proc(u: ^State, axis: Axis, dir: int) -> bool {
 	group := Key(0)
@@ -880,6 +882,7 @@ focus_arrow :: proc(u: ^State, axis: Axis, dir: int) -> bool {
 	lo, hi := span(from.rect, axis)
 	clo, chi := span(from.rect, cross)
 	best := Key(0)
+	best_overlaps: bool
 	best_gap, best_off: f32
 	for h in u.hits[:u.hit_count] {
 		b := box_lookup(u, h.key)
@@ -888,13 +891,18 @@ focus_arrow :: proc(u: ^State, axis: Axis, dir: int) -> bool {
 		}
 		blo, bhi := span(b.rect, axis)
 		gap := blo - hi if dir > 0 else lo - bhi
-		bclo, bchi := span(b.rect, cross)
-		if gap < -0.5 || bclo >= chi || bchi <= clo {
+		if gap < -0.5 {
 			continue
 		}
-		off := abs((bclo + bchi) - (clo + chi))
-		if best == 0 || gap < best_gap - 0.5 || (gap <= best_gap + 0.5 && off < best_off) {
-			best, best_gap, best_off = h.key, gap, off
+		bclo, bchi := span(b.rect, cross)
+		overlaps := bclo < chi && bchi > clo
+		off := max(bclo - chi, clo - bchi, 0) if !overlaps else abs((bclo + bchi) - (clo + chi))
+		better := best == 0 || overlaps && !best_overlaps
+		if !better && overlaps == best_overlaps {
+			better = gap < best_gap - 0.5 || (gap <= best_gap + 0.5 && off < best_off)
+		}
+		if better {
+			best, best_overlaps, best_gap, best_off = h.key, overlaps, gap, off
 		}
 	}
 	if best == 0 {
