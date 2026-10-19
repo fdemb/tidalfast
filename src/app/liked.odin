@@ -14,6 +14,17 @@ Liked_Set :: struct {
 	version: List_Version, // the sidebar's Liked Songs version these came at
 	loading: bool, // a Liked_Ids job is out
 	edits:   [dynamic]Liked_Edit, // toggles made while it's out, for its result
+	out:     map[i64]Heart_Out, // tracks with a heart change out to TIDAL
+}
+
+// Heart_Out is a track whose heart change is out to TIDAL. Only one change
+// per track is out at a time: the workers could send two in either order,
+// and the app couldn't tell which one TIDAL kept. A click while one is out
+// only changes want, which goes once the change out is answered.
+Heart_Out :: struct {
+	confirmed: bool, // liked, as TIDAL last had it
+	sent:      bool, // what the change out asks for
+	want:      bool, // what the heart shows
 }
 
 Liked_Edit :: struct {
@@ -108,33 +119,86 @@ liked_ids_result :: proc(d: ^Data, res: ^Result, failed: bool) {
 		liked_put(d, e.id, e.on)
 	}
 	clear(&d.liked.edits)
+	// A change that went out before the fetch did isn't among the edits.
+	for id, h in d.liked.out {
+		liked_put(d, id, h.want)
+	}
 }
 
 // liked_clear frees the set, at sign-out and shut down.
 liked_clear :: proc(d: ^Data) {
 	delete(d.liked.ids)
 	delete(d.liked.edits)
+	delete(d.liked.out)
 	d.liked = {}
 }
 
-// liked_toggle flips the heart on a track: the set changes at once, and
-// the worker sends the change on to TIDAL. If that fails, add_result puts
-// the heart back. With the fake data it only flips. track is the TIDAL id,
-// or with the fake data the row's key (see row_key).
+// liked_toggle flips the heart on a track, see liked_want. With the fake
+// data it only flips. track is the TIDAL id, or with the fake data the
+// row's key (see row_key).
 liked_toggle :: proc(s: ^State, track: i64) {
 	d := &s.data
 	if track < 0 || (track == 0 && !d.fake) {
 		return
 	}
 	on := !liked_has(d, track)
-	if !d.fake {
-		push_job(d, {payload = Add_Track_Job{track = track, source = .Liked, remove = !on}})
+	if d.fake {
+		liked_change(d, track, on)
+		return
 	}
-	liked_put(d, track, on)
+	liked_want(d, track, on)
+}
+
+// liked_want sets the heart on track, from a click or a drop on Liked
+// Songs. The heart shows it at once. It goes to TIDAL now, or if a change
+// to the track is out, once liked_answer has that one's answer.
+liked_want :: proc(d: ^Data, track: i64, on: bool) {
+	if h, ok := &d.liked.out[track]; ok {
+		h.want = on
+		liked_change(d, track, on)
+		return
+	}
+	if d.liked.out == nil {
+		d.liked.out = make(map[i64]Heart_Out, runtime.heap_allocator())
+	}
+	d.liked.out[track] = {confirmed = liked_has(d, track), sent = on, want = on}
+	liked_change(d, track, on)
+	push_job(d, {payload = Add_Track_Job{track = track, source = .Liked, remove = !on}})
+}
+
+// liked_answer takes TIDAL's answer to the heart change out for track, or
+// took is false for a refusal or a change dropped before it went. It
+// returns whether the heart's newer want went out in its place.
+liked_answer :: proc(d: ^Data, track: i64, took: bool) -> (resent: bool) {
+	h, ok := d.liked.out[track]
+	if !ok {
+		return false
+	}
+	if took {
+		h.confirmed = h.sent
+	} else {
+		// Clicks since go too: the heart shows what TIDAL has.
+		h.want = h.confirmed
+		liked_change(d, track, h.want)
+	}
+	if h.want == h.confirmed {
+		delete_key(&d.liked.out, track)
+		return false
+	}
+	h.sent = h.want
+	d.liked.out[track] = h
+	push_job(d, {payload = Add_Track_Job{track = track, source = .Liked, remove = !h.sent}})
+	return true
+}
+
+// liked_change sets whether track id is liked, and keeps the change for
+// the result of a fetch that's out, which replays it over what TIDAL sent.
+liked_change :: proc(d: ^Data, id: i64, on: bool) {
+	liked_put(d, id, on)
 	if d.liked.loading {
 		if d.liked.edits == nil {
 			d.liked.edits = make([dynamic]Liked_Edit, runtime.heap_allocator())
 		}
-		append(&d.liked.edits, Liked_Edit{track, on})
+		append(&d.liked.edits, Liked_Edit{id, on})
 	}
 }

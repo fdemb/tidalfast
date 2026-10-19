@@ -479,16 +479,13 @@ add_to_list :: proc(s: ^State, track, entry: int) {
 	if entry < 0 || entry > len(d.sidebar.items) || row.id == 0 {
 		return
 	}
-	job := Add_Track_Job{track = row.id, source = .Liked}
 	if entry > 0 {
-		job.source = .Playlist
-		job.id = small(d.sidebar.items[entry - 1].id)
+		push_job(d, {payload = Add_Track_Job{track = row.id, source = .Playlist, id = small(d.sidebar.items[entry - 1].id)}})
 	} else {
 		// Liked Songs. The heart changes at once; if TIDAL says no, the
 		// result puts it back.
-		liked_put(d, row.id, true)
+		liked_want(d, row.id, true)
 	}
-	push_job(d, {payload = job})
 	set_status(s, .Adding, track, entry)
 }
 
@@ -496,8 +493,9 @@ add_to_list :: proc(s: ^State, track, entry: int) {
 // kept copies take it in place at the version TIDAL gave, so nothing is
 // fetched again. An unlike takes the row out the same way. Without either
 // row they're dropped and the list is fetched again. The heart was set
-// before the job went out, so a failed one puts it back. The status line
-// says how it went if it still names this add.
+// before the job went out, so a failed one puts it back, see liked_answer.
+// The status line says how it went if it still names this add, once the
+// heart's last change is answered.
 add_result :: proc(s: ^State, res: ^Result, job: Add_Track_Job) {
 	d := &s.data
 	lib := &s.library
@@ -509,15 +507,12 @@ add_result :: proc(s: ^State, res: ^Result, job: Add_Track_Job) {
 		// Liking a liked track adds nothing, and only the count tells.
 		added = res.version.count > i64(d.sidebar.liked_count)
 	}
+	resent := job.source == .Liked && liked_answer(d, job.track, !failed)
 	status := Status.Added
 	switch {
 	case failed:
 		status = .Add_Failed
 		log.warnf("lists: adding a track to %s failed: %v", list_name(job.source, id), err)
-		if job.source == .Liked {
-			// The heart went ahead of TIDAL; it goes back.
-			liked_put(d, job.track, job.remove)
-		}
 	case job.remove:
 		// Unliking: the row leaves the kept copies, at the version the
 		// unliked list was at. The set was told when the job went out, so
@@ -538,7 +533,7 @@ add_result :: proc(s: ^State, res: ^Result, job: Add_Track_Job) {
 	case:
 		list_forget(s, job.source, id)
 	}
-	if lib.status != .Adding {
+	if lib.status != .Adding || resent {
 		return
 	}
 	row := view_row(s, lib.status_track)
