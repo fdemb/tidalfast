@@ -22,6 +22,8 @@ bold heart e2a8
 fill heart e2a8
 bold dots-three e1fe
 bold share-network e408
+bold plus e3d4
+bold check e182
 "
 
 for weight in fill bold; do

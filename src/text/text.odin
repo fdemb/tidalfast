@@ -74,6 +74,8 @@ ICON_HEART :: "\ue2a8" // Icon
 ICON_HEART_FILL :: "\ue2a8" // Icon_Fill
 ICON_DOTS_THREE :: "\ue1fe" // Icon
 ICON_SHARE_NETWORK :: "\ue408" // Icon
+ICON_PLUS :: "\ue3d4" // Icon
+ICON_CHECK :: "\ue182" // Icon
 
 MAX_FACES :: 32 // also kb_text_shape's font stack limit
 FALLBACK_CAPACITY :: 4096 // to start with; it doubles when three quarters full
