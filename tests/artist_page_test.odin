@@ -757,3 +757,26 @@ bio_breaks_words_wider_than_the_column :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(strings.to_string(joined), cjk), "the whole paragraph without spaces")
 	testing.expect(t, strings.contains(strings.to_string(joined), url), "the whole link")
 }
+
+// Pressing More, from the keyboard or an assistive app, asks for the frame
+// that shows the rest of the biography, and Less for the one that hides it.
+@(test)
+bio_more_asks_for_a_frame :: proc(t: ^testing.T) {
+	fonts: Fonts
+	if !testing.expect(t, fonts_init(&fonts)) {
+		return
+	}
+	defer fonts_destroy(&fonts)
+	context.allocator = mem.arena_allocator(&fonts.arena)
+	s := library_state(true)
+	defer library_state_free(s)
+	f := Frame{fonts = &fonts, size = {1100, 2400}}
+	fake_page(t, s, &f)
+	settle(t, s, &f)
+	library_frame(t, s, &f, press_exact(t, s, "Read more"))
+	testing.expect(t, f.animating, "More asks for a frame")
+	settle(t, s, &f)
+	testing.expect(t, has(s, "Read less", .Button), "the rest shows")
+	library_frame(t, s, &f, press_exact(t, s, "Read less"))
+	testing.expect(t, f.animating, "Less asks for a frame")
+}
