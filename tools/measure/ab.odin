@@ -11,8 +11,10 @@ import "core:strings"
 // take turns, a then b, then b then a, so a machine that gets busier or
 // hotter over the run weighs on both alike. Startup is judged on the
 // differences between runs next to each other (paired_startup); the memory
-// scenario runs once each and is compared as `measure compare` does. Each
-// build gets a mock of its own, both this checkout's.
+// scenario runs once each and is compared as `measure compare` does, and
+// with the fake data the frames scenario runs three times each, taking
+// turns, compared by its medians. Each build gets a mock of its own, both
+// this checkout's.
 run_ab :: proc(cfg: ^Config, base, stamp: string) -> int {
 	for setup in cfg.setups {
 		if setup != "fake" && setup != "mock" {
@@ -77,6 +79,18 @@ run_ab :: proc(cfg: ^Config, base, stamp: string) -> int {
 			lines := run_once(cfg, &sides[k], setup, "memory", 0, 1)
 			add_memory(&results[k], setup, {lines})
 		}
+		if setup == "fake" {
+			nf := frames_runs(cfg)
+			frames: [2][dynamic][]Line
+			for i in 0 ..< nf {
+				for k in turns(i) {
+					append(&frames[k], run_once(cfg, &sides[k], setup, "frames", i, nf))
+				}
+			}
+			for k in 0 ..< 2 {
+				add_frames(&results[k], setup, frames[k][:])
+			}
+		}
 	}
 
 	if has_mock {
@@ -91,7 +105,11 @@ run_ab :: proc(cfg: ^Config, base, stamp: string) -> int {
 	// Builds of the same code came out 12 MB apart on one memory run each, so
 	// one run doesn't get marked.
 	fmt.sbprintln(&b, "\nmemory, one run each, not marked: compare `measure memory -runs=N` of each build for that")
-	write_compare(&b, compare(memory_metrics(results[0].metrics[:]), results[1].metrics[:]), marks = false)
+	write_compare(&b, compare(scenario_metrics(results[0].metrics[:], "memory"), results[1].metrics[:]), marks = false)
+	if frames := scenario_metrics(results[0].metrics[:], "frames"); len(frames) > 0 {
+		fmt.sbprintln(&b, "\nframes, the fake data's library bench, medians over the runs; more fps is better")
+		write_compare(&b, compare(frames, results[1].metrics[:]))
+	}
 	fmt.print(strings.to_string(b))
 	stem := strings.trim_suffix(cfg.out, ".json")
 	for k in 0 ..< 2 {
@@ -113,10 +131,10 @@ turns :: proc(i: int) -> [2]int {
 }
 
 @(private = "file")
-memory_metrics :: proc(metrics: []Metric) -> []Metric {
+scenario_metrics :: proc(metrics: []Metric, scenario: string) -> []Metric {
 	out := make([dynamic]Metric, context.temp_allocator)
 	for m in metrics {
-		if m.scenario == "memory" {
+		if m.scenario == scenario {
 			append(&out, m)
 		}
 	}

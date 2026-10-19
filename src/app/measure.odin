@@ -9,17 +9,20 @@ package app
 //   1        marks and a sample at each mark, nothing else
 //   startup  the same, then quit once the first track rows and their covers are drawn
 //   memory   after startup, run the memory scenario (measure_step) and quit
+//   frames   after startup, scroll the fake data's list with the library
+//            bench, print each phase's frame rate and frame times, and quit
 //
 // With it off the marks are still kept, quietly, until the first track
 // rows show, for the launch log (launch_log.odin); after that nothing here
 // runs except two counters per drawn row. Marks and samples come from
-// frames that happen anyway. Only the memory scenario
-// starts a thread, which samples once a second and wakes the UI when a
-// stage's wait is over.
+// frames that happen anyway. Only the memory and frames scenarios start a
+// thread, which samples once a second and wakes the UI when a stage's wait
+// is over, since an idle window draws no frame to see it.
 
 import "base:runtime"
 import "core:fmt"
 import "core:os"
+import "core:slice"
 import "core:strings"
 import "core:sync"
 import "core:sys/posix"
@@ -35,6 +38,7 @@ Measure_Mode :: enum u8 {
 	On,
 	Startup,
 	Memory,
+	Frames,
 }
 
 Mark :: enum u8 {
@@ -90,6 +94,24 @@ Measure :: struct {
 	running:      bool,
 	stop:         bool, // atomic
 	sema:         sync.Sema, // posted to stop the thread early
+	frame_time:   f64, // the frame being measured's Frame_Input.time
+	frames:       Frame_Samples,
+}
+
+MAX_FRAME_SAMPLES :: 1024
+
+// Frame_Samples is one bench phase's frames, for the frames scenario.
+Frame_Samples :: struct {
+	phase:    int, // the bench phase they're from, -1 before the first
+	last:     f64, // the frame before's time, 0 for none in the phase
+	count:    int,
+	interval: [MAX_FRAME_SAMPLES]f32, // ms since the frame before
+	cpu:      [MAX_FRAME_SAMPLES]f32, // ms building and encoding the frame, not counting the waits
+	gpu:      [MAX_FRAME_SAMPLES]f32, // ms the GPU took, render.Renderer.gpu_ms
+	// ms the frame spent waiting for the GPU to finish with its slot and for
+	// a drawable
+	slot_wait:     [MAX_FRAME_SAMPLES]f32,
+	drawable_wait: [MAX_FRAME_SAMPLES]f32,
 }
 
 Process_Memory :: struct {
@@ -115,6 +137,8 @@ measure_mode :: proc(value: string) -> Measure_Mode {
 		return .Startup
 	case "memory":
 		return .Memory
+	case "frames":
+		return .Frames
 	}
 	return .On
 }
@@ -150,7 +174,7 @@ measure_unload :: proc(s: ^State) {
 
 @(private = "file")
 measure_thread_start :: proc(m: ^Measure) {
-	if m.mode == .Memory && m.stage != .Done && !m.running {
+	if (m.mode == .Memory || m.mode == .Frames) && m.stage != .Done && !m.running {
 		m.running = posix.pthread_create(&m.thread, nil, measure_thread, m) == .NONE
 	}
 }
@@ -219,6 +243,8 @@ measure_frame :: proc(s: ^State) {
 		}
 	case .Memory:
 		measure_step(s)
+	case .Frames:
+		measure_frames_step(s)
 	}
 }
 
@@ -309,6 +335,91 @@ measure_step :: proc(s: ^State) {
 		}
 	case .Done:
 	}
+}
+
+// The frames scenario: once the first track rows show and settle, scroll
+// the fake data's list with the library bench, and for each phase it
+// measures print the frame rate and the CPU and GPU time a frame took. The
+// bench asks for the next frame as soon as one is done, so the frame rate
+// is what the display and the GPU let through. The CPU time leaves out the
+// waits for the GPU and for a drawable, which go with the window and the
+// display more than with the frame. The GPU time is of a frame or two
+// before (render.Renderer.gpu_ms).
+@(private = "file")
+measure_frames_step :: proc(s: ^State) {
+	m := &s.measure
+	switch m.stage {
+	case .Startup:
+		if .Tracks in m.marks {
+			measure_wait(m, .Startup_Idle, SETTLE_WAIT)
+		}
+	case .Startup_Idle:
+		if m.deadline != {} && time.tick_since(m.deadline) >= 0 {
+			s.bench = {running = true, ui = true}
+			m.frames = {phase = -1}
+			measure_wait(m, .Scroll, 0)
+		}
+	case .Scroll:
+		// The frame just drawn, before bench_record moves the bench on.
+		b := &s.bench
+		phases := bench_phases(b)
+		if !b.running || b.phase >= len(phases) {
+			return
+		}
+		f := &m.frames
+		if b.phase != f.phase {
+			frames_flush(s)
+			f^ = {phase = b.phase}
+		}
+		phase := phases[b.phase]
+		if phase.name != "settle" && b.frame >= phase.skip && f.count < MAX_FRAME_SAMPLES {
+			if f.last > 0 {
+				f.interval[f.count] = f32((m.frame_time - f.last) * 1000)
+				r := &s.renderer
+				waited := r.slot_wait_ms + r.drawable_wait_ms
+				f.cpu[f.count] = max(s.frame_ms[(s.frame_count + FRAME_HISTORY - 1) % FRAME_HISTORY] - waited, 0)
+				f.gpu[f.count] = r.gpu_ms
+				f.slot_wait[f.count] = r.slot_wait_ms
+				f.drawable_wait[f.count] = r.drawable_wait_ms
+				f.count += 1
+			}
+			f.last = m.frame_time
+		}
+		if b.phase == len(phases) - 1 && b.frame == phase.frames - 1 {
+			frames_flush(s)
+			m.stage = .Done
+			measure_quit()
+		}
+	case .Open_List, .List_Open, .Scrolled, .Play, .Playing, .Idle_After, .Done:
+	}
+}
+
+// frames_flush prints the frames recorded for a phase: their count, the
+// frame rate, the 95th percentile of the time between frames, and the
+// median and 95th percentile of the CPU time spent working on a frame, of
+// the GPU's time, and of the two waits left out of the CPU time.
+@(private = "file")
+frames_flush :: proc(s: ^State) {
+	f := &s.measure.frames
+	if f.phase < 0 || f.count == 0 {
+		return
+	}
+	pct :: proc(values: []f32, q: f32) -> f32 {
+		sorted := slice.clone(values, context.temp_allocator)
+		slice.sort(sorted)
+		return sorted[min(int(q * f32(len(sorted) - 1) + 0.5), len(sorted) - 1)]
+	}
+	n := f.count
+	total: f64
+	for v in f.interval[:n] {
+		total += f64(v)
+	}
+	buf: [768]u8
+	measure_write(fmt.bprintf(buf[:], `{{"frames":"%s","count":%d,"fps":%.1f,"interval_p95":%.2f,"cpu_median":%.3f,"cpu_p95":%.3f,"gpu_median":%.3f,"gpu_p95":%.3f,` +
+		`"slot_wait_median":%.3f,"slot_wait_p95":%.3f,"drawable_wait_median":%.3f,"drawable_wait_p95":%.3f}}`,
+		bench_phases(&s.bench)[f.phase].name, n, f64(n) * 1000 / max(total, 1e-6), pct(f.interval[:n], 0.95),
+		pct(f.cpu[:n], 0.5), pct(f.cpu[:n], 0.95), pct(f.gpu[:n], 0.5), pct(f.gpu[:n], 0.95),
+		pct(f.slot_wait[:n], 0.5), pct(f.slot_wait[:n], 0.95), pct(f.drawable_wait[:n], 0.5), pct(f.drawable_wait[:n], 0.95)))
 }
 
 // measure_wait moves to stage, whose wait ends after wait (none for 0).

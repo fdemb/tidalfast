@@ -1,7 +1,7 @@
 package app
 
-// Settings: the volume, shuffle and repeat, bit-perfect output, hog mode
-// and how lists show their scrollbars. They live in a small JSON file, ~/Library/Application Support/tidalfast/settings.json, or
+// Settings: the volume, shuffle and repeat, bit-perfect output, hog mode,
+// how lists show their scrollbars and whether the player bar blurs them. They live in a small JSON file, ~/Library/Application Support/tidalfast/settings.json, or
 // wherever TIDALFAST_SETTINGS points. The fake data has none unless
 // TIDALFAST_SETTINGS points to one, and a mock run without a mock URL has
 // none (run_decide). A worker writes it, so a click never
@@ -34,6 +34,7 @@ Settings :: struct {
 	hog:         bool,
 	device:      audio.Device_Change, // rate 0 when no device is changed
 	scrollbars:  ui.Scrollbars,
+	bar:         Player_Bar,
 	volume:      f32, // 0 to 1
 	shuffle:     bool,
 	repeat:      audio.Repeat,
@@ -41,12 +42,20 @@ Settings :: struct {
 
 VOLUME_DEFAULT :: 0.7
 
+// Player_Bar is how the player bar sits on the views, where the renderer
+// has backdrops (render.BACKDROPS).
+Player_Bar :: enum u8 {
+	Blurred, // over their bottoms, blurring them
+	Solid, // under them
+}
+
 // Settings_File is Settings as the JSON in the file.
 @(private = "file")
 Settings_File :: struct {
 	bit_perfect:   bool,
 	hog:           bool,
 	scrollbars:    ui.Scrollbars,
+	bar:           Player_Bar,
 	device_change: Maybe(Device_Change_File) `json:"device_change,omitempty"`,
 	volume:        Maybe(f32) `json:"volume,omitempty"`, // missing in files from before it was saved
 	shuffle:       bool,
@@ -83,7 +92,7 @@ settings_decode_json :: proc(data: []u8) -> (st: Settings, ok: bool) {
 	if json.unmarshal(data, &f, allocator = context.temp_allocator) != nil {
 		return {volume = VOLUME_DEFAULT}, false
 	}
-	st = {bit_perfect = f.bit_perfect, hog = f.hog, scrollbars = f.scrollbars, volume = clamp(f.volume.? or_else VOLUME_DEFAULT, 0, 1), shuffle = f.shuffle, repeat = f.repeat}
+	st = {bit_perfect = f.bit_perfect, hog = f.hog, scrollbars = f.scrollbars, bar = f.bar, volume = clamp(f.volume.? or_else VOLUME_DEFAULT, 0, 1), shuffle = f.shuffle, repeat = f.repeat}
 	if c, has := f.device_change.?; has && c.rate != 0 && len(c.uid) <= len(st.device.uid) {
 		st.device = {orig_rate = c.orig_rate, orig_format = c.orig_format, rate = c.rate}
 		st.device.uid_len = copy(st.device.uid[:], c.uid)
@@ -104,6 +113,7 @@ settings_save :: proc(path: string, st: Settings) -> bool {
 		bit_perfect = st.bit_perfect,
 		hog         = st.hog,
 		scrollbars  = st.scrollbars,
+		bar         = st.bar,
 		volume      = st.volume,
 		shuffle     = st.shuffle,
 		repeat      = st.repeat,
@@ -318,6 +328,22 @@ draw_settings_button :: proc(s: ^State) {
 			if item.clicked {
 				s.settings.scrollbars = mode
 				settings_queue(&s.data, settings_to_save(s))
+			}
+		}
+		if render.BACKDROPS {
+			ui.text_style(.Regular, 11, DIM)
+			heading = ui.label("Player bar", ui.fill(), ui.px(24))
+			heading.text_pad = 14
+			ui.text_style(.Regular, 13, TEXT)
+			for mode in Player_Bar {
+				on := s.settings.bar == mode
+				name := fmt.tprint(mode)
+				item := ui.menu_item(fmt.tprintf("%s %s###bar_%s", "✓" if on else "   ", name, name))
+				ui.accessible(item.box, .Menu_Item, name, selected = on)
+				if item.clicked {
+					s.settings.bar = mode
+					settings_queue(&s.data, settings_to_save(s))
+				}
 			}
 		}
 	}

@@ -3,7 +3,7 @@
 // tests/abi_test.odin compares their field offsets.
 package platform
 
-ABI_VERSION :: 6
+ABI_VERSION :: 7
 
 Event_Kind :: enum u32 {
 	None,
@@ -236,8 +236,12 @@ Shell :: struct {
 	get_clipboard:     proc "c" (buffer: [^]u8, capacity: uint) -> uint,
 	// The shell copies the nodes and their strings.
 	set_accessibility: proc "c" (nodes: [^]Access_Node, count: u32),
+	// Where a press moves the window, as x, y, w, h in view points: the
+	// empty parts of the titlebar the view draws under. The shell copies
+	// them. nil on Linux.
+	set_drag_regions:  proc "c" (rects: [^][4]f32, count: u32),
 }
-#assert(size_of(Shell) == 56)
+#assert(size_of(Shell) == 64)
 
 Frame_Input :: struct {
 	events:        [^]Event,
@@ -251,7 +255,12 @@ Frame_Input :: struct {
 	// Held down now, whichever app got the events, so the UI can drop a press
 	// whose release went elsewhere.
 	mouse_buttons: Mouse_Buttons,
-	_:             u32,
+	// The window's buttons sit over the view's top titlebar_height points,
+	// and end titlebar_inset points from its left edge. Both 0 when the
+	// window has its own titlebar, or none, as in full screen.
+	titlebar_height: f32,
+	titlebar_inset:  f32,
+	_:               u32,
 }
 
 Frame_Result :: struct {
@@ -274,7 +283,7 @@ App_API :: struct {
 	shutdown:    proc "c" (mem: ^Memory),
 	frame:       proc "c" (mem: ^Memory, shell: ^Shell, input: ^Frame_Input) -> Frame_Result,
 }
-#assert(size_of(Frame_Input) == 56)
+#assert(size_of(Frame_Input) == 64)
 #assert(size_of(Frame_Result) == 8)
 #assert(size_of(App_API) == 48)
 

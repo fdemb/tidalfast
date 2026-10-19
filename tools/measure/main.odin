@@ -6,6 +6,7 @@
 //     ./build/measure/measure startup            fake and mock, 10 runs each
 //     ./build/measure/measure memory             fake and mock, 1 run each
 //     ./build/measure/measure all
+//     ./build/measure/measure frames             fake, 3 runs
 //     ./build/measure/measure compare a.json b.json
 //     ./build/measure/measure ab main            this checkout against main, taking turns
 //     ./build/measure/measure launches           the app's own log of real launches
@@ -74,7 +75,7 @@ main :: proc() {
 		}
 		base = args[1]
 		args = args[1:]
-	} else if scenario != "startup" && scenario != "memory" && scenario != "all" {
+	} else if scenario != "startup" && scenario != "memory" && scenario != "all" && scenario != "frames" {
 		usage()
 	}
 
@@ -83,7 +84,8 @@ main :: proc() {
 		out_dir = exe_dir,
 		root    = clean(join(exe_dir, "..", "..")),
 	}
-	setups_flag := "fake,mock"
+	// The frames scenario scrolls the fake data only.
+	setups_flag := "fake" if scenario == "frames" else "fake,mock"
 	for arg in args[1:] {
 		name, _, value := strings.partition(arg, "=")
 		switch name {
@@ -177,6 +179,18 @@ main :: proc() {
 			}
 			add_memory(&results, setup, runs[:])
 		}
+		if scenario == "frames" {
+			if setup != "fake" {
+				fmt.printfln("frames runs with the fake data only, not %s", setup)
+				continue
+			}
+			n := frames_runs(&cfg)
+			runs := make([dynamic][]Line)
+			for i in 0 ..< n {
+				append(&runs, run_once(&cfg, &side, setup, "frames", i, n))
+			}
+			add_frames(&results, setup, runs[:])
+		}
 	}
 
 	if has_mock {
@@ -198,7 +212,7 @@ main :: proc() {
 }
 
 usage :: proc() {
-	fmt.eprintln(`usage: measure startup|memory|all [-runs=N] [-setup=fake,mock] [-app=path] [-timeout=s] [-out=path] [-real]
+	fmt.eprintln(`usage: measure startup|memory|all|frames [-runs=N] [-setup=fake,mock] [-app=path] [-timeout=s] [-out=path] [-real]
        measure ab <git ref> [-runs=N] [-setup=fake,mock] [-timeout=s] [-out=path]
        measure compare a.json b.json
        measure launches [launches.jsonl]`)
@@ -207,6 +221,10 @@ usage :: proc() {
 
 startup_runs :: proc(cfg: ^Config) -> int {
 	return cfg.runs if cfg.runs > 0 else 10
+}
+
+frames_runs :: proc(cfg: ^Config) -> int {
+	return cfg.runs if cfg.runs > 0 else 3
 }
 
 // run_once launches side's app once, run i of n, and returns its lines. A
@@ -225,9 +243,13 @@ run_once :: proc(cfg: ^Config, side: ^Side, setup, scenario: string, i, n: int) 
 	lines := parse_log(log)
 	last := "tracks" if scenario == "startup" else "idle_after"
 	reached: bool
-	if scenario == "startup" {
+	switch scenario {
+	case "startup":
 		_, reached = find_mark(lines, last)
-	} else {
+	case "frames":
+		last = FRAME_PHASES[len(FRAME_PHASES) - 1]
+		_, reached = find_frames(lines, last)
+	case:
 		_, reached = find_sample(lines, last)
 	}
 	for &l in lines {

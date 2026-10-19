@@ -112,11 +112,14 @@ link :: proc(id: string, hot_color: render.Color, height: Size = {}, pad: f32 = 
 
 // scroll_view is a clipped box that scrolls its children vertically, and
 // the parent until the end of the scope. It has a scrollbar while its
-// content is taller than it, drawn as State.scrollbars says.
+// content is taller than it, drawn as State.scrollbars says. inset_end is
+// how much of its bottom something else covers: the content can scroll up
+// clear of it, and the scrollbar and scroll_to keep above it.
 @(deferred_out = scroll_view_end)
-scroll_view :: proc(id: string, width, height: Size, flags: Box_Flags = {}) -> ^Box {
+scroll_view :: proc(id: string, width, height: Size, flags: Box_Flags = {}, inset_end: f32 = 0) -> ^Box {
 	b := box_make(id, {.View_Scroll, .Clip, .Allow_Overflow_Y} + flags, width, height)
 	b.child_axis = .Y
+	b.inset_end = inset_end
 	if b.key != 0 {
 		scrollbar_drag(b)
 		b.gutter = gutter_of(b)
@@ -165,7 +168,7 @@ Thumb :: struct {
 
 @(private)
 thumb_of :: proc(view: ^Box) -> (t: Thumb, ok: bool) {
-	content, h := view.view_bounds.y, view.rect.h
+	content, h := view.view_bounds.y - view.inset_end, view.rect.h - view.inset_end
 	if content <= h || h <= 0 {
 		return {}, false
 	}
@@ -255,7 +258,7 @@ scrollbar :: proc(view: ^Box) {
 	if view.bar_t > 0 {
 		flags += {.Clickable}
 	}
-	bar := box_make("###scrollbar", flags, px(SCROLLBAR_TRACK), px(view.rect.h))
+	bar := box_make("###scrollbar", flags, px(SCROLLBAR_TRACK), px(view.rect.h - view.inset_end))
 	bar.fixed_pos = {view.rect.w - SCROLLBAR_TRACK, view.view_off.y}
 	bar.opacity = view.bar_t
 	push_parent(bar)
@@ -300,10 +303,11 @@ virtual_rows :: proc(view: ^Box, count: int, row_h: f32) -> Virtual_Rows {
 // content.
 scroll_to :: proc(view: ^Box, y0, y1: f32) {
 	t := &view.view_off_target.y
+	h := view.rect.h - view.inset_end
 	if y0 < t^ {
 		t^ = y0
-	} else if y1 > t^ + view.rect.h {
-		t^ = y1 - view.rect.h
+	} else if y1 > t^ + h {
+		t^ = y1 - h
 	}
 	t^ = clamp(t^, 0, max(view.view_bounds.y - view.rect.h, 0))
 	ctx.animating = true

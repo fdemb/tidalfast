@@ -57,6 +57,10 @@ SIDEBAR_DEFAULT :: 250
 MAIN_MIN :: 360 // the sidebar stops growing before the main view gets narrower
 HANDLE_W :: 5
 PLAYER_BAR_H :: 88
+// The player bar's blur of the views under it.
+BAR_BLUR :: 20
+BAR_SATURATION :: 1.8
+BAR_TINT :: render.Color{PANEL.r, PANEL.g, PANEL.b, 0.75}
 TRACK_ROW_H :: 56
 PLAYLIST_ROW_H :: 56
 HEADER_H :: 34
@@ -172,23 +176,29 @@ draw_library :: proc(s: ^State, w, h: f32) {
 	bg.background = WINDOW_BG
 	bg.child_axis = .Y
 	ui.parent(bg)
-	draw_login_notice(s)
 	{
 		ui.row("body", {}, ui.fill(), ui.fill())
 		draw_sidebar(s)
 		draw_sidebar_handle(s, w)
 		draw_main_view(s, w - lib.sidebar_w - HANDLE_W)
 	}
-	draw_player_bar(s, w)
+	if !s.blur_reference {
+		draw_player_bar(s, w, h)
+	}
 	draw_track_menu(s)
 	draw_drag_ghost(s)
 }
 
 // draw_history_buttons is Back and Forward through the places visited
-// (History), at the top of the sidebar.
+// (History), at the top of the sidebar: in the titlebar after the window's
+// buttons when the window has none of its own.
 draw_history_buttons :: proc(s: ^State) {
-	ui.row("", {}, ui.fill(), ui.px(32))
-	ui.spacer(ui.px(10))
+	ui.row("", {}, ui.fill(), ui.px(s.titlebar_h if s.titlebar_h > 0 else 32))
+	if s.titlebar_h > 0 {
+		titlebar_space(ui.px(s.titlebar_inset + 12))
+	} else {
+		ui.spacer(ui.px(10))
+	}
 	if history_button(text.ICON_CARET_LEFT + "###back", "Back", history_can_back(s)).clicked {
 		pending_set(s, {kind = .Back})
 	}
@@ -196,6 +206,31 @@ draw_history_buttons :: proc(s: ^State) {
 	if history_button(text.ICON_CARET_RIGHT + "###forward", "Forward", history_can_forward(s)).clicked {
 		pending_set(s, {kind = .Forward})
 	}
+	if s.titlebar_h > 0 {
+		titlebar_space(ui.fill())
+	}
+}
+
+// hero_under_titlebar is how far the artist page's picture runs up under
+// the titlebar: all of it, unless the login notice is above the page.
+hero_under_titlebar :: proc(s: ^State) -> f32 {
+	p := artist_place(s)
+	if p == nil || p.artist_view != nil || login_notice_shown(s) {
+		return 0
+	}
+	return s.titlebar_h
+}
+
+// bar_inset is how much of a view that reaches the window's bottom the
+// player bar covers.
+bar_inset :: proc(s: ^State) -> f32 {
+	return PLAYER_BAR_H if s.bar_over_content else 0
+}
+
+// titlebar_space is empty room in a row of the titlebar, which moves the
+// window like the titlebar does.
+titlebar_space :: proc(width: ui.Size) {
+	ui.box_make("", {.Window_Drag}, width, ui.fill())
 }
 
 history_button :: proc(id, name: string, enabled: bool) -> ui.Signal {
@@ -234,7 +269,7 @@ draw_sidebar :: proc(s: ^State) {
 		ui.spacer(ui.px(10))
 	}
 	draw_search_field(s)
-	list := ui.scroll_view("playlists", ui.fill(), ui.fill())
+	list := ui.scroll_view("playlists", ui.fill(), ui.fill(), inset_end = bar_inset(s))
 	ui.accessible(list, .List, "Playlists")
 	for i in 0 ..< sidebar_count(s) {
 		entry := sidebar_entry(s, i)
@@ -276,7 +311,9 @@ draw_sidebar_handle :: proc(s: ^State, window_w: f32) {
 	if sig.held || sig.released {
 		lib.sidebar_w = clamp(lib.drag_from_w + sig.drag_delta.x, SIDEBAR_MIN, sidebar_limit(window_w))
 	}
-	ui.spacer(ui.px(2))
+	// The sidebar's background runs up to the line.
+	side := ui.box_make("", {.Draw_Background}, ui.px(2), ui.fill())
+	side.background = PANEL
 	line := ui.box_make("", {.Draw_Background}, ui.px(1), ui.fill())
 	t := max(handle.hot_t, handle.active_t)
 	line.background = mix(OUTLINE, ACCENT, t)
@@ -292,6 +329,14 @@ draw_main_view :: proc(s: ^State, main_w: f32) {
 	// track's count of minute digits.
 	cols.duration = max(cols.duration, ui.counter_width(.Regular, 13, fmt.tprintf("%d:00", max(s.data.view.longest / 60, 10))) + 2 * CELL_PAD)
 	ui.column("main", {.Clip}, ui.fill(), ui.fill())
+	if s.titlebar_h > 0 {
+		// Over the artist page's picture, or above the other views.
+		strip := ui.box_make("", {.Window_Drag}, ui.px(main_w), ui.px(s.titlebar_h))
+		if hero_under_titlebar(s) > 0 {
+			strip.flags += {.Floating_X, .Floating_Y}
+		}
+	}
+	draw_login_notice(s)
 	if p := artist_place(s); p != nil {
 		if _, table := p.artist_view.(Artist_Top_Tracks); !table {
 			draw_artist(s, p, main_w)
@@ -347,7 +392,7 @@ draw_main_view :: proc(s: ^State, main_w: f32) {
 		ui.spacer(ui.px(16))
 	}
 
-	list := ui.scroll_view("tracks", ui.fill(), ui.fill(), {.Focusable})
+	list := ui.scroll_view("tracks", ui.fill(), ui.fill(), {.Focusable}, bar_inset(s))
 	ui.accessible(list, .Table, view_title(s))
 	if s.bench.running && s.bench.ui {
 		list.view_off.y = bench_offset(s, list.rect.h)
@@ -744,9 +789,17 @@ draw_drag_ghost :: proc(s: ^State) {
 	b.text_pad = 12
 }
 
-draw_player_bar :: proc(s: ^State, w: f32) {
-	bar := ui.column("player", {.Draw_Background}, ui.fill(), ui.px(PLAYER_BAR_H))
+draw_player_bar :: proc(s: ^State, w, h: f32) {
+	bar := ui.column("player", {.Draw_Background}, ui.px(w), ui.px(PLAYER_BAR_H))
 	bar.background = PANEL
+	if s.bar_over_content {
+		// Over the bottom of the views, blurring them. Clickable so a press
+		// on it doesn't reach the row under it.
+		bar.flags += {.Draw_Backdrop, .Clickable, .Floating_X, .Floating_Y}
+		bar.fixed_pos = {0, h - PLAYER_BAR_H}
+		bar.background = BAR_TINT
+		bar.backdrop = {blur = BAR_BLUR, saturation = BAR_SATURATION}
+	}
 	line := ui.box_make("", {.Draw_Background}, ui.fill(), ui.px(1))
 	line.background = OUTLINE
 	ui.row("", {}, ui.fill(), ui.fill())

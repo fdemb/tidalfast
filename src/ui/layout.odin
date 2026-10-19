@@ -175,6 +175,9 @@ position :: proc(b: ^Box, axis: Axis) {
 			c.rect.h = c.fixed_size.y
 		}
 	}
+	if axis == .Y {
+		bounds += b.inset_end
+	}
 	b.view_bounds[axis] = bounds
 	for c := b.first; c != nil; c = c.next {
 		position(c, axis)

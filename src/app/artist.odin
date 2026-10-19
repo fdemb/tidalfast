@@ -157,7 +157,7 @@ draw_artist :: proc(s: ^State, p: ^Pending, main_w: f32) {
 		draw_artist_grid(s, page, grid.part, content_w)
 		return
 	}
-	view := ui.scroll_view(fmt.tprintf("artist##%d", page.id), ui.fill(), ui.fill())
+	view := ui.scroll_view(fmt.tprintf("artist##%d", page.id), ui.fill(), ui.fill(), inset_end = bar_inset(s))
 	ui.accessible(view, .Group, small_str(&page.name))
 	draw_artist_hero(s, page, main_w, content_w)
 	centred(content_w)
@@ -336,7 +336,7 @@ draw_artist_hero :: proc(s: ^State, page: ^Artist_Page, main_w, content_w: f32) 
 	bio := artist_bio(page)
 	lines := artist_bio_lines(s, page, min(content_w, BIO_W) - 2 * CARD_PAD - 48)
 	shown := len(lines) if page.bio.open else min(len(lines), BIO_LINES)
-	hero_h := HERO_H + f32(max(shown - BIO_LINES, 0)) * BIO_LINE_H
+	hero_h := HERO_H + f32(max(shown - BIO_LINES, 0)) * BIO_LINE_H + hero_under_titlebar(s)
 	ui.column("hero", {.Clip}, ui.fill(), ui.px(hero_h))
 	hero_background(s, page, main_w, hero_h)
 	ui.spacer(ui.fill())

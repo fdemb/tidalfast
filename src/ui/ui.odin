@@ -84,6 +84,8 @@ Box_Flag :: enum u32 {
 	Draw_Hot_Underline, // the label is underlined while hot
 	Text_Input, // a text field: with the focus it takes Return, Space, the arrows and Escape
 	Click_On_Release, // clicked on a release over it rather than on the press, for drag sources
+	Window_Drag, // empty titlebar space: a press there moves the window, see drag_regions
+	Draw_Backdrop, // background over a blur of what's under the box, see render.push_backdrop
 }
 Box_Flags :: bit_set[Box_Flag; u32]
 
@@ -123,6 +125,7 @@ Build :: struct {
 	fixed_pos:                 [2]f32, // relative to the parent
 	fixed_size:                [2]f32,
 	gutter:                    f32, // points at the right that children's widths leave out
+	inset_end:                 f32, // a scroll view's bottom under something drawn over it, see scroll_view
 	id:                        string, // as given; must live until end_frame
 	label:                     string, // the part of id before "##"
 	font:                      text.Font,
@@ -131,6 +134,7 @@ Build :: struct {
 	text_align:                Align,
 	text_pad:                  f32, // left and right of the label
 	background:                render.Color,
+	backdrop:                  Backdrop, // with Draw_Backdrop, background tints it
 	gradient:                  render.Color, // bottom colour of the background, when its alpha isn't 0
 	border_color:              render.Color,
 	hover_color:               render.Color,
@@ -147,6 +151,12 @@ Build :: struct {
 	access_label:              string,
 	access_value:              string,
 	access_selected:           bool,
+}
+
+// Backdrop is the blur a Draw_Backdrop box draws its background over.
+Backdrop :: struct {
+	blur:       f32, // points it reaches
+	saturation: f32, // 1 keeps the colours
 }
 
 Signal :: struct {
@@ -224,6 +234,8 @@ State :: struct {
 	box_count:      int,
 	hits:           []Hit,
 	hit_count:      int,
+	drag_rects:     [8]render.Rect, // the Window_Drag boxes, from end_frame
+	drag_count:     int,
 
 	frame:          u64,
 	time:           f64,
@@ -953,6 +965,7 @@ end_frame :: proc() -> bool {
 	layout(u.root)
 	layout(u.floating_root)
 	u.hit_count = 0
+	u.drag_count = 0
 	mismatch := false
 	finish(u, u.root, {0, 0, u.width, u.height}, 0, 0, false, false, &mismatch)
 	finish(u, u.floating_root, {0, 0, u.width, u.height}, 0, 0, true, false, &mismatch)
@@ -1047,6 +1060,10 @@ finish :: proc(u: ^State, b: ^Box, clip: render.Rect, focus_parent, click_parent
 		}
 		u.hit_count += 1
 	}
+	if .Window_Drag in b.flags && u.drag_count < len(u.drag_rects) {
+		u.drag_rects[u.drag_count] = b.clip
+		u.drag_count += 1
+	}
 	inner := rect_intersect(clip, b.rect) if .Clip in b.flags else clip
 	fp := b.key if .Focusable in b.flags && b.key != 0 else focus_parent
 	cp := b.key if .Clickable in b.flags && b.key != 0 else click_parent
@@ -1079,6 +1096,9 @@ reveal_focus :: proc(u: ^State) {
 			}
 			done[axis] = true
 			t := v.view_off_target[axis]
+			if axis == 1 {
+				view.y -= v.inset_end
+			}
 			if pos[axis] < t {
 				t = pos[axis]
 			} else if pos[axis] + size[axis] > t + view[axis] {
@@ -1474,6 +1494,12 @@ text_input :: proc(u: ^State) -> (input: platform.Text_Input, changed: bool) {
 	u.text_sent = h
 	u.text_resend = false
 	return
+}
+
+// drag_regions is where a press moves the window, for the shell, valid
+// after end_frame until the next begin_frame.
+drag_regions :: proc(u: ^State) -> []render.Rect {
+	return u.drag_rects[:u.drag_count]
 }
 
 // access_tree is this frame's accessibility tree and a hash of it, valid

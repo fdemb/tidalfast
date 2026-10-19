@@ -18,6 +18,8 @@ package app
 
 import "base:runtime"
 import "core:fmt"
+import "core:hash"
+import "core:mem"
 import vmem "core:mem/virtual"
 import "core:log"
 import "core:slice"
@@ -579,7 +581,7 @@ found_at :: proc(s: ^State, tab: Search_Tab, i: int) -> Found {
 draw_found_list :: proc(s: ^State) {
 	sr := &s.search
 	tab := sr.tab
-	list := ui.scroll_view("found", ui.fill(), ui.fill())
+	list := ui.scroll_view("found", ui.fill(), ui.fill(), inset_end = bar_inset(s))
 	ui.accessible(list, .List, fmt.tprintf("%v", tab))
 	n := found_count(s, tab)
 	rows := ui.virtual_rows(list, n, TRACK_ROW_H)
@@ -817,8 +819,8 @@ fake_count :: proc(s: ^State) -> (n: int, listed: bool) {
 
 // Shell
 
-// shell_update tells the shell about the focused text field and the
-// accessibility tree when they changed. Run it after ui.end_frame.
+// shell_update tells the shell about the focused text field, the
+// accessibility tree and the drag regions when they changed. Run it after ui.end_frame.
 shell_update :: proc(s: ^State, shell: ^platform.Shell) {
 	if input, changed := ui.text_input(&s.ui); changed && shell.set_text_input != nil {
 		shell.set_text_input(&input)
@@ -827,5 +829,10 @@ shell_update :: proc(s: ^State, shell: ^platform.Shell) {
 	if h != s.access_sent && shell.set_accessibility != nil {
 		shell.set_accessibility(raw_data(nodes), u32(len(nodes)))
 		s.access_sent = h
+	}
+	rects := ui.drag_regions(&s.ui)
+	if dh := hash.fnv64a(mem.slice_to_bytes(rects)); dh != s.drag_sent && shell.set_drag_regions != nil {
+		shell.set_drag_regions(cast([^][4]f32)raw_data(rects), u32(len(rects)))
+		s.drag_sent = dh
 	}
 }

@@ -395,6 +395,13 @@ settings_persistence :: proc(t: ^testing.T) {
 	testing.expect(t, ok)
 	testing.expect_value(t, st, app.Settings{hog = true, volume = 0.7})
 
+	// The player bar too, by name; a file from before it has it blurred.
+	testing.expect(t, app.settings_save(path, {bar = .Solid}))
+	data, _ = os.read_entire_file(path, context.temp_allocator)
+	testing.expect(t, strings.contains(string(data), `"bar": "Solid"`))
+	st, _ = app.settings_load(path)
+	testing.expect_value(t, st, app.Settings{bar = .Solid})
+
 	// Shuffle and repeat too; a file from before them has both off.
 	testing.expect(t, app.settings_save(path, {shuffle = true, repeat = .One}))
 	data, _ = os.read_entire_file(path, context.temp_allocator)

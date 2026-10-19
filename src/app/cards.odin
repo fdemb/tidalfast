@@ -167,7 +167,7 @@ card_grid :: proc(s: ^State, id, title: string, items: []Found, source: Source, 
 	n := len(items)
 	row_h := f32(CARD_H + GRID_ROW_GAP)
 	kind := cover.Kind.Artist if source == .Artist else .Album
-	view := ui.scroll_view(id, ui.fill(), ui.fill())
+	view := ui.scroll_view(id, ui.fill(), ui.fill(), inset_end = bar_inset(s))
 	ui.accessible(view, .List, title)
 	rows := ui.virtual_rows(view, (n + cols - 1) / cols, row_h)
 	for r in rows.first ..< rows.last {

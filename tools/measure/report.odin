@@ -41,6 +41,19 @@ Line :: struct {
 	cycles:             f64,
 	ui_instructions:    f64,
 	ui_cycles:          f64,
+	// The frames scenario: one line per bench phase.
+	frames:             string,
+	count:              f64,
+	fps:                f64,
+	interval_p95:       f64,
+	cpu_median:         f64,
+	cpu_p95:            f64,
+	gpu_median:         f64,
+	gpu_p95:            f64,
+	slot_wait_median:   f64,
+	slot_wait_p95:      f64,
+	drawable_wait_median: f64,
+	drawable_wait_p95:  f64,
 }
 
 // The marks in the order they happen. The shell prints main, launched,
@@ -49,6 +62,25 @@ MARKS := [?]string{"main", "launched", "dylib", "init", "window", "first_frame",
 
 // The memory scenario's samples in order.
 STAGES := [?]string{"startup_idle", "list_open", "scrolled", "playing", "idle_after"}
+
+// The frames scenario's bench phases in order, and its fields with their
+// units. More fps is better; less of the rest.
+FRAME_PHASES := [?]string{"warm", "cold", "jump"}
+
+FRAME_FIELDS := [?]struct {
+	name, unit: string,
+} {
+	{"fps", "fps"},
+	{"interval_p95", "ms"},
+	{"cpu_median", "ms"},
+	{"cpu_p95", "ms"},
+	{"gpu_median", "ms"},
+	{"gpu_p95", "ms"},
+	{"slot_wait_median", "ms"},
+	{"slot_wait_p95", "ms"},
+	{"drawable_wait_median", "ms"},
+	{"drawable_wait_p95", "ms"},
+}
 
 // Memory fields kept per sample: name in the line, and whether it's bytes
 // (reported in MB) or a count.
@@ -97,6 +129,17 @@ line_field :: proc(l: ^Line, name: string) -> f64 {
 	case "cycles":             return l.cycles
 	case "ui_instructions":    return l.ui_instructions
 	case "ui_cycles":          return l.ui_cycles
+	case "count":              return l.count
+	case "fps":                return l.fps
+	case "interval_p95":       return l.interval_p95
+	case "cpu_median":         return l.cpu_median
+	case "cpu_p95":            return l.cpu_p95
+	case "gpu_median":         return l.gpu_median
+	case "gpu_p95":            return l.gpu_p95
+	case "slot_wait_median":   return l.slot_wait_median
+	case "slot_wait_p95":      return l.slot_wait_p95
+	case "drawable_wait_median": return l.drawable_wait_median
+	case "drawable_wait_p95":  return l.drawable_wait_p95
 	}
 	return 0
 }
@@ -139,6 +182,15 @@ find_mark :: proc(lines: []Line, name: string) -> (^Line, bool) {
 find_sample :: proc(lines: []Line, name: string) -> (^Line, bool) {
 	for &l in lines {
 		if l.sample == name {
+			return &l, true
+		}
+	}
+	return nil, false
+}
+
+find_frames :: proc(lines: []Line, phase: string) -> (^Line, bool) {
+	for &l in lines {
+		if l.frames == phase {
 			return &l, true
 		}
 	}
@@ -273,6 +325,24 @@ add_memory :: proc(r: ^Results, setup: string, runs: [][]Line) {
 	}
 }
 
+// add_frames sums up a setup's frames runs: each phase's fields, the
+// median over the runs.
+add_frames :: proc(r: ^Results, setup: string, runs: [][]Line) {
+	for phase in FRAME_PHASES {
+		for field in FRAME_FIELDS {
+			values := make([dynamic]f64, context.temp_allocator)
+			for run in runs {
+				if l, ok := find_frames(run, phase); ok {
+					append(&values, line_field(l, field.name))
+				}
+			}
+			if len(values) > 0 {
+				append(&r.metrics, Metric{"frames", setup, phase, field.name, field.unit, stats(values[:]).median})
+			}
+		}
+	}
+}
+
 find_metric :: proc(metrics: []Metric, scenario, setup, row, field: string) -> (f64, bool) {
 	for m in metrics {
 		if m.scenario == scenario && m.setup == setup && m.row == row && m.field == field {
@@ -337,6 +407,25 @@ write_tables :: proc(b: ^strings.Builder, r: ^Results) {
 		}
 		fmt.sbprintln(b)
 	}
+	for setup in setups(r.metrics[:], "frames") {
+		fmt.sbprintfln(b, "frames, %s: the library bench's phases, medians over the runs; times in ms, cpu without the waits", setup)
+		fmt.sbprintfln(b, "  %-6s %7s %13s %10s %8s %10s %8s %9s", "phase", "fps", "interval p95", "cpu median", "cpu p95", "gpu median", "gpu p95", "wait p95")
+		for phase in FRAME_PHASES {
+			fps, has := find_metric(r.metrics[:], "frames", setup, phase, "fps")
+			if !has {
+				continue
+			}
+			v :: proc(r: ^Results, setup, phase, field: string) -> string {
+				x, _ := find_metric(r.metrics[:], "frames", setup, phase, field)
+				return fmt.tprintf("%.2f", x)
+			}
+			slot, _ := find_metric(r.metrics[:], "frames", setup, phase, "slot_wait_p95")
+			drawable, _ := find_metric(r.metrics[:], "frames", setup, phase, "drawable_wait_p95")
+			fmt.sbprintfln(b, "  %-6s %7s %13s %10s %8s %10s %8s %9s", phase, fmt.tprintf("%.1f", fps), v(r, setup, phase, "interval_p95"), v(r, setup, phase, "cpu_median"),
+				v(r, setup, phase, "cpu_p95"), v(r, setup, phase, "gpu_median"), v(r, setup, phase, "gpu_p95"), fmt.tprintf("%.2f", max(slot, drawable)))
+		}
+		fmt.sbprintln(b)
+	}
 }
 
 @(private = "file")
@@ -364,7 +453,8 @@ compare :: proc(a, b: []Metric, allocator := context.allocator) -> []Delta {
 
 // significant says whether a change between two medians is more than runs
 // vary: 10% and at least 1 ms or MB for times and sizes, 2% for
-// instruction counts. Counts without a unit are never marked.
+// instruction counts, 5% and at least 1 for frame rates. Counts without a
+// unit are never marked.
 significant :: proc(unit: string, a, diff: f64) -> bool {
 	if a == 0 {
 		return false
@@ -375,12 +465,15 @@ significant :: proc(unit: string, a, diff: f64) -> bool {
 		return pct >= 2
 	case "ms", "MB":
 		return pct >= 10 && math.abs(diff) >= 1
+	case "fps":
+		return pct >= 5 && math.abs(diff) >= 1
 	}
 	return false
 }
 
 // write_compare prints each pair with its change. Lower is better for every
-// unit, so a significant change is marked worse or better, if marks is set.
+// unit but fps, so a significant change is marked worse or better, if marks
+// is set.
 write_compare :: proc(sb: ^strings.Builder, deltas: []Delta, marks := true) {
 	fmt.sbprintfln(sb, "%-8s %-5s %-13s %-18s %10s %10s %10s %8s", "scenario", "setup", "row", "field", "a", "b", "delta", "change")
 	for d in deltas {
@@ -390,7 +483,7 @@ write_compare :: proc(sb: ^strings.Builder, deltas: []Delta, marks := true) {
 		if d.value != 0 {
 			change = fmt.tprintf("%+.1f%%", diff / math.abs(d.value) * 100)
 			if marks && significant(d.unit, d.value, diff) {
-				flag = " worse" if diff > 0 else " better"
+				flag = " worse" if (diff > 0) != (d.unit == "fps") else " better"
 			}
 		}
 		line := fmt.tprintf("%-8s %-5s %-13s %-18s %10s %10s %10s %8s %s%s", d.scenario, d.setup, d.row, d.field, num(d.value, true), num(d.b, true), fmt.tprintf("%+.1f", diff), change, d.unit, flag)

@@ -35,7 +35,9 @@ draw_box :: proc(u: ^State, b: ^Box, alpha: f32) {
 	if .Draw_Shadow in b.flags {
 		render.push_shadow(r, rect, b.radius, 24, {0, 8}, 0, {0, 0, 0, 0.5 * a})
 	}
-	if .Draw_Background in b.flags {
+	if .Draw_Backdrop in b.flags {
+		render.push_backdrop(r, rect, b.backdrop.blur, b.backdrop.saturation, fade(b.background, a), b.radius)
+	} else if .Draw_Background in b.flags {
 		if b.gradient.a > 0 {
 			render.push_gradient(r, rect, fade(b.background, a), fade(b.gradient, a), false, b.radius)
 		} else if b.background.a > 0 {

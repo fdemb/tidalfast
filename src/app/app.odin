@@ -77,6 +77,16 @@ State :: struct {
 	pending:      Pending, // what the frame being built asked for, done after it
 	history:      History,
 	access_sent:  u64, // hash of the accessibility tree the shell has
+	// The views run under the player bar, which covers their bottoms with a
+	// blur of them, where the renderer has backdrops (render.BACKDROPS) and
+	// Settings.bar says so.
+	bar_over_content: bool,
+	// TIDALFAST_BLUR_REFERENCE: the bar is left out, and the shell blurs
+	// where it goes, to compare the renderer's blur with.
+	blur_reference:   bool,
+	drag_sent:    u64, // hash of the drag regions the shell has
+	titlebar_h:   f32, // this frame's Frame_Input.titlebar_height
+	titlebar_inset: f32,
 	bench:        Bench,
 	measure:      Measure,
 	dev:          Dev,
@@ -190,6 +200,7 @@ app_frame :: proc "c" (m: ^platform.Memory, shell: ^platform.Shell, input: ^plat
 	frame_ms := f32(time.duration_milliseconds(time.tick_since(begin)))
 	s.frame_ms[s.frame_count % FRAME_HISTORY] = frame_ms
 	s.frame_count += 1
+	s.measure.frame_time = input.time
 	measure_frame(s)
 	if s.text.needs_redraw {
 		// Glyphs left over from the raster budget or a full atlas. The
@@ -408,6 +419,7 @@ start :: proc(s: ^State, shell: ^platform.Shell) {
 	s.show_overlay = os.get_env("TIDALFAST_OVERLAY", context.temp_allocator) != "" || bench != ""
 	s.log_events = os.get_env("TIDALFAST_LOG_EVENTS", context.temp_allocator) != ""
 	s.log_render = os.get_env("TIDALFAST_LOG_RENDER", context.temp_allocator) != ""
+	s.blur_reference = os.get_env("TIDALFAST_BLUR_REFERENCE", context.temp_allocator) != ""
 
 	// TIDALFAST_SPALL=path writes a spall trace of every frame to path. Only
 	// the fd is used after this; the os.File it came from is dropped so State
@@ -484,6 +496,8 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input, shell: ^platfor
 		}
 	}
 	w, h := input.width, input.height
+	s.titlebar_h = input.titlebar_height
+	s.titlebar_inset = input.titlebar_inset
 	r := &s.renderer
 	render.begin_frame(r, w, h, input.scale, CLEAR_COLOR)
 	ui_begin := time.tick_now()
@@ -496,6 +510,7 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input, shell: ^platfor
 	lists_window_key(s, bool(input.key_window))
 	playback_update(s, events)
 	s.ui.scrollbars = s.settings.scrollbars
+	s.bar_over_content = s.blur_reference || (render.BACKDROPS && s.settings.bar == .Blurred)
 
 	// Backtick toggles the frame-time overlay.
 	if ui.take_key(.Grave) {
