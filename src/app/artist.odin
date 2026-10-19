@@ -517,6 +517,9 @@ draw_top_tracks :: proc(s: ^State, p: ^Pending, view: ^ui.Box, width: f32) {
 		shown = TOP_TRACKS // loading: the rows stand empty
 	}
 	cols := track_columns(width, false)
+	// A keyed parent of its own, so the arrow keys find no other box to
+	// move the focus to and reach table_keys.
+	ui.column("top_tracks_group", {}, ui.fill(), ui.children_sum())
 	list := ui.column("top_tracks", {.Focusable}, ui.fill(), ui.px(f32(shown) * TRACK_ROW_H))
 	ui.accessible(list, .Table, "Top tracks")
 	if table_keys(s, list, min(n, TOP_TRACKS)) {
