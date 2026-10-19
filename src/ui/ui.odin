@@ -732,7 +732,11 @@ key_down :: proc(u: ^State, e: platform.Event) {
 		}
 		return
 	case (code == .Up || code == .Down) && mods == {}:
-		if focus_arrow(u, -1 if code == .Up else 1) {
+		if focus_arrow(u, .Y, -1 if code == .Up else 1) {
+			return
+		}
+	case (code == .Left || code == .Right) && mods == {} && !focus_takes_text(u):
+		if focus_arrow(u, .X, -1 if code == .Left else 1) {
 			return
 		}
 	}
@@ -841,8 +845,9 @@ menu_blocks :: proc(u: ^State, key: Key) -> bool {
 
 // focus_arrow moves the focus to the previous or next focusable box with
 // the same keyed parent. In an open menu it moves among the menu's items.
+// Along X it moves only in a parent that lays its children out across.
 @(private)
-focus_arrow :: proc(u: ^State, dir: int) -> bool {
+focus_arrow :: proc(u: ^State, axis: Axis, dir: int) -> bool {
 	group := Key(0)
 	at := -1
 	for h, i in u.hits[:u.hit_count] {
@@ -860,6 +865,12 @@ focus_arrow :: proc(u: ^State, dir: int) -> bool {
 	}
 	if group == 0 {
 		return false
+	}
+	if axis == .X {
+		g := box_lookup(u, group)
+		if g == nil || g.child_axis != .X {
+			return false
+		}
 	}
 	for i := at + dir; i >= 0 && i < u.hit_count; i += dir {
 		h := u.hits[i]

@@ -467,6 +467,34 @@ test_ui_focus_reveals_on_both_axes :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_ui_left_right_in_a_row :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	now := 0.0
+	page, shelf, _ := shelf_settle(&u, &now)
+	card :: proc(shelf: ^ui.Box, i: int) -> ui.Key {
+		return ui.key_from_string(shelf.key, fmt.tprintf("##card%d", i))
+	}
+
+	shelf_frame(&u, &now, {kind = .Mouse_Down, x = 50, y = 40, click_count = 1}, {kind = .Mouse_Up, x = 50, y = 40, click_count = 1})
+	testing.expect_value(t, u.focus, card(shelf, 0))
+	_, _, taken, _ := shelf_frame(&u, &now, {kind = .Key_Down, key = .Right})
+	testing.expect_value(t, u.focus, card(shelf, 1))
+	testing.expect(t, !taken, "the row took Right")
+	shelf_frame(&u, &now, {kind = .Key_Down, key = .Left})
+	testing.expect_value(t, u.focus, card(shelf, 0))
+
+	// The page lays its children out down, so Right goes to the app.
+	shelf_frame(&u, &now, {kind = .Mouse_Down, x = 50, y = 10, click_count = 1}, {kind = .Mouse_Up, x = 50, y = 10, click_count = 1})
+	item := ui.key_from_string(page.key, "##item")
+	testing.expect_value(t, u.focus, item)
+	_, _, taken, _ = shelf_frame(&u, &now, {kind = .Key_Down, key = .Right})
+	testing.expect_value(t, u.focus, item)
+	testing.expect(t, taken, "the app sees Right")
+}
+
+@(test)
 test_ui_scroll_clamps_to_new_content :: proc(t: ^testing.T) {
 	u: ui.State
 	ui.init(&u)
