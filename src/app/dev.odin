@@ -37,7 +37,7 @@ dev_start :: proc(s: ^State) {
 	render.texture_update(&s.renderer, s.dev.half_cover, {128}, 0, 0, 1, 1)
 }
 
-// Cmd-1, 2 and 3 switch between the library and the phase 2 and phase 1 test
+// Cmd-1, 2 and 3 switch between the library and the text and renderer test
 // screens.
 dev_input :: proc(s: ^State, time: f64) {
 	when !DEV {

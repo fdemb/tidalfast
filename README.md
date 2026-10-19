@@ -1,6 +1,6 @@
 # TIDALfast
 
-A native TIDAL client in Odin, for macOS and Linux (Wayland). A small shell owns the window and talks to the OS: Obj-C on macOS, C on Linux. Everything else is an Odin dylib that the shell reloads while it runs. `docs/plan.md` has the plan and the phases, and the other files in `docs/` describe each part in detail.
+A native TIDAL client in Odin, for macOS and Linux (Wayland). A small shell owns the window and talks to the OS: Obj-C on macOS, C on Linux. Everything else is an Odin dylib that the shell reloads while it runs. `docs/architecture.md` has the layout and the main decisions, and the other files in `docs/` describe each part in detail.
 
 ```
 shell/          the executable: window, event queue, dylib loader, input methods and clipboard. shell.m is
@@ -51,4 +51,4 @@ It needs macOS 14 or later, Odin and the Xcode command line tools. Run `./build.
 - [Hot reload](docs/hot-reload.md)
 - [Redraw policy](docs/redraw.md)
 - [Measuring RAM and startup](docs/measuring.md): the measure tool, what the app prints and the baseline numbers
-- [Plan](docs/plan.md): the plan and the phases
+- [Architecture](docs/architecture.md): the layout, the main decisions and what isn't done yet

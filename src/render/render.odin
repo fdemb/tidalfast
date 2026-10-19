@@ -16,7 +16,7 @@
 // then converts to linear once. The drawable is BGRA8Unorm_sRGB, so the GPU
 // blends in linear space and encodes back to sRGB when it stores. Textures
 // are sRGB formats too (sampling returns linear) except R8, which holds linear
-// coverage. Text in phase 2 relies on this: glyph coverage is blended in
+// coverage. Text relies on this: glyph coverage is blended in
 // linear light. Colour textures hold premultiplied linear values, sRGB
 // encoded, so the hardware decodes before filtering and gets premultiplied
 // linear out; texture_update converts to that from ordinary premultiplied
