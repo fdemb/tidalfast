@@ -263,8 +263,9 @@ artist_bio :: proc(page: ^Artist_Page) -> string {
 }
 
 // artist_bio_lines is the page's biography broken into lines no wider than
-// width, at spaces and line breaks, from the page's Bio_Layout when it's
-// still good.
+// width, at spaces and line breaks, and inside a word wider than the line
+// between grapheme clusters, from the page's Bio_Layout when it's still
+// good.
 artist_bio_lines :: proc(s: ^State, page: ^Artist_Page, width: f32) -> []Bio_Line {
 	l := &page.bio
 	generation := s.ui.texts.generation if s.ui.texts != nil else 0
@@ -292,26 +293,51 @@ artist_bio_lines :: proc(s: ^State, page: ^Artist_Page, width: f32) -> []Bio_Lin
 		words := p
 		at := 0
 		for word in strings.split_iterator(&words, " ") {
-			word_start := at
-			at += len(word) + 1
+			word_start, word_end := at, at + len(word)
+			at = word_end + 1
 			if word == "" {
 				continue
 			}
 			w := ui.text_width(BIO_FONT, BIO_SIZE, word)
-			if end > start && line_w + space + w > width {
-				append(&l.lines, Bio_Line{base + start, base + end})
-				start = word_start
-				line_w = w
-			} else {
-				line_w += (space if end > start else 0) + w
+			if end > start && line_w + space + w <= width {
+				line_w += space + w
+				end = word_end
+				continue
 			}
-			end = word_start + len(word)
+			if end > start {
+				append(&l.lines, Bio_Line{base + start, base + end})
+			}
+			start = word_start
+			for w > width {
+				cut := start + bio_fit(p[start:word_end], width)
+				append(&l.lines, Bio_Line{base + start, base + cut})
+				start = cut
+				w = ui.text_width(BIO_FONT, BIO_SIZE, p[start:word_end])
+			}
+			end, line_w = word_end, w
 		}
 		if end > start {
 			append(&l.lines, Bio_Line{base + start, base + end})
 		}
 	}
 	return l.lines[:]
+}
+
+// bio_fit is how many bytes of word, in whole grapheme clusters, fit in
+// width: at least one cluster, so a line always moves on.
+@(private = "file")
+bio_fit :: proc(word: string, width: f32) -> int {
+	bounds := ui.cluster_bounds(word)
+	lo, hi := 1, len(bounds) - 1 // bounds[lo] fits, bounds[hi + 1] doesn't
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		if ui.text_width(BIO_FONT, BIO_SIZE, word[:bounds[mid]]) <= width {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	return bounds[lo]
 }
 
 @(private = "file")
