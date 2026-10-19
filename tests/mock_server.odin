@@ -489,6 +489,9 @@ mock_route :: proc(m: ^Mock, req: Mock_Request, target: string) -> (status: int,
 		}
 		strings.write_string(&b, "]}")
 		return 200, strings.to_string(b), etag
+	case req.path == "/search":
+		// Every search finds artist 7 and one of its songs.
+		return 200, `{"artists":{"items":[{"id":7,"name":"Artist 7","picture":"pic-7"}]},"tracks":{"items":[{"id":700,"title":"Top 1 of Artist 7","duration":200,"artist":{"id":7,"name":"Artist 7"},"artists":[{"id":7,"name":"Artist 7"}],"album":{"id":7000,"title":"Album 7000","cover":"cover-7000"}}]},"albums":{"items":[]},"playlists":{"items":[]}}`, etag
 	case strings.has_prefix(req.path, "/artists/"):
 		status, body = mock_artist(req)
 		return status, body, etag
@@ -608,9 +611,10 @@ mock_liked_page :: proc(offset_s, limit_s: string, liked: []i64 = nil, removed: 
 }
 
 MOCK_ARTIST_ALBUMS :: 73 // artist 1's albums; the others have 9
+MOCK_TOP_TRACKS :: 8 // every artist's
 
 // mock_artist answers /artists/<n> and its bio, albums (with filter
-// EPSANDSINGLES or COMPILATIONS) and similar artists. Artist n is
+// EPSANDSINGLES or COMPILATIONS), top tracks and similar artists. Artist n is
 // "Artist n", and artist 1 has MOCK_ARTIST_ALBUMS albums, more than a page.
 @(private = "file")
 mock_artist :: proc(req: Mock_Request) -> (status: int, body: string) {
@@ -642,6 +646,15 @@ mock_artist :: proc(req: Mock_Request) -> (status: int, body: string) {
 			}
 			album := id * 1000 + base + i
 			fmt.sbprintf(&b, `{{"id":%d,"title":"Album %d","cover":"cover-%d","numberOfTracks":10,"type":"%s","releaseDate":"2020-01-01","artist":{{"id":%d,"name":"Artist %d"}},"artists":[{{"id":%d,"name":"Artist %d"}}]}}`, album, album, album, kind, id, id, id, id)
+		}
+	case "toptracks":
+		fmt.sbprintf(&b, `{{"limit":%d,"offset":%d,"totalNumberOfItems":%d,"items":[`, limit, offset, MOCK_TOP_TRACKS)
+		for i in offset ..< min(offset + limit, MOCK_TOP_TRACKS) {
+			if i > offset {
+				strings.write_byte(&b, ',')
+			}
+			track := id * 100 + i
+			fmt.sbprintf(&b, `{{"id":%d,"title":"Top %d of Artist %d","duration":200,"artist":{{"id":%d,"name":"Artist %d"}},"artists":[{{"id":%d,"name":"Artist %d"}}],"album":{{"id":%d,"title":"Album %d","cover":"cover-%d"}}}}`, track, i + 1, id, id, id, id, id, id * 1000, id * 1000, id * 1000)
 		}
 	case "similar":
 		strings.write_string(&b, `{"limit":10,"offset":0,"totalNumberOfItems":3,"items":[`)

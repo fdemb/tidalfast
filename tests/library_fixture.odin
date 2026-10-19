@@ -15,8 +15,9 @@ import "../src/ui"
 // A State for drawing the library screen without a window: no renderer,
 // text system or workers. Closed lists' arenas are poisoned, so a string
 // the frame still borrows from one reads as POISON bytes. Like the app's,
-// it allocates from an arena, given as context.allocator.
-library_state :: proc(fake: bool) -> ^app.State {
+// it allocates from an arena, given as context.allocator. With m it signs
+// in to the mock; its jobs run when the test runs them.
+library_state :: proc(fake: bool, m: ^Mock = nil) -> ^app.State {
 	s := new(app.State)
 	ui.init(&s.ui)
 	app.library_init(&s.library)
@@ -27,6 +28,10 @@ library_state :: proc(fake: bool) -> ^app.State {
 	if fake {
 		s.rows = app.make_rows()
 	} else {
+		if m != nil {
+			s.data.api = app.small(m.base_url)
+			s.data.wake = proc "c" () {}
+		}
 		sign_in(s)
 	}
 	app.search_init(s)
@@ -40,9 +45,11 @@ library_state_free :: proc(s: ^app.State) {
 }
 
 Frame :: struct {
-	now:   f64,
-	bytes: [256]u8,
-	fonts: ^Fonts, // nil measures every label as empty
+	now:       f64,
+	bytes:     [256]u8,
+	fonts:     ^Fonts, // nil measures every label as empty
+	size:      [2]f32, // the window, 1000 by 700 when zero
+	animating: bool, // the last frame asked for another
 }
 
 // library_frame builds and lays out one frame of the library screen with
@@ -57,16 +64,17 @@ library_frame :: proc(t: ^testing.T, s: ^app.State, f: ^Frame, events: ..platfor
 		texts = f.fonts.state
 		text.begin_frame(texts, &f.fonts.r)
 	}
-	ui.begin_frame(&s.ui, events, nil, texts, 1000, 700, f.now, nil, f.bytes[:])
-	app.draw_library(s, 1000, 700)
-	ui.end_frame()
+	size := f.size if f.size != {} else {1000, 700}
+	ui.begin_frame(&s.ui, events, nil, texts, size.x, size.y, f.now, nil, f.bytes[:])
+	app.draw_library(s, size.x, size.y)
+	f.animating = ui.end_frame()
 	nodes, _ := ui.access_tree(&s.ui)
 	for n in nodes {
 		for c in ([2]cstring{n.label, n.value}) {
 			testing.expectf(t, strings.index_byte(string(c), app.POISON) < 0, "node %v reads freed memory: %q", n.role, string(c), loc = loc)
 		}
 	}
-	app.pending_apply(s)
+	f.animating |= app.pending_apply(s)
 }
 
 // access_node finds the first node in the last frame's tree whose label starts
