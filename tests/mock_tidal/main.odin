@@ -63,8 +63,10 @@
 // lastUpdated on. A stale ETag gets 412. POST /users/123/favorites/tracks
 // likes trackId, unless it's liked already, and DELETE
 // /users/123/favorites/tracks/<id> unlikes it: it leaves the liked tracks
-// until the same POST likes it back. GET /users/123/favorites/ids lists
-// the liked track ids. Any track id from the mock can be added, and it's
+// until the same POST likes it back. POST /users/123/favorites/artists
+// follows artistId and DELETE /users/123/favorites/artists/<id> unfollows
+// it. GET /users/123/favorites/ids lists the liked track ids and the
+// followed artists. Any track id from the mock can be added, and it's
 // listed as it is elsewhere.
 //
 // It never prints tokens or Authorization headers.
@@ -137,6 +139,7 @@ Server :: struct {
 	changes:       [len(PLAYLISTS)]int, // /mock/change calls per playlist
 	liked_added:   [dynamic]int, // track ids liked through /mock/change or a POST, oldest first; heap
 	liked_removed: [dynamic]int, // track ids unliked with a DELETE, oldest first; heap
+	followed:      [dynamic]int, // artist ids followed with a POST, oldest first; heap
 	added:         [len(PLAYLISTS)][dynamic]Added_Item, // tracks added by a POST; heap
 }
 
@@ -543,10 +546,31 @@ route :: proc(req: ^Request) -> Response {
 			fmt.printfln("mock: liked track %d, %d liked", id, LIKED + len(server.liked_added))
 		}
 		return json_response(200, "{}")
+	case path == fmt.tprintf("/users/%d/favorites/artists", USER_ID) && req.method == "POST":
+		sync.guard(&server.mutex)
+		for id_s in strings.split(req.form["artistId"] or_else "", ",", context.temp_allocator) {
+			if id, ok := parse_i(id_s); ok && !slice.contains(server.followed[:], id) {
+				append(&server.followed, id)
+				fmt.printfln("mock: followed artist %d, %d followed", id, len(server.followed))
+			}
+		}
+		return json_response(200, "{}")
+	case strings.has_prefix(path, fmt.tprintf("/users/%d/favorites/artists/", USER_ID)) && req.method == "DELETE":
+		id, _ := parse_i(strings.trim_prefix(path, fmt.tprintf("/users/%d/favorites/artists/", USER_ID)))
+		sync.guard(&server.mutex)
+		if at, found := slice.linear_search(server.followed[:], id); found {
+			ordered_remove(&server.followed, at)
+			fmt.printfln("mock: unfollowed artist %d, %d followed", id, len(server.followed))
+		}
+		return json_response(200, "{}")
 	case path == fmt.tprintf("/users/%d/favorites/ids", USER_ID):
 		b := strings.builder_make(context.temp_allocator)
-		strings.write_string(&b, `{"ALBUM":[],"ARTIST":[],"PLAYLIST":[],"VIDEO":[],"TRACK":[`)
+		strings.write_string(&b, `{"ALBUM":[],"PLAYLIST":[],"VIDEO":[],"ARTIST":[`)
 		sync.mutex_lock(&server.mutex)
+		for id, i in server.followed {
+			fmt.sbprintf(&b, `%s"%d"`, "," if i > 0 else "", id)
+		}
+		strings.write_string(&b, `],"TRACK":[`)
 		candidates := slice.clone(server.liked_added[:], context.temp_allocator)
 		sync.mutex_unlock(&server.mutex)
 		ids := make([dynamic]int, 0, LIKED + len(candidates), context.temp_allocator)

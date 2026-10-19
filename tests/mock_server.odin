@@ -3,6 +3,7 @@ package tidal_tests
 import "base:runtime"
 import "core:fmt"
 import "core:net"
+import "core:slice"
 import "core:strconv"
 import "core:strings"
 import "core:sync"
@@ -47,6 +48,7 @@ Mock :: struct {
 	// one back where it was. Tracks liked by a POST go off liked itself,
 	// since they were listed on top of it.
 	liked_removed: [dynamic]i64,
+	followed:      [dynamic]i64, // artists followed by a POST, oldest first
 	// Stuck accepts DELETEs without removing anything.
 	stuck:         bool,
 	requests:   [dynamic]string, // "METHOD /path?query"
@@ -86,6 +88,7 @@ mock_start :: proc(m: ^Mock, items: []Mock_Item = nil) {
 	m.items = make([dynamic]Mock_Item, m.allocator)
 	m.liked = make([dynamic]i64, m.allocator)
 	m.liked_removed = make([dynamic]i64, m.allocator)
+	m.followed = make([dynamic]i64, m.allocator)
 	m.requests = make([dynamic]string, m.allocator)
 	m.poll_times = make([dynamic]time.Tick, m.allocator)
 	m.files = make(map[string][]u8, m.allocator)
@@ -117,6 +120,7 @@ mock_stop :: proc(m: ^Mock) {
 	delete(m.requests)
 	delete(m.items)
 	delete(m.liked)
+	delete(m.followed)
 	delete(m.poll_times)
 	clear_query(&m.last_query, m.allocator)
 	delete(m.last_query)
@@ -360,8 +364,21 @@ mock_route :: proc(m: ^Mock, req: Mock_Request, target: string) -> (status: int,
 			}
 		}
 		return 200, `{}`, etag
+	case req.path == "/users/123/favorites/artists" && req.method == "POST":
+		for id_s in strings.split(req.form["artistId"] or_else "", ",", context.temp_allocator) {
+			if id, ok := strconv.parse_i64(id_s); ok && !slice.contains(m.followed[:], id) {
+				append(&m.followed, id)
+			}
+		}
+		return 200, `{}`, etag
+	case strings.has_prefix(req.path, "/users/123/favorites/artists/") && req.method == "DELETE":
+		id, _ := strconv.parse_i64(strings.trim_prefix(req.path, "/users/123/favorites/artists/"))
+		if at, found := slice.linear_search(m.followed[:], id); found {
+			ordered_remove(&m.followed, at)
+		}
+		return 200, `{}`, etag
 	case req.path == "/users/123/favorites/ids":
-		return 200, mock_liked_ids(m.liked[:], m.liked_removed[:]), etag
+		return 200, mock_liked_ids(m.liked[:], m.liked_removed[:], m.followed[:]), etag
 	case req.path == "/users/123/favorites/tracks":
 		return 200, mock_liked_page(req.query["offset"] or_else "0", req.query["limit"] or_else "50", m.liked[:], m.liked_removed[:]), etag
 	case req.path == "/echo":
@@ -531,10 +548,14 @@ removed_at :: proc(m: ^Mock, id: i64) -> int {
 }
 
 // mock_liked_ids answers users/123/favorites/ids with the ids the
-// favorites pages list, as strings, as TIDAL does.
-mock_liked_ids :: proc(liked: []i64, removed: []i64) -> string {
+// favorites pages list and the followed artists, as strings, as TIDAL does.
+mock_liked_ids :: proc(liked: []i64, removed: []i64, followed: []i64) -> string {
 	b := strings.builder_make(context.temp_allocator)
-	strings.write_string(&b, `{"ALBUM":[],"ARTIST":[],"PLAYLIST":[],"VIDEO":[],"TRACK":[`)
+	strings.write_string(&b, `{"ALBUM":[],"PLAYLIST":[],"VIDEO":[],"ARTIST":[`)
+	for id, i in followed {
+		fmt.sbprintf(&b, `%s"%d"`, "," if i > 0 else "", id)
+	}
+	strings.write_string(&b, `],"TRACK":[`)
 	first := true
 	write :: proc(b: ^strings.Builder, first: ^bool, id: i64) {
 		if !first^ {
