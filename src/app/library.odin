@@ -491,11 +491,12 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 // icon_button is a square icon button of side, centred in the cell it sits
 // in: the square is the click and hover area. hot is its opacity, so 0
 // hides it while it still clicks. Returns the button's box for anything
-// anchored to it, such as a menu.
-icon_button :: proc(id, icon: string, font: text.Font, name: string, color: render.Color, hot: f32, side: f32) -> (^ui.Box, ui.Signal) {
+// anchored to it, such as a menu. flags adds to the button's, such as
+// Focusable for one outside a row.
+icon_button :: proc(id, icon: string, font: text.Font, name: string, color: render.Color, hot: f32, side: f32, flags: ui.Box_Flags = {}) -> (^ui.Box, ui.Signal) {
 	ui.column("", {}, ui.px(side), ui.fill())
 	ui.spacer(ui.fill())
-	b := ui.box_make(fmt.tprintf("%s###%s", icon, id), {.Clickable, .Draw_Text, .Draw_Hot_Effects}, ui.px(side), ui.px(side))
+	b := ui.box_make(fmt.tprintf("%s###%s", icon, id), {.Clickable, .Draw_Text, .Draw_Hot_Effects} + flags, ui.px(side), ui.px(side))
 	b.text_align = .Center
 	b.font = font
 	b.font_size = 16
