@@ -645,6 +645,73 @@ abandoned_search_keeps_the_artist_page :: proc(t: ^testing.T) {
 	testing.expect(t, enabled(s, "Forward"), "the page to go Forward to")
 }
 
+
+// Back and Forward step from the place they're heading to, so pressing
+// them again walks the history whether or not a search on the way answers:
+// from an artist's page, Back twice past a search that fails, or that
+// hasn't answered yet, reaches the list before it.
+@(test)
+back_walks_past_a_search_that_hasnt_answered :: proc(t: ^testing.T) {
+	fonts: Fonts
+	if !testing.expect(t, fonts_init(&fonts)) {
+		return
+	}
+	defer fonts_destroy(&fonts)
+	context.allocator = mem.arena_allocator(&fonts.arena)
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := library_state(false, &m)
+	defer library_state_free(s)
+	f := Frame{fonts = &fonts, size = {1100, 2400}}
+	library_frame(t, s, &f)
+	library_frame(t, s, &f, key(.F, {ui.PRIMARY}))
+	library_frame(t, s, &f, type_text(&f, "seven"))
+	library_frame(t, s, &f, dt = 1)
+	run_page_jobs(s)
+	library_frame(t, s, &f)
+	library_frame(t, s, &f, press_exact(t, s, "Artist 7"))
+	library_frame(t, s, &f)
+	run_page_jobs(s)
+	library_frame(t, s, &f)
+	testing.expect(t, page_showing(s), "the page")
+
+	m.answers["/search"] = {500, `{"userMessage":"down"}`}
+	library_frame(t, s, &f, press(s, "Back"))
+	library_frame(t, s, &f)
+	run_page_jobs(s)
+	library_frame(t, s, &f)
+	library_frame(t, s, &f, press(s, "Back"))
+	library_frame(t, s, &f)
+	run_page_jobs(s)
+	library_frame(t, s, &f)
+	testing.expect(t, !page_showing(s), "Back past a failed search leaves the page")
+	testing.expect(t, !enabled(s, "Back"), "Back past a failed search reaches the first place")
+	testing.expect(t, enabled(s, "Forward"), "the search to go Forward to")
+
+	delete_key(&m.answers, "/search")
+	library_frame(t, s, &f, press(s, "Forward"))
+	library_frame(t, s, &f)
+	run_page_jobs(s)
+	library_frame(t, s, &f)
+	testing.expect(t, has(s, "Results for “seven”", .Static_Text), "Forward to the search")
+	library_frame(t, s, &f, press(s, "Forward"))
+	library_frame(t, s, &f)
+	run_page_jobs(s)
+	library_frame(t, s, &f)
+	testing.expect(t, page_showing(s), "Forward to the page")
+
+	library_frame(t, s, &f, press(s, "Back"))
+	library_frame(t, s, &f)
+	library_frame(t, s, &f, press(s, "Back"))
+	library_frame(t, s, &f)
+	run_page_jobs(s)
+	library_frame(t, s, &f)
+	testing.expect(t, !page_showing(s), "Back twice before the search answers leaves the page")
+	testing.expect(t, !has(s, "Results for “seven”", .Static_Text), "Back twice before the search answers passes it")
+	testing.expect(t, !enabled(s, "Back"), "Back twice before the search answers reaches the first place")
+}
+
 // In a View all grid Down and Up move the focus by a row of cards, Left
 // and Right by one card. A resize that changes how many cards fit in a row
 // keeps the focused card focused, under the same accessibility id.
