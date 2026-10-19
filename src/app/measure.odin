@@ -15,9 +15,9 @@ package app
 // With it off the marks are still kept, quietly, until the first track
 // rows show, for the launch log (launch_log.odin); after that nothing here
 // runs except two counters per drawn row. Marks and samples come from
-// frames that happen anyway. Only the memory scenario
-// starts a thread, which samples once a second and wakes the UI when a
-// stage's wait is over.
+// frames that happen anyway. Only the memory and frames scenarios start a
+// thread, which samples once a second and wakes the UI when a stage's wait
+// is over, since an idle window draws no frame to see it.
 
 import "base:runtime"
 import "core:fmt"
@@ -170,7 +170,7 @@ measure_unload :: proc(s: ^State) {
 
 @(private = "file")
 measure_thread_start :: proc(m: ^Measure) {
-	if m.mode == .Memory && m.stage != .Done && !m.running {
+	if (m.mode == .Memory || m.mode == .Frames) && m.stage != .Done && !m.running {
 		m.running = posix.pthread_create(&m.thread, nil, measure_thread, m) == .NONE
 	}
 }
