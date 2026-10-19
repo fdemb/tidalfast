@@ -549,7 +549,8 @@ hsv :: proc(h, s, v: f32) -> render.Color {
 // draw_frame_overlay draws the CPU time of the last FRAME_HISTORY frames as
 // bars, newest on the right, with lines at 120 Hz and 60 Hz budgets. Under
 // the bars: the last frame's CPU time in total and building the frame (the
-// UI, before end_frame), then its draw calls (blue), instances (green), and
+// UI, before end_frame), and on macOS the GPU's time on the newest frame it
+// has finished, then its draw calls (blue), instances (green), and
 // the text cache's runs and atlas pages, then the keyed boxes in use, in red
 // when the pool ran out this frame, then the process's memory footprint (as
 // Activity Monitor shows it) and what Metal has allocated on the GPU.
@@ -583,6 +584,9 @@ draw_frame_overlay :: proc(s: ^State, view_width: f32) {
 	y := y0 + PANEL_H + 6
 	ms := s.frame_ms[(s.frame_count + FRAME_HISTORY - 1) % FRAME_HISTORY]
 	line := fmt.tprintf("frame %.2f ms   ui %.2f ms", ms, s.ui_ms)
+	if r.gpu_ms > 0 {
+		line = fmt.tprintf("%s   gpu %.2f ms", line, r.gpu_ms)
+	}
 	text.draw(t, r, .Medium, 11, {x0 + 8, y}, {1, 1, 1, 0.9}, line)
 	y += 16
 	render.push_rect(r, {x0 + 8, y + 4, 6, 6}, {0.35, 0.60, 1, 1}, 3)

@@ -18,6 +18,8 @@ Gpu :: struct {
 	// that last read buffers[slot]; begin_frame waits for it before writing.
 	buffers:   [FRAMES_IN_FLIGHT]id, // id<MTLBuffer>, shared storage
 	in_flight: [FRAMES_IN_FLIGHT]id, // id<MTLCommandBuffer>
+	in_flight_frame: [FRAMES_IN_FLIGHT]u64, // the frame_index each one drew
+	timed_frame: u64, // the newest frame gpu_ms has come from, plus 1
 }
 
 Gpu_Texture :: struct {
@@ -308,6 +310,7 @@ gpu_texture_copy :: proc(r: ^Renderer, from, to: ^Texture_Slot, w, h: int) {
 @(private)
 gpu_frame_begin :: proc(r: ^Renderer) -> [^]Instance {
 	g := &r.gpu
+	read_gpu_time(r)
 	// The GPU usually finished this slot two frames ago, so this rarely waits.
 	if cmd := g.in_flight[r.slot]; cmd != nil {
 		msg(cmd, "waitUntilCompleted")
@@ -319,6 +322,34 @@ gpu_frame_begin :: proc(r: ^Renderer) -> [^]Instance {
 		r.capacity[r.slot] = INITIAL_INSTANCES
 	}
 	return ([^]Instance)(msg(g.buffers[r.slot], "contents"))
+}
+
+// read_gpu_time sets gpu_ms from the newest command buffer the GPU has
+// finished that it hasn't read yet, without waiting for any.
+@(private)
+read_gpu_time :: proc(r: ^Renderer) {
+	MTL_COMMAND_BUFFER_STATUS_COMPLETED :: 4
+	g := &r.gpu
+	newest := -1
+	for cmd, i in g.in_flight {
+		if cmd == nil || g.in_flight_frame[i] < g.timed_frame {
+			continue
+		}
+		if msg_proc(proc "c" (id, SEL) -> uint)(cmd, sel_registerName("status")) != MTL_COMMAND_BUFFER_STATUS_COMPLETED {
+			continue
+		}
+		if newest < 0 || g.in_flight_frame[i] > g.in_flight_frame[newest] {
+			newest = i
+		}
+	}
+	if newest < 0 {
+		return
+	}
+	cmd := g.in_flight[newest]
+	start := msg_proc(proc "c" (id, SEL) -> f64)(cmd, sel_registerName("GPUStartTime"))
+	end := msg_proc(proc "c" (id, SEL) -> f64)(cmd, sel_registerName("GPUEndTime"))
+	r.gpu_ms = f32((end - start) * 1000)
+	g.timed_frame = g.in_flight_frame[newest] + 1
 }
 
 // grow_instances replaces the current slot's buffer with one twice the size
@@ -405,6 +436,7 @@ end_frame :: proc(r: ^Renderer) {
 	// commandBuffer returns an autoreleased object; keep it until begin_frame
 	// comes back to this slot.
 	g.in_flight[r.slot] = msg(cmd, "retain")
+	g.in_flight_frame[r.slot] = r.frame_index
 	r.stats = {draw_calls, r.instance_count}
 
 	if capture != nil {

@@ -152,6 +152,9 @@ Renderer :: struct {
 	clip_depth:     int,
 
 	stats:          Stats, // of the last frame end_frame drew
+	// Milliseconds the GPU took on the newest frame it has finished, a frame
+	// or two behind; 0 where the backend can't tell.
+	gpu_ms:         f32,
 	// Debug: when set, end_frame waits for the GPU and writes each frame to
 	// this path as a TGA. Set it before init.
 	capture_path:   string,
