@@ -108,7 +108,6 @@ card_row :: proc(s: ^State, id, title: string, items: []Found, source: Source, w
 	view.child_axis = .X
 	ui.accessible(view, .List, title)
 	if move != 0 {
-		// Whole cards: the next page starts on one.
 		view.view_off_target.x = clamp(math.round((off + move) / CARD_PITCH) * CARD_PITCH, 0, max(content - view_w, 0))
 		ui.request_frame()
 	}
