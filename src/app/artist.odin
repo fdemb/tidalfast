@@ -377,6 +377,7 @@ draw_artist_hero :: proc(s: ^State, page: ^Artist_Page, main_w, content_w: f32) 
 				ui.accessible(more, .Button, "Read less" if page.bio.open else "Read more")
 				if ui.signal(more).clicked {
 					page.bio.open = !page.bio.open
+					ui.request_frame() // this frame's lines are the old count
 				}
 			}
 		}
