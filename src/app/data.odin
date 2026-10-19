@@ -717,9 +717,8 @@ same_request :: proc(held, job: Job) -> bool {
 // held_victim is the held job to drop for a new one: one no longer wanted,
 // else the oldest Stream, Artwork or Add_Track, whose track has most likely
 // moved on, Artist, whose page asks again, or Follow, whose button goes
-// back. hold_job keeps one of each
-// other kind and view_pages one page per list, so they never fill the
-// list.
+// back. hold_job keeps one of each other kind and view_pages one page per
+// list, so they never fill the list.
 @(private = "file")
 held_victim :: proc(d: ^Data) -> int {
 	held := d.held[:d.held_count]

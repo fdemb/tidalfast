@@ -746,8 +746,8 @@ run_playlists :: proc(s: ^tidal.Session, res: ^Result, alloc: mem.Allocator) {
 }
 
 // run_liked_ids reads every liked track's id and followed artist's in one
-// request and sorts them for the binary searches. The version is the sidebar's from
-// when the job went out, since the ids don't say one.
+// request and sorts them for the binary searches. The version is the
+// sidebar's from when the job went out, since the ids don't say one.
 @(private = "file")
 run_liked_ids :: proc(s: ^tidal.Session, job: Liked_Ids_Job, res: ^Result, alloc: mem.Allocator) {
 	ids, err := tidal.favorites_ids(s, alloc)
