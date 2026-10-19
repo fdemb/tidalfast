@@ -4,6 +4,7 @@
 ./build.sh              # debug: build/tidalfast and build/app.dylib
 ./build.sh app          # rebuild only the dylib
 ./build.sh release      # optimized, hot reload off
+./build.sh dist         # release package in build/dist
 ./build/tidalfast
 ```
 
@@ -16,6 +17,20 @@ On macOS it needs macOS 14 or later, Odin and the Xcode command line tools; [lin
 - Hangul. `kbts__HangulSyllableInfo` tested `Codepoint == 0xAC00` where it meant `>=`, so U+AC00 (가) was the only precomposed syllable it recognized. That one was split into jamo and never put back together: the syllable's jamo were treated as not composable, so 가 came out as two jamo glyphs twice as wide. Every other syllable was passed through untouched. On top of that, every glyph the Hangul pass made had codepoint index 0. Now all of U+AC00 to U+D7A3 is recognized, a syllable's own jamo always recompose, and the new glyphs keep the syllable's index and config. Apple SD Gothic Neo's Hangul now matches CoreText's glyph for glyph.
 - Inserted glyphs. The dotted circle added before a stray mark and the nikhahit split off Thai and Lao sara am got index 0. They now take the index of the character they're inserted for.
 - Font coverage. `kbts_FontCoverageTestCodepoint` asked the font for a glyph for every codepoint of a cluster, default ignorables included, so a font that doesn't map U+FE0F didn't cover 🏳️‍🌈 or 1️⃣ and the cluster went to Inter as missing glyphs. Noto Color Emoji is such a font. The shaper hides default ignorables anyway, so the test now skips them.
+
+## Packaging
+
+`./build.sh dist` builds an optimized app with hot reload off into `build/dist` and packs it. It writes nothing else in `build/`, so a debug app that's running doesn't reload it. `TIDALFAST_VERSION=1.2.3` sets the version. Without it the version comes from a `v1.2.3` tag on HEAD, or is 0.0.0.
+
+On macOS it makes `TIDALfast.app` and `TIDALfast-<version>-macos-arm64.dmg`. The shell and `app.dylib` sit together in `Contents/MacOS`, since the shell loads the dylib from its own folder. Both are built for macOS 14, as `LSMinimumSystemVersion` in `packaging/macos/Info.plist` says. Odin and clang otherwise target the build machine's macOS, and dyld refuses a dylib built for a newer one. The static libraries they link should target 14 too. Homebrew's Odin ships a `miniaudio.a` built for its own macOS, which the linker warns about. The release workflow builds `miniaudio.a` itself with `MACOSX_DEPLOYMENT_TARGET=14.0`. The bundle is signed ad hoc, so Gatekeeper blocks a downloaded copy until the user allows it in System Settings > Privacy & Security or runs `xattr -dr com.apple.quarantine /Applications/TIDALfast.app`. Every release has a new ad hoc signature, so the Keychain asks again for access to the saved login after an update.
+
+On Linux it makes `TIDALfast-<version>-<arch>.AppImage` with [linuxdeploy](https://github.com/linuxdeploy/linuxdeploy) and its AppImage plugin, found on `PATH` or through `LINUXDEPLOY=path`. Run it with `APPIMAGE_EXTRACT_AND_RUN=1` where there's no FUSE, as in a container. The AppDir keeps `tidalfast` and `app.so` in `usr/bin`. linuxdeploy copies the libraries they link (libcurl and what it needs) into `usr/lib` and leaves out the ones every desktop has: glibc, Wayland, xkbcommon, fontconfig, FreeType and the Vulkan loader. The libcurl it carries is Debian's and looks for CA certificates only in `/etc/ssl/certs/ca-certificates.crt`. openSUSE has no file there, so `src/cacert` gives curl the system's own bundle when that file is missing. Build on the oldest distribution the AppImage should run on, since it needs that glibc or newer. Ubuntu 24.04 is the oldest Ubuntu with the fractional-scale protocol the shell uses.
+
+`packaging/icon.svg` is the icon. `tools/icon.sh` renders it to `packaging/macos/AppIcon.icns` and `packaging/linux/tidalfast.png`, which are committed so the build needs no SVG renderer. It needs `rsvg-convert` (`brew install librsvg`) and `iconutil`.
+
+`.github/workflows/release.yml` runs `./build.sh dist` on macOS 15 and Ubuntu 24.04 when a `v*` tag is pushed, and publishes the .dmg and the AppImage as that tag's GitHub release. A tag with a hyphen, such as `v0.2.0-beta.1`, makes a prerelease. Running the workflow by hand builds both and keeps them as workflow artifacts without releasing anything.
+
+## Logging and environment variables
 
 The app logs through `core:log` to stderr, at info level and up, with the level, time and source line. Errors say what failed and its HTTP status or OS code, never tokens, URLs with their query or what the server sent.
 
