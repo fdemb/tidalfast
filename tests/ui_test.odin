@@ -1164,3 +1164,88 @@ test_ui_closed_menu_takes_no_click :: proc(t: ^testing.T) {
 	f = menu_frame(&u, &now, {kind = .Mouse_Down, x = at.x, y = at.y, click_count = 1}, {kind = .Mouse_Up, x = at.x, y = at.y, click_count = 1})
 	testing.expect(t, f.area.clicked, "the closed menu doesn't swallow the click")
 }
+
+// A 300 by 200 window with two keyed groups. The panel, laid out like the
+// sidebar: two 24 pt buttons at the top left, one at the right of the row
+// below, and a full-width box under them. The grid: three 80 pt cards in a
+// row, and a last row with one.
+@(private = "file")
+reach_frame :: proc(u: ^ui.State, now: ^f64, events: ..platform.Event) -> (panel, grid: ^ui.Box) {
+	now^ += 1.0 / 120
+	ui.begin_frame(u, events, nil, nil, 300, 200, now^)
+	{
+		ui.row("", {}, ui.fill(), ui.fill())
+		{
+			panel = ui.column("panel", {}, ui.px(200), ui.fill())
+			{
+				ui.row("", {}, ui.fill(), ui.px(32))
+				ui.spacer(ui.px(10))
+				ui.box_make("##back", {.Focusable, .Clickable}, ui.px(24), ui.px(24))
+				ui.spacer(ui.px(2))
+				ui.box_make("##forward", {.Focusable, .Clickable}, ui.px(24), ui.px(24))
+			}
+			{
+				ui.row("", {}, ui.fill(), ui.px(40))
+				ui.spacer(ui.fill())
+				ui.box_make("##settings", {.Focusable, .Clickable}, ui.px(24), ui.px(24))
+				ui.spacer(ui.px(10))
+			}
+			ui.box_make("##wide", {.Focusable, .Clickable}, ui.fill(), ui.px(32))
+		}
+		{
+			grid = ui.column("grid", {}, ui.px(100), ui.fill())
+			{
+				ui.row("", {}, ui.fill(), ui.px(30))
+				for i in 0 ..< 3 {
+					ui.box_make(fmt.tprintf("##card%d", i), {.Focusable, .Clickable}, ui.px(30), ui.px(30))
+				}
+			}
+			ui.row("", {}, ui.fill(), ui.px(30))
+			ui.box_make("##card3", {.Focusable, .Clickable}, ui.px(30), ui.px(30))
+		}
+	}
+	ui.end_frame()
+	return
+}
+
+// Every focusable box in a group is reachable with the arrows. An arrow
+// goes to the nearest box that way overlapping the focused one across,
+// and with none overlapping to the nearest box that way at all: Right from
+// Forward reaches Settings, and Down from a column the short last row of
+// a grid doesn't fill reaches that row's last card.
+@(test)
+test_ui_arrows_reach_every_box :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	now := 0.0
+	panel, grid := reach_frame(&u, &now)
+	reach_frame(&u, &now)
+	in_panel :: proc(panel: ^ui.Box, name: string) -> ui.Key {
+		return ui.key_from_string(panel.key, name)
+	}
+	move :: proc(u: ^ui.State, now: ^f64, from: ui.Key, arrow: platform.Key) {
+		reach_frame(u, now, {kind = .Access_Focus, target = u64(from)})
+		reach_frame(u, now, {kind = .Key_Down, key = arrow})
+	}
+
+	move(&u, &now, in_panel(panel, "##forward"), .Right)
+	testing.expect_value(t, u.focus, in_panel(panel, "##settings"))
+	move(&u, &now, in_panel(panel, "##settings"), .Left)
+	testing.expect_value(t, u.focus, in_panel(panel, "##forward"))
+	move(&u, &now, in_panel(panel, "##back"), .Right)
+	testing.expect_value(t, u.focus, in_panel(panel, "##forward"))
+	move(&u, &now, in_panel(panel, "##forward"), .Down)
+	testing.expect_value(t, u.focus, in_panel(panel, "##wide"))
+	move(&u, &now, in_panel(panel, "##wide"), .Up)
+	testing.expect_value(t, u.focus, in_panel(panel, "##settings"))
+
+	move(&u, &now, in_panel(grid, "##card2"), .Down)
+	testing.expect_value(t, u.focus, in_panel(grid, "##card3"))
+	move(&u, &now, in_panel(grid, "##card1"), .Down)
+	testing.expect_value(t, u.focus, in_panel(grid, "##card3"))
+	move(&u, &now, in_panel(grid, "##card3"), .Up)
+	testing.expect_value(t, u.focus, in_panel(grid, "##card0"))
+	move(&u, &now, in_panel(grid, "##card3"), .Down)
+	testing.expect_value(t, u.focus, in_panel(grid, "##card3"))
+}
