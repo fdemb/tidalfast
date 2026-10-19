@@ -5,6 +5,7 @@ package tidal_tests
 
 import "core:strings"
 import "core:testing"
+import "core:unicode/utf8"
 
 import app "../src/app"
 import "../src/cover"
@@ -14,7 +15,8 @@ import "../src/ui"
 
 // A State for drawing the library screen without a window: no renderer,
 // text system or workers. Closed lists' arenas are poisoned, so a string
-// the frame still borrows from one reads as POISON bytes. Like the app's,
+// the frame still borrows from one reads as POISON bytes, which are never
+// valid UTF-8 the way a real label always is. Like the app's,
 // it allocates from an arena, given as context.allocator. With m it signs
 // in to the mock; its jobs run when the test runs them.
 library_state :: proc(fake: bool, m: ^Mock = nil) -> ^app.State {
@@ -71,7 +73,7 @@ library_frame :: proc(t: ^testing.T, s: ^app.State, f: ^Frame, events: ..platfor
 	nodes, _ := ui.access_tree(&s.ui)
 	for n in nodes {
 		for c in ([2]cstring{n.label, n.value}) {
-			testing.expectf(t, strings.index_byte(string(c), app.POISON) < 0, "node %v reads freed memory: %q", n.role, string(c), loc = loc)
+			testing.expectf(t, utf8.valid_string(string(c)), "node %v reads freed memory: %q", n.role, string(c), loc = loc)
 		}
 	}
 	f.animating |= app.pending_apply(s)
