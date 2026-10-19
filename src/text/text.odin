@@ -411,6 +411,11 @@ Piece :: struct {
 
 @(private)
 shape_uncached :: proc(t: ^State, font: Font, size: f32, s: string) -> Run {
+	// kb_text_shape crashes on no codepoints.
+	if len(s) == 0 {
+		face := &t.faces[font]
+		return {size = size, font = font, ascent = face.ascent * size, descent = face.descent * size, generation = t.generation}
+	}
 	runes := make([dynamic]rune, 0, len(s), context.temp_allocator)
 	for r in s {
 		append(&runes, r)
