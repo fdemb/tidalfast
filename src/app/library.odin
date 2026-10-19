@@ -387,18 +387,19 @@ header_cell :: proc(label: string, width: f32, align: ui.Align) {
 
 // table_keys moves the selection among the first count rows with the
 // arrow keys while the table has the focus, and plays the selected row with
-// Enter or Space. It returns true when the selection moved, for the caller
-// to scroll it into view.
+// Enter or Space. A row selected past count, as in an artist's full top
+// tracks, isn't one of them. It returns true when the selection moved, for
+// the caller to scroll it into view.
 table_keys :: proc(s: ^State, list: ^ui.Box, count: int) -> (moved: bool) {
 	lib := &s.library
-	if ui.signal(list).keyboard && lib.selected >= 0 {
-		play(s, lib.selected)
+	sel := lib.selected if lib.selected < count else -1
+	if ui.signal(list).keyboard && sel >= 0 {
+		play(s, sel)
 	}
 	if !ui.has_focus(list) {
 		return
 	}
 	page := max(int(list.rect.h / TRACK_ROW_H) - 1, 1)
-	sel := lib.selected
 	moved = true
 	switch {
 	case ui.take_key(.Down):
