@@ -1115,7 +1115,7 @@ Pending_Kind :: enum u8 {
 	None,
 	Playlist, // open a sidebar entry
 	List, // open an album, an artist or a playlist that isn't in the sidebar
-	Search, // search for id again
+	Search, // a search in the history, never pending: id is the query
 	Close_Search,
 	Play,
 	Back,
@@ -1132,13 +1132,11 @@ pending_apply :: proc(s: ^State) -> bool {
 	p := s.pending
 	s.pending = {}
 	switch p.kind {
-	case .None:
+	case .None, .Search:
 		return false
 	case .Playlist, .List:
 		history_visit(s, p)
 		place_go(s, &p)
-	case .Search:
-		search_go(s, small_str(&p.id), nil)
 	case .Close_Search:
 		if search_showing(s) {
 			history_visit(s, {kind = .Playlist, index = s.library.playlist})
@@ -1150,7 +1148,7 @@ pending_apply :: proc(s: ^State) -> bool {
 		}
 	case .Back, .Forward:
 		h := &s.history
-		to := h.at - 1 if p.kind == .Back else h.at + 1
+		to := history_from(s) - 1 if p.kind == .Back else history_from(s) + 1
 		if to < 0 || to >= h.count {
 			return false
 		}
@@ -1168,7 +1166,7 @@ pending_apply :: proc(s: ^State) -> bool {
 
 // place_go shows a place, a Pending of kind .Playlist or .List, without
 // recording it in the history. A search's place is recorded when its
-// results show (search_go).
+// results show (search_shown).
 place_go :: proc(s: ^State, p: ^Pending) {
 	search_stop(s)
 	#partial switch p.kind {
@@ -1240,12 +1238,19 @@ playlist_index :: proc(s: ^State, p: ^Pending) -> int {
 	return -1
 }
 
+// history_from is the place Back and Forward step from: the search they
+// went to, which the history moves to only once its results show, or else
+// the place showing.
+history_from :: proc(s: ^State) -> int {
+	return s.search.place.? or_else s.history.at
+}
+
 history_can_back :: proc(s: ^State) -> bool {
-	return s.history.at > 0
+	return history_from(s) > 0
 }
 
 history_can_forward :: proc(s: ^State) -> bool {
-	return s.history.at + 1 < s.history.count
+	return history_from(s) + 1 < s.history.count
 }
 
 mix :: proc(a, b: render.Color, t: f32) -> render.Color {

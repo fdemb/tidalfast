@@ -8,7 +8,7 @@ The songs become the open track list, a `Track_View` with source `.Search`. So c
 
 Opening any list, from the sidebar, the tabs or the track menu, ends a search that's still waiting for its debounce or its answer. The generation goes up and the queued Search job goes, so the answer can't bring the results back over the list. The text stays in the field, and Return searches for it again.
 
-A search becomes a place in the history when its results show, not when it's sent. A search cleared, or one that fails, before its results come leaves the history at the place still showing, such as an artist's page. Back or Forward to a search moves the history there once the results come, and leaves it where it was if they don't.
+A search becomes a place in the history when its results show, not when it's sent. A search cleared, or one that fails, before its results come leaves the history at the place still showing, such as an artist's page. Back or Forward to a search moves the history there once the results come, and leaves it where it was if they don't. Either way, the next Back or Forward steps on from that search, so pressing Back again walks past a search that fails or hasn't answered.
 
 Signing out clears the field, the results and the history Back and Forward go through, so the next account starts with none of them.
 
