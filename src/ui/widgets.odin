@@ -100,7 +100,7 @@ scroll_view :: proc(id: string, width, height: Size, flags: Box_Flags = {}) -> ^
 // scrollbar. A header above the list leaves the same, so its columns line
 // up with the rows'.
 scroll_gutter :: proc(id: string) -> f32 {
-	b := box_lookup(ctx, key_from_string(seed_key(top_parent()), id))
+	b := find(id)
 	return gutter_of(b) if b != nil else 0
 }
 

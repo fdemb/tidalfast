@@ -1302,6 +1302,12 @@ take_key :: proc(code: platform.Key, modifiers: platform.Modifiers = {}) -> bool
 	return false
 }
 
+// find is the keyed box id under the current parent, as the last frame left
+// it, or nil before it's built for the first time.
+find :: proc(id: string) -> ^Box {
+	return box_lookup(ctx, key_from_string(seed_key(top_parent()), id))
+}
+
 has_focus :: proc(b: ^Box) -> bool {
 	return b.key != 0 && ctx.focus == b.key
 }
