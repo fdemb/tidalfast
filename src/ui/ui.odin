@@ -252,8 +252,10 @@ State :: struct {
 	drag_moved:     bool, // past DRAG_THRESHOLD since the press
 	control_click:  bool, // the left button is down as a control-click
 	buttons_stale:  platform.Mouse_Buttons, // held here but up in hardware last frame
-	scroll_latch:   Key, // the scroll view a trackpad gesture started over
-	scroll_key:     Key, // this frame's scroll goes to this box
+	// Per axis, so a row that scrolls sideways inside a page that scrolls
+	// down takes only the sideways part of a scroll, and the page the rest.
+	scroll_latch:   [2]Key, // the scroll views a trackpad gesture started over
+	scroll_key:     [2]Key, // this frame's scroll goes to these boxes
 	scroll:         [2]f32, // points, this frame
 	scroll_precise: [2]f32, // the part of scroll from trackpads, applied without easing
 	focus:          Key,
@@ -526,7 +528,7 @@ process_events :: proc(u: ^State, events: []platform.Event, text_bytes: []u8) {
 	u.edit_count = 0
 	u.scroll = {}
 	u.scroll_precise = {}
-	u.scroll_key = 0
+	u.scroll_key = {}
 	u.drop = u.drop_next
 	u.drop_next = false
 	u.drag_unclaimed = false
@@ -575,8 +577,8 @@ process_events :: proc(u: ^State, events: []platform.Event, text_bytes: []u8) {
 		case .Scroll:
 			// A trackpad gesture and its momentum keep scrolling the view it
 			// started over. A mouse wheel goes wherever the mouse is.
-			if e.phase == .Began || e.phase == .May_Begin || (e.phase == .None && e.momentum_phase == .None) || u.scroll_latch == 0 {
-				u.scroll_latch = scroll_hit_at(u, u.input.mouse)
+			if e.phase == .Began || e.phase == .May_Begin || (e.phase == .None && e.momentum_phase == .None) || u.scroll_latch == {} {
+				u.scroll_latch = {scroll_hit_at(u, u.input.mouse, .X), scroll_hit_at(u, u.input.mouse, .Y)}
 			}
 			u.scroll_key = u.scroll_latch
 			d := scroll_delta(e)
@@ -881,16 +883,17 @@ hit_at :: proc(u: ^State, pos: [2]f32) -> Key {
 	return 0
 }
 
-// scroll_hit_at is the innermost scroll view under pos. An open menu over
-// it takes the scroll instead.
+// scroll_hit_at is the innermost scroll view under pos that scrolls along
+// axis. An open menu over it takes the scroll instead.
 @(private)
-scroll_hit_at :: proc(u: ^State, pos: [2]f32) -> Key {
+scroll_hit_at :: proc(u: ^State, pos: [2]f32, axis: Axis) -> Key {
+	overflow := Box_Flag.Allow_Overflow_X if axis == .X else .Allow_Overflow_Y
 	for i := u.hit_count - 1; i >= 0; i -= 1 {
 		h := u.hits[i]
 		if !rect_contains(h.rect, pos) {
 			continue
 		}
-		if .View_Scroll in h.flags {
+		if .View_Scroll in h.flags && overflow in h.flags {
 			return h.key
 		}
 		if h.floating && .Clickable in h.flags {
@@ -1011,15 +1014,17 @@ finish :: proc(u: ^State, b: ^Box, clip: render.Rect, focus_parent, click_parent
 	}
 }
 
-// reveal_focus scrolls the nearest scroll view around the focused box the
-// least it takes to show the box. The box must have been built this frame.
+// reveal_focus scrolls the scroll views around the focused box the least
+// it takes to show the box: along each axis, the nearest one that scrolls
+// that way. The box must have been built this frame.
 @(private)
 reveal_focus :: proc(u: ^State) {
 	b := box_lookup(u, u.focus)
 	if b == nil || b.last_frame != u.frame {
 		return
 	}
-	for v := b.parent; v != nil; v = v.parent {
+	done: [2]bool
+	for v := b.parent; v != nil && done != {true, true}; v = v.parent {
 		if .View_Scroll not_in v.flags || v.key == 0 {
 			continue
 		}
@@ -1028,9 +1033,10 @@ reveal_focus :: proc(u: ^State) {
 		view := [2]f32{v.rect.w, v.rect.h}
 		for axis in 0 ..< 2 {
 			overflow := Box_Flag.Allow_Overflow_X if axis == 0 else .Allow_Overflow_Y
-			if overflow not_in v.flags {
+			if overflow not_in v.flags || done[axis] {
 				continue
 			}
+			done[axis] = true
 			t := v.view_off_target[axis]
 			if pos[axis] < t {
 				t = pos[axis]
@@ -1043,7 +1049,6 @@ reveal_focus :: proc(u: ^State) {
 				u.animating = true
 			}
 		}
-		return
 	}
 }
 
@@ -1140,9 +1145,11 @@ approach :: proc(u: ^State, v, target, rate, eps: f32) -> f32 {
 // after it. Both stay within the content from the last layout.
 @(private)
 scroll_box :: proc(u: ^State, b: ^Box) {
-	if u.scroll_key == b.key {
-		b.view_off_target -= u.scroll
-		b.view_off -= u.scroll_precise
+	for axis in 0 ..< 2 {
+		if u.scroll_key[axis] == b.key {
+			b.view_off_target[axis] -= u.scroll[axis]
+			b.view_off[axis] -= u.scroll_precise[axis]
+		}
 	}
 	limit := [2]f32{max(b.view_bounds.x - b.rect.w, 0), max(b.view_bounds.y - b.rect.h, 0)}
 	rate := 1 - math.exp(-u.dt * 20)
@@ -1181,8 +1188,10 @@ signal :: proc(b: ^Box) -> (s: Signal) {
 		s.drag_delta = s.mouse - u.drag_start
 		s.dragging = u.drag_moved
 	}
-	if u.scroll_key == k {
-		s.scroll = u.scroll
+	for axis in 0 ..< 2 {
+		if u.scroll_key[axis] == k {
+			s.scroll[axis] = u.scroll[axis]
+		}
 	}
 	return
 }

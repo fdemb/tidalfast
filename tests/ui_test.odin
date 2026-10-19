@@ -388,6 +388,84 @@ settle :: proc(u: ^ui.State, now: ^f64, height: f32, count: int) -> (view: ^ui.B
 	return
 }
 
+// A vertical page in a 300 by 200 window: a 20 pt focusable item, then a
+// 50 pt shelf that scrolls sideways through ten 100 pt focusable cards,
+// then 1000 pt of space. right_taken says whether the app got a Right.
+@(private = "file")
+shelf_frame :: proc(u: ^ui.State, now: ^f64, events: ..platform.Event) -> (page, shelf: ^ui.Box, right_taken, animating: bool) {
+	now^ += 1.0 / 120
+	ui.begin_frame(u, events, nil, nil, 300, 200, now^)
+	{
+		page = ui.scroll_view("page", ui.fill(), ui.fill())
+		ui.box_make("##item", {.Focusable, .Clickable}, ui.fill(), ui.px(20))
+		shelf = ui.box_make("shelf", {.View_Scroll, .Clip, .Allow_Overflow_X}, ui.fill(), ui.px(50))
+		shelf.child_axis = .X
+		ui.push_parent(shelf)
+		for i in 0 ..< 10 {
+			ui.box_make(fmt.tprintf("##card%d", i), {.Focusable, .Clickable}, ui.px(100), ui.px(50))
+		}
+		ui.pop_parent()
+		ui.box_make("", {}, ui.fill(), ui.px(1000))
+	}
+	right_taken = ui.take_key(.Right)
+	animating = ui.end_frame()
+	return
+}
+
+@(private = "file")
+shelf_settle :: proc(u: ^ui.State, now: ^f64) -> (page, shelf: ^ui.Box, settled: bool) {
+	animating: bool
+	for _ in 0 ..< 300 {
+		page, shelf, _, animating = shelf_frame(u, now)
+		if !animating {
+			return page, shelf, true
+		}
+	}
+	return
+}
+
+@(test)
+test_ui_scroll_per_axis :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	now := 0.0
+	shelf_settle(&u, &now)
+
+	// A diagonal trackpad scroll over the shelf: it takes the sideways part
+	// and the page the rest, through the momentum too, wherever the mouse is.
+	page, shelf, _, _ := shelf_frame(&u, &now, {kind = .Mouse_Move, x = 50, y = 40}, {kind = .Scroll, dx = -40, dy = -30, precise = true, phase = .Began})
+	testing.expect_value(t, shelf.view_off.x, f32(40))
+	testing.expect_value(t, page.view_off.y, f32(30))
+	page, shelf, _, _ = shelf_frame(&u, &now, {kind = .Mouse_Move, x = 50, y = 150}, {kind = .Scroll, dx = -10, dy = -10, precise = true, momentum_phase = .Changed})
+	testing.expect_value(t, shelf.view_off.x, f32(50))
+	testing.expect_value(t, page.view_off.y, f32(40))
+	shelf_settle(&u, &now)
+
+	// A wheel over the shelf with no sideways delta scrolls the page.
+	page, shelf, _, _ = shelf_frame(&u, &now, {kind = .Mouse_Move, x = 50, y = 20}, {kind = .Scroll, dy = -2})
+	testing.expect_value(t, page.view_off_target.y, f32(40 + 2 * ui.SCROLL_LINE))
+	testing.expect_value(t, shelf.view_off_target.x, f32(50))
+}
+
+@(test)
+test_ui_focus_reveals_on_both_axes :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	now := 0.0
+	shelf_settle(&u, &now)
+	shelf_frame(&u, &now, {kind = .Mouse_Move, x = 50, y = 150}, {kind = .Scroll, dy = -500, precise = true, phase = .Began})
+	page, shelf, _ := shelf_settle(&u, &now)
+	testing.expect_value(t, page.view_off.y, f32(500))
+
+	// Card 9 is 900 to 1000 across and 20 to 70 down, above the page's view.
+	shelf_frame(&u, &now, {kind = .Access_Focus, target = u64(ui.key_from_string(shelf.key, "##card9"))})
+	page, shelf, _ = shelf_settle(&u, &now)
+	testing.expect_value(t, page.view_off.y, f32(20))
+	testing.expect_value(t, shelf.view_off.x, 1000 - shelf.rect.w)
+}
+
 @(test)
 test_ui_scroll_clamps_to_new_content :: proc(t: ^testing.T) {
 	u: ui.State
