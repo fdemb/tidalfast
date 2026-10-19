@@ -17,7 +17,11 @@
 // artists and the playlists by name; a query that matches nothing gets
 // made-up tracks named after it, so any query has results. /albums/<id>/tracks
 // and /artists/<id>/toptracks list a dozen made-up tracks. Every fifth
-// made-up track has a second artist.
+// made-up track has a second artist. /artists/<id> gives the artist, and
+// /bio, /albums (filter EPSANDSINGLES or COMPILATIONS too) and /similar
+// the rest of an artist page. Artist 1 has 73 albums, so they take two
+// pages of 50; every fifth artist has no biography and gets a 404, as
+// TIDAL answers.
 //
 // The PKCE login: GET /authorize redirects to /android/login/auth with a
 // code, and POST /oauth2/token trades it, with the Android client's id,
@@ -643,6 +647,8 @@ route :: proc(req: ^Request) -> Response {
 	case strings.has_prefix(path, "/artists/") && strings.has_suffix(path, "/toptracks"):
 		id, _ := parse_i(strings.trim_suffix(strings.trim_prefix(path, "/artists/"), "/toptracks"))
 		return made_up_tracks(-1, id, offset, limit)
+	case strings.has_prefix(path, "/artists/"):
+		return artist_response(path, req.query, offset, limit)
 	case strings.has_prefix(path, "/playlists/") && strings.has_suffix(path, "/items") && req.method == "POST":
 		p := playlist_index(strings.trim_suffix(strings.trim_prefix(path, "/playlists/"), "/items"))
 		if p < 0 {
@@ -1156,4 +1162,68 @@ hsv :: proc(h, s, v: f32) -> [3]f32 {
 		out[i] = v - v * s * max(0, min(k[i], 4 - k[i], 1))
 	}
 	return out
+}
+
+// artist_response serves /artists/<n> and its bio, albums (with filter
+// EPSANDSINGLES or COMPILATIONS) and similar artists. Artist n is
+// ARTISTS[n - 1], as in the tracks.
+artist_response :: proc(path: string, query: map[string]string, offset, limit: int) -> Response {
+	id_str, _, what := strings.partition(strings.trim_prefix(path, "/artists/"), "/")
+	id, _ := parse_i(id_str)
+	if id <= 0 {
+		return json_response(404, `{"status":404,"subStatus":2001,"userMessage":"Artist not found"}`)
+	}
+	ar := (id - 1) % len(ARTISTS)
+	switch what {
+	case "":
+		fmt.printfln("mock: artist %d", id)
+		return json_response(200, fmt.tprintf(`{{"id":%d,"name":%q,"picture":"%s","popularity":50}}`, id, ARTISTS[ar], image_id(3000 + ar)))
+	case "bio":
+		if id % 5 == 0 {
+			return json_response(404, `{"status":404,"subStatus":2001,"userMessage":"Biography not found"}`)
+		}
+		other := (ar + 1) % len(ARTISTS)
+		text := fmt.tprintf("%s is a made-up artist the mock serves, here to fill an artist page without a TIDAL account. Their sound owes a lot to [wimpLink artistId=\"%d\"]%s[/wimpLink], whom they toured with for years.<br/><br/>The albums below are generated from the artist's number, each with a cover drawn from its id, and the songs are the mock's usual quiet tones.", ARTISTS[ar], other + 1, ARTISTS[other])
+		return json_response(200, fmt.tprintf(`{{"source":"mock","text":%q}}`, text))
+	case "albums":
+		filter := query["filter"] or_else ""
+		count, base := 73 if id == 1 else 9, 0
+		switch filter {
+		case "EPSANDSINGLES":
+			count, base = 14, 100
+		case "COMPILATIONS":
+			count, base = 6, 200
+		}
+		b := list_begin(count, offset, limit)
+		for i in offset ..< min(offset + limit, count) {
+			if i > offset {
+				strings.write_byte(&b, ',')
+			}
+			album := 10_000 + id * 1000 + base + i
+			kind := "ALBUM"
+			if filter == "EPSANDSINGLES" {
+				kind = "EP" if i % 3 == 0 else "SINGLE"
+			}
+			by := ar if filter != "COMPILATIONS" else (ar + i + 1) % len(ARTISTS)
+			fmt.sbprintf(&b, `{{"id":%d,"title":%q,"cover":"%s","numberOfTracks":%d,"type":"%s","releaseDate":"%d-%02d-01","artist":{{"id":%d,"name":%q}},"artists":[{{"id":%d,"name":%q}}]}}`,
+				album, album_title(album), image_id(album), 12 if kind == "ALBUM" else (4 if kind == "EP" else 1), kind, 2025 - i % 40, 1 + i % 12, by + 1, ARTISTS[by], by + 1, ARTISTS[by])
+		}
+		strings.write_string(&b, "]}")
+		fmt.printfln("mock: artist %d albums (%s), %d from %d", id, filter, count, offset)
+		return json_response(200, strings.to_string(b))
+	case "similar":
+		count := len(ARTISTS) - 1
+		b := list_begin(count, offset, limit)
+		for i in offset ..< min(offset + limit, count) {
+			if i > offset {
+				strings.write_byte(&b, ',')
+			}
+			other := (ar + i + 1) % len(ARTISTS)
+			fmt.sbprintf(&b, `{{"id":%d,"name":%q,"picture":"%s"}}`, other + 1, ARTISTS[other], image_id(3000 + other))
+		}
+		strings.write_string(&b, "]}")
+		return json_response(200, strings.to_string(b))
+	}
+	fmt.printfln("mock: no route for artist %s", path)
+	return json_response(404, `{"status":404,"userMessage":"Not found"}`)
 }
