@@ -10,6 +10,8 @@ import "core:sync"
 import "core:time"
 import curl "vendor:curl"
 
+import "../cacert"
+
 Method :: enum {
 	GET,
 	POST,
@@ -69,6 +71,9 @@ http_send :: proc(
 	curl.easy_setopt(h, .FOLLOWLOCATION, c.long(1))
 	curl.easy_setopt(h, .ACCEPT_ENCODING, cstring(""))
 	curl.easy_setopt(h, .CONNECTTIMEOUT, c.long(15))
+	if ca := cacert.path(); ca != nil {
+		curl.easy_setopt(h, .CAINFO, ca)
+	}
 	if s.config.timeout_seconds > 0 {
 		curl.easy_setopt(h, .TIMEOUT, c.long(s.config.timeout_seconds))
 	}
