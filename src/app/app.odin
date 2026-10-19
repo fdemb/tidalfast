@@ -200,6 +200,7 @@ app_frame :: proc "c" (m: ^platform.Memory, shell: ^platform.Shell, input: ^plat
 	frame_ms := f32(time.duration_milliseconds(time.tick_since(begin)))
 	s.frame_ms[s.frame_count % FRAME_HISTORY] = frame_ms
 	s.frame_count += 1
+	s.measure.frame_time = input.time
 	measure_frame(s)
 	if s.text.needs_redraw {
 		// Glyphs left over from the raster budget or a full atlas. The

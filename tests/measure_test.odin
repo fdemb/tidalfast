@@ -108,6 +108,43 @@ test_measure_compare :: proc(t: ^testing.T) {
 	testing.expect(t, !strings.has_suffix(lines[3], "worse"), lines[3])
 }
 
+// The frames scenario: a line per bench phase, the medians over the runs,
+// and more fps is better where less of everything else is.
+@(test)
+test_measure_frames :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	run :: proc(fps, gpu: string) -> []measure.Line {
+		return measure.parse_log(strings.concatenate({`measure: {"frames":"warm","count":240,"fps":`, fps, `,"interval_p95":9.1,"cpu_median":1.5,"cpu_p95":2.2,"gpu_median":`, gpu, `,"gpu_p95":6.0}`}))
+	}
+	runs := [][]measure.Line{run("118", "4.0"), run("120", "5.0"), run("90", "4.5")}
+	l, ok := measure.find_frames(runs[0], "warm")
+	testing.expect(t, ok)
+	testing.expect_value(t, l.count, 240)
+	a: measure.Results
+	measure.add_frames(&a, "fake", runs)
+	fps, _ := measure.find_metric(a.metrics[:], "frames", "fake", "warm", "fps")
+	testing.expect_value(t, fps, 118)
+	gpu, _ := measure.find_metric(a.metrics[:], "frames", "fake", "warm", "gpu_median")
+	testing.expect_value(t, gpu, 4.5)
+	_, has_cold := measure.find_metric(a.metrics[:], "frames", "fake", "cold", "fps")
+	testing.expect(t, !has_cold)
+
+	b: measure.Results
+	measure.add_frames(&b, "fake", {run("100", "7.0")})
+	sb := strings.builder_make()
+	measure.write_compare(&sb, measure.compare(a.metrics[:], b.metrics[:]))
+	// Fewer fps and more GPU time are both worse.
+	marked := 0
+	for line in strings.split_lines(strings.to_string(sb)) {
+		cols := strings.fields(line)
+		if len(cols) > 3 && (cols[3] == "fps" || cols[3] == "gpu_median") {
+			testing.expect(t, strings.has_suffix(line, "worse"), line)
+			marked += 1
+		}
+	}
+	testing.expect_value(t, marked, 2)
+}
+
 @(test)
 test_measure_counters :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator

@@ -5,6 +5,7 @@
 ./build/measure/measure startup     # 10 cold launches with the fake data, then 10 against the mock
 ./build/measure/measure memory      # the memory scenario, once with each
 ./build/measure/measure all         # both
+./build/measure/measure frames      # frame rate and frame times, scrolling the fake data, 3 runs
 ./build/measure/measure compare docs/measure-baseline.json build/measure/20261015-114141.json
 ./build/measure/measure ab main      # this checkout against main, the two taking turns
 ./build/measure/measure launches     # your own launches, from the app's launch log
@@ -22,11 +23,17 @@ The setups:
 
 `measure compare a.json b.json` prints every number in both files with its change. A time or size that changed by 10% and at least 1 ms or MB is marked `worse` or `better`, and an instruction count that changed by 2%. Startup times move a few percent from run to run, so compare medians from the same machine.
 
+## Frames
+
+`measure frames` runs `TIDALFAST_MEASURE=frames` with the fake data (it skips the other setups), three times unless `-runs` says otherwise. Once the first track rows show and 3 s pass, the app scrolls the 10,000 rows with the library bench (`TIDALFAST_BENCH=1`'s phases: warm scrolls back and forth over rows it has built, cold 3 new rows a frame, jump a new page a frame) and asks for each frame as soon as the last one is done. So the frame rate is what the display and the GPU let through, at most the display's refresh rate. For each phase it prints the frame rate, the 95th percentile of the time between frames, and the median and 95th percentile of the CPU time a frame took (building and encoding it, the overlay's frame time) and of the GPU's (`render.Renderer.gpu_ms`, from the command buffer's start and end on the GPU, a frame or two behind; 0 on Linux). The tool prints the medians over the runs. A frame rate is marked when it changes by 5% and at least 1 fps, and more is better.
+
+The window has to be on screen and the Mac awake: a covered window parks its drawables and draws no real frames. Battery power, Low Power Mode and heat lower the GPU's clock, which shows in its times, so compare builds in one sitting with `measure ab`.
+
 ## Comparing two builds
 
 Times measured on different days don't compare. On 17 October the commit the baseline below was recorded from, measured again, came out 50 ms (fake) and 109 ms (mock) slower to `tracks` than its own baseline. The code was the same; the machine wasn't. Load, heat and background work such as Spotlight, Photos analysis and XProtect's scans move startup by tens of percent.
 
-`measure ab <ref>` measures a change against the code it changes, in one sitting. It checks out `<ref>` in a worktree under `build/measure/ab-<time>`, builds it with its own `./build.sh measure`, and measures it (a) against this checkout's measure build (b), so run `./build.sh measure` first. The two take turns, a then b, then b then a, so whatever the machine does during the run weighs on both. Each build has its own settings, list cache, Keychain item and mock, both mocks this checkout's. A shared mock keeps one refresh token per user, so each build's login would end the other's. Flags are the same as `startup`'s; the memory scenario runs once each after the startup runs.
+`measure ab <ref>` measures a change against the code it changes, in one sitting. It checks out `<ref>` in a worktree under `build/measure/ab-<time>`, builds it with its own `./build.sh measure`, and measures it (a) against this checkout's measure build (b), so run `./build.sh measure` first. The two take turns, a then b, then b then a, so whatever the machine does during the run weighs on both. Each build has its own settings, list cache, Keychain item and mock, both mocks this checkout's. A shared mock keeps one refresh token per user, so each build's login would end the other's. Flags are the same as `startup`'s; the memory scenario runs once each after the startup runs, and with the fake data the frames scenario three times each, taking turns, compared by its medians and marked as `compare` marks.
 
 For each startup mark it prints the median of a and of b, then the median and middle half (25th to 75th percentile) of the differences between runs next to each other, in how many of those pairs b was higher, and a sign test's p-value: the chance that two builds doing the same work split the pairs at least that unevenly. Each build's first run is left out. A change is `worse` or `better` only when p is under 0.05 (with the default 9 pairs, 8 of them going the same way) and the median difference is at least 1% (and 1 ms for times). An earlier rule, the middle half of the differences on one side of zero, marked two builds with the same startup code apart: b was faster in 7 of 9 pairs, which happens by chance 18% of the time. Memory runs once per build and is printed without marks: a build measured against itself came out 12 MB apart at the mock's `list_open`. To judge memory, compare `measure memory -runs=N` of each build.
 
