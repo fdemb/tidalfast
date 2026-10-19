@@ -830,6 +830,44 @@ bio_breaks_words_wider_than_the_column :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(strings.to_string(joined), url), "the whole link")
 }
 
+
+// Breaking a long paragraph without spaces again at a new width, as a live
+// resize does every frame, shapes a few runs, not a run per prefix tried
+// on every line.
+@(test)
+bio_breaks_a_long_word_in_a_few_shapes :: proc(t: ^testing.T) {
+	fonts: Fonts
+	if !testing.expect(t, fonts_init(&fonts)) {
+		return
+	}
+	defer fonts_destroy(&fonts)
+	context.allocator = mem.arena_allocator(&fonts.arena)
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	cjk := strings.repeat("日本語の文章は単語の間に空白を入れずに書かれます。", 80)
+	m.answers["/artists/7/bio"] = {200, fmt.aprintf(`{{"source":"mock","text":"%s"}}`, cjk)}
+	s := library_state(false, &m)
+	defer library_state_free(s)
+	f := Frame{fonts = &fonts, size = {1100, 2400}}
+	mock_page(t, s, &f, 7)
+	for same := 0; same < 5; {
+		generation := fonts.state.generation
+		time.sleep(20 * time.Millisecond)
+		library_frame(t, s, &f)
+		same = same + 1 if fonts.state.generation == generation else 0
+	}
+	testing.expect(t, has(s, "Read more", .Button), "the paragraph is longer than three lines")
+
+	for width in ([]f32{820, 900, 860}) {
+		wraps := s.measure.bio_wraps
+		f.size = {width, 2400}
+		library_frame(t, s, &f)
+		testing.expectf(t, s.measure.bio_wraps == wraps + 1, "the biography breaks again at %v", width)
+		testing.expectf(t, fonts.state.stats.shaped <= 10, "%d runs shaped at %v", fonts.state.stats.shaped, width)
+	}
+}
+
 // Pressing More, from the keyboard or an assistive app, asks for the frame
 // that shows the rest of the biography, and Less for the one that hides it.
 @(test)
