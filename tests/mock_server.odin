@@ -75,6 +75,7 @@ Mock :: struct {
 	// playbackinfopostpaywall's answer for each audioquality; 404 for others.
 	playback:   map[string]Mock_Answer,
 	// Paths answered with these instead of their route, such as a failure.
+	// A request with a filter is looked up as "path?filter=value".
 	answers:    map[string]Mock_Answer,
 
 	allocator:  runtime.Allocator,
@@ -295,7 +296,11 @@ mock_route :: proc(m: ^Mock, req: Mock_Request, target: string) -> (status: int,
 	if data, ok := m.files[req.path]; ok {
 		return 200, string(data), etag
 	}
-	if a, ok := m.answers[req.path]; ok {
+	answer_key := req.path
+	if filter, ok := req.query["filter"]; ok {
+		answer_key = fmt.tprintf("%s?filter=%s", req.path, filter)
+	}
+	if a, ok := m.answers[answer_key]; ok {
 		return a.status, a.body, etag
 	}
 
