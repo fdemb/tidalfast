@@ -845,8 +845,8 @@ menu_blocks :: proc(u: ^State, key: Key) -> bool {
 // keyed parent in the arrow's direction: past the focused box along axis
 // and overlapping it across, so a column moves up and down, a row left and
 // right, and a grid both ways. With none overlapping it goes to the
-// nearest box past it at all, so no box in a group is out of the arrows'
-// reach. In an open menu it moves among the menu's items, starting at the
+// nearest box past it at all, so a box off to the side, such as Settings
+// beside the history buttons, is still reached. In an open menu it moves among the menu's items, starting at the
 // first or last when none has the focus.
 @(private)
 focus_arrow :: proc(u: ^State, axis: Axis, dir: int) -> bool {
