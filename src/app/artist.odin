@@ -308,11 +308,18 @@ artist_bio_lines :: proc(s: ^State, page: ^Artist_Page, width: f32) -> []Bio_Lin
 				append(&l.lines, Bio_Line{base + start, base + end})
 			}
 			start = word_start
-			for w > width {
-				cut := start + bio_fit(p[start:word_end], width)
-				append(&l.lines, Bio_Line{base + start, base + cut})
-				start = cut
-				w = ui.text_width(BIO_FONT, BIO_SIZE, p[start:word_end])
+			if w > width {
+				// Whole clusters per line, at least one, so a line always
+				// moves on.
+				bounds := ui.cluster_bounds(word)
+				w = 0
+				for cw, i in ui.cluster_widths(BIO_FONT, BIO_SIZE, word, bounds) {
+					if w > 0 && w + cw > width {
+						append(&l.lines, Bio_Line{base + start, base + word_start + bounds[i]})
+						start, w = word_start + bounds[i], 0
+					}
+					w += cw
+				}
 			}
 			end, line_w = word_end, w
 		}
@@ -321,23 +328,6 @@ artist_bio_lines :: proc(s: ^State, page: ^Artist_Page, width: f32) -> []Bio_Lin
 		}
 	}
 	return l.lines[:]
-}
-
-// bio_fit is how many bytes of word, in whole grapheme clusters, fit in
-// width: at least one cluster, so a line always moves on.
-@(private = "file")
-bio_fit :: proc(word: string, width: f32) -> int {
-	bounds := ui.cluster_bounds(word)
-	lo, hi := 1, len(bounds) - 1 // bounds[lo] fits, bounds[hi + 1] doesn't
-	for lo < hi {
-		mid := (lo + hi + 1) / 2
-		if ui.text_width(BIO_FONT, BIO_SIZE, word[:bounds[mid]]) <= width {
-			lo = mid
-		} else {
-			hi = mid - 1
-		}
-	}
-	return bounds[lo]
 }
 
 @(private = "file")
