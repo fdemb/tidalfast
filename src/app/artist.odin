@@ -1,9 +1,10 @@
 package app
 
 // The artist page, after TIDAL's: the artist's picture across the top with
-// the name and the start of the biography over it, Play and Shuffle, Share
-// and More, the top tracks, then a shelf for each part of the page that has
-// cards (artist_part_spec). The data is in artist_data.odin.
+// the name and the start of the biography over it, Play, Shuffle, Follow,
+// Share and More, the top tracks, then a shelf for each part of the page
+// that has cards (artist_part_spec). The data is in artist_data.odin, and
+// the followed artists in followed.odin.
 //
 // The page, its full top tracks (Artist_Top_Tracks) and a shelf's grid
 // (Artist_Grid) are places in the History, told apart by
@@ -462,6 +463,22 @@ draw_artist_actions :: proc(s: ^State, p: ^Pending, page: ^Artist_Page) {
 			ui.spacer(ui.fill())
 			if pill("artist_shuffle", text.ICON_SHUFFLE, "Shuffle", false, playable).clicked {
 				pending_set(s, {kind = .Play, order = .Shuffled})
+			}
+			ui.spacer(ui.fill())
+		}
+		ui.spacer(ui.px(10))
+		{
+			ui.column("", {}, ui.children_sum(), ui.fill())
+			ui.spacer(ui.fill())
+			// Until the set comes, an artist it lacks may be followed.
+			known := s.data.fake || s.data.followed.known
+			following := followed_has(&s.data, page.id)
+			icon, label := text.ICON_PLUS, "Follow"
+			if following {
+				icon, label = text.ICON_CHECK, "Following"
+			}
+			if pill("artist_follow", icon, label, false, known).clicked {
+				follow_toggle(s, page.id)
 			}
 			ui.spacer(ui.fill())
 		}

@@ -70,14 +70,15 @@ liked_put :: proc(d: ^Data, id: i64, on: bool) {
 }
 
 // liked_fetch fetches the whole set when the sidebar's version moved on
-// from the one the set was taken at and no fetch is out. It runs after the
+// from the one the set was taken at, or the followed artists, which come
+// with it, aren't known yet, and no fetch is out. It runs after the
 // sidebar comes from TIDAL, at sign-in and when it's refreshed later.
 liked_fetch :: proc(d: ^Data) {
 	if d.fake || d.liked.loading || !d.sidebar.loaded || d.sidebar.liked_count < 0 {
 		return
 	}
 	v := List_Version{count = i64(d.sidebar.liked_count), newest = d.sidebar.liked_newest}
-	if v == d.liked.version {
+	if v == d.liked.version && d.followed.known {
 		return
 	}
 	d.liked.loading = true

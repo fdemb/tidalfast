@@ -91,6 +91,7 @@ Job_Payload :: union {
 	Disk_Job,
 	Add_Track_Job,
 	Liked_Ids_Job,
+	Follow_Job,
 	Launch_Log_Job,
 	Artist_Job,
 }
@@ -185,7 +186,8 @@ Add_Track_Job :: struct {
 	remove: bool, // .Liked only: unlike it
 }
 
-// Liked_Ids_Job reads every liked track's id for the hearts, see liked.odin.
+// Liked_Ids_Job reads every liked track's id for the hearts, and every
+// followed artist's for the Follow buttons, see liked.odin.
 Liked_Ids_Job :: struct {
 	version: List_Version, // the sidebar's Liked Songs version when it went out
 }
@@ -242,6 +244,7 @@ Result :: struct {
 	queue:       Queue_Header, // Disk, Read_Queue: the play queue's place; its rows are in rows
 	added:       bool, // Add_Track: TIDAL added it rather than finding it there
 	liked_ids:   []i64, // Liked_Ids: every liked track's id, sorted
+	followed:    []i64, // Liked_Ids: every followed artist's id, sorted
 	artist:      Artist_Content, // Artist: strings in arena
 }
 
@@ -586,6 +589,17 @@ run_job :: proc(d: ^Data, job: Job) -> (res: Result) {
 		run_add_track(s, p, &res, alloc)
 	case Liked_Ids_Job:
 		run_liked_ids(s, p, &res, alloc)
+	case Follow_Job:
+		artist := fmt.tprint(p.artist)
+		err: tidal.Error
+		if p.on {
+			err = tidal.favorites_add_artist(s, {artist})
+		} else {
+			err = tidal.favorites_remove_artist(s, artist)
+		}
+		if err != nil {
+			fail(&res, err)
+		}
 	case Artist_Job:
 		content, err := artist_part_spec(p.part).load(s, p.artist, alloc)
 		if err != nil {
@@ -731,18 +745,20 @@ run_playlists :: proc(s: ^tidal.Session, res: ^Result, alloc: mem.Allocator) {
 	res.playlists = items[:]
 }
 
-// run_liked_ids reads every liked track's id in one request and sorts
-// them for the hearts' binary search. The version is the sidebar's from
+// run_liked_ids reads every liked track's id and followed artist's in one
+// request and sorts them for the binary searches. The version is the sidebar's from
 // when the job went out, since the ids don't say one.
 @(private = "file")
 run_liked_ids :: proc(s: ^tidal.Session, job: Liked_Ids_Job, res: ^Result, alloc: mem.Allocator) {
-	ids, err := tidal.favorites_track_ids(s, alloc)
+	ids, err := tidal.favorites_ids(s, alloc)
 	if err != nil {
 		fail(res, err)
 		return
 	}
-	slice.sort(ids)
-	res.liked_ids = ids
+	slice.sort(ids.tracks)
+	slice.sort(ids.artists)
+	res.liked_ids = slice.unique(ids.tracks)
+	res.followed = slice.unique(ids.artists)
 	res.version = job.version
 }
 
