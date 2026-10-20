@@ -944,7 +944,7 @@ static const struct wl_data_device_listener g_device_listener = {
 // Accessibility
 //
 // Not exposed to assistive apps yet (AT-SPI over D-Bus). The shell keeps a
-// copy of the tree for the test driver.
+// copy of the tree for the test driver, and only when it runs.
 
 typedef struct {
   uint64_t id;
@@ -954,10 +954,12 @@ typedef struct {
   char *label, *value; // malloc'd, or NULL
 } Shell_Node;
 
+static bool g_keep_nodes;
 static Shell_Node *g_nodes;
 static uint32_t g_node_count, g_node_cap;
 
 static void set_accessibility(const Access_Node *nodes, uint32_t count) {
+  if (!g_keep_nodes) return;
   for (uint32_t i = 0; i < g_node_count; i++) {
     free(g_nodes[i].label);
     free(g_nodes[i].value);
@@ -2011,6 +2013,7 @@ int main(int argc, char **argv) {
   g_repeat_fd = new_timer();
   g_momentum_fd = new_timer();
   g_test_fd = new_timer();
+  g_keep_nodes = getenv("TIDALFAST_SHELL_TEST") != NULL;
 
   if (!connect_wayland()) return 1;
   measure_mark("launched");
