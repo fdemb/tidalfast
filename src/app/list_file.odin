@@ -358,10 +358,24 @@ Queue_Header :: struct {
 	sample:   i64, // where in it, in samples
 	rate:     i64, // the rate sample is in, 0 if unknown
 	list_key: u64, // Playback.list_key
-	_:        u64,
+	key:      u64, // new with each write, see Queue_Position
 }
 
 #assert(size_of(Queue_Header) % 16 == 0)
+
+QUEUE_POSITION_MAGIC :: 0x5051_4654 // "TFQP"
+
+// Queue_Position is where the queue is, in a file of its own, so a pause,
+// a seek or another track doesn't write the queue's rows again. It stands
+// in for the header's place when its key is the header's.
+Queue_Position :: struct {
+	magic:  u32,
+	_:      u32,
+	key:    u64,
+	index:  i64,
+	sample: i64,
+	rate:   i64,
+}
 
 // queue_encode is a queue file of rows, without its sum (see queue_seal).
 queue_encode :: proc(head: Queue_Header, rows: []Row, allocator: runtime.Allocator) -> []u8 {

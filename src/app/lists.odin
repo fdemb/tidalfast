@@ -86,6 +86,7 @@ Disk_Op :: enum u8 {
 	Delete,
 	Read_Queue, // the play queue's file, see queue_save
 	Write_Queue, // Disk_Job.blob, from queue_encode
+	Write_Queue_Position, // Disk_Job.blob, a Queue_Position
 	Delete_Queue,
 }
 
@@ -882,9 +883,11 @@ disk_run :: proc(d: ^Data, queued: Job) -> (res: Result, reply: bool) {
 		return res, true
 	case .Read_Queue, .Write_Queue, .Delete_Queue:
 		path = queue_path(dir, context.temp_allocator)
+	case .Write_Queue_Position:
+		path = queue_position_path(dir, context.temp_allocator)
 	}
 	if job.op == .Read_Queue {
-		queue_read(&res, path)
+		queue_read(&res, path, queue_position_path(dir, context.temp_allocator))
 		return res, true
 	}
 	#partial switch job.op {
@@ -899,7 +902,7 @@ disk_run :: proc(d: ^Data, queued: Job) -> (res: Result, reply: bool) {
 	}
 	switch job.op {
 	case .Read, .Read_Queue:
-	case .Write_Queue:
+	case .Write_Queue, .Write_Queue_Position:
 		disk_write(dir, path, job.blob)
 	case .Write:
 		if disk_write(dir, path, job.blob) {
@@ -908,10 +911,27 @@ disk_run :: proc(d: ^Data, queued: Job) -> (res: Result, reply: bool) {
 	case .Touch:
 		now := time.now()
 		os.change_times(path, now, now)
-	case .Delete, .Delete_Queue:
+	case .Delete:
 		os.remove(path)
+	case .Delete_Queue:
+		os.remove(path)
+		os.remove(queue_position_path(dir, context.temp_allocator))
 	}
 	return
+}
+
+// disk_drop_queued drops the disk jobs still queued for ops, which a newer
+// job makes pointless.
+disk_drop_queued :: proc(d: ^Data, ops: bit_set[Disk_Op]) {
+	ops := ops
+	jobs.remove_if(&d.lists.queue, proc(job: ^Job, data: rawptr) -> bool {
+		disk, is_disk := job.payload.(Disk_Job)
+		if !is_disk || disk.op not_in (^bit_set[Disk_Op])(data)^ {
+			return false
+		}
+		job_free(job)
+		return true
+	}, &ops)
 }
 
 // queue_path is the play queue's file. It isn't a .tfl, so disk_evict
@@ -920,10 +940,15 @@ queue_path :: proc(dir: string, allocator: runtime.Allocator) -> string {
 	return fmt.aprintf("%s/queue.tfq", dir, allocator = allocator)
 }
 
-// queue_read reads the play queue's file into res, in an arena of its own.
-// A file that's damaged or of another format is deleted.
+queue_position_path :: proc(dir: string, allocator: runtime.Allocator) -> string {
+	return fmt.aprintf("%s/queue-position.tfq", dir, allocator = allocator)
+}
+
+// queue_read reads the play queue's file into res, in an arena of its own,
+// at the place in its position file if that goes with it. A file that's
+// damaged or of another format is deleted.
 @(private = "file")
-queue_read :: proc(res: ^Result, path: string) {
+queue_read :: proc(res: ^Result, path, position_path: string) {
 	res.arena = arena_new()
 	if res.arena == nil {
 		return
@@ -932,6 +957,13 @@ queue_read :: proc(res: ^Result, path: string) {
 	data, ok := file_read(path, a)
 	if !ok {
 		return
+	}
+	if place, read := file_read(position_path, context.temp_allocator); read && len(place) == size_of(Queue_Position) && len(data) >= size_of(Queue_Header) {
+		p := (^Queue_Position)(raw_data(place))
+		h := (^Queue_Header)(raw_data(data))
+		if p.magic == QUEUE_POSITION_MAGIC && p.key != 0 && p.key == h.key {
+			h.index, h.sample, h.rate = p.index, p.sample, p.rate
+		}
 	}
 	out: Queue_File_Result
 	err: File_Error

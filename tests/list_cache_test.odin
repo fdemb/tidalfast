@@ -1247,3 +1247,53 @@ queue_takes_pages_as_they_come :: proc(t: ^testing.T) {
 	}
 	testing.expect_value(t, s.playback.index, 0)
 }
+
+// Pausing and moving to another track save where the queue is, not the
+// queue's rows again, and the queue reads back at the new place.
+@(test)
+queue_place_is_saved_apart :: proc(t: ^testing.T) {
+	dir := cache_dir("queue-place")
+	defer delete(dir, runtime.heap_allocator())
+	defer os.remove_all(dir)
+	s := cache_state(dir)
+	defer cache_state_free(s)
+	s.playback.player = audio.create(no_wake, 0, null_output = true)
+	defer app.playback_shutdown(s)
+	d := &s.data
+	sidebar(s, updated = 1, count = 300)
+	serve(s, rows_of(LIKED_IDS))
+	app.select_playlist(s, 2)
+	run_disk(s)
+	serve(s, rows_of(ids_from(1000, 1300)))
+	app.playback_play_row(s, 7)
+	app.playback_update(s, nil)
+	run_disk(s)
+
+	app.playback_set_paused(s, true)
+	app.playback_update(s, nil)
+	app.playback_next(s)
+	app.playback_update(s, nil)
+	app.playback_next(s)
+	app.playback_update(s, nil)
+	rows_written, places := 0, 0
+	for {
+		job, ok := jobs.try_pop(&d.lists.queue)
+		if !ok {
+			break
+		}
+		op := job.payload.(app.Disk_Job).op
+		rows_written += int(op == .Write_Queue)
+		places += 1
+		res, _ := app.disk_run(d, job)
+		app.result_free(&res)
+	}
+	testing.expect_value(t, rows_written, 0)
+	testing.expect_value(t, places, 1)
+
+	res, _ := app.disk_run(d, {payload = app.Disk_Job{op = .Read_Queue, user = 7}})
+	defer app.result_free(&res)
+	queue, hit := res.payload.(app.Queue_File_Result)
+	testing.expect(t, hit, "the queue's file reads back")
+	testing.expect_value(t, queue.header.index, 9)
+	testing.expect_value(t, len(queue.rows), 300)
+}
