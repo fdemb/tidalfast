@@ -246,7 +246,7 @@ draw_history_buttons :: proc(s: ^State) {
 // above it. The search results and an artist's grid keep their headers
 // below it.
 hero_under_titlebar :: proc(s: ^State) -> f32 {
-	if login_notice_shown(s) || search_showing(s) {
+	if login_notice_shown(s) || search_showing(s) || home_showing(s) {
 		return 0
 	}
 	if p := artist_place(s); p != nil {
