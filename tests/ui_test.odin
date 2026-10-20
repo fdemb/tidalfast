@@ -388,6 +388,44 @@ settle :: proc(u: ^ui.State, now: ^f64, height: f32, count: int) -> (view: ^ui.B
 	return
 }
 
+// Rows after a 300 pt header that scrolls with them, inside a column of
+// their own: none are built while the header fills the view, and once it
+// has scrolled away they're the ones in view, each where it's drawn.
+@(test)
+test_virtual_rows_after_header :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	now := 0.0
+	frame :: proc(u: ^ui.State, now: ^f64, offset: f32) -> (view: ^ui.Box, rows: ui.Virtual_Rows) {
+		now^ += 1.0 / 120
+		ui.begin_frame(u, nil, nil, nil, 300, 200, now^)
+		{
+			view = ui.scroll_view("view", ui.fill(), ui.fill())
+			view.view_off.y, view.view_off_target.y = offset, offset
+			ui.spacer(ui.px(300))
+			ui.column("rows", {}, ui.fill(), ui.children_sum())
+			rows = ui.virtual_rows(view, 100, 10, 300)
+			for i in rows.first ..< rows.last {
+				ui.box_make(fmt.tprintf("##row%d", i), {.Clickable}, ui.fill(), ui.px(10))
+			}
+		}
+		ui.end_frame()
+		return
+	}
+	frame(&u, &now, 0)
+	_, rows := frame(&u, &now, 0)
+	testing.expect_value(t, rows.last - rows.first, 0)
+	_, rows = frame(&u, &now, 350)
+	testing.expect_value(t, rows.first, 4)
+	testing.expect_value(t, rows.last, 26)
+	frame(&u, &now, 350)
+	view, _ := frame(&u, &now, 350)
+	row := ui.box_lookup(&u, ui.key_from_string(ui.key_from_string(view.key, "rows"), "##row5"))
+	testing.expect(t, row != nil && row.rect.y == view.rect.y, "row 5 at the top of the view")
+	testing.expect_value(t, view.view_bounds.y, f32(300 + 100 * 10))
+}
+
 // A vertical page in a 300 by 200 window: a 20 pt focusable item, then a
 // 50 pt shelf that scrolls sideways through ten 100 pt focusable cards,
 // then 1000 pt of space. right_taken says whether the app got a Right.

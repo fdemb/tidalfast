@@ -286,10 +286,12 @@ virtual_rows_end :: proc(v: Virtual_Rows) {
 // scroll view, which is the current parent, and stands in for the rest with
 // spacers. Build exactly the rows in [first, last) before the scope ends.
 // One row past each edge is built too, so the keyboard can move the focus
-// onto it and scroll it into view.
+// onto it and scroll it into view. start is where row 0 is in the view's
+// content past its pad, for rows under a header that scrolls with them;
+// the parent can then be a box inside the view that starts there.
 @(deferred_out = virtual_rows_end)
-virtual_rows :: proc(view: ^Box, count: int, row_h: f32) -> Virtual_Rows {
-	first, last := virtual_range(view.view_off.y - view.pad.y, view.rect.h, row_h, count)
+virtual_rows :: proc(view: ^Box, count: int, row_h: f32, start: f32 = 0) -> Virtual_Rows {
+	first, last := virtual_range(view.view_off.y - view.pad.y - start, view.rect.h, row_h, count)
 	if last > first {
 		first, last = max(first - 1, 0), min(last + 1, count)
 	}
