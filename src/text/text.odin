@@ -302,7 +302,9 @@ begin_frame :: proc(t: ^State, r: ^render.Renderer) {
 	}
 	atlas_begin_frame(&t.atlas, r)
 	t.stats.runs = t.run_count
-	t.stats.pages = t.atlas.page_count
+	for page in t.atlas.pages[:t.atlas.page_count] {
+		t.stats.pages += int(page.size > 0)
+	}
 }
 
 // shape returns the shaped run for s, from the cache when it can.

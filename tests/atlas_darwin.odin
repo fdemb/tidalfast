@@ -103,3 +103,53 @@ atlas_pages_grow_and_keep_their_glyphs :: proc(t: ^testing.T) {
 	after := read_texels(r, a.pages[0].texture, int(glyph.x), int(glyph.y), int(glyph.w), int(glyph.h))
 	testing.expect_value(t, string(after), before)
 }
+
+// When the atlas fills up, only pages nothing was drawn from last frame go.
+// Text drawn every frame keeps its bitmaps and isn't rasterized again.
+@(test)
+atlas_keeps_hot_pages_when_full :: proc(t: ^testing.T) {
+	device := MTLCreateSystemDefaultDevice()
+	if device == nil {
+		return // no GPU to test with
+	}
+	backing := make([]byte, 64 << 20)
+	defer delete(backing)
+	arena: mem.Arena
+	mem.arena_init(&arena, backing)
+	context.allocator = mem.arena_allocator(&arena)
+	r := new(render.Renderer)
+	r.gpu.device = device
+	r.gpu.queue = render.msg(device, "newCommandQueue")
+	s := new(text.State)
+	testing.expect(t, text.init(s))
+	defer {
+		text.destroy(s, r)
+		render.destroy(r)
+	}
+
+	frame :: proc(s: ^text.State, r: ^render.Renderer) {
+		free_all(context.temp_allocator)
+		render.begin_frame(r, 1000, 1000, 2, {})
+		text.begin_frame(s, r)
+	}
+	a := &s.atlas
+	size: f32 = 60
+	for i := 0; i < 5000 && !a.full; i += 1 {
+		frame(s, r)
+		text.draw(s, r, .Regular, 13, {0, 0}, render.WHITE, "Hot")
+		text.draw(s, r, .Bold, size, {0, 0}, render.WHITE, "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+		if !s.needs_redraw {
+			size += 10
+		}
+	}
+	testing.expect(t, a.full, "the atlas filled up")
+	pages := s.stats.pages
+
+	frame(s, r)
+	testing.expect(t, !a.full)
+	testing.expect(t, s.stats.pages < pages, "cold pages are gone")
+	text.draw(s, r, .Regular, 13, {0, 0}, render.WHITE, "Hot")
+	testing.expect_value(t, s.stats.rasterized, 0)
+	text.draw(s, r, .Bold, 55, {0, 0}, render.WHITE, "ABC")
+	testing.expect(t, s.stats.rasterized > 0 && !a.full, "freed room takes new glyphs")
+}
