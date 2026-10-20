@@ -23,7 +23,9 @@ Ticket :: struct {
 
 Queue :: struct($T: typeid, $N: int) {
 	mutex:    sync.Mutex,
-	cond:     sync.Cond, // an item arrived, room was freed, or stop
+	arrived:  sync.Cond, // an item arrived, or stop
+	freed:    sync.Cond, // room was freed, or stop
+	halted:   sync.Cond, // stop, for sleep
 	items:    [N]T,
 	tickets:  [N]Ticket,
 	count:    int,
@@ -48,7 +50,7 @@ push :: proc(q: ^Queue($T, $N), item: T, priority: u8 = 0) -> bool {
 push_wait :: proc(q: ^Queue($T, $N), item: T, priority: u8 = 0) -> bool {
 	sync.guard(&q.mutex)
 	for q.count + q.busy >= N && !q.stopped {
-		sync.cond_wait(&q.cond, &q.mutex)
+		sync.cond_wait(&q.freed, &q.mutex)
 	}
 	if q.stopped {
 		return false
@@ -73,7 +75,7 @@ add :: proc(q: ^Queue($T, $N), item: T, ticket: Ticket) {
 	q.items[q.count] = item
 	q.tickets[q.count] = ticket
 	q.count += 1
-	sync.cond_broadcast(&q.cond)
+	sync.cond_broadcast(&q.arrived)
 }
 
 // pop_wait takes the next item, waiting for one. ok is false once the
@@ -81,7 +83,7 @@ add :: proc(q: ^Queue($T, $N), item: T, ticket: Ticket) {
 pop_wait :: proc(q: ^Queue($T, $N)) -> (item: T, ticket: Ticket, ok: bool) {
 	sync.guard(&q.mutex)
 	for q.count == 0 && !q.stopped {
-		sync.cond_wait(&q.cond, &q.mutex)
+		sync.cond_wait(&q.arrived, &q.mutex)
 	}
 	if q.stopped {
 		return
@@ -99,6 +101,7 @@ try_pop :: proc(q: ^Queue($T, $N)) -> (item: T, ok: bool) {
 		return
 	}
 	item, _ = take(q)
+	sync.cond_broadcast(&q.freed)
 	return item, true
 }
 
@@ -118,7 +121,7 @@ pop_wait_where :: proc(q: ^Queue($T, $N), wanted: proc(item: ^T) -> bool, d: tim
 		if left <= 0 {
 			return
 		}
-		sync.cond_wait_with_timeout(&q.cond, &q.mutex, left)
+		sync.cond_wait_with_timeout(&q.arrived, &q.mutex, left)
 	}
 	stopped = true
 	return
@@ -156,7 +159,6 @@ take_at :: proc(q: ^Queue($T, $N), best: int) -> (item: T, ticket: Ticket) {
 	q.count -= 1
 	q.items[best] = q.items[q.count]
 	q.tickets[best] = q.tickets[q.count]
-	sync.cond_broadcast(&q.cond)
 	return
 }
 
@@ -164,7 +166,7 @@ take_at :: proc(q: ^Queue($T, $N), best: int) -> (item: T, ticket: Ticket) {
 done :: proc(q: ^Queue($T, $N)) {
 	sync.guard(&q.mutex)
 	q.busy -= 1
-	sync.cond_broadcast(&q.cond)
+	sync.cond_broadcast(&q.freed)
 }
 
 // remove_if drops every queued item for which pred returns true and
@@ -184,7 +186,7 @@ remove_if :: proc(q: ^Queue($T, $N), pred: proc(item: ^T, data: rawptr) -> bool,
 		}
 	}
 	if removed > 0 {
-		sync.cond_broadcast(&q.cond)
+		sync.cond_broadcast(&q.freed)
 	}
 	return removed
 }
@@ -194,7 +196,9 @@ remove_if :: proc(q: ^Queue($T, $N), pred: proc(item: ^T, data: rawptr) -> bool,
 stop :: proc(q: ^Queue($T, $N)) {
 	sync.guard(&q.mutex)
 	q.stopped = true
-	sync.cond_broadcast(&q.cond)
+	sync.cond_broadcast(&q.arrived)
+	sync.cond_broadcast(&q.freed)
+	sync.cond_broadcast(&q.halted)
 }
 
 start :: proc(q: ^Queue($T, $N)) {
@@ -212,7 +216,7 @@ sleep :: proc(q: ^Queue($T, $N), d: time.Duration) -> bool {
 		if left <= 0 {
 			break
 		}
-		sync.cond_wait_with_timeout(&q.cond, &q.mutex, left)
+		sync.cond_wait_with_timeout(&q.halted, &q.mutex, left)
 	}
 	return q.stopped
 }

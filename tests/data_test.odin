@@ -440,3 +440,52 @@ cover_decode_premultiplies_gray_alpha :: proc(t: ^testing.T) {
 		testing.expect(t, slice.equal(got, want), fmt.tprint(px, got[:4], want[:4]))
 	}
 }
+
+// Every way room comes back wakes a push_wait, and every way an item comes
+// in wakes a pop_wait_where waiting for that item.
+@(test)
+queue_waiters_wake_on_each_change :: proc(t: ^testing.T) {
+	Shared :: struct {
+		q:      jobs.Queue(Test_Job, 1),
+		ok:     bool,
+		popped: int,
+	}
+	push_waits :: proc(t: ^testing.T, sh: ^Shared, free_room: proc(sh: ^Shared)) {
+		sync.atomic_store(&sh.ok, false)
+		worker := thread.create_and_start_with_poly_data(sh, proc(sh: ^Shared) {
+			sync.atomic_store(&sh.ok, jobs.push_wait(&sh.q, {2}))
+		})
+		time.sleep(20 * time.Millisecond)
+		testing.expect(t, !sync.atomic_load(&sh.ok))
+		free_room(sh)
+		thread.join(worker)
+		thread.destroy(worker)
+		testing.expect(t, sh.ok)
+	}
+	sh: Shared
+	jobs.push(&sh.q, {1})
+	_, _, _ = jobs.pop_wait(&sh.q)
+	push_waits(t, &sh, proc(sh: ^Shared) {jobs.done(&sh.q)})
+	push_waits(t, &sh, proc(sh: ^Shared) {
+		all :: proc(_: ^Test_Job, _: rawptr) -> bool {return true}
+		jobs.remove_if(&sh.q, all, nil)
+	})
+
+	pop_waits :: proc(t: ^testing.T, sh: ^Shared, add_item: proc(sh: ^Shared)) {
+		sync.atomic_store(&sh.popped, 0)
+		worker := thread.create_and_start_with_poly_data(sh, proc(sh: ^Shared) {
+			is_seven :: proc(job: ^Test_Job) -> bool {return job.id == 7}
+			job, _, ok, _ := jobs.pop_wait_where(&sh.q, is_seven, 5 * time.Second)
+			sync.atomic_store(&sh.popped, job.id if ok else -1)
+		})
+		time.sleep(20 * time.Millisecond)
+		testing.expect_value(t, sync.atomic_load(&sh.popped), 0)
+		add_item(sh)
+		thread.join(worker)
+		thread.destroy(worker)
+		testing.expect_value(t, sh.popped, 7)
+	}
+	jobs.remove_if(&sh.q, proc(_: ^Test_Job, _: rawptr) -> bool {return true}, nil)
+	pop_waits(t, &sh, proc(sh: ^Shared) {jobs.push(&sh.q, {7})})
+	pop_waits(t, &sh, proc(sh: ^Shared) {jobs.requeue(&sh.q, {7}, {})})
+}
