@@ -48,7 +48,7 @@ Stream :: struct {
 	released:    bool, // buf's pages went back to the system; written again after MADV_FREE_REUSE
 	win_start:   i64, // oldest byte still held
 	win_end:     i64, // one past the newest byte
-	read_pos:    i64, // the decoder's position; bytes before it minus KEEP_BEHIND may go
+	read_pos:    i64, // the decoder's position; bytes before keep_from may go
 	length:      i64, // file size, -1 until a response says
 	gen:         u64, // bumped by stream_restart; a transfer for an older gen stops
 	active:      bool, // has a URL; the fetch thread works on it
@@ -201,54 +201,58 @@ Read_Result :: enum u8 {
 }
 
 // stream_read copies len(dst) bytes from offset, waiting for them to
-// arrive. While it waits it calls interrupt, which can handle commands and
-// return true to give up. Moves the read position to the end of what it
-// copied.
+// arrive. It takes them as they come, so dst may be longer than the window.
+// While it waits it calls interrupt, which can handle commands and return
+// true to give up. Moves the read position to the end of what it copied,
+// and n counts those bytes whatever the result.
 stream_read :: proc(st: ^Stream, offset: i64, dst: []u8, interrupt: proc(data: rawptr) -> bool, data: rawptr) -> (n: int, res: Read_Result) {
 	for {
 		sync.lock(&st.mutex)
-		if st.dash && offset < st.win_start {
+		at := offset + i64(n)
+		if st.dash && at < st.win_start {
 			sync.unlock(&st.mutex)
-			return 0, .Failed
+			return n, .Failed
 		}
-		if !st.dash && (offset < st.win_start || offset > st.win_end) {
+		if !st.dash && (at < st.win_start || at > st.win_end) {
 			// Not held and not next: move the window here.
 			sync.unlock(&st.mutex)
-			stream_restart(st, offset)
+			stream_restart(st, at)
 			continue
 		}
-		want := i64(len(dst))
+		want := i64(len(dst) - n)
 		if st.length >= 0 {
-			want = clamp(st.length - offset, 0, want)
+			want = clamp(st.length - at, 0, want)
 		}
-		have := st.win_end - offset
-		if have >= want {
-			cap := i64(len(st.buf))
-			for i in 0 ..< want {
-				dst[i] = st.buf[(offset + i) % cap]
-			}
-			st.read_pos = offset + want
+		k := clamp(st.win_end - at, 0, want)
+		cap := i64(len(st.buf))
+		for i in 0 ..< k {
+			dst[i64(n) + i] = st.buf[(at + i) % cap]
+		}
+		n += int(k)
+		at += k
+		if k == want {
+			st.read_pos = at
 			sync.cond_broadcast(&st.cond)
 			sync.unlock(&st.mutex)
-			if want < i64(len(dst)) {
-				return int(want), .Eof
+			if n < len(dst) {
+				return n, .Eof
 			}
-			return int(want), .Ok
+			return n, .Ok
 		}
 		// The fetcher may be waiting for room that only moving read_pos
 		// frees. A DASH read can be ahead of what has arrived, when it skips
 		// a box; bytes before it may go as they arrive.
-		if pos := min(offset, st.win_end); st.read_pos != pos {
+		if pos := min(at, st.win_end); st.read_pos != pos {
 			st.read_pos = pos
 			sync.cond_broadcast(&st.cond)
 		}
 		failed := st.failed
 		sync.unlock(&st.mutex)
 		if failed {
-			return 0, .Failed
+			return n, .Failed
 		}
 		if interrupt != nil && interrupt(data) {
-			return 0, .Interrupted
+			return n, .Interrupted
 		}
 		sync.atomic_sema_wait_with_timeout(st.wake, 100 * time.Millisecond)
 	}
@@ -399,13 +403,21 @@ fetch_main :: proc "c" (arg: rawptr) -> rawptr {
 	return nil
 }
 
-// window_full says the fetcher must wait for the decoder: the window holds
-// STREAM_WINDOW bytes and none of them are far enough behind the reader to
-// drop. Caller holds the mutex.
+// window_full says the fetcher must wait for the decoder: the window is
+// full and none of its bytes are far enough behind the reader to drop.
+// Caller holds the mutex.
 @(private = "file")
 window_full :: proc(st: ^Stream) -> bool {
-	keep_from := max(st.win_start, st.read_pos - KEEP_BEHIND)
-	return st.win_end - keep_from >= i64(len(st.buf))
+	return st.win_end - keep_from(st) >= i64(len(st.buf))
+}
+
+// keep_from is the oldest byte the window must still hold: KEEP_BEHIND
+// before the reader, or less in a small window, which must keep most of
+// itself for the bytes ahead. Caller holds the mutex.
+@(private = "file")
+keep_from :: proc(st: ^Stream) -> i64 {
+	behind := min(KEEP_BEHIND, i64(len(st.buf)) / 4)
+	return max(st.win_start, st.read_pos - behind)
 }
 
 @(private = "file")
@@ -514,8 +526,7 @@ write_callback :: proc "c" (buffer: [^]byte, size: c.size_t, nitems: c.size_t, u
 			sync.cond_wait(&st.cond, &st.mutex)
 			continue
 		}
-		keep_from := max(st.win_start, st.read_pos - KEEP_BEHIND)
-		room := cap - (st.win_end - keep_from)
+		room := cap - (st.win_end - keep_from(st))
 		k := min(room, i64(len(data)))
 		for i in 0 ..< k {
 			st.buf[(st.win_end + i) % cap] = data[i]

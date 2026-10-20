@@ -552,3 +552,44 @@ listener_outlives_the_player :: proc(t: ^testing.T) {
 	thread.join(th)
 	thread.destroy(th)
 }
+
+// A read longer than the stream's window completes, and so do reads through
+// a window smaller than the history kept behind the reader. Either used to
+// wait for room that only the read itself could free.
+@(test)
+stream_reads_past_its_window :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	file := make([]u8, 1 << 20, context.temp_allocator)
+	for &b, i in file {
+		b = u8(i ~ i >> 8)
+	}
+	m.files["/big.flac"] = file
+	url := fmt.tprintf("%sbig.flac", m.base_url)
+	for read_size in ([]int{512 << 10, 16 << 10}) {
+		testing.expectf(t, read_through(url, file, 128 << 10, read_size), "%d KiB reads through a 128 KiB window", read_size >> 10)
+	}
+}
+
+@(private = "file")
+read_through :: proc(url: string, file: []u8, window, read_size: int) -> bool {
+	sema: sync.Atomic_Sema
+	st := new(audio.Stream, context.temp_allocator)
+	audio.stream_init(st, &sema, window)
+	defer audio.stream_destroy(st)
+	audio.stream_open(st, url)
+	deadline := time.tick_add(time.tick_now(), 3 * time.Second)
+	give_up :: proc(data: rawptr) -> bool {
+		return time.tick_diff(time.tick_now(), (^time.Tick)(data)^) <= 0
+	}
+	got := make([]u8, len(file), context.temp_allocator)
+	for pos := 0; pos < len(file); {
+		n, res := audio.stream_read(st, i64(pos), got[pos:min(pos + read_size, len(got))], give_up, &deadline)
+		if res != .Ok {
+			return false
+		}
+		pos += n
+	}
+	return slice.equal(got, file)
+}
