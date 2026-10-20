@@ -440,7 +440,7 @@ Piece :: struct {
 // Shaping is shape_uncached's scratch, in the temp allocator: the string's
 // codepoints, the glyphs shaped so far with each one's codepoint index, and
 // the pieces that index into both. glyphs and cps only change together
-// (shaping_append, peel, flip), so cps[i] is always glyphs[i]'s codepoint.
+// (shaping_append, flip), so cps[i] is always glyphs[i]'s codepoint.
 @(private)
 Shaping :: struct {
 	runes:  []rune,
@@ -778,63 +778,74 @@ pictographic :: proc(r: rune) -> bool {
 }
 
 // peel splits spaces and brackets at either logical end of a run into
-// one-glyph runs of their own, as long as each is a glyph to itself.
+// one-glyph runs of their own, as long as each is a glyph to itself. The
+// split glyphs stay where they are in sh.glyphs.
 @(private)
 peel :: proc(t: ^State, sh: ^Shaping) {
 	peelable :: proc(r: rune) -> bool {
 		return r == ' ' || r == 0xa0 || mirror(r) != r
 	}
-	// split moves the glyph at visual index g out of p into a new piece.
-	split :: proc(p: ^Piece, sh: ^Shaping, g: int) -> Piece {
-		glyph := sh.glyphs[g]
-		cp := sh.cps[g]
-		if g == p.first {
-			for &other in sh.glyphs[p.first + 1:][:p.count - 1] {
-				other.pen -= glyph.advance
-			}
-			p.first += 1
+	// edge says whether the glyph at the left or right end of [lo, hi) is
+	// codepoint cp's and no other glyph there is.
+	edge :: proc(cps: []int, lo, hi, cp: int, at_left: bool) -> bool {
+		g, inner := lo, lo + 1
+		if !at_left {
+			g, inner = hi - 1, hi - 2
 		}
-		p.count -= 1
-		p.width -= glyph.advance
-		glyph.pen = 0
-		shaping_append(sh, glyph, cp)
-		return {face = p.face, rtl = p.rtl, start = cp, end = cp + 1, first = len(sh.glyphs) - 1, count = 1, width = glyph.advance}
+		return cps[g] == cp && cps[inner] != cp
 	}
-	// edge returns the visual index of the glyph for codepoint cp if it is
-	// at the visual end where logical `first` or last lands and no other
-	// glyph shares it.
-	edge :: proc(p: Piece, cps: []int, cp: int, first: bool) -> (int, bool) {
-		at_left := first != p.rtl
-		g := p.first if at_left else p.first + p.count - 1
-		inner := g + 1 if at_left else g - 1
-		return g, cps[g] == cp && cps[inner] != cp
+	single :: proc(sh: ^Shaping, p: Piece, g, cp: int) -> Piece {
+		sh.glyphs[g].pen = 0
+		return {face = p.face, rtl = p.rtl, start = cp, end = cp + 1, first = g, count = 1, width = sh.glyphs[g].advance}
 	}
 
-	pieces, runes := &sh.pieces, sh.runes
-	for i := 0; i < len(pieces); i += 1 {
-		if t.faces[pieces[i].face].coretext_shaping {
+	pieces := make([dynamic]Piece, 0, len(sh.pieces), context.temp_allocator)
+	runes, cps := sh.runes, sh.cps[:]
+	for p in sh.pieces {
+		if t.faces[p.face].coretext_shaping {
+			append(&pieces, p)
 			continue
 		}
-		for pieces[i].count > 1 && pieces[i].end - pieces[i].start > 1 && peelable(runes[pieces[i].end - 1]) {
-			g, ok := edge(pieces[i], sh.cps[:], pieces[i].end - 1, false)
-			if !ok {
-				break
+		// The logical end is on the right in a left-to-right run.
+		lo, hi := p.first, p.first + p.count
+		start, end := p.start, p.end
+		for hi - lo > 1 && end - start > 1 && peelable(runes[end - 1]) && edge(cps, lo, hi, end - 1, p.rtl) {
+			if p.rtl {
+				lo += 1
+			} else {
+				hi -= 1
 			}
-			piece := split(&pieces[i], sh, g)
-			pieces[i].end -= 1
-			inject_at(pieces, i + 1, piece)
+			end -= 1
 		}
-		for pieces[i].count > 1 && pieces[i].end - pieces[i].start > 1 && peelable(runes[pieces[i].start]) {
-			g, ok := edge(pieces[i], sh.cps[:], pieces[i].start, true)
-			if !ok {
-				break
+		for hi - lo > 1 && end - start > 1 && peelable(runes[start]) && edge(cps, lo, hi, start, !p.rtl) {
+			if p.rtl {
+				hi -= 1
+			} else {
+				lo += 1
 			}
-			piece := split(&pieces[i], sh, g)
-			pieces[i].start += 1
-			inject_at(pieces, i, piece)
-			i += 1
+			start += 1
+		}
+		left, right: f32
+		for g in sh.glyphs[p.first:lo] {
+			left += g.advance
+		}
+		for g in sh.glyphs[hi:p.first + p.count] {
+			right += g.advance
+		}
+		for &g in sh.glyphs[lo:hi] {
+			g.pen -= left
+		}
+		// The j-th codepoint peeled from either end is the j-th glyph in
+		// from its side.
+		for j in 0 ..< start - p.start {
+			append(&pieces, single(sh, p, p.first + p.count - 1 - j if p.rtl else p.first + j, p.start + j))
+		}
+		append(&pieces, Piece{face = p.face, rtl = p.rtl, start = start, end = end, first = lo, count = hi - lo, width = p.width - left - right})
+		for j := p.end - end - 1; j >= 0; j -= 1 {
+			append(&pieces, single(sh, p, p.first + j if p.rtl else p.first + p.count - 1 - j, p.end - 1 - j))
 		}
 	}
+	sh.pieces = pieces
 }
 
 // flip reverses a run of neutrals whose direction resolve_levels changed,
@@ -988,24 +999,23 @@ resolve_levels :: proc(kinds: []Bidi_Kind, rtl: []bool, brackets: []rune, paragr
 		}
 	}
 
+	// N1, N2: after[i] is the direction of the first run past i that isn't
+	// neutral.
+	after := make([]bool, len(kinds), context.temp_allocator)
+	next := paragraph_rtl
+	#reverse for kind, i in kinds {
+		after[i] = next
+		if kind != .Neutral {
+			next = acts_rtl[i]
+		}
+	}
+	before := paragraph_rtl
 	for kind, i in kinds {
 		if kind != .Neutral {
+			before = acts_rtl[i]
 			continue
 		}
-		before, after := paragraph_rtl, paragraph_rtl
-		for j := i - 1; j >= 0; j -= 1 {
-			if kinds[j] != .Neutral {
-				before = acts_rtl[j]
-				break
-			}
-		}
-		for j in i + 1 ..< len(kinds) {
-			if kinds[j] != .Neutral {
-				after = acts_rtl[j]
-				break
-			}
-		}
-		rtl[i] = before if before == after else paragraph_rtl
+		rtl[i] = before if before == after[i] else paragraph_rtl
 	}
 	for kind, i in kinds {
 		switch {

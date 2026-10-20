@@ -182,6 +182,16 @@ test_resolve_levels :: proc(t: ^testing.T) {
 		text.resolve_levels(kinds, rtl, brackets, false, levels)
 		testing.expect(t, slice_equal(levels, []u8{0, 0, 1, 1, 2, 0, 0}), "number after rtl")
 	}
+	// Spans of neutrals take the direction on both sides when it agrees,
+	// else the paragraph's, which also stands in past either end.
+	{
+		kinds := []text.Bidi_Kind{.Neutral, .Strong, .Neutral, .Neutral, .Neutral, .Strong, .Neutral, .Neutral, .Strong, .Neutral, .Neutral}
+		rtl := []bool{true, true, false, false, false, true, true, true, false, true, true}
+		brackets := make([]rune, len(kinds), context.temp_allocator)
+		levels := make([]u8, len(kinds), context.temp_allocator)
+		text.resolve_levels(kinds, rtl, brackets, false, levels)
+		testing.expect(t, slice_equal(levels, []u8{0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0}), "neutral spans")
+	}
 }
 
 @(test)
