@@ -278,6 +278,9 @@ basic_request :: proc(s: ^Session, r: Request, allocator := context.allocator) -
 			if refreshed {
 				// Retry exactly once. If TIDAL still reports an expired token
 				// (e.g. clock skew), return that response instead of looping.
+				delete(resp.body, allocator)
+				delete(resp.etag, allocator)
+				resp = {}
 				resp, _ = send(s, r.method, url, headers[:], body, auth.epoch, allocator) or_return
 			}
 		} else if resp.status == 401 && is_error(early_refresh, .Refresh_Failed) {
@@ -308,9 +311,13 @@ resource_get :: proc(s: ^Session, url: string, allocator := context.allocator) -
 	return resp.body, nil
 }
 
-// request is basic_request, with non-2xx responses turned into Errors.
+// request is basic_request, with non-2xx responses turned into Errors. A
+// response that came with an error is returned too, for the caller to free.
 request :: proc(s: ^Session, r: Request, allocator := context.allocator) -> (resp: Http_Response, err: Error) {
-	resp = basic_request(s, r, allocator) or_return
+	resp, err = basic_request(s, r, allocator)
+	if err != nil {
+		return
+	}
 	if !http_ok(resp) {
 		log.infof("Request %v %s resulted in HTTP %d", r.method, r.path, resp.status)
 		return resp, http_error(resp)
