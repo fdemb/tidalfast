@@ -76,29 +76,6 @@ queue_full_and_remove_if :: proc(t: ^testing.T) {
 }
 
 @(test)
-queue_push_wait_blocks_until_room :: proc(t: ^testing.T) {
-	Shared :: struct {
-		q:      jobs.Queue(Test_Job, 1),
-		pushed: bool,
-	}
-	sh: Shared
-	jobs.push(&sh.q, {1})
-	worker := thread.create_and_start_with_poly_data(&sh, proc(sh: ^Shared) {
-		ok := jobs.push_wait(&sh.q, {2})
-		sync.atomic_store(&sh.pushed, ok)
-	})
-	time.sleep(20 * time.Millisecond)
-	testing.expect(t, !sync.atomic_load(&sh.pushed))
-	first, _ := jobs.try_pop(&sh.q)
-	thread.join(worker)
-	thread.destroy(worker)
-	testing.expect_value(t, first.id, 1)
-	testing.expect(t, sh.pushed)
-	second, _ := jobs.try_pop(&sh.q)
-	testing.expect_value(t, second.id, 2)
-}
-
-@(test)
 cover_size_matches_display :: proc(t: ^testing.T) {
 	testing.expect_value(t, cover.pick_size(.Album, 40, 2), 80) // track rows at 2x
 	testing.expect_value(t, cover.pick_size(.Album, 40, 1), 80) // nothing smaller
@@ -515,8 +492,15 @@ queue_waiters_wake_on_each_change :: proc(t: ^testing.T) {
 	@(static) sh_storage: Wait_Shared
 	sh := &sh_storage
 	jobs.push(&sh.q, {1})
-	_, _, _ = jobs.pop_wait(&sh.q)
 	sh.work = proc(sh: ^Wait_Shared) {sh.ok = jobs.push_wait(&sh.q, {2})}
+	blocks_until(t, sh, proc(sh: ^Wait_Shared) {
+		job, _ := jobs.try_pop(&sh.q)
+		sh.popped = job.id
+	})
+	testing.expect(t, sh.ok)
+	testing.expect_value(t, sh.popped, 1)
+	job, _, _ := jobs.pop_wait(&sh.q)
+	testing.expect_value(t, job.id, 2)
 	blocks_until(t, sh, proc(sh: ^Wait_Shared) {jobs.done(&sh.q)})
 	testing.expect(t, sh.ok)
 	blocks_until(t, sh, proc(sh: ^Wait_Shared) {jobs.remove_if(&sh.q, every_job, nil)})
