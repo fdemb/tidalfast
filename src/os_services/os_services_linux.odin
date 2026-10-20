@@ -237,12 +237,12 @@ spawn_detached :: proc(argv: []cstring) -> bool {
 		return false
 	}
 	status: c.int
-	for posix.waitpid(pid, &status, {}) < 0 {
-		if posix.errno() != .EINTR {
-			return false
-		}
+	waited := posix.waitpid(pid, &status, {})
+	for waited < 0 && posix.errno() == .EINTR {
+		waited = posix.waitpid(pid, &status, {})
 	}
-	if !posix.WIFEXITED(status) || posix.WEXITSTATUS(status) != 0 {
+	if waited < 0 || !posix.WIFEXITED(status) || posix.WEXITSTATUS(status) != 0 {
+		log.warnf("os_services: couldn't fork for %s", argv[0])
 		return false
 	}
 	err: posix.Errno
@@ -250,8 +250,12 @@ spawn_detached :: proc(argv: []cstring) -> bool {
 	for n < 0 && posix.errno() == .EINTR {
 		n = posix.read(read_end, ([^]byte)(&err), size_of(err))
 	}
-	if n != 0 {
+	switch {
+	case n == size_of(err):
 		log.warnf("os_services: %s didn't start: %v", argv[0], err)
+		return false
+	case n < 0:
+		log.warnf("os_services: couldn't tell if %s started: %v", argv[0], posix.errno())
 		return false
 	}
 	return true
