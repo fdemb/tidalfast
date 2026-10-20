@@ -43,7 +43,7 @@ Bts_Manifest :: struct {
 	codec:           string, // upper case, without the profile: FLAC, MP4A
 	mime_type:       string,
 	encryption_type: string,
-	key_id:          string,
+	key_id:          string, // only with an encryption_type
 	urls:            []string,
 }
 
@@ -61,14 +61,16 @@ parse_bts :: proc(data: string, allocator: mem.Allocator) -> (m: Bts_Manifest, e
 	if dot := strings.index_byte(codec, '.'); dot >= 0 {
 		codec = codec[:dot]
 	}
-	return Bts_Manifest {
-			codec = strings.clone(codec, allocator),
-			mime_type = pstr(&p, obj, "mimeType"),
-			encryption_type = pstr(&p, obj, "encryptionType"),
-			key_id = pstr(&p, obj, "keyId"),
-			urls = pstrings(&p, obj, "urls"),
-		},
-		nil
+	m = Bts_Manifest {
+		codec           = strings.clone(codec, allocator),
+		mime_type       = pstr(&p, obj, "mimeType"),
+		encryption_type = pstr(&p, obj, "encryptionType"),
+		urls            = pstrings(&p, obj, "urls"),
+	}
+	if m.encryption_type != "" {
+		m.key_id = pstr(&p, obj, "keyId")
+	}
+	return m, nil
 }
 
 // mime_type_from_codec maps a codec name to the MIME type TIDAL uses for it.
@@ -138,9 +140,7 @@ stream_get_manifest :: proc(s: Stream, allocator := context.allocator) -> (m: St
 		m.codecs = bts.codec
 		m.mime_type = bts.mime_type
 		m.encryption_type = bts.encryption_type
-		if m.encryption_type != "" {
-			m.encryption_key = bts.key_id
-		}
+		m.encryption_key = bts.key_id
 	} else {
 		return {}, make_error(.Unknown_Manifest_Format, "Unknown manifest format", detail = m.manifest_mime_type)
 	}
