@@ -11,11 +11,11 @@ import "../render"
 // fonts_darwin.odin and fonts_linux.odin) at physical pixel sizes. Coverage
 // goes into R8 pages, colour glyphs (emoji) into BGRA pages. A page starts
 // at a quarter of its full side and doubles when it fills, keeping what it
-// holds; a full-size page that fills gets a sibling. When every page is
-// full, or the entries are, the next frame frees the pages nothing was drawn
-// from in the frame that filled up, and their glyphs. If every page was
-// drawn from, or the pages that stay hold half the entries, the whole atlas
-// starts over.
+// holds; a full-size page that fills gets a sibling. When the entries fill,
+// the next frame drops every glyph not drawn in the frame that filled up.
+// When the pages fill, it frees the pages nothing was drawn from in that
+// frame, and their glyphs. If every page was drawn from, or the glyphs drawn
+// fill half the entries, the whole atlas starts over.
 
 PAGE_SIZE :: 2048
 COLOR_PAGE_SIZE :: 1024
@@ -33,6 +33,15 @@ Atlas_Entry :: struct {
 	x, y, w, h: u16, // texels in the page; w = 0 draws nothing
 	left, top:  i16, // pixels from the pen position and up from the baseline
 	page:       u8,
+	last_drawn: u16, // the low bits of the Atlas.frame it was last drawn in
+}
+#assert(size_of(Atlas_Entry) == 24)
+
+// Why the atlas retires at the next begin_frame.
+Atlas_Full :: enum u8 {
+	No,
+	Entries, // the entry table reached three quarters
+	Pages, // a glyph fit in no page
 }
 
 Page :: struct {
@@ -49,7 +58,7 @@ Atlas :: struct {
 	entry_count:    int,
 	pages:          [MAX_PAGES]Page,
 	page_count:     int, // pages in use or freed; freed ones are reused first
-	full:           bool, // retire at the next begin_frame
+	full:           Atlas_Full,
 	frame:          u64,
 	// Textures of pages that grew this frame. Instances drawn earlier in the
 	// frame still sample them, so they're destroyed at the next begin_frame.
@@ -81,18 +90,21 @@ atlas_begin_frame :: proc(a: ^Atlas, r: ^render.Renderer) {
 		render.texture_destroy(r, t)
 	}
 	a.outgrown_count = 0
-	if a.full {
+	if a.full != .No {
 		atlas_retire(a, r)
 	}
 	a.frame += 1
 }
 
-// atlas_retire frees the pages nothing was drawn from last frame and drops
-// every glyph not on a page that stays. It clears the atlas instead if every
-// page was drawn from, or if the glyphs that stay fill half the entries.
-// The table fills at three quarters, so keeping half leaves room for a
-// quarter at most, and the atlas would fill again within a few frames, each
-// one missing glyphs.
+// atlas_retire frees the pages nothing was drawn from last frame. If the
+// entries filled, it drops every glyph not drawn last frame, on every page.
+// Their texels stay taken, since the packer can't free one rectangle, so a
+// dropped glyph drawn again takes new room and the pages fill sooner; when
+// they do, the cold ones go or the atlas clears as below. If the pages
+// filled, it drops the glyphs on the pages it freed, and clears the atlas
+// instead if every page was drawn from. It also clears if the glyphs drawn
+// last frame fill half the entries, since that leaves less than a quarter of
+// the table before it fills again.
 @(private)
 atlas_retire :: proc(a: ^Atlas, r: ^render.Renderer) {
 	retired: [MAX_PAGES]bool
@@ -105,17 +117,22 @@ atlas_retire :: proc(a: ^Atlas, r: ^render.Renderer) {
 			freed = true
 		}
 	}
-	if !freed {
+	if a.full == .Pages && !freed {
 		atlas_clear(a, r)
 		return
 	}
 	kept := make([dynamic]Atlas_Entry, 0, a.entry_count, context.temp_allocator)
 	for e in a.entries {
-		if e.key != 0 && e.w > 0 && !retired[e.page] {
+		on_kept_page := e.w > 0 && !retired[e.page]
+		// last_drawn wraps, so a glyph not drawn for 65536 frames can look
+		// drawn; its page may be gone.
+		drawn := e.last_drawn == u16(a.frame) && (e.w == 0 || on_kept_page)
+		keep := drawn if a.full == .Entries else on_kept_page
+		if e.key != 0 && keep {
 			append(&kept, e)
 		}
 	}
-	if len(kept) >= len(a.entries) / 2 {
+	if a.full == .Entries && len(kept) >= len(a.entries) / 2 {
 		atlas_clear(a, r)
 		return
 	}
@@ -125,7 +142,7 @@ atlas_retire :: proc(a: ^Atlas, r: ^render.Renderer) {
 		a.entries[slot] = e
 	}
 	a.entry_count = len(kept)
-	a.full = false
+	a.full = .No
 }
 
 // atlas_clear drops every glyph. The old pages may still be in flight, so
@@ -143,7 +160,7 @@ atlas_clear :: proc(a: ^Atlas, r: ^render.Renderer) {
 	a.page_count = 0
 	mem.zero_slice(a.entries)
 	a.entry_count = 0
-	a.full = false
+	a.full = .No
 }
 
 // subpixel splits a pixel x into a whole pixel and one of SUBPIXEL_STEPS
@@ -231,13 +248,16 @@ glyph_entry :: proc(t: ^State, r: ^render.Renderer, face_index: u8, id: u16, px_
 	slot, found := entry_slot(a, key)
 	if found {
 		e := &a.entries[slot]
+		e.last_drawn = u16(a.frame)
 		if e.w > 0 {
 			a.pages[e.page].last_used = a.frame
 		}
 		return e
 	}
-	if a.full || a.entry_count >= len(a.entries) * 3 / 4 {
-		a.full = true
+	if a.full != .No || a.entry_count >= len(a.entries) * 3 / 4 {
+		if a.full == .No {
+			a.full = .Entries
+		}
 		t.needs_redraw = true
 		return nil
 	}
@@ -250,7 +270,7 @@ glyph_entry :: proc(t: ^State, r: ^render.Renderer, face_index: u8, id: u16, px_
 
 	face := &t.faces[face_index]
 	box := glyph_box(a, face, px_size, size, id)
-	e := Atlas_Entry{key = key}
+	e := Atlas_Entry{key = key, last_drawn = u16(a.frame)}
 	if box[2] > box[0] && box[3] > box[1] {
 		// One pixel of padding on each side, and room for the subpixel shift.
 		left := math.floor(box[0]) - 1
@@ -260,7 +280,7 @@ glyph_entry :: proc(t: ^State, r: ^render.Renderer, face_index: u8, id: u16, px_
 		w, h := int(right - left), int(top - bottom)
 		page, x, y, ok := atlas_pack(a, r, face.color, w, h)
 		if !ok {
-			a.full = true
+			a.full = .Pages
 			t.needs_redraw = true
 			return nil
 		}

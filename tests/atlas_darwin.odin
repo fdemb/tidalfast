@@ -135,7 +135,7 @@ atlas_keeps_hot_pages_when_full :: proc(t: ^testing.T) {
 	}
 	a := &s.atlas
 	size: f32 = 60
-	for i := 0; i < 5000 && !a.full; i += 1 {
+	for i := 0; i < 5000 && a.full == .No; i += 1 {
 		frame(s, r)
 		text.draw(s, r, .Regular, 13, {0, 0}, render.WHITE, "Hot")
 		text.draw(s, r, .Bold, size, {0, 0}, render.WHITE, "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
@@ -143,16 +143,16 @@ atlas_keeps_hot_pages_when_full :: proc(t: ^testing.T) {
 			size += 10
 		}
 	}
-	testing.expect(t, a.full, "the atlas filled up")
+	testing.expect(t, a.full != .No, "the atlas filled up")
 	pages := s.stats.pages
 
 	frame(s, r)
-	testing.expect(t, !a.full)
+	testing.expect(t, a.full == .No)
 	testing.expect(t, s.stats.pages < pages, "cold pages are gone")
 	text.draw(s, r, .Regular, 13, {0, 0}, render.WHITE, "Hot")
 	testing.expect_value(t, s.stats.rasterized, 0)
 	text.draw(s, r, .Bold, 55, {0, 0}, render.WHITE, "ABC")
-	testing.expect(t, s.stats.rasterized > 0 && !a.full, "freed room takes new glyphs")
+	testing.expect(t, s.stats.rasterized > 0 && a.full == .No, "freed room takes new glyphs")
 }
 
 // When the glyph table fills but the page that holds most glyphs is drawn
@@ -203,7 +203,7 @@ atlas_full_table_on_a_hot_page_takes_new_glyphs :: proc(t: ^testing.T) {
 		}
 	}
 	filler := strings.clone(strings.to_string(b))
-	for i := 0; i < 5000 && !a.full; i += 1 {
+	for i := 0; i < 5000 && a.full == .No; i += 1 {
 		frame(s, r)
 		for font in ([]text.Font{.Regular, .Bold}) {
 			for size: f32 = 5; size <= 6; size += 0.25 {
@@ -213,7 +213,7 @@ atlas_full_table_on_a_hot_page_takes_new_glyphs :: proc(t: ^testing.T) {
 			}
 		}
 	}
-	testing.expect(t, a.full, "the glyph table filled up")
+	testing.expect(t, a.full != .No, "the glyph table filled up")
 	testing.expect_value(t, s.stats.pages, 2)
 
 	// More new glyphs than the cold page held.
@@ -221,8 +221,73 @@ atlas_full_table_on_a_hot_page_takes_new_glyphs :: proc(t: ^testing.T) {
 	for i := 0; i < 100 && (i == 0 || s.needs_redraw); i += 1 {
 		frame(s, r)
 		text.draw(s, r, .Bold, 20, {0, 0}, render.WHITE, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmn")
-		testing.expect(t, !a.full, "the table has room again")
+		testing.expect(t, a.full == .No, "the table has room again")
 		rasterized += s.stats.rasterized
 	}
 	testing.expect_value(t, rasterized, 40)
+}
+
+// When the glyph table fills with glyphs on a page that is still drawn
+// from, the glyphs not drawn in the frame that filled it go and the page
+// stays. Text drawn every frame keeps its bitmaps and isn't rasterized again.
+@(test)
+atlas_full_table_drops_glyphs_not_drawn :: proc(t: ^testing.T) {
+	device := MTLCreateSystemDefaultDevice()
+	if device == nil {
+		return // no GPU to test with
+	}
+	backing := make([]byte, 64 << 20)
+	defer delete(backing)
+	arena: mem.Arena
+	mem.arena_init(&arena, backing)
+	context.allocator = mem.arena_allocator(&arena)
+	r := new(render.Renderer)
+	r.gpu.device = device
+	r.gpu.queue = render.msg(device, "newCommandQueue")
+	s := new(text.State)
+	testing.expect(t, text.init(s))
+	defer {
+		text.destroy(s, r)
+		render.destroy(r)
+	}
+
+	// At scale 1 the small glyphs that fill the table fit in one page.
+	frame :: proc(s: ^text.State, r: ^render.Renderer) {
+		free_all(context.temp_allocator)
+		render.begin_frame(r, 1000, 1000, 1, {})
+		text.begin_frame(s, r)
+	}
+	b := strings.builder_make(context.temp_allocator)
+	for ranges in ([][2]rune{{0x21, 0x7e}, {0xa1, 0x17f}, {0x391, 0x3a9}, {0x3b1, 0x3c9}, {0x410, 0x44f}}) {
+		for c in ranges[0] ..= ranges[1] {
+			strings.write_rune(&b, c)
+		}
+	}
+	filler := strings.clone(strings.to_string(b))
+	fonts := []text.Font{.Regular, .Medium, .Semibold, .Bold}
+
+	// Each filler variant is drawn only until it is all in the atlas.
+	a := &s.atlas
+	variant := 0
+	for i := 0; i < 5000 && a.entry_count < len(a.entries) * 3 / 4; i += 1 {
+		frame(s, r)
+		text.draw(s, r, .Regular, 13, {0, 0}, render.WHITE, "Hot")
+		size := 5 + 0.25 * f32(variant / len(fonts))
+		for x: f32 = 0; x < 1; x += 0.25 {
+			text.draw(s, r, fonts[variant % len(fonts)], size, {x, 0}, render.WHITE, filler)
+		}
+		if !s.needs_redraw {
+			variant += 1
+		}
+	}
+	testing.expect(t, a.entry_count >= len(a.entries) * 3 / 4, "the glyph table filled up")
+	text.draw(s, r, .Regular, 20, {0, 0}, render.WHITE, "ABC")
+
+	frame(s, r)
+	testing.expect_value(t, s.stats.pages, 1)
+	testing.expect(t, a.entry_count < len(a.entries) / 4, "the glyphs not drawn are gone")
+	text.draw(s, r, .Regular, 13, {0, 0}, render.WHITE, "Hot")
+	testing.expect_value(t, s.stats.rasterized, 0)
+	text.draw(s, r, .Regular, 20, {0, 0}, render.WHITE, "ABC")
+	testing.expect_value(t, s.stats.rasterized, 3)
 }
