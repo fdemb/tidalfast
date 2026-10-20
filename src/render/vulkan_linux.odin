@@ -1054,8 +1054,8 @@ gpu_texture_copy :: proc(r: ^Renderer, from, to: ^Texture_Slot, w, h: int) {
 	// Both images must be ready to sample, as the barriers below expect.
 	f := slot_ready(r)
 	for i := 0; i < f.write_count; {
-		if w := f.writes[i]; w.image == src || w.image == dst {
-			end_write(cmd, w)
+		if write := f.writes[i]; write.image == src || write.image == dst {
+			end_write(cmd, write)
 			f.write_count -= 1
 			f.writes[i] = f.writes[f.write_count]
 		} else {
