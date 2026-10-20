@@ -554,6 +554,37 @@ queue_gets_the_rest_of_a_closed_list :: proc(t: ^testing.T) {
 	testing.expect(t, app.lru_find(d, .Playlist, "pl") >= 0, "the list is kept once it loaded")
 }
 
+// Two edits before a frame move the queue's rows and leave the list with
+// as many loaded rows as before. The queue follows them anyway. Before
+// this, only a change in the loaded rows made it follow, so it kept the
+// removed track and missed the added one.
+@(test)
+queue_follows_edits_that_keep_the_count :: proc(t: ^testing.T) {
+	s := cache_state()
+	defer cache_state_free(s)
+	s.playback.player = audio.create(no_wake, 0, null_output = true)
+	defer app.playback_shutdown(s)
+	d := &s.data
+	sidebar(s, updated = 1, count = 300)
+	serve(s, rows_of(LIKED_IDS))
+	app.select_playlist(s, 2)
+	serve(s, rows_of(ids_from(1000, 1300)))
+	app.playback_play_row(s, 50)
+	app.playback_update(s, nil)
+	loaded := d.view.loaded_rows
+
+	app.list_edited(s, .Playlist, "pl", false, {id = 1010}, {updated = 2, count = 299})
+	app.list_edited(s, .Playlist, "pl", true, rows_of({77})[0], {updated = 3, count = 300})
+	testing.expect_value(t, d.view.loaded_rows, loaded)
+	app.playback_update(s, nil)
+	if testing.expect_value(t, len(s.playback.entries), 300) {
+		testing.expect_value(t, s.playback.entries[10].id, 1011)
+		testing.expect_value(t, s.playback.entries[299].id, 77)
+	}
+	testing.expect_value(t, s.playback.index, 49)
+	testing.expect_value(t, s.playback.entries[s.playback.index].id, 1050)
+}
+
 // Playing a list that's still loading writes the queue's file at play,
 // when its loaded rows double, and once more when the list has loaded,
 // with every row. Before this it was written once per page.
@@ -1206,7 +1237,8 @@ refused_drop_of_a_liked_row :: proc(t: ^testing.T) {
 // A long list the queue follows comes in page by page, and each page costs
 // the queue only its own rows. Before this every page copied the whole
 // queue again. Each row the queue copied is marked with row -1, which the
-// real queue leaves 0, so a row copied again shows up unmarked.
+// real queue leaves 0, so a row copied again shows up unmarked. The queue
+// grows by doubling, so it moves only a few times, not once a page.
 @(test)
 queue_takes_pages_as_they_come :: proc(t: ^testing.T) {
 	N :: 30000
@@ -1215,11 +1247,12 @@ queue_takes_pages_as_they_come :: proc(t: ^testing.T) {
 	s.playback.player = audio.create(no_wake, 0, null_output = true)
 	defer app.playback_shutdown(s)
 	d := &s.data
-	sidebar(s, updated = 1, count = N)
+	sidebar(s, updated = 1, count = 100) // out of date, so the list grows as it loads
 	serve(s, rows_of(LIKED_IDS))
 	app.select_playlist(s, 2)
 	rows := rows_of(ids_from(1000, 1000 + N))
-	pages, copied := 0, 0
+	pages, copied, grows := 0, 0, 0
+	items: rawptr
 	for {
 		job, ok := jobs.try_pop(&d.queue)
 		if !ok {
@@ -1237,6 +1270,10 @@ queue_takes_pages_as_they_come :: proc(t: ^testing.T) {
 			app.playback_play_row(s, 0)
 		}
 		app.playback_update(s, nil)
+		if raw_data(s.playback.items) != items {
+			grows += 1
+			items = raw_data(s.playback.items)
+		}
 		for &item, i in s.playback.items {
 			if s.playback.entries[i].id != 0 && item.row != -1 {
 				copied += 1
@@ -1245,6 +1282,8 @@ queue_takes_pages_as_they_come :: proc(t: ^testing.T) {
 		}
 	}
 	testing.expect(t, pages > 200, "the list came in many pages")
+	// About log2 of N over the first page's 50 rows, plus the first one.
+	testing.expectf(t, grows <= 12, "the queue moved %d times for %d pages", grows, pages)
 	testing.expect_value(t, copied, N)
 	if testing.expect_value(t, len(s.playback.entries), N) {
 		testing.expect_value(t, s.playback.entries[N - 1].id, 1000 + N - 1)
