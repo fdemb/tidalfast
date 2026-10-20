@@ -95,6 +95,7 @@ Gpu :: struct {
 	format:           vk.Format,
 	swapchain:        vk.SwapchainKHR,
 	extent:           vk.Extent2D,
+	requested:        vk.Extent2D, // the size asked of make_swapchain, before it clamps; zero makes it again
 	image_count:      u32,
 	images:           [MAX_SWAPCHAIN_IMAGES]vk.Image,
 	views:            [MAX_SWAPCHAIN_IMAGES]vk.ImageView,
@@ -1165,6 +1166,7 @@ make_swapchain :: proc(r: ^Renderer, width, height: u32) -> bool {
 		return false
 	}
 	g.extent = extent
+	g.requested = {width, height}
 	n: u32
 	vk.GetSwapchainImagesKHR(g.device, g.swapchain, &n, nil)
 	n = min(n, MAX_SWAPCHAIN_IMAGES)
@@ -1211,7 +1213,7 @@ end_frame :: proc(r: ^Renderer) {
 	want := vk.Extent2D{u32(math.round(r.width * r.scale)), u32(math.round(r.height * r.scale))}
 	image := max(u32)
 	if g.pipeline != 0 && want.width > 0 && want.height > 0 {
-		if g.swapchain == 0 || g.extent != want {
+		if g.swapchain == 0 || g.requested != want {
 			make_swapchain(r, want.width, want.height)
 		}
 		image = acquire(r, f, want)
@@ -1269,9 +1271,7 @@ end_frame :: proc(r: ^Renderer) {
 	}
 	vk.CmdEndRenderPass(cmd)
 
-	// Present can clear g.extent, so the capture keeps its own size.
 	capture: Gpu_Buffer
-	capture_size := g.extent
 	if r.capture_path != "" && g.can_capture {
 		capture = record_capture(r, cmd, image)
 	}
@@ -1309,13 +1309,13 @@ end_frame :: proc(r: ^Renderer) {
 		pImageIndices      = &image,
 	}
 	if res := vk.QueuePresentKHR(g.queue, &present); res == .ERROR_OUT_OF_DATE_KHR || res == .SUBOPTIMAL_KHR {
-		g.extent = {} // made again next frame
+		g.requested = {} // made again next frame
 	}
 	r.stats = {draw_calls, r.instance_count}
 
 	if capture.buffer != 0 {
 		vk.WaitForFences(g.device, 1, &f.fence, true, max(u64))
-		w, h := uint(capture_size.width), uint(capture_size.height)
+		w, h := uint(g.extent.width), uint(g.extent.height)
 		pixels := capture.mapped[:w * h * 4]
 		if g.format == .R8G8B8A8_SRGB {
 			for i := 0; i < len(pixels); i += 4 {
