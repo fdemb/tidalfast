@@ -3,6 +3,7 @@ package tidal_tests
 import "core:mem"
 import "core:strings"
 import "core:testing"
+import "core:time"
 
 import "../src/render"
 import "../src/text"
@@ -152,4 +153,76 @@ atlas_keeps_hot_pages_when_full :: proc(t: ^testing.T) {
 	testing.expect_value(t, s.stats.rasterized, 0)
 	text.draw(s, r, .Bold, 55, {0, 0}, render.WHITE, "ABC")
 	testing.expect(t, s.stats.rasterized > 0 && !a.full, "freed room takes new glyphs")
+}
+
+// When the glyph table fills but the page that holds most glyphs is drawn
+// from every frame, freeing the cold pages would leave the table nearly full
+// and new glyphs missing again. The frame after the atlas fills draws new
+// glyphs.
+@(test)
+atlas_full_table_on_a_hot_page_takes_new_glyphs :: proc(t: ^testing.T) {
+	device := MTLCreateSystemDefaultDevice()
+	if device == nil {
+		return // no GPU to test with
+	}
+	backing := make([]byte, 64 << 20)
+	defer delete(backing)
+	arena: mem.Arena
+	mem.arena_init(&arena, backing)
+	context.allocator = mem.arena_allocator(&arena)
+	r := new(render.Renderer)
+	r.gpu.device = device
+	r.gpu.queue = render.msg(device, "newCommandQueue")
+	s := new(text.State)
+	testing.expect(t, text.init(s))
+	defer {
+		text.destroy(s, r)
+		render.destroy(r)
+	}
+
+	frame :: proc(s: ^text.State, r: ^render.Renderer) {
+		free_all(context.temp_allocator)
+		render.begin_frame(r, 1000, 1000, 2, {})
+		text.begin_frame(s, r)
+	}
+	a := &s.atlas
+	// The cold page: a colour page drawn from until it exists, then never.
+	for i := 0; i < 5000 && s.stats.pages < 1; i += 1 {
+		time.sleep(time.Millisecond)
+		frame(s, r)
+		text.draw(s, r, .Regular, 13, {0, 0}, render.WHITE, "😀")
+	}
+	testing.expect_value(t, s.stats.pages, 1)
+
+	// The hot page: small glyphs in every subpixel position and a few sizes,
+	// all drawn every frame, until the table is full.
+	b := strings.builder_make(context.temp_allocator)
+	for ranges in ([][2]rune{{0x21, 0x7e}, {0xa1, 0x17f}, {0x391, 0x3a9}, {0x3b1, 0x3c9}, {0x410, 0x44f}}) {
+		for c in ranges[0] ..= ranges[1] {
+			strings.write_rune(&b, c)
+		}
+	}
+	filler := strings.clone(strings.to_string(b))
+	for i := 0; i < 5000 && !a.full; i += 1 {
+		frame(s, r)
+		for font in ([]text.Font{.Regular, .Bold}) {
+			for size: f32 = 5; size <= 6; size += 0.25 {
+				for x: f32 = 0; x < 0.5; x += 0.125 {
+					text.draw(s, r, font, size, {x, 0}, render.WHITE, filler)
+				}
+			}
+		}
+	}
+	testing.expect(t, a.full, "the glyph table filled up")
+	testing.expect_value(t, s.stats.pages, 2)
+
+	// More new glyphs than the cold page held.
+	rasterized := 0
+	for i := 0; i < 100 && (i == 0 || s.needs_redraw); i += 1 {
+		frame(s, r)
+		text.draw(s, r, .Bold, 20, {0, 0}, render.WHITE, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmn")
+		testing.expect(t, !a.full, "the table has room again")
+		rasterized += s.stats.rasterized
+	}
+	testing.expect_value(t, rasterized, 40)
 }

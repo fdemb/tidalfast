@@ -14,7 +14,8 @@ import "../render"
 // holds; a full-size page that fills gets a sibling. When every page is
 // full, or the entries are, the next frame frees the pages nothing was drawn
 // from in the frame that filled up, and their glyphs. If every page was
-// drawn from, the whole atlas starts over.
+// drawn from, or the pages that stay hold half the entries, the whole atlas
+// starts over.
 
 PAGE_SIZE :: 2048
 COLOR_PAGE_SIZE :: 1024
@@ -87,8 +88,11 @@ atlas_begin_frame :: proc(a: ^Atlas, r: ^render.Renderer) {
 }
 
 // atlas_retire frees the pages nothing was drawn from last frame and drops
-// every glyph not on a page that stays, or clears the atlas if every page
-// was drawn from.
+// every glyph not on a page that stays. It clears the atlas instead if every
+// page was drawn from, or if the glyphs that stay fill half the entries.
+// The table fills at three quarters, so keeping half leaves room for a
+// quarter at most, and the atlas would fill again within a few frames, each
+// one missing glyphs.
 @(private)
 atlas_retire :: proc(a: ^Atlas, r: ^render.Renderer) {
 	retired: [MAX_PAGES]bool
@@ -110,6 +114,10 @@ atlas_retire :: proc(a: ^Atlas, r: ^render.Renderer) {
 		if e.key != 0 && e.w > 0 && !retired[e.page] {
 			append(&kept, e)
 		}
+	}
+	if len(kept) >= len(a.entries) / 2 {
+		atlas_clear(a, r)
+		return
 	}
 	mem.zero_slice(a.entries)
 	for e in kept {
