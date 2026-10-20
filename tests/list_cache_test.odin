@@ -1205,7 +1205,8 @@ refused_drop_of_a_liked_row :: proc(t: ^testing.T) {
 
 // A long list the queue follows comes in page by page, and each page costs
 // the queue only its own rows. Before this every page copied the whole
-// queue again.
+// queue again. Each row the queue copied is marked with row -1, which the
+// real queue leaves 0, so a row copied again shows up unmarked.
 @(test)
 queue_takes_pages_as_they_come :: proc(t: ^testing.T) {
 	N :: 30000
@@ -1218,8 +1219,7 @@ queue_takes_pages_as_they_come :: proc(t: ^testing.T) {
 	serve(s, rows_of(LIKED_IDS))
 	app.select_playlist(s, 2)
 	rows := rows_of(ids_from(1000, 1000 + N))
-	pages := 0
-	took: time.Duration
+	pages, copied := 0, 0
 	for {
 		job, ok := jobs.try_pop(&d.queue)
 		if !ok {
@@ -1236,12 +1236,16 @@ queue_takes_pages_as_they_come :: proc(t: ^testing.T) {
 		if pages == 1 {
 			app.playback_play_row(s, 0)
 		}
-		start := time.tick_now()
 		app.playback_update(s, nil)
-		took += time.tick_since(start)
+		for &item, i in s.playback.items {
+			if s.playback.entries[i].id != 0 && item.row != -1 {
+				copied += 1
+				item.row = -1
+			}
+		}
 	}
 	testing.expect(t, pages > 200, "the list came in many pages")
-	testing.expectf(t, took < time.Second, "%v for %d pages", took, pages)
+	testing.expect_value(t, copied, N)
 	if testing.expect_value(t, len(s.playback.entries), N) {
 		testing.expect_value(t, s.playback.entries[N - 1].id, 1000 + N - 1)
 		testing.expect_value(t, s.playback.items[N - 1].title, rows[N - 1].title)

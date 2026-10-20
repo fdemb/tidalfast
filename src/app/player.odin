@@ -90,6 +90,7 @@ Playback :: struct {
 	items:           []Queue_Item,
 	entries:         []audio.Queue_Entry,
 	order:           []int, // the items in play order, see queue_reorder
+	capacity:        int, // items, entries and order have room for this many
 	loaded:          int, // rows loaded when the snapshot was taken
 	moved:           u32, // the list's moved then
 	list_key:        u64, // list_key of the list the queue came from
@@ -300,13 +301,23 @@ queue_follow :: proc(s: ^State, v: ^Track_View) {
 		return
 	}
 	a := vmem.arena_allocator(&pb.arena)
-	if n := v.count; n != len(pb.items) {
-		items := make([]Queue_Item, n, a)
-		entries := make([]audio.Queue_Entry, n, a)
-		copy(items, pb.items)
-		copy(entries, pb.entries)
-		pb.items, pb.entries = items, entries
-		pb.order = make([]int, n, a)
+	if n, old := v.count, len(pb.items); n != old {
+		if n > pb.capacity {
+			pb.capacity = max(n, 2 * pb.capacity)
+			items := make([]Queue_Item, pb.capacity, a)
+			entries := make([]audio.Queue_Entry, pb.capacity, a)
+			copy(items, pb.items)
+			copy(entries, pb.entries)
+			pb.items, pb.entries = items, entries
+			pb.order = make([]int, pb.capacity, a)
+		}
+		pb.items = ([^]Queue_Item)(raw_data(pb.items))[:n]
+		pb.entries = ([^]audio.Queue_Entry)(raw_data(pb.entries))[:n]
+		pb.order = ([^]int)(raw_data(pb.order))[:n]
+		if n > old {
+			slice.zero(pb.items[old:])
+			slice.zero(pb.entries[old:])
+		}
 	}
 	pb.loaded = v.loaded_rows
 	for &e, i in pb.entries {
@@ -331,6 +342,7 @@ queue_reset :: proc(pb: ^Playback, n: int) -> runtime.Allocator {
 	pb.items = make([]Queue_Item, n, a)
 	pb.entries = make([]audio.Queue_Entry, n, a)
 	pb.order = make([]int, n, a)
+	pb.capacity = n
 	audio.queue_order(pb.order, nil, false)
 	return a
 }
@@ -867,7 +879,7 @@ playback_update :: proc(s: ^State, events: []platform.Event) {
 	// not the list is still open. A page that came back short moves the
 	// rows after it up, and the queue's tracks with them.
 	d := &s.data
-	if v := queue_list(d); !pb.fake && pb.index >= 0 && v != nil && pb.loaded != v.loaded_rows {
+	if v := queue_list(d); !pb.fake && pb.index >= 0 && v != nil && (pb.loaded != v.loaded_rows || pb.moved != v.moved) {
 		index := pb.index
 		played := order_played(s)
 		queue_follow(s, v)
