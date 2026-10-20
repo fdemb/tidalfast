@@ -1000,13 +1000,18 @@ write_target :: proc(r: ^Renderer, slot: ^Texture_Slot) -> ^Image_Write {
 @(private)
 end_writes :: proc(f: ^Gpu_Frame) {
 	for w in f.writes[:f.write_count] {
-		if w.levels > 1 {
-			generate_mips(f.upload, w)
-		} else {
-			image_barrier(f.upload, w.image, .TRANSFER_DST_OPTIMAL, .SHADER_READ_ONLY_OPTIMAL, 0, 1, {.TRANSFER}, {.FRAGMENT_SHADER}, {.TRANSFER_WRITE}, {.SHADER_READ})
-		}
+		end_write(f.upload, w)
 	}
 	f.write_count = 0
+}
+
+@(private)
+end_write :: proc(cmd: vk.CommandBuffer, w: Image_Write) {
+	if w.levels > 1 {
+		generate_mips(cmd, w)
+	} else {
+		image_barrier(cmd, w.image, .TRANSFER_DST_OPTIMAL, .SHADER_READ_ONLY_OPTIMAL, 0, 1, {.TRANSFER}, {.FRAGMENT_SHADER}, {.TRANSFER_WRITE}, {.SHADER_READ})
+	}
 }
 
 // generate_mips blits each level from the one above. Every level comes in
@@ -1036,9 +1041,18 @@ gpu_texture_copy :: proc(r: ^Renderer, from, to: ^Texture_Slot, w, h: int) {
 		return
 	}
 	cmd := upload_cmd(r)
-	// Both images must be ready to sample, as the barriers below expect.
-	end_writes(slot_ready(r))
 	src, dst := from.gpu.image, to.gpu.image
+	// Both images must be ready to sample, as the barriers below expect.
+	f := slot_ready(r)
+	for i := 0; i < f.write_count; {
+		if w := f.writes[i]; w.image == src || w.image == dst {
+			end_write(cmd, w)
+			f.write_count -= 1
+			f.writes[i] = f.writes[f.write_count]
+		} else {
+			i += 1
+		}
+	}
 	image_barrier(cmd, src, .SHADER_READ_ONLY_OPTIMAL, .TRANSFER_SRC_OPTIMAL, 0, 1, {.FRAGMENT_SHADER}, {.TRANSFER}, {.SHADER_READ}, {.TRANSFER_READ})
 	image_barrier(cmd, dst, .SHADER_READ_ONLY_OPTIMAL, .TRANSFER_DST_OPTIMAL, 0, 1, {.FRAGMENT_SHADER}, {.TRANSFER}, {.SHADER_READ}, {.TRANSFER_WRITE})
 	region := vk.ImageCopy {
