@@ -2,6 +2,7 @@ package tidal_tests
 
 import "core:mem"
 import "core:strconv"
+import "core:sync"
 import "core:testing"
 import "core:unicode/utf8"
 import "core:time"
@@ -569,6 +570,53 @@ test_fallback_cache_limit :: proc(t: ^testing.T) {
 		testing.expect(t, !text.loading(state), "nothing asked again")
 	}
 	testing.expect_value(t, state.generation, generation)
+}
+
+// A loader result for a character the fallback faces turned out to have
+// while it looked doesn't replace the face runs already use.
+@(test)
+test_loader_keeps_scanned_fallback :: proc(t: ^testing.T) {
+	s: Shaper
+	context.allocator = shaper_init(&s)
+	defer shaper_destroy(&s)
+	state := s.state
+
+	cjk := shape_loaded(&s, .Regular, 13, "夜")
+	arabic := shape_loaded(&s, .Regular, 13, "ب")
+	if !testing.expect(t, !cjk.pending && !arabic.pending) {
+		return
+	}
+	cjk_face, arabic_face := int(cjk.glyphs[0].face), int(arabic.glyphs[0].face)
+	testing.expect(t, cjk_face != arabic_face)
+
+	// The loader was asked for 龍 and hasn't answered yet.
+	key := (u64(text.Font.Regular) + 1) << 32 | u64('龍')
+	slot := int(text.mix64(key)) & (len(state.fallback_cache) - 1)
+	for state.fallback_cache[slot].key != 0 && state.fallback_cache[slot].key != key {
+		slot = (slot + 1) & (len(state.fallback_cache) - 1)
+	}
+	if state.fallback_cache[slot].key == 0 {
+		state.fallback_used += 1
+	}
+	state.fallback_cache[slot] = {key, text.PENDING}
+
+	run := text.shape(state, .Regular, 13, "龍 1")
+	testing.expect(t, !run.pending)
+	testing.expect_value(t, int(run.glyphs[0].face), cjk_face)
+
+	for i := 0; text.loading(state) && i < 5000; i += 1 {
+		time.sleep(time.Millisecond)
+		text.begin_frame(state, &s.r)
+	}
+	l := &state.loader
+	sync.mutex_lock(&l.mutex)
+	l.results[l.result_count] = {font = .Regular, codepoint = '龍', found = state.faces[arabic_face].name}
+	l.result_count += 1
+	sync.mutex_unlock(&l.mutex)
+	text.begin_frame(state, &s.r)
+
+	run = text.shape(state, .Regular, 13, "龍 2")
+	testing.expect_value(t, int(run.glyphs[0].face), cjk_face)
 }
 
 // A default ignorable a font doesn't map, like U+FE0F in Noto Color Emoji,
