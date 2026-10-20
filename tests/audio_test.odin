@@ -3,6 +3,7 @@ package tidal_tests
 import "core:encoding/base64"
 import "core:encoding/json"
 import "core:fmt"
+import "core:log"
 import "core:math"
 import "core:math/rand"
 import "core:net"
@@ -675,4 +676,54 @@ stream_clear_releases_the_window :: proc(t: ^testing.T) {
 	when ODIN_OS == .Linux {
 		testing.expect_value(t, slice.count(st.buf[:len(file)], 0), len(file))
 	}
+}
+
+// with_picture puts a PICTURE block of size bytes after STREAMINFO.
+@(private = "file")
+with_picture :: proc(file: []u8, size: int) -> []u8 {
+	out := make([dynamic]u8, 0, len(file) + 4 + size, context.temp_allocator)
+	append(&out, ..file[:42])
+	append(&out, 6, u8(size >> 16), u8(size >> 8), u8(size))
+	resize(&out, len(out) + size)
+	append(&out, ..file[42:])
+	return out[:]
+}
+
+// Cover art in the header plays, and the slot doesn't keep it. A header
+// bigger than any real one fails the track instead of being read whole.
+@(test)
+flac_header_size :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	file, _ := test_flac(400, 100)
+	m.files["/art.flac"] = with_picture(file, 4 << 20)
+	huge := make([dynamic]u8, context.temp_allocator)
+	tag := 20 << 20
+	append(&huge, 'I', 'D', '3', 4, 0, 0, u8(tag >> 21 & 0x7f), u8(tag >> 14 & 0x7f), u8(tag >> 7 & 0x7f), u8(tag & 0x7f))
+	resize(&huge, len(huge) + tag)
+	append(&huge, ..file)
+	m.files["/huge.flac"] = huge[:]
+
+	p := audio.create(no_wake, 0, null_output = true)
+	defer audio.destroy(p)
+	audio.play(p, {kind = .Flac, serial = 1, url = fmt.tprintf("%sart.flac", m.base_url), gain = 1, seconds = 10})
+	testing.expect(t, wait_audible(p, 1), "the track with art plays")
+	held := 0
+	for &sl in p.slots {
+		held += len(sl.stream.head)
+	}
+	testing.expectf(t, held < 4 << 10, "the slots hold %d header bytes", held)
+
+	runner := context.logger
+	context.logger = log.nil_logger() // the failure is logged as an error
+	q := audio.create(no_wake, 0, null_output = true)
+	context.logger = runner
+	defer audio.destroy(q)
+	audio.play(q, {kind = .Flac, serial = 2, url = fmt.tprintf("%shuge.flac", m.base_url), gain = 1, seconds = 10})
+	start := time.tick_now()
+	for audio.status(q).error.serial != 2 && time.tick_since(start) < 5 * time.Second {
+		time.sleep(5 * time.Millisecond)
+	}
+	testing.expect_value(t, audio.status(q).error.serial, u64(2))
 }

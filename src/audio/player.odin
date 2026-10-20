@@ -25,8 +25,8 @@ package audio
 //
 // A DASH track (TIDAL's hi-res) arrives as fragmented MP4 segments. The
 // fetch thread downloads them in order into the same kind of window, and
-// the decoder sees the FLAC stream inside: "fLaC" and the metadata blocks
-// from the initialization segment, then the frames from each fragment
+// the decoder sees the FLAC stream inside: "fLaC" and STREAMINFO from the
+// initialization segment, then the frames from each fragment
 // (fmp4.odin). A seek starts again at the segment holding the target.
 //
 // Output goes through miniaudio, which plays at whatever rate the device
@@ -227,7 +227,7 @@ Slot :: struct {
 @(private)
 Dash_Demux :: struct {
 	starts:      []i64, // each media segment's first sample, in the source's timescale; in track
-	init:        Mp4_Init, // flac_head is in stream.head instead
+	init:        Mp4_Init, // stream.head is made from flac_head
 	pos:         i64, // the next box header
 	moof:        i64, // where the current fragment's moof starts
 	covered:     i64, // where its samples end
@@ -1289,8 +1289,8 @@ slot_open_dash :: proc(p: ^Player, sl: ^Slot) -> bool {
 }
 
 // read_init reads the initialization segment at the start of a freshly
-// opened DASH stream and keeps "fLaC" and the metadata blocks from its dfLa
-// as the slot's header.
+// opened DASH stream and keeps "fLaC" and STREAMINFO from its dfLa as the
+// slot's header.
 @(private = "file")
 read_init :: proc(p: ^Player, sl: ^Slot) -> bool {
 	st := &sl.stream
@@ -1317,12 +1317,7 @@ read_init :: proc(p: ^Player, sl: ^Slot) -> bool {
 				slot_fail(p, sl, 0, "the FLAC header in the MP4 is broken")
 				return false
 			}
-			// As in read_header: the decoder mustn't stop at a sample count
-			// counted from wherever it starts.
-			s := st.header.streaminfo
-			head[s + 13] &= 0xf0
-			head[s + 14], head[s + 15], head[s + 16], head[s + 17] = 0, 0, 0, 0
-			st.head = head
+			st.head = flac_decoder_head(head, &st.header, vmem.arena_allocator(&sl.track))
 			st.has_header = true
 			dm.init = init
 			dm.pos = i64(used)
@@ -1505,6 +1500,11 @@ slot_close :: proc(sl: ^Slot) {
 	sl.interrupted = false
 }
 
+// FLAC_HEADER_MAX is the most read_header buffers. Cover art makes headers
+// megabytes long; a bigger one isn't worth holding in memory to play.
+@(private = "file")
+FLAC_HEADER_MAX :: 16 << 20
+
 // read_header reads the metadata blocks from the start of the file.
 @(private = "file")
 read_header :: proc(p: ^Player, sl: ^Slot) -> bool {
@@ -1524,16 +1524,7 @@ read_header :: proc(p: ^Player, sl: ^Slot) -> bool {
 		}
 		switch parse_flac_header(buf[:], &st.header) {
 		case .Ok:
-			h := &st.header
-			// The decoder sees the header and then frames from wherever a
-			// seek put us. It must not stop at the file's sample count
-			// counted from the first frame it sees, so that goes to 0
-			// (unknown) in its copy.
-			st.head = make([]u8, h.audio_start, vmem.arena_allocator(&sl.track))
-			copy(st.head, buf[:h.audio_start])
-			s := h.streaminfo
-			st.head[s + 13] &= 0xf0
-			st.head[s + 14], st.head[s + 15], st.head[s + 16], st.head[s + 17] = 0, 0, 0, 0
+			st.head = flac_decoder_head(buf[:], &st.header, vmem.arena_allocator(&sl.track))
 			st.has_header = true
 			return true
 		case .Invalid:
@@ -1542,6 +1533,10 @@ read_header :: proc(p: ^Player, sl: ^Slot) -> bool {
 		case .Need_More:
 			if res == .Eof {
 				slot_fail(p, sl, 0, "the file ends inside its header")
+				return false
+			}
+			if len(buf) >= FLAC_HEADER_MAX {
+				slot_fail(p, sl, 0, "the FLAC header is too big")
 				return false
 			}
 		}

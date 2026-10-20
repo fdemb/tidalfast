@@ -58,7 +58,7 @@ Stream :: struct {
 	thread:      posix.pthread_t,
 	// Header and seek data, filled by the decode thread once it has read them.
 	header:      Flac_Header,
-	head:        []u8, // the bytes before the first frame, borrowed, like url
+	head:        []u8, // from flac_decoder_head, read before the frames; borrowed, like url
 	has_header:  bool,
 	logger:      runtime.Logger, // stream_init's caller's, for the fetch thread
 }
