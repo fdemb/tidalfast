@@ -189,9 +189,11 @@ session_epoch :: proc(s: ^Session) -> u64 {
 }
 
 // session_set_epoch carries a session's auth epoch over to the one that
-// replaces it, so epochs keep counting up across a hot reload. Call it
-// before the session is shared between threads.
+// replaces it, so epochs keep counting up across a hot reload. The epoch
+// never goes back.
 session_set_epoch :: proc(s: ^Session, epoch: u64) {
+	sync.guard(&s.mutex)
+	assert(epoch >= s.auth_epoch, "a session's auth epoch went back")
 	sync.atomic_store(&s.auth_epoch, epoch)
 }
 
