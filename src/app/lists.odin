@@ -204,12 +204,11 @@ lru_find :: proc(d: ^Data, source: Source, id: string) -> int {
 // lru_remove takes entry i out of memory and gives it to the caller.
 lru_remove :: proc(d: ^Data, i: int) -> Track_View {
 	l := &d.lists
-	v := l.entries[i].view
-	l.bytes -= l.entries[i].bytes
+	e := l.entries[i]
+	l.bytes -= e.bytes
 	l.count -= 1
-	l.entries[i] = l.entries[l.count]
-	l.entries[l.count] = {}
-	return v
+	l.entries[i] = take(&l.entries[l.count])
+	return e.view
 }
 
 lru_drop :: proc(d: ^Data, i: int) {
@@ -273,8 +272,7 @@ list_open :: proc(d: ^Data, source: Source, id, name, image: string, hint: int) 
 	v := &d.view
 	if q := &d.queued; q.source == source && small_str(&q.id) == id {
 		// Still loading for the play queue: it opens as far as it got.
-		v^ = q^
-		q^ = {}
+		v^ = take(q)
 		v.name = small(name)
 		v.image = small(image)
 		return
@@ -447,13 +445,10 @@ rows_moved :: proc(s: ^State, m: Row_Marks) {
 refresh_land :: proc(s: ^State) {
 	d := &s.data
 	marks := row_marks(s)
-	old := d.view
-	d.view = d.refresh
+	old := take(&d.view)
+	d.view = take(&d.refresh)
 	d.view.fetched = unix_now()
-	d.refresh = {}
-	if old.has_arena {
-		view_free(d, &old)
-	}
+	view_free(d, &old)
 	rows_moved(s, marks)
 	log.debugf("lists: %s fetched again, %d rows", list_name(d.view.source, small_str(&d.view.id)), d.view.count)
 	list_save(d, &d.view)
@@ -678,7 +673,7 @@ sidebar_adopt :: proc(s: ^State, res: ^Result, sidebar: Sidebar_Result, from_dis
 	fetched := d.sidebar.fetched
 	sidebar_free(d)
 	d.sidebar = {
-		arena        = res.arena,
+		arena        = take(&res.arena),
 		items        = sidebar.playlists,
 		liked_count  = sidebar.liked_count,
 		liked_newest = sidebar.liked_newest,
@@ -687,7 +682,6 @@ sidebar_adopt :: proc(s: ^State, res: ^Result, sidebar: Sidebar_Result, from_dis
 		fresh        = !from_disk,
 		fetched      = fetched if from_disk else time.tick_now(),
 	}
-	res.arena = nil
 	if lib.status in ADD_STATUSES {
 		lib.status = .None // it names a sidebar entry by its place
 	}
@@ -1158,10 +1152,9 @@ disk_result :: proc(s: ^State, res: ^Result, job: Disk_Job) {
 	// The disk thread decoded the rows into the list's space and their
 	// strings into the arena, so the view takes both as they are. The
 	// arena's copy of itself left in its first block is dead.
-	v.arena = res.arena^
-	v.space, v.rows, v.loaded = list.space, list.rows, list.loaded
+	v.arena = take(&res.arena)^
+	v.space, v.rows, v.loaded = take(&list.space), list.rows, list.loaded
 	v.has_arena = true
-	res.arena, list.space = nil, nil
 	n := len(v.rows)
 	slice.fill(v.loaded, true)
 	v.count = n

@@ -460,8 +460,7 @@ artwork_result :: proc(s: ^State, res: ^Result, job: Artwork_Job) {
 		return
 	}
 	artwork_free(a)
-	a^ = {img.pixels, img.w, img.h, job.serial}
-	img.pixels = nil
+	a^ = {take(&img.pixels), img.w, img.h, job.serial}
 }
 
 // stream_result takes a Stream job's result.

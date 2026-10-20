@@ -1335,14 +1335,13 @@ view_close :: proc(d: ^Data) {
 	v := &d.view
 	if v.has_arena && v.gen == d.queue_view && !view_complete(v) && v.error.len == 0 && !v.reading {
 		queued_drop(d)
-		d.queued = v^
-		v.has_arena = false
+		d.queued = take(v)
 	}
 	jobs.remove_if(&d.queue, drop_track_jobs, &d.queued)
 	refresh_drop(d)
 	if v.has_arena {
 		if d.lists.memory && view_complete(v) && v.fetched != 0 {
-			list_keep(d, v^)
+			list_keep(d, take(v))
 		} else {
 			view_free(d, v)
 		}
@@ -1358,12 +1357,10 @@ queued_drop :: proc(d: ^Data) {
 		return
 	}
 	jobs.remove_if(&d.queue, page_of, &q.gen)
-	if q.has_arena {
-		if d.lists.memory && view_complete(q) && q.fetched != 0 {
-			list_keep(d, q^)
-		} else {
-			view_free(d, q)
-		}
+	if q.has_arena && d.lists.memory && view_complete(q) && q.fetched != 0 {
+		list_keep(d, take(q))
+	} else {
+		view_free(d, q)
 	}
 	q^ = {}
 }
@@ -1482,6 +1479,9 @@ view_release :: proc(v: ^Track_View) {
 // view_free frees a list's memory. Debug builds and tests poison it and
 // keep it until the next one goes, see Data.poison.
 view_free :: proc(d: ^Data, v: ^Track_View) {
+	if !v.has_arena {
+		return
+	}
 	if !d.poison {
 		view_release(v)
 		return
@@ -1493,8 +1493,7 @@ view_free :: proc(d: ^Data, v: ^Track_View) {
 	mem.set(raw_data(v.loaded), POISON, len(v.loaded))
 	mem.set(raw_data(v.gaps), POISON, len(v.gaps) * size_of(Gap))
 	view_release(&d.retired)
-	d.retired = v^
-	v.has_arena = false
+	d.retired = take(v)
 }
 
 // view_bytes is about what a list holds in memory.

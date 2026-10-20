@@ -236,8 +236,7 @@ artist_result :: proc(d: ^Data, res: ^Result, job: Artist_Job) {
 		return
 	}
 	part, _ := res.payload.(Artist_Result)
-	artist_ready(page, job.part, res.arena, part.content)
-	res.arena = nil
+	artist_ready(page, job.part, take(&res.arena), part.content)
 	v := &d.view
 	if _, info := part.content.(Artist_Info); info && v.source == .Artist && small_str(&v.id) == fmt.tprint(job.artist) {
 		v.name = page.name

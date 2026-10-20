@@ -281,8 +281,7 @@ search_result :: proc(s: ^State, res: ^Result, job: Search_Job) {
 	answer, _ := res.payload.(Search_Result)
 	sr.error = {}
 	found_free(sr)
-	sr.arena = res.arena
-	res.arena = nil
+	sr.arena = take(&res.arena)
 	sr.found = answer.found
 	sr.query = job.query
 	q := small_str(&sr.query)

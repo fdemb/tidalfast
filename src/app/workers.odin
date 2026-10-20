@@ -532,6 +532,14 @@ arena_release :: proc(a: ^vmem.Arena) {
 	}
 }
 
+// take moves what p holds to the caller and leaves p empty, so of the two
+// only the caller's copy owns the memory it points to.
+take :: proc(p: ^$T) -> T {
+	v := p^
+	p^ = {}
+	return v
+}
+
 result_free :: proc(res: ^Result) {
 	arena_release(res.arena)
 	res.arena = nil
