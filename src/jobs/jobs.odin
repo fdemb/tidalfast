@@ -25,7 +25,7 @@ Queue :: struct($T: typeid, $N: int) {
 	mutex:    sync.Mutex,
 	arrived:  sync.Cond, // an item arrived, or stop
 	freed:    sync.Cond, // room was freed, or stop
-	halted:   sync.Cond, // stop, for sleep
+	stopping: sync.Cond, // stop, for sleep
 	items:    [N]T,
 	tickets:  [N]Ticket,
 	count:    int,
@@ -198,7 +198,7 @@ stop :: proc(q: ^Queue($T, $N)) {
 	q.stopped = true
 	sync.cond_broadcast(&q.arrived)
 	sync.cond_broadcast(&q.freed)
-	sync.cond_broadcast(&q.halted)
+	sync.cond_broadcast(&q.stopping)
 }
 
 start :: proc(q: ^Queue($T, $N)) {
@@ -216,7 +216,7 @@ sleep :: proc(q: ^Queue($T, $N), d: time.Duration) -> bool {
 		if left <= 0 {
 			break
 		}
-		sync.cond_wait_with_timeout(&q.halted, &q.mutex, left)
+		sync.cond_wait_with_timeout(&q.stopping, &q.mutex, left)
 	}
 	return q.stopped
 }
