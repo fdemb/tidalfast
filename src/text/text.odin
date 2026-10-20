@@ -492,9 +492,18 @@ font_stack :: proc(t: ^State, font: Font, runes: []rune) -> (stack: Font_Stack, 
 		if has_codepoint(t, font, r) || ignorable(r) {
 			continue
 		}
-		face := in_fallbacks(t, font, r)
-		if face < 0 {
-			face = fallback_face(t, font, r)
+		// A cached face is used as is, unless it's a black and white one
+		// for an emoji, which a colour face found since should draw.
+		// Otherwise the faces found so far may have r now.
+		key := fallback_key(font, r)
+		face, cached := cached_face(t, key)
+		if !cached || face < 0 || emoji_presentation(r) && !t.faces[face].color {
+			if found := in_fallbacks(t, font, r); found >= 0 {
+				face = found
+				cache_face(t, key, face)
+			} else if !cached {
+				face = fallback_face(t, font, r)
+			}
 		}
 		if face >= 0 {
 			stack.needed += {face}
