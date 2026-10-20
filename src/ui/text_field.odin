@@ -105,8 +105,8 @@ text_field :: proc(id: string, f: ^Text_Field, placeholder: string, width, heigh
 		case .Press:
 			field_unmark(f)
 			// This hit-tests the text as the batch's earlier edits left it, at
-			// last frame's scroll. Typing and a click rarely share a frame,
-			// and then the caret still lands near the click.
+			// last frame's scroll. Typing and a click rarely share a frame.
+			// When they do, the caret still lands near the click.
 			p := field_hit(field_layout(u.texts, font, size, field_text(f)), e.pos.x - origin)
 			switch {
 			case e.click_count >= 3:
