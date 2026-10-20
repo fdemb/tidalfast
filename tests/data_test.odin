@@ -2,6 +2,7 @@ package tidal_tests
 
 import "base:runtime"
 import "core:fmt"
+import "core:hash"
 import "core:slice"
 import "core:sync"
 import "core:testing"
@@ -438,6 +439,44 @@ cover_decode_premultiplies_gray_alpha :: proc(t: ^testing.T) {
 		testing.expect(t, ok)
 		testing.expect_value(t, [2]int{w, h}, [2]int{4, 4} if px == 0 else [2]int{px, px})
 		testing.expect(t, slice.equal(got, want), fmt.tprint(px, got[:4], want[:4]))
+	}
+}
+
+// A gray PNG whose tRNS chunk makes gray 200 transparent: stb_image counts
+// the tRNS alpha as a channel, so that pixel comes out all zero.
+@(test)
+cover_decode_premultiplies_trns :: proc(t: ^testing.T) {
+	chunk :: proc(png: ^[dynamic]u8, kind: string, data: []u8) {
+		be32 :: proc(png: ^[dynamic]u8, v: u32) {
+			append(png, u8(v >> 24), u8(v >> 16), u8(v >> 8), u8(v))
+		}
+		be32(png, u32(len(data)))
+		start := len(png)
+		append(png, kind)
+		append(png, ..data)
+		be32(png, hash.crc32(png[start:]))
+	}
+	// One row: filter 0, gray 200 (the transparent key), gray 100.
+	row := [3]u8{0, 200, 100}
+	// zlib header, one stored deflate block, Adler-32 of the row.
+	idat := make([dynamic]u8, context.temp_allocator)
+	append(&idat, 0x78, 0x01, 0x01, 3, 0, 0xfc, 0xff)
+	append(&idat, ..row[:])
+	adler := hash.adler32(row[:])
+	append(&idat, u8(adler >> 24), u8(adler >> 16), u8(adler >> 8), u8(adler))
+	png := make([dynamic]u8, context.temp_allocator)
+	append(&png, 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n')
+	chunk(&png, "IHDR", {0, 0, 0, 2, 0, 0, 0, 1, 8, 0, 0, 0, 0})
+	chunk(&png, "tRNS", {0, 200})
+	chunk(&png, "IDAT", idat[:])
+	chunk(&png, "IEND", nil)
+	pixels, w, h, ok := cover.decode(png[:])
+	defer cover.free_pixels(pixels)
+	testing.expect(t, ok)
+	testing.expect_value(t, [2]int{w, h}, [2]int{2, 1})
+	if len(pixels) == 8 {
+		testing.expect_value(t, [4]u8{pixels[0], pixels[1], pixels[2], pixels[3]}, [4]u8{0, 0, 0, 0})
+		testing.expect_value(t, [4]u8{pixels[4], pixels[5], pixels[6], pixels[7]}, [4]u8{100, 100, 100, 255})
 	}
 }
 
