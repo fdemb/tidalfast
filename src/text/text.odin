@@ -293,7 +293,9 @@ begin_frame :: proc(t: ^State, r: ^render.Renderer) {
 	t.stats = {}
 	t.needs_redraw = false
 	take_loaded(t)
-	if t.cache_full || t.run_count > RUN_CAPACITY / 2 * 3 / 4 || t.pool_used > GLYPH_POOL * 3 / 4 {
+	// Sweeping hard only once a run didn't fit: a working set that fits but
+	// stays above some threshold would otherwise be swept every frame.
+	if t.cache_full {
 		sweep(t, 1)
 	} else if t.frame - t.last_sweep >= SWEEP_EVERY {
 		sweep(t, EVICT_AFTER)

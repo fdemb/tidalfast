@@ -1,6 +1,7 @@
 package tidal_tests
 
 import "core:mem"
+import "core:strconv"
 import "core:testing"
 import "core:unicode/utf8"
 import "core:time"
@@ -612,4 +613,33 @@ test_measure_empty :: proc(t: ^testing.T) {
 	defer fonts_destroy(&f)
 	m := text.measure(f.state, .Semibold, 14, "")
 	testing.expect_value(t, m.width, f32(0))
+}
+
+// A working set bigger than three quarters of the run cache, all of it
+// drawn every frame, fits, so begin_frame leaves it alone instead of
+// sweeping every frame.
+@(test)
+test_large_working_set_is_not_swept_every_frame :: proc(t: ^testing.T) {
+	s: Shaper
+	context.allocator = shaper_init(&s)
+	defer shaper_destroy(&s)
+	state := s.state
+
+	n := text.RUN_CAPACITY / 2 * 7 / 8
+	draw_all :: proc(state: ^text.State, n: int) {
+		buf: [16]byte
+		for i in 0 ..< n {
+			text.shape(state, .Regular, 13, strconv.write_int(buf[:], i64(i), 10))
+		}
+	}
+	draw_all(state, n)
+	testing.expect_value(t, state.run_count, n)
+	last := state.last_sweep
+	for _ in 0 ..< 5 {
+		free_all(context.temp_allocator)
+		text.begin_frame(state, &s.r)
+		draw_all(state, n)
+		testing.expect_value(t, state.stats.shaped, 0)
+	}
+	testing.expect_value(t, state.last_sweep, last)
 }
