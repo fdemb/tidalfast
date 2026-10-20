@@ -409,6 +409,8 @@ ring_read :: proc(buf: []u8, at: i64, dst: []u8) {
 	copy(dst[k:], buf)
 }
 
+// ring_write copies src into buf from file offset at. src is no longer than
+// buf, or its head would be overwritten by its own tail.
 @(private = "file")
 ring_write :: proc(buf: []u8, at: i64, src: []u8) {
 	k := copy(buf[at % i64(len(buf)):], src)
