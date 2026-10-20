@@ -470,11 +470,11 @@ every_job :: proc(_: ^Test_Job, _: rawptr) -> bool {return true}
 
 // blocks_until runs sh.work on a thread, checks it is still waiting after
 // 20 ms, runs wake and waits up to 2 s for the work to return. On a timeout
-// it fails and stops the queue to free the thread, so a lost wakeup fails
-// the test instead of hanging it. A thread that ignores the stop as well
-// ends the test and is left running with sh, so sh is static and the
-// thread comes from the heap rather than the test's allocator, which the
-// test frees when it ends.
+// it stops the queue to free the thread and ends the test, so a lost wakeup
+// fails the test instead of hanging it or running on against a stopped
+// queue. A thread that ignores the stop as well is left running with sh, so
+// sh is static and the thread comes from the heap rather than the test's
+// allocator, which the test frees when it ends.
 @(private = "file")
 blocks_until :: proc(t: ^testing.T, sh: ^Wait_Shared, wake: proc(sh: ^Wait_Shared), loc := #caller_location) {
 	finished_within :: proc(sh: ^Wait_Shared, d: time.Duration) -> bool {
@@ -497,11 +497,12 @@ blocks_until :: proc(t: ^testing.T, sh: ^Wait_Shared, wake: proc(sh: ^Wait_Share
 	testing.expect(t, !sync.atomic_load(&sh.finished), "returned before the wakeup", loc = loc)
 	wake(sh)
 	if !finished_within(sh, 2 * time.Second) {
-		testing.expect(t, false, "no wakeup within 2 s", loc = loc)
 		jobs.stop(&sh.q)
-		if !finished_within(sh, 2 * time.Second) {
-			testing.fail_now(t, "the stop did not wake it either", loc)
+		if finished_within(sh, 2 * time.Second) {
+			thread.join(worker)
+			thread.destroy(worker)
 		}
+		testing.fail_now(t, "no wakeup within 2 s", loc)
 	}
 	thread.join(worker)
 	thread.destroy(worker)
