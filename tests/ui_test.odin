@@ -552,6 +552,54 @@ test_ui_focus_reveals_on_both_axes :: proc(t: ^testing.T) {
 	testing.expect_value(t, shelf.view_off.x, 1000 - shelf.rect.w)
 }
 
+// A focusable table of 100 rows after a header, 1000 pt in a 200 pt view,
+// the way the track list builds it. Tab into it keeps the view where it
+// is while the table shows, at the header and in the middle of the rows,
+// and brings its first rows in when it doesn't.
+@(test)
+test_ui_focus_keeps_a_table_taller_than_the_view :: proc(t: ^testing.T) {
+	frame :: proc(u: ^ui.State, now: ^f64, header: f32, offset: Maybe(f32), events: ..platform.Event) -> (view, table: ^ui.Box, animating: bool) {
+		now^ += 1.0 / 120
+		ui.begin_frame(u, events, nil, nil, 300, 200, now^)
+		{
+			view = ui.scroll_view("view", ui.fill(), ui.fill())
+			if y, ok := offset.?; ok {
+				view.view_off.y, view.view_off_target.y = y, y
+			}
+			ui.spacer(ui.px(header))
+			table = ui.column("rows", {.Focusable}, ui.fill(), ui.children_sum())
+			rows := ui.virtual_rows(view, 100, 10, header)
+			for i in rows.first ..< rows.last {
+				ui.box_make(fmt.tprintf("##row%d", i), {.Clickable}, ui.fill(), ui.px(10))
+			}
+		}
+		animating = ui.end_frame()
+		return
+	}
+	Case :: struct {
+		header, start, want: f32,
+	}
+	for c in ([]Case{{150, 0, 0}, {150, 600, 600}, {300, 0, 300}}) {
+		u: ui.State
+		ui.init(&u)
+		defer ui_destroy(&u)
+		now := 0.0
+		frame(&u, &now, c.header, c.start)
+		_, table, _ := frame(&u, &now, c.header, c.start)
+		frame(&u, &now, c.header, nil, {kind = .Key_Down, key = .Tab})
+		testing.expect_value(t, u.focus, table.key)
+		view: ^ui.Box
+		for _ in 0 ..< 300 {
+			animating: bool
+			view, _, animating = frame(&u, &now, c.header, nil)
+			if !animating {
+				break
+			}
+		}
+		testing.expectf(t, view.view_off.y == c.want, "header %v, focus from %v scrolled to %v, want %v", c.header, c.start, view.view_off.y, c.want)
+	}
+}
+
 @(test)
 test_ui_left_right_in_a_row :: proc(t: ^testing.T) {
 	u: ui.State

@@ -1106,10 +1106,16 @@ reveal_focus :: proc(u: ^State) {
 			if axis == 1 {
 				view.y -= v.inset_end
 			}
-			if pos[axis] < t {
-				t = pos[axis]
-			} else if pos[axis] + size[axis] > t + view[axis] {
-				t = pos[axis] + size[axis] - view[axis]
+			// A box larger than the view, like a table of rows, keeps the
+			// reader's place while any of it shows, and otherwise brings in
+			// its nearer end.
+			lo, hi := pos[axis], pos[axis] + size[axis]
+			if size[axis] > view[axis] && lo < t + view[axis] && hi > t {
+				continue
+			} else if lo < t {
+				t = max(lo, hi - view[axis])
+			} else if hi > t + view[axis] {
+				t = min(lo, hi - view[axis])
 			}
 			t = clamp(t, 0, max(v.view_bounds[axis] - view[axis], 0))
 			if t != v.view_off_target[axis] {
