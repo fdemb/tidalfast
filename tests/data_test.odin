@@ -2,6 +2,7 @@ package tidal_tests
 
 import "base:runtime"
 import "core:fmt"
+import "core:mem/virtual"
 import "core:sync"
 import "core:testing"
 import "core:thread"
@@ -391,4 +392,20 @@ temp_tail_is_whole_pages_past_keep :: proc(t: ^testing.T) {
 	testing.expect(t, uintptr(start) + uintptr(size) <= base + (4 << 20))
 	_, size = app.temp_tail(base, 64 << 10, 64 << 10)
 	testing.expect_value(t, size, 0)
+}
+
+// Giving pages back has to work on this OS, and they must be usable once taken
+// back.
+@(test)
+pages_give_back_then_take_back :: proc(t: ^testing.T) {
+	SIZE :: 4 * (16 << 10)
+	block, err := virtual.reserve_and_commit(SIZE)
+	testing.expect_value(t, err, nil)
+	defer virtual.release(raw_data(block), SIZE)
+	block[0] = 1
+	testing.expect(t, app.pages_give_back(raw_data(block), SIZE), "pages given back")
+	app.pages_take_back(raw_data(block), SIZE)
+	block[0] = 2
+	block[SIZE - 1] = 3
+	testing.expect_value(t, block[0] + block[SIZE - 1], 5)
 }

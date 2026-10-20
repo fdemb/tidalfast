@@ -422,11 +422,6 @@ worker_main :: proc "c" (arg: rawptr) -> rawptr {
 @(private = "file")
 TEMP_KEEP :: 64 << 10
 
-@(private = "file")
-MADV_FREE_REUSABLE :: 7
-@(private = "file")
-MADV_FREE_REUSE :: 8
-
 // temp_tail is the whole pages of a block at base, capacity bytes long,
 // past its first keep bytes. Empty if there are none.
 temp_tail :: proc(base: uintptr, capacity, keep: uint) -> (start: rawptr, size: uint) {
@@ -451,15 +446,14 @@ temp_range :: proc() -> (start: rawptr, size: uint) {
 @(private = "file")
 temp_give_back :: proc(given: ^bool) {
 	if start, size := temp_range(); size > 0 && !given^ {
-		posix.posix_madvise(start, size, transmute(posix.MAdvice)i32(MADV_FREE_REUSABLE))
-		given^ = true
+		given^ = pages_give_back(start, size)
 	}
 }
 
 @(private = "file")
 temp_take_back :: proc(given: ^bool) {
 	if start, size := temp_range(); size > 0 && given^ {
-		posix.posix_madvise(start, size, transmute(posix.MAdvice)i32(MADV_FREE_REUSE))
+		pages_take_back(start, size)
 	}
 	given^ = false
 }
