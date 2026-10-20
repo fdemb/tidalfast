@@ -91,6 +91,9 @@ SWEEP_EVERY :: 256
 BASE_SIZE :: 16
 
 ELLIPSIS :: "…"
+// Points a run may exceed max_width by and still fit: a box sized to the
+// run, less its padding, can come out a rounding error narrower than it.
+FIT_SLACK :: 0.001
 
 // A shaped glyph. Runs store glyphs in visual order, left to right.
 Glyph :: struct {
@@ -975,7 +978,7 @@ visual_order :: proc(levels: []u8, order: []int) {
 // ellipsis_x. Spaces next to the ellipsis go too. width is the result's
 // width.
 truncate :: proc(glyphs: []Glyph, run_width, max_width, ellipsis_width: f32, rtl: bool) -> (first, last: int, shift, ellipsis_x, width: f32) {
-	if run_width <= max_width {
+	if run_width <= max_width + FIT_SLACK {
 		return 0, len(glyphs), 0, 0, run_width
 	}
 	avail := max_width - ellipsis_width

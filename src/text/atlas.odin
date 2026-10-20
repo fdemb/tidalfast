@@ -125,7 +125,7 @@ draw_run :: proc(t: ^State, r: ^render.Renderer, run: ^Run, pos: [2]f32, color: 
 	width := run.width
 	shift, ellipsis_x: f32
 	ellipsis: ^Run
-	if max_width > 0 && run.width > max_width {
+	if max_width > 0 && run.width > max_width + FIT_SLACK {
 		ellipsis = shape(t, run.font, run.size, ELLIPSIS)
 		first, last: int
 		first, last, shift, ellipsis_x, width = truncate(glyphs, run.width, max_width, ellipsis.width, run.rtl)
