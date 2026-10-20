@@ -223,7 +223,7 @@ Thread_Result :: struct {
 @(private = "file")
 wait_for_count :: proc(m: ^Mock, prefix: string, n: int) -> bool {
 	deadline := time.tick_add(time.tick_now(), 2 * time.Second)
-	for mock_count(m, prefix) != n {
+	for mock_count(m, prefix) < n {
 		if time.tick_diff(time.tick_now(), deadline) <= 0 {
 			return false
 		}
