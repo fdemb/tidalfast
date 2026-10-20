@@ -86,7 +86,9 @@ Disk_Op :: enum u8 {
 	Delete,
 	Read_Queue, // the play queue's file, see queue_save
 	Write_Queue, // Disk_Job.blob, from queue_encode
+	Write_Queue_Position, // Disk_Job.blob, a Queue_Position
 	Delete_Queue,
+	Forget, // what a sign-out leaves, see disk_forget
 }
 
 Lists :: struct {
@@ -623,6 +625,7 @@ view_edit :: proc(v: ^Track_View, add: bool, row: Row) -> bool {
 		slice.fill(v.loaded[:n + 1], true)
 		v.count = n + 1
 		v.loaded_rows = n + 1
+		v.moved += 1
 		v.hint += 1
 		v.longest = max(v.longest, row.seconds)
 		return true
@@ -641,6 +644,7 @@ view_edit :: proc(v: ^Track_View, add: bool, row: Row) -> bool {
 	v.loaded[n - 1] = false
 	v.count = n - 1
 	v.loaded_rows -= 1
+	v.moved += 1
 	v.hint = max(v.hint - 1, 0)
 	return true
 }
@@ -737,24 +741,45 @@ lists_signed_in :: proc(d: ^Data, user: i64) {
 	disk_push(d, {op = .Read_Queue})
 }
 
-// lists_forget drops what's kept for the account that signed out: in memory
-// and its folder on disk.
-lists_forget :: proc(d: ^Data) {
+// lists_forget drops what's kept in memory for the account that signed
+// out, and queues disk_forget for its folder and Keychain item. epoch is
+// the session's auth epoch after the sign-out. A Forget still queued for an
+// earlier sign-out stays.
+lists_forget :: proc(d: ^Data, epoch: u64) {
 	lists_clear(d)
 	refresh_drop(d)
 	jobs.remove_if(&d.lists.queue, drop_disk_job, nil)
-	dir := disk_dir(d.lists.root, d.lists.user, context.temp_allocator) if disk_on(d) else ""
-	// The delete and the user going are one step under the mutex, so a
-	// cover write waiting on it sees the user gone.
-	sync.guard(&d.lists.mutex)
-	if dir != "" {
-		os.remove_all(dir)
-	}
+	user := sync.atomic_load(&d.lists.user)
+	// A cover write that sees the user gone writes nothing, and one that
+	// didn't finishes before disk_forget deletes the folder.
 	sync.atomic_store(&d.lists.user, 0)
+	forget := Disk_Job{op = .Forget, user = user, epoch = epoch}
+	if !jobs.push(&d.lists.queue, Job{auth = d.auth_gen, payload = forget}) {
+		// With the queue full or stopped, waiting here on the Keychain
+		// beats a login that comes back at the next start.
+		disk_forget(d, forget)
+	}
+}
+
+// disk_forget deletes what a sign-out left: the user's folder, and the
+// Keychain item unless a login since has saved over it. The folder goes
+// first, since the Keychain can block on the user.
+disk_forget :: proc(d: ^Data, job: Disk_Job) {
+	if d.lists.root != "" && job.user != 0 {
+		sync.guard(&d.lists.mutex)
+		os.remove_all(disk_dir(d.lists.root, job.user, context.temp_allocator))
+	}
+	sync.guard(&d.keychain_mutex)
+	if d.keychain_saved < job.epoch {
+		keychain_delete(&d.keychain)
+	}
 }
 
 @(private = "file")
 drop_disk_job :: proc(job: ^Job, _: rawptr) -> bool {
+	if disk, ok := job.payload.(Disk_Job); ok && disk.op == .Forget {
+		return false
+	}
 	job_free(job)
 	return true
 }
@@ -793,9 +818,17 @@ disk_stop :: proc(d: ^Data) {
 }
 
 // lists_shutdown frees everything the cache holds. The disk thread has
-// stopped.
+// stopped. A sign-out's Forget still queued is done now, so the login isn't
+// restored at the next start.
 lists_shutdown :: proc(d: ^Data) {
 	jobs.remove_if(&d.lists.queue, drop_disk_job, nil)
+	for {
+		job, ok := jobs.try_pop(&d.lists.queue)
+		if !ok {
+			break
+		}
+		disk_forget(d, job.payload.(Disk_Job))
+	}
 	lists_clear(d)
 	refresh_drop(d)
 	delete(d.lists.root, runtime.heap_allocator())
@@ -878,11 +911,16 @@ disk_run :: proc(d: ^Data, queued: Job) -> (res: Result, reply: bool) {
 	case .Read:
 		disk_read(&res, path, job.source, small_str(&id))
 		return res, true
+	case .Forget:
+		disk_forget(d, job)
+		return
 	case .Read_Queue, .Write_Queue, .Delete_Queue:
 		path = queue_path(dir, context.temp_allocator)
+	case .Write_Queue_Position:
+		path = queue_position_path(dir, context.temp_allocator)
 	}
 	if job.op == .Read_Queue {
-		queue_read(&res, path)
+		queue_read(&res, path, queue_position_path(dir, context.temp_allocator))
 		return res, true
 	}
 	#partial switch job.op {
@@ -896,8 +934,8 @@ disk_run :: proc(d: ^Data, queued: Job) -> (res: Result, reply: bool) {
 		return // that account is gone
 	}
 	switch job.op {
-	case .Read, .Read_Queue:
-	case .Write_Queue:
+	case .Read, .Read_Queue, .Forget:
+	case .Write_Queue, .Write_Queue_Position:
 		disk_write(dir, path, job.blob)
 	case .Write:
 		if disk_write(dir, path, job.blob) {
@@ -906,10 +944,27 @@ disk_run :: proc(d: ^Data, queued: Job) -> (res: Result, reply: bool) {
 	case .Touch:
 		now := time.now()
 		os.change_times(path, now, now)
-	case .Delete, .Delete_Queue:
+	case .Delete:
 		os.remove(path)
+	case .Delete_Queue:
+		os.remove(path)
+		os.remove(queue_position_path(dir, context.temp_allocator))
 	}
 	return
+}
+
+// disk_drop_queued drops the disk jobs still queued for ops, which a newer
+// job makes pointless.
+disk_drop_queued :: proc(d: ^Data, ops: bit_set[Disk_Op]) {
+	ops := ops
+	jobs.remove_if(&d.lists.queue, proc(job: ^Job, data: rawptr) -> bool {
+		disk, is_disk := job.payload.(Disk_Job)
+		if !is_disk || disk.op not_in (^bit_set[Disk_Op])(data)^ {
+			return false
+		}
+		job_free(job)
+		return true
+	}, &ops)
 }
 
 // queue_path is the play queue's file. It isn't a .tfl, so disk_evict
@@ -918,10 +973,15 @@ queue_path :: proc(dir: string, allocator: runtime.Allocator) -> string {
 	return fmt.aprintf("%s/queue.tfq", dir, allocator = allocator)
 }
 
-// queue_read reads the play queue's file into res, in an arena of its own.
-// A file that's damaged or of another format is deleted.
+queue_position_path :: proc(dir: string, allocator: runtime.Allocator) -> string {
+	return fmt.aprintf("%s/queue-position.tfq", dir, allocator = allocator)
+}
+
+// queue_read reads the play queue's file into res, in an arena of its own,
+// at the place in its position file if that goes with it and is sound. A
+// queue file that's damaged or of another format is deleted.
 @(private = "file")
-queue_read :: proc(res: ^Result, path: string) {
+queue_read :: proc(res: ^Result, path, position_path: string) {
 	res.arena = arena_new()
 	if res.arena == nil {
 		return
@@ -937,6 +997,13 @@ queue_read :: proc(res: ^Result, path: string) {
 		log.warnf("lists: dropping the play queue's file (%v)", err)
 		os.remove(path)
 		return
+	}
+	if place, read := file_read(position_path, context.temp_allocator); read && len(place) == size_of(Queue_Position) {
+		p := (^Queue_Position)(raw_data(place))
+		h := &out.header
+		if p.magic == QUEUE_POSITION_MAGIC && p.key != 0 && p.key == h.key && queue_place_ok(p.sample, p.rate) && p.index >= 0 && int(p.index) < len(out.rows) {
+			h.index, h.sample, h.rate = p.index, p.sample if p.rate != 0 else 0, p.rate
+		}
 	}
 	res.payload = out
 }

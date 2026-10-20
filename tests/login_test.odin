@@ -657,6 +657,7 @@ auth_failures_sign_out_once :: proc(t: ^testing.T) {
 	second := fail_job(d, .Authentication)
 
 	app.handle_result(s, &first, 0)
+	run_disk(s)
 	_, saved = keychain_auth(d)
 	testing.expect(t, !saved, "the keychain item went")
 	testing.expect_value(t, tidal.session_auth(d.session, context.temp_allocator).access_token, "")
@@ -2446,4 +2447,93 @@ like_answered_while_a_fetch_is_out :: proc(t: ^testing.T) {
 	app.add_result(s, &took, job.payload.(app.Add_Track_Job))
 	app.liked_ids_result(d, &without, false)
 	testing.expect(t, app.liked_has(d, 7))
+}
+
+// A session that ends while a worker holds the Keychain, saving or waiting
+// on the user, doesn't hold up the UI thread. The item goes after.
+@(test)
+sign_out_doesnt_wait_for_the_keychain :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := mock_data_state(&m)
+	defer data_state_free(s)
+	d := &s.data
+	sign_in(s)
+	data_jobs(d)
+
+	done: bool
+	sync.lock(&d.keychain_mutex)
+	th := thread.create_and_start_with_poly_data2(s, &done, proc(s: ^app.State, done: ^bool) {
+		app.sign_out(s, "Your TIDAL session ended. Log in again.")
+		sync.atomic_store(done, true)
+	})
+	start := time.tick_now()
+	for !sync.atomic_load(&done) && time.tick_since(start) < 2 * time.Second {
+		time.sleep(time.Millisecond)
+	}
+	returned := sync.atomic_load(&done)
+	sync.unlock(&d.keychain_mutex)
+	thread.join(th)
+	thread.destroy(th)
+	testing.expect(t, returned, "sign_out returned while the Keychain was held")
+	testing.expect(t, app.show_login(s))
+
+	run_disk(s)
+	_, saved := keychain_auth(d)
+	testing.expect(t, !saved, "the keychain item went")
+}
+
+// A login saved after a sign-out, before its cleanup ran, stays.
+@(test)
+login_after_sign_out_keeps_its_item :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := mock_data_state(&m)
+	defer data_state_free(s)
+	d := &s.data
+	sign_in(s)
+	data_jobs(d)
+
+	app.sign_out(s, "Your TIDAL session ended. Log in again.")
+	tidal.session_restore(d.session, {token_type = "Bearer", access_token = "new", refresh_token = "new-r", user_id = 123, user_kind = .Logged_In_User})
+	app.auth_changed(d.session, d)
+	run_disk(s)
+	a, saved := keychain_auth(d)
+	testing.expect(t, saved, "the new login is still in the Keychain")
+	testing.expect_value(t, a.access_token, "new")
+}
+
+// A sign-out after a hot reload deletes the Keychain item that a login
+// saved before the reload.
+@(test)
+sign_out_after_reload_forgets_the_login :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := mock_data_state(&m)
+	defer data_state_free(s)
+	d := &s.data
+	sign_in(s)
+	data_jobs(d)
+
+	app.sign_out(s, "Your TIDAL session ended. Log in again.")
+	tidal.session_restore(d.session, {token_type = "Bearer", access_token = "new", refresh_token = "new-r", user_id = 123, user_kind = .Logged_In_User})
+	app.auth_changed(d.session, d)
+	run_disk(s)
+	_, saved := keychain_auth(d)
+	testing.expect(t, saved, "the new login is in the Keychain")
+
+	shell := platform.Shell {
+		request_redraw = proc "c" () {},
+	}
+	app.data_unload(s)
+	app.data_reload(s, &shell)
+
+	app.sign_out(s, "Your TIDAL session ended. Log in again.")
+	app.workers_stop(d)
+	run_disk(s)
+	_, saved = keychain_auth(d)
+	testing.expect(t, !saved, "the keychain item went")
 }

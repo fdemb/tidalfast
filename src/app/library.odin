@@ -277,36 +277,48 @@ draw_sidebar :: proc(s: ^State) {
 	list := ui.scroll_view("playlists", ui.fill(), ui.fill(), inset_end = bar_inset(s))
 	list.pad.x = SIDEBAR_PAD
 	ui.accessible(list, .List, "Playlists")
-	for i in 0 ..< sidebar_count(s) {
-		entry := sidebar_entry(s, i)
-		item := ui.row(fmt.tprintf("##playlist%d", i), {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects, .Draw_Border}, ui.fill(), ui.px(PLAYLIST_ROW_H))
-		item.radius = 6
-		current := lib.playlist == i && !s.search.browsing
-		row_highlight(item, SIDEBAR_ROWS, current)
-		ui.accessible(item, .Row, fmt.tprintf("%s, %s", entry.name, entry.subtitle), selected = current)
-		if ui.drop_hover(item) {
-			lib.drop_target = i
-			item.border_color = ACCENT
+	{
+		rows := ui.virtual_rows(list, sidebar_count(s), PLAYLIST_ROW_H)
+		for i in rows.first ..< rows.last {
+			entry := sidebar_entry(s, i)
+			item := ui.row(fmt.tprintf("##playlist%d", i), {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects, .Draw_Border}, ui.fill(), ui.px(PLAYLIST_ROW_H))
+			item.radius = 6
+			current := lib.playlist == i && !s.search.browsing
+			row_highlight(item, SIDEBAR_ROWS, current)
+			ui.accessible(item, .Row, fmt.tprintf("%s, %s", entry.name, entry.subtitle), selected = current)
+			if ui.drop_hover(item) {
+				lib.drop_target = i
+				item.border_color = ACCENT
+			}
+			if track, ok := ui.dropped(item); ok {
+				add_to_list(s, int(track), i)
+			}
+			sig := ui.signal(item)
+			if sig.clicked {
+				pending_set(s, Playlist_Place{index = i})
+			}
+			ui.spacer(ui.px(ROW_PAD))
+			cover_art(s, .Playlist, entry.image, entry.seed, 40, ui.px(40))
+			ui.spacer(ui.px(12))
+			ui.column("", {}, ui.fill(), ui.fill())
+			ui.spacer(ui.px(10))
+			ui.text_style(.Medium, 14, TEXT)
+			ui.label(entry.name, ui.fill(), ui.px(19))
+			ui.text_style(.Regular, 12, SECONDARY)
+			ui.label(entry.subtitle, ui.fill(), ui.px(17))
 		}
-		if track, ok := ui.dropped(item); ok {
-			add_to_list(s, int(track), i)
-		}
-		sig := ui.signal(item)
-		if sig.clicked {
-			pending_set(s, Playlist_Place{index = i})
-		}
-		ui.spacer(ui.px(ROW_PAD))
-		cover_art(s, .Playlist, entry.image, entry.seed, 40, ui.px(40))
-		ui.spacer(ui.px(12))
-		ui.column("", {}, ui.fill(), ui.fill())
-		ui.spacer(ui.px(10))
-		ui.text_style(.Medium, 14, TEXT)
-		ui.label(entry.name, ui.fill(), ui.px(19))
-		ui.text_style(.Regular, 12, SECONDARY)
-		ui.label(entry.subtitle, ui.fill(), ui.px(17))
+		sidebar_prefetch(s, rows.first - COVER_PREFETCH_ROWS, rows.first)
+		sidebar_prefetch(s, rows.last, rows.last + COVER_PREFETCH_ROWS)
 	}
 	// Only below: the search field's margin is already above.
 	ui.spacer(ui.px(LIST_PAD_Y))
+}
+
+@(private = "file")
+sidebar_prefetch :: proc(s: ^State, first, last: int) {
+	for i in max(first, 0) ..< min(last, sidebar_count(s)) {
+		cover_want(s, .Playlist, sidebar_entry(s, i).image, 40, PRIORITY_COVER_NEAR)
+	}
 }
 
 draw_sidebar_handle :: proc(s: ^State, window_w: f32) {

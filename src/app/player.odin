@@ -30,6 +30,8 @@ import "base:runtime"
 import "core:fmt"
 import "core:log"
 import "core:math"
+import "core:math/rand"
+import "core:mem"
 import vmem "core:mem/virtual"
 import "core:os"
 import "core:slice"
@@ -88,7 +90,9 @@ Playback :: struct {
 	items:           []Queue_Item,
 	entries:         []audio.Queue_Entry,
 	order:           []int, // the items in play order, see queue_reorder
+	capacity:        int, // items, entries and order have room for this many
 	loaded:          int, // rows loaded when the snapshot was taken
+	moved:           u32, // the list's moved then
 	list_key:        u64, // list_key of the list the queue came from
 	queue_gen:       u32, // goes up each time a new list replaces the queue
 	fake:            bool,
@@ -117,7 +121,9 @@ Playback :: struct {
 	art:             Artwork, // the current track's, for Now Playing
 	next_art:        Artwork, // the next track's, fetched with its stream
 	np_key:          u64, // what was last sent to Now Playing
-	save_key:        u64, // what the queue's file was last written for
+	save_key:        u64, // what the queue's rows were last written for
+	place_key:       u64, // and where in it, see Queue_Position
+	file_key:        u64, // the key of the queue's last file
 
 	// The row of the open list found holding the current track, for when
 	// the queue's index doesn't (see playing_row), and what it was found in.
@@ -270,6 +276,7 @@ queue_snapshot :: proc(s: ^State, v: ^Track_View) {
 	pb.fake = s.data.fake
 	s.data.queue_view = v.gen
 	pb.loaded = v.loaded_rows
+	pb.moved = v.moved
 	for i in 0 ..< n {
 		row := view_row(s, i) if s.data.fake else list_row(v, i)
 		if row == nil {
@@ -281,6 +288,52 @@ queue_snapshot :: proc(s: ^State, v: ^Track_View) {
 			pb.entries[i].id = -i64(i + 1)
 		}
 	}
+}
+
+// queue_follow brings the queue up to date with v, the list it was
+// snapshot from, as its pages arrive: the rows that came since are copied
+// in. Rows that moved take a new snapshot.
+@(private = "file")
+queue_follow :: proc(s: ^State, v: ^Track_View) {
+	pb := &s.playback
+	if v.moved != pb.moved || !pb.has_arena {
+		queue_snapshot(s, v)
+		return
+	}
+	a := vmem.arena_allocator(&pb.arena)
+	if n, old := v.count, len(pb.items); n != old {
+		if n > pb.capacity {
+			pb.capacity = max(n, 2 * pb.capacity)
+			items := make([]Queue_Item, pb.capacity, a)
+			entries := make([]audio.Queue_Entry, pb.capacity, a)
+			copy(items, pb.items)
+			copy(entries, pb.entries)
+			pb.items, pb.entries = items, entries
+			pb.order = make([]int, pb.capacity, a)
+		}
+		pb.items = queue_len(pb.items, n)
+		pb.entries = queue_len(pb.entries, n)
+		pb.order = queue_len(pb.order, n)
+		if n > old {
+			slice.zero(pb.items[old:])
+			slice.zero(pb.entries[old:])
+		}
+	}
+	pb.loaded = v.loaded_rows
+	for &e, i in pb.entries {
+		if e.id != 0 {
+			continue
+		}
+		if row := list_row(v, i); row != nil {
+			queue_fill(pb, i, row, a)
+		}
+	}
+}
+
+// queue_len is s at length n, which can be up to the queue's capacity.
+@(private = "file")
+queue_len :: proc(s: []$T, n: int) -> []T {
+	return ([^]T)(raw_data(s))[:n]
 }
 
 // queue_reset makes a new, empty queue of n items, and returns its
@@ -295,6 +348,7 @@ queue_reset :: proc(pb: ^Playback, n: int) -> runtime.Allocator {
 	pb.items = make([]Queue_Item, n, a)
 	pb.entries = make([]audio.Queue_Entry, n, a)
 	pb.order = make([]int, n, a)
+	pb.capacity = n
 	audio.queue_order(pb.order, nil, false)
 	return a
 }
@@ -831,10 +885,10 @@ playback_update :: proc(s: ^State, events: []platform.Event) {
 	// not the list is still open. A page that came back short moves the
 	// rows after it up, and the queue's tracks with them.
 	d := &s.data
-	if v := queue_list(d); !pb.fake && pb.index >= 0 && v != nil && pb.loaded != v.loaded_rows {
+	if v := queue_list(d); !pb.fake && pb.index >= 0 && v != nil && (pb.loaded != v.loaded_rows || pb.moved != v.moved) {
 		index := pb.index
 		played := order_played(s)
-		queue_snapshot(s, v)
+		queue_follow(s, v)
 		pb.index = queue_find(pb, pb.cur.track, index)
 		pb.cur.item = pb.index
 		if pb.next.serial != 0 {
@@ -1019,37 +1073,54 @@ update_now_playing :: proc(s: ^State) {
 	pb.set_now_playing(&np)
 }
 
-// queue_save writes the queue's file when what it holds changes: the
-// queue, its current track, pause, a finished seek or the end. The running
-// position isn't one of those; playback_shutdown writes the last one. A
-// queue that stopped is deleted, so it doesn't come back.
+// queue_save writes the queue's file when its rows change, and its
+// position file when only its place does: its current track, pause, a
+// finished seek or the end. The running position isn't one of those;
+// playback_shutdown writes the last one. A write still queued is dropped
+// for the newer one. A queue that stopped is deleted, so it doesn't come
+// back.
 @(private = "file")
 queue_save :: proc(s: ^State) {
 	pb := &s.playback
 	if pb.fake {
 		return
 	}
-	key: u64
-	if pb.index >= 0 {
-		key = 14695981039346656037
-		ended := pb.status.state == .Ended && pb.status.serial == pb.cur.serial
-		count, loaded := u64(len(pb.entries)), u64(pb.loaded)
-		if v := queue_list(&s.data); v != nil && v.error.len == 0 && !view_complete(v) {
-			count, loaded = 0, floor_pow2(loaded)
+	d := &s.data
+	if pb.index < 0 {
+		if pb.save_key != 0 {
+			pb.save_key, pb.place_key = 0, 0
+			disk_drop_queued(d, {.Write_Queue, .Write_Queue_Position})
+			disk_push(d, {op = .Delete_Queue})
 		}
-		for v in ([]u64{u64(pb.queue_gen), count, loaded, u64(pb.index), u64(pb.cur.track), u64(pb.paused), u64(pb.status.seek_id), u64(ended)}) {
-			key = (key ~ v) * 1099511628211
-		}
-	}
-	if key == pb.save_key {
 		return
 	}
-	pb.save_key = key
-	if key == 0 {
-		disk_push(&s.data, {op = .Delete_Queue})
-		return
+	ended := pb.status.state == .Ended && pb.status.serial == pb.cur.serial
+	count, loaded := u64(len(pb.entries)), u64(pb.loaded)
+	if v := queue_list(d); v != nil && v.error.len == 0 && !view_complete(v) {
+		count, loaded = 0, floor_pow2(loaded)
 	}
-	disk_push(&s.data, {op = .Write_Queue, blob = queue_file(pb, runtime.heap_allocator())})
+	rows := fnv_u64({u64(pb.queue_gen), count, loaded})
+	place := fnv_u64({u64(pb.index), u64(pb.cur.track), u64(pb.paused), u64(pb.status.seek_id), u64(ended)})
+	if rows != pb.save_key {
+		pb.save_key, pb.place_key = rows, place
+		disk_drop_queued(d, {.Write_Queue, .Write_Queue_Position})
+		disk_push(d, {op = .Write_Queue, blob = queue_file(pb, runtime.heap_allocator())})
+	} else if place != pb.place_key {
+		pb.place_key = place
+		disk_drop_queued(d, {.Write_Queue_Position})
+		h := queue_head(pb)
+		p := Queue_Position{magic = QUEUE_POSITION_MAGIC, key = h.key, index = h.index, sample = h.sample, rate = h.rate}
+		disk_push(d, {op = .Write_Queue_Position, blob = slice.clone(mem.ptr_to_bytes(&p), runtime.heap_allocator())})
+	}
+}
+
+@(private = "file")
+fnv_u64 :: proc(values: []u64) -> u64 {
+	key: u64 = 14695981039346656037
+	for v in values {
+		key = (key ~ v) * 1099511628211
+	}
+	return key
 }
 
 @(private = "file")
@@ -1057,28 +1128,12 @@ floor_pow2 :: proc(n: u64) -> u64 {
 	return 0 if n == 0 else 1 << (63 - intrinsics.count_leading_zeros(n))
 }
 
-// queue_file is the queue as its file, at the current position.
+// queue_file is the queue as its file, at the current position, with a new
+// key so no older position file goes with it.
 @(private = "file")
 queue_file :: proc(pb: ^Playback, allocator: runtime.Allocator) -> []u8 {
-	st := &pb.status
-	head := Queue_Header {
-		index    = i64(pb.index),
-		sample   = pb.cur.at,
-		rate     = i64(pb.cur.rate),
-		list_key = pb.list_key,
-	}
-	if st.serial != 0 && st.serial == pb.cur.serial {
-		head.sample = st.sample
-		if st.rate > 0 {
-			head.rate = i64(st.rate)
-		}
-		if st.state == .Ended {
-			head.sample = 0
-		}
-	}
-	if pb.seek_id != 0 && pb.seek_serial == pb.cur.serial {
-		head.sample = pb.seek_sample
-	}
+	pb.file_key = rand.uint64() | 1
+	head := queue_head(pb)
 	rows := make([]Row, len(pb.items), context.temp_allocator)
 	for &it, i in pb.items {
 		e := pb.entries[i]
@@ -1095,6 +1150,32 @@ queue_file :: proc(pb: ^Playback, allocator: runtime.Allocator) -> []u8 {
 		}
 	}
 	return queue_encode(head, rows, allocator)
+}
+
+// queue_head is the queue's file header, at the current position.
+@(private = "file")
+queue_head :: proc(pb: ^Playback) -> Queue_Header {
+	st := &pb.status
+	head := Queue_Header {
+		index    = i64(pb.index),
+		sample   = pb.cur.at,
+		rate     = i64(pb.cur.rate),
+		list_key = pb.list_key,
+		key      = pb.file_key,
+	}
+	if st.serial != 0 && st.serial == pb.cur.serial {
+		head.sample = st.sample
+		if st.rate > 0 {
+			head.rate = i64(st.rate)
+		}
+		if st.state == .Ended {
+			head.sample = 0
+		}
+	}
+	if pb.seek_id != 0 && pb.seek_serial == pb.cur.serial {
+		head.sample = pb.seek_sample
+	}
+	return head
 }
 
 // playback_restore takes the queue's file read at sign-in: the queue comes

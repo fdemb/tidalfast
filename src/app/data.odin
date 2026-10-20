@@ -133,6 +133,7 @@ Track_View :: struct {
 	rows:        []Row, // in space
 	loaded:      []bool, // in space
 	loaded_rows: int,
+	moved:       u32, // goes up when loaded rows move to other indices
 	count:       int, // rows shown, loaded or not
 	next_offset: int, // in TIDAL's offsets, which count the gaps
 	in_flight:   int,
@@ -169,16 +170,19 @@ Data :: struct {
 	held_count:     int,
 	refresh_errors: int, // token refreshes in a row that failed without ending the login (atomic)
 	keychain_mutex: sync.Mutex, // orders a sign-out's delete against the workers' saves
+	keychain_saved: u64, // the auth epoch of the login last saved, under keychain_mutex
 	session:        ^tidal.Session, // made by this dylib, so closed on unload
 	wake:           proc "c" (), // the shell's request_redraw
 	queue:          jobs.Queue(Job, JOB_QUEUE),
 	results:        jobs.Queue(Result, RESULT_QUEUE),
 	threads:        [WORKERS]posix.pthread_t,
 	running:        bool,
-	// From unload to reload: the login state (heap) and the backoff.
+	// From unload to reload: the login state (heap), the backoff and the
+	// auth epoch, which keychain_saved and queued Forgets are compared with.
 	saved_auth:     []u8,
 	saved_backoff:  time.Tick,
 	saved_reason:   Small,
+	saved_epoch:    u64,
 	login:          Login,
 	// The hi-res login's PKCE verifier and client key. A new session on
 	// reload takes them, so a login page opened before it still works.
@@ -279,6 +283,7 @@ data_unload :: proc(s: ^State) {
 		until, reason := tidal.backoff_state(d.session, context.temp_allocator)
 		d.saved_backoff = until
 		d.saved_reason = small(reason)
+		d.saved_epoch = tidal.session_epoch(d.session)
 		tidal.session_destroy(d.session)
 		d.session = nil
 	}
@@ -291,6 +296,7 @@ data_reload :: proc(s: ^State, shell: ^platform.Shell) {
 		return
 	}
 	session_open(d)
+	tidal.session_set_epoch(d.session, d.saved_epoch)
 	if d.saved_auth != nil {
 		// partial: a login approved before the unload may not have loaded
 		// its session yet. Its Login_Wait finishes it with these tokens.
@@ -649,6 +655,8 @@ auth_changed :: proc(s: ^tidal.Session, data: rawptr) {
 	bytes := auth_marshal(a, context.temp_allocator)
 	if status := keychain_set(&d.keychain, bytes); status != os_services.SECRET_OK {
 		log.errorf("app: couldn't save the login to the Keychain (error %d)", status)
+	} else {
+		d.keychain_saved = a.epoch
 	}
 }
 
@@ -761,15 +769,12 @@ drop_account_job :: proc(job: ^Job, _: rawptr) -> bool {
 // before it are dropped when they arrive, so however many requests fail,
 // the login ends once and one new login starts. Queued jobs for the old
 // login go, the ones in flight are cancelled (session_clear_auth), and the
-// Keychain item is deleted. Playback stops and its queue goes.
+// disk thread deletes the Keychain item (lists_forget). Playback stops and
+// its queue goes.
 sign_out :: proc(s: ^State, why: string) {
 	d := &s.data
 	account_end(s)
-	{
-		sync.guard(&d.keychain_mutex)
-		keychain_delete(&d.keychain)
-	}
-	lists_forget(d)
+	lists_forget(d, tidal.session_epoch(d.session))
 	d.login = {
 		note = small(why),
 	}
@@ -1484,6 +1489,7 @@ view_close_gap :: proc(v: ^Track_View, offset, row, limit, got: int) {
 		copy(v.loaded[to:], v.loaded[from:used])
 	}
 	v.count = max(v.count - missing, to)
+	v.moved += 1
 	for i in v.count ..< used {
 		v.loaded[i] = false
 	}

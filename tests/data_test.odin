@@ -3,6 +3,7 @@ package tidal_tests
 import "base:runtime"
 import "core:fmt"
 import "core:hash"
+import "core:mem/virtual"
 import "core:slice"
 import "core:sync"
 import "core:testing"
@@ -562,4 +563,20 @@ queue_stop_wakes_waiters :: proc(t: ^testing.T) {
 	sh.work = proc(sh: ^Wait_Shared) {sh.stopped = jobs.sleep(&sh.q, 5 * time.Second)}
 	blocks_until(t, sh, stop)
 	testing.expect(t, sh.stopped)
+}
+
+// Giving pages back has to work on this OS, and they must be usable once taken
+// back.
+@(test)
+pages_give_back_then_take_back :: proc(t: ^testing.T) {
+	SIZE :: 4 * (16 << 10)
+	block, err := virtual.reserve_and_commit(SIZE)
+	testing.expect_value(t, err, nil)
+	defer virtual.release(raw_data(block), SIZE)
+	block[0] = 1
+	testing.expect(t, app.pages_give_back(raw_data(block), SIZE), "pages given back")
+	app.pages_take_back(raw_data(block), SIZE)
+	block[0] = 2
+	block[SIZE - 1] = 3
+	testing.expect_value(t, block[0] + block[SIZE - 1], 5)
 }
