@@ -955,10 +955,11 @@ static void clear_paste(void) {
   g_paste_done = false;
 }
 
+// While our own copy is the selection, get_clipboard reads it directly.
 static void receive_selection(void) {
   clear_paste();
   int fds[2];
-  if (!g_offer || !g_offer_text || pipe2(fds, O_CLOEXEC) != 0) return;
+  if (g_clip_source || !g_offer || !g_offer_text || pipe2(fds, O_CLOEXEC) != 0) return;
   // The write end goes to the source client, which may expect it to block.
   wl_data_offer_receive(g_offer, "text/plain;charset=utf-8", fds[1]);
   close(fds[1]);
