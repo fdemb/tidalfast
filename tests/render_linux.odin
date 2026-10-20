@@ -28,7 +28,7 @@ renderer_without_a_device_draws_nothing :: proc(t: ^testing.T) {
 }
 
 // A failed submit releases the GPU objects partway through a frame, as when
-// a glyph upload runs out of staging room. The rest of the frame keeps its
+// flush_slot's submit fails during a glyph upload. The rest of the frame keeps its
 // clips and draws nothing.
 @(test)
 renderer_released_mid_frame_draws_nothing :: proc(t: ^testing.T) {

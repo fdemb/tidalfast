@@ -289,8 +289,9 @@ destroy :: proc(r: ^Renderer) {
 }
 
 // release frees the GPU objects, so g.device is nil and the renderer draws
-// nothing, but keeps the frame being built, which a failed submit can stop
-// halfway through, and the capture path the shell set.
+// nothing. It keeps the frame's counts, batches and clips, which a failed
+// submit can leave halfway, and the capture path the shell set. Each slot's
+// generation moves on, as in texture_destroy, so no old handle matches.
 release :: proc(r: ^Renderer) {
 	g := &r.gpu
 	if g.device != nil {
@@ -330,7 +331,7 @@ release :: proc(r: ^Renderer) {
 	}
 	r.gpu = {}
 	for &slot in r.textures {
-		slot = {generation = slot.generation}
+		slot = {generation = slot.generation + 1}
 	}
 	r.instances = nil
 	r.capacity = {}
@@ -950,6 +951,7 @@ gpu_texture_write :: proc(r: ^Renderer, slot: ^Texture_Slot, pixels: []byte, x, 
 	}
 	buffer, offset, ok := stage(r, pixels[:w * h * bpp])
 	if !ok {
+		// A failed flush in stage released the renderer and logged it.
 		if r.gpu.device != nil {
 			log.error("render: out of staging memory")
 		}
