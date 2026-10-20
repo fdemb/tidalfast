@@ -1012,6 +1012,44 @@ follow_button_follows_the_artist :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(m.followed), 0)
 }
 
+// The Follow button fits its label, narrower than Following, and Share next
+// to it stays put when it toggles.
+@(test)
+follow_button_fits_its_label :: proc(t: ^testing.T) {
+	fonts: Fonts
+	if !testing.expect(t, fonts_init(&fonts)) {
+		return
+	}
+	defer fonts_destroy(&fonts)
+	context.allocator = mem.arena_allocator(&fonts.arena)
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	sidebar_mock(&m)
+	s := library_state(false, &m)
+	defer library_state_free(s)
+	f := Frame{fonts = &fonts, size = {1100, 2400}}
+	run_jobs(s, app.Playlists_Job, app.Liked_Ids_Job)
+	mock_page(t, s, &f, 7)
+
+	follow, ok := exact(s, "Follow", .Button)
+	share, share_ok := exact(s, "Share", .Button)
+	if !testing.expect(t, ok && share_ok, "Follow and Share") {
+		return
+	}
+	library_frame(t, s, &f, press_exact(t, s, "Follow"))
+	library_frame(t, s, &f)
+	following, following_ok := exact(s, "Following", .Button)
+	shared, shared_ok := exact(s, "Share", .Button)
+	if !testing.expect(t, following_ok && shared_ok, "Following and Share") {
+		return
+	}
+	testing.expectf(t, follow.frame.x == following.frame.x, "Follow at %v, Following at %v", follow.frame.x, following.frame.x)
+	testing.expectf(t, follow.frame.z < following.frame.z, "Follow is %v wide, Following %v", follow.frame.z, following.frame.z)
+	testing.expectf(t, share.frame.x == shared.frame.x, "Share at %v, then %v", share.frame.x, shared.frame.x)
+	testing.expectf(t, following.frame.x + following.frame.z < shared.frame.x, "Following ends at %v, Share starts at %v", following.frame.x + following.frame.z, shared.frame.x)
+}
+
 // Follow, unfollow, follow pressed before TIDAL answers send one change,
 // and unfollow, follow after it send the second only once the first is
 // answered. The button ends Following, and so does TIDAL.
