@@ -93,9 +93,9 @@ home_want :: proc(d: ^Data) {
 	push_job(d, {payload = Home_Job{}})
 }
 
-// home_retry asks again after a failure.
+// home_retry asks again after a failure or a feed with nothing to show.
 home_retry :: proc(d: ^Data) {
-	if d.home.status == .Failed {
+	if d.home.status != .Loading {
 		d.home.status = .Idle
 		home_want(d)
 	}
@@ -175,7 +175,7 @@ draw_home_entry :: proc(s: ^State) {
 
 // draw_home draws the page main_w wide: the greeting, the shortcuts, then
 // the shelves, grey ones while they're on their way, or why they didn't
-// come with a Retry.
+// come with a Retry, or that the feed had none with a Refresh.
 draw_home :: proc(s: ^State, main_w: f32) {
 	h := &s.data.home
 	home_want(&s.data)
@@ -201,13 +201,20 @@ draw_home :: proc(s: ^State, main_w: f32) {
 				open_card(s, shelf.source, shelf.items[sig.clicked])
 			}
 		}
-	case h.status == .Failed:
+	case h.status == .Failed || h.status == .Ready:
 		ui.parent(section_title("For you"))
 		ui.text_style(.Regular, 13, DIM)
 		message := small_str(&h.error)
-		ui.label(fmt.tprintf("Couldn't load: %s", message) if message != "" else "Couldn't load", ui.text_size(), ui.fill())
+		button, name := "Retry###home_retry", "Retry loading Home"
+		if h.status == .Ready {
+			message = "Nothing to show yet"
+			button, name = "Refresh###home_retry", "Refresh Home"
+		} else {
+			message = fmt.tprintf("Couldn't load: %s", message) if message != "" else "Couldn't load"
+		}
+		ui.accessible(ui.label(message, ui.text_size(), ui.fill()), .Static_Text, message)
 		ui.spacer(ui.px(8))
-		if text_button("Retry###home_retry", "Retry loading Home").clicked {
+		if text_button(button, name).clicked {
 			home_retry(&s.data)
 			ui.data_changed()
 		}

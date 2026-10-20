@@ -246,3 +246,41 @@ home_page_opens_from_the_sidebar :: proc(t: ^testing.T) {
 	testing.expect(t, !app.home_showing(s), "a card leaves Home")
 	testing.expect_value(t, app.view_title(s), album.name)
 }
+
+// A feed with nothing Home can show says so, rather than drawing grey
+// shelves forever, and Refresh asks for the feed again.
+@(test)
+home_empty_feed_says_so :: proc(t: ^testing.T) {
+	fonts: Fonts
+	if !testing.expect(t, fonts_init(&fonts)) {
+		return
+	}
+	defer fonts_destroy(&fonts)
+	context.allocator = mem.arena_allocator(&fonts.arena)
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	m.answers["/v2/home/feed/static"] = {200, `{"items":[{"type":"TRACK_LIST","title":"Tracks","items":[{"type":"TRACK","data":{"id":5,"title":"t"}}]}]}`}
+	s := library_state(false, &m)
+	defer library_state_free(s)
+	f := Frame{fonts = &fonts, size = {1100, 900}}
+	library_frame(t, s, &f)
+	library_frame(t, s, &f, home_press(t, s, "Home"))
+	library_frame(t, s, &f)
+	if !home_job(t, s) {
+		return
+	}
+	testing.expect_value(t, s.data.home.status, app.Home_Status.Ready)
+	testing.expect_value(t, len(s.data.home.shelves), 0)
+	library_frame(t, s, &f)
+	library_frame(t, s, &f)
+	_, empty := access_node(s, "Nothing to show yet")
+	testing.expect(t, empty, "Home says it has nothing to show")
+	_, refresh := home_node(s, "Refresh Home", .Button)
+	if !testing.expect(t, refresh, "a Refresh button") {
+		return
+	}
+	library_frame(t, s, &f, home_press(t, s, "Refresh Home"))
+	testing.expect_value(t, s.data.home.status, app.Home_Status.Loading)
+	home_job(t, s)
+}
