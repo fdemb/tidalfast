@@ -34,12 +34,14 @@ default_read_line :: proc(prompt: string, allocator := context.allocator) -> str
 
 // ---- Token handling ----
 
-// token_refresh gets a new access token with refresh_token and stores it.
-// TIDAL may rotate the refresh token; the new one is kept. It waits for a
-// refresh another thread has under way.
-token_refresh :: proc(s: ^Session, refresh_token: string) -> (ok: bool, err: Error) {
+// token_refresh gets a new access token with auth's refresh token and
+// stores it, for the login auth was copied from (see session_auth). If that
+// login was cleared, it fails with .Cancelled. TIDAL may rotate the refresh
+// token; the new one is kept. It waits for a refresh another thread has
+// under way.
+token_refresh :: proc(s: ^Session, auth: Auth) -> (ok: bool, err: Error) {
 	sync.guard(&s.refresh_mutex)
-	return refresh_tokens(s, refresh_token, session_epoch(s))
+	return refresh_tokens(s, auth.refresh_token, auth.epoch)
 }
 
 // refresh_tokens is token_refresh for the login of auth epoch epoch. If the
