@@ -907,6 +907,7 @@ static void source_send(void *data, struct wl_data_source *s, const char *mime, 
 static void source_cancelled(void *data, struct wl_data_source *s) {
   if (s == g_clip_source) {
     g_clip_source = NULL;
+    g_selection_ours = false;
     free(g_clip);
     g_clip = NULL;
     g_clip_len = 0;
