@@ -54,27 +54,8 @@ text_field :: proc(id: string, f: ^Text_Field, placeholder: string, width, heigh
 	}
 	f.had_focus = focused
 
-	// The mouse goes by the text as it was drawn.
+	// The mouse goes by where the text was drawn.
 	origin := b.rect.x + FIELD_PAD - f.scroll
-	if focused && s.held {
-		if s.dragging && !s.pressed {
-			lay := field_layout(u.texts, font, size, field_text(f))
-			p := field_hit(lay, u.input.mouse.x - origin)
-			switch f.drag {
-			case .Clusters:
-				field_place(f, p, true)
-			case .Words:
-				lo, hi := word_at(field_text(f), lay.bounds, p)
-				a, z := min(lo, f.drag_origin[0]), max(hi, f.drag_origin[1])
-				f.anchor, f.cursor = a, z
-				if p < f.drag_origin[0] {
-					f.anchor, f.cursor = z, a
-				}
-			case .None:
-			}
-		}
-		f.blink_start = u.time
-	}
 
 	// The frame's edits for this field, in order. They were queued while it
 	// had the focus, so text typed before a Tab still goes in. After Escape
@@ -150,6 +131,24 @@ text_field :: proc(id: string, f: ^Text_Field, placeholder: string, width, heigh
 	sig.changed = t != old
 
 	lay := field_layout(u.texts, font, size, t)
+	if focused && s.held {
+		if s.dragging && !s.pressed {
+			p := field_hit(lay, u.input.mouse.x - origin)
+			switch f.drag {
+			case .Clusters:
+				field_place(f, p, true)
+			case .Words:
+				lo, hi := word_at(t, lay.bounds, p)
+				a, z := min(lo, f.drag_origin[0]), max(hi, f.drag_origin[1])
+				f.anchor, f.cursor = a, z
+				if p < f.drag_origin[0] {
+					f.anchor, f.cursor = z, a
+				}
+			case .None:
+			}
+		}
+		f.blink_start = u.time
+	}
 	avail := b.rect.w - 2 * FIELD_PAD
 	caret := field_caret_x(lay, f.cursor)
 	if !focused {

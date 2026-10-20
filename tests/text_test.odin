@@ -7,6 +7,7 @@ import "core:unicode/utf8"
 import "core:time"
 
 import "../src/kbts"
+import "../src/platform"
 import "../src/render"
 import "../src/text"
 import "../src/ui"
@@ -682,4 +683,38 @@ test_field_selection_spans :: proc(t: ^testing.T) {
 	// the Hebrew word: two pieces with ב between them.
 	spans = ui.field_spans(lay, len("a"), len("ab א"))
 	testing.expectf(t, len(spans) == 2 && spans[0].x < spans[1].x, "%q: %v", mixed, spans)
+}
+
+// Dragging in a text field selects from the press to the mouse, by
+// clusters, or by words after a double-click.
+@(test)
+test_text_field_drag_select :: proc(t: ^testing.T) {
+	s: Shaper
+	context.allocator = shaper_init(&s)
+	defer shaper_destroy(&s)
+	u: ui.State
+	ui.init(&u)
+	f := new(ui.Text_Field)
+	ui.field_insert(f, "hello big world")
+	shape_loaded(&s, .Regular, 13, "hello big world")
+	now := 0.0
+	frame :: proc(u: ^ui.State, s: ^Shaper, f: ^ui.Text_Field, now: ^f64, events: ..platform.Event) {
+		now^ += 0.016
+		ui.begin_frame(u, events, nil, s.state, 300, 200, now^)
+		ui.text_field("search", f, "Search", ui.px(250), ui.px(30))
+		ui.end_frame()
+	}
+	frame(&u, &s, f, &now)
+	frame(&u, &s, f, &now)
+	frame(&u, &s, f, &now, {kind = .Mouse_Down, x = 9, y = 15, button = .Left, click_count = 1})
+	frame(&u, &s, f, &now, {kind = .Mouse_Move, x = 240, y = 15})
+	frame(&u, &s, f, &now, {kind = .Mouse_Up, x = 240, y = 15, button = .Left})
+	testing.expect_value(t, ui.field_selected(f), "hello big world")
+
+	frame(&u, &s, f, &now, {kind = .Mouse_Down, x = 240, y = 15, button = .Left, click_count = 2})
+	testing.expect_value(t, ui.field_selected(f), "world")
+	frame(&u, &s, f, &now, {kind = .Mouse_Move, x = 9, y = 15})
+	frame(&u, &s, f, &now, {kind = .Mouse_Up, x = 9, y = 15, button = .Left})
+	testing.expect_value(t, ui.field_selected(f), "hello big world")
+	testing.expect_value(t, f.cursor, 0)
 }
