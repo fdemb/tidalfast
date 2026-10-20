@@ -331,8 +331,8 @@ playlist_item_ids :: proc(s: ^Session, playlist_id: string) -> (ids: []i64, err:
 	defer vmem.arena_destroy(&scratch)
 
 	out := make([dynamic]i64, 0, count, context.temp_allocator)
-	for _, i in bodies {
-		obj := next_page_json(bodies, i, &scratch) or_return
+	for &body in bodies {
+		obj := next_page_json(&body, &scratch) or_return
 		items, _ := jarr(obj, "items")
 		for item in items {
 			entry, _ := item.(json.Object)

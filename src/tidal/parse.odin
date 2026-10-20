@@ -129,7 +129,8 @@ parse_artists :: proc(p: ^Parser, arr: json.Array) -> []Artist {
 	return out[:n]
 }
 
-// The "artist" object obj, as artists[0] when that is the same artist.
+// primary_artist parses obj, the JSON's "artist". When it has the same id as
+// artists[0] it returns that instead, so the two share one Artist.
 @(private = "file")
 primary_artist :: proc(p: ^Parser, obj: json.Object, artists: []Artist) -> ^Artist {
 	if len(artists) > 0 && ji64(obj, "id") == artists[0].id {
