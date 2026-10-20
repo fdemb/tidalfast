@@ -292,3 +292,54 @@ atlas_full_table_drops_glyphs_not_drawn :: proc(t: ^testing.T) {
 	text.draw(s, r, .Regular, 20, {0, 0}, render.WHITE, "ABC")
 	testing.expect_value(t, s.stats.rasterized, 3)
 }
+
+// last_drawn keeps 16 bits of the frame, so a glyph last drawn 65536 frames
+// before the table fills looks drawn. Its page is cold and goes, and the
+// glyph must go with it rather than point into a freed page.
+@(test)
+atlas_full_table_drops_wrapped_glyphs_on_freed_pages :: proc(t: ^testing.T) {
+	device := MTLCreateSystemDefaultDevice()
+	if device == nil {
+		return // no GPU to test with
+	}
+	backing := make([]byte, 64 << 20)
+	defer delete(backing)
+	arena: mem.Arena
+	mem.arena_init(&arena, backing)
+	context.allocator = mem.arena_allocator(&arena)
+	r := new(render.Renderer)
+	r.gpu.device = device
+	r.gpu.queue = render.msg(device, "newCommandQueue")
+	s := new(text.State)
+	testing.expect(t, text.init(s))
+	defer {
+		text.destroy(s, r)
+		render.destroy(r)
+	}
+
+	frame :: proc(s: ^text.State, r: ^render.Renderer) {
+		free_all(context.temp_allocator)
+		render.begin_frame(r, 1000, 1000, 2, {})
+		text.begin_frame(s, r)
+	}
+	a := &s.atlas
+	for i := 0; i < 5000 && (i == 0 || s.needs_redraw); i += 1 {
+		time.sleep(time.Millisecond)
+		frame(s, r)
+		text.draw(s, r, .Regular, 13, {0, 0}, render.WHITE, "A")
+	}
+	testing.expect_value(t, text.atlas_pages(s), 1)
+
+	a.frame += 65535
+	frame(s, r)
+	a.entry_count = len(a.entries) * 3 / 4
+	text.draw(s, r, .Regular, 13, {0, 0}, render.WHITE, "B")
+	testing.expect(t, a.full == .Entries, "the glyph table filled up")
+
+	frame(s, r)
+	for e in a.entries {
+		if e.key != 0 && e.w > 0 {
+			testing.expect(t, a.pages[e.page].size > 0, "no glyph points into a freed page")
+		}
+	}
+}
