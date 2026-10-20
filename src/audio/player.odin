@@ -596,7 +596,7 @@ decode_main :: proc "c" (arg: rawptr) -> rawptr {
 	p := (^Player)(arg)
 	context.logger = p.logger
 	for {
-		if !run_commands(p, true) {
+		if run_commands(p, .All) == .Quit {
 			break
 		}
 		check_device(p)
@@ -633,20 +633,32 @@ decode_main :: proc "c" (arg: rawptr) -> rawptr {
 	return nil
 }
 
-// run_commands applies pending commands. With heavy false (inside a read
-// that waits for bytes) it applies only those that don't touch the current
-// decoder, and returns false if a heavy one waits, so the read gives up.
-// With heavy true it returns false on quit.
+// Command_Mode is which commands run_commands applies. A read waiting for
+// bytes runs .Light: commands that leave the current decoder alone.
 @(private = "file")
-run_commands :: proc(p: ^Player, heavy: bool) -> bool {
+Command_Mode :: enum u8 {
+	All,
+	Light,
+}
+
+@(private = "file")
+Command_Outcome :: enum u8 {
+	Applied, // every pending command ran, or none was pending
+	Quit,
+	Heavy_Waiting, // .Light only: a command that touches the decoder waits, so the read gives up
+}
+
+// run_commands applies pending commands, those mode allows.
+@(private = "file")
+run_commands :: proc(p: ^Player, mode: Command_Mode) -> Command_Outcome {
 	if !sync.atomic_load(&p.cmd_pending) {
-		return true
+		return .Applied
 	}
 	sync.lock(&p.cmd_mutex)
 	c := &p.cmd
-	if !heavy && (c.quit || c.play != nil || c.seek != nil || c.output != nil) {
+	if mode == .Light && (c.quit || c.play != nil || c.seek != nil || c.output != nil) {
 		sync.unlock(&p.cmd_mutex)
-		return false
+		return .Heavy_Waiting
 	}
 	sync.atomic_store(&p.cmd_pending, false)
 	quit := c.quit
@@ -663,7 +675,7 @@ run_commands :: proc(p: ^Player, heavy: bool) -> bool {
 	if quit {
 		source_free(&play_src)
 		source_free(&next)
-		return false
+		return .Quit
 	}
 	if has_output && output != p.output {
 		do_set_output(p, output)
@@ -684,7 +696,7 @@ run_commands :: proc(p: ^Player, heavy: bool) -> bool {
 		update_device(p)
 		status_set(p, proc(s: ^Status, p: ^Player) {s.state = .Paused if p.paused else .Playing})
 	}
-	return true
+	return .Applied
 }
 
 @(private = "file")
@@ -1568,7 +1580,7 @@ find_start :: proc(p: ^Player, sl: ^Slot, target: i64) -> (offset, sample: i64, 
 @(private = "file")
 interrupt :: proc(data: rawptr) -> bool {
 	p := (^Player)(data)
-	return !run_commands(p, false)
+	return run_commands(p, .Light) == .Heavy_Waiting
 }
 
 // dr_flac's view of a slot: the header, then the file from frame_off on.
