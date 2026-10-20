@@ -98,6 +98,7 @@ Artist_Cards :: struct {
 Artist_Job :: struct {
 	artist: i64,
 	gen:    u64, // the page's
+	slot:   int, // and where it's cached
 	part:   Artist_Part,
 }
 
@@ -107,6 +108,7 @@ Artist_Load :: #type proc(s: ^tidal.Session, id: i64, live: Artist_Live, a: mem.
 // once it's evicted, see artist_live.
 Artist_Live :: struct {
 	cache: ^Artist_Cache,
+	slot:  int,
 	gen:   u64,
 }
 
@@ -198,12 +200,7 @@ artist_job_of :: proc(job: ^Job, gen: rawptr) -> bool {
 // artist_live says whether the page live names is still cached. A worker
 // asks between the pages of a shelf.
 artist_live :: proc(live: Artist_Live) -> bool {
-	for &gen in live.cache.live {
-		if sync.atomic_load(&gen) == live.gen {
-			return true
-		}
-	}
-	return false
+	return sync.atomic_load(&live.cache.live[live.slot]) == live.gen
 }
 
 // artist_want asks for each part of page not asked for yet. Asking again
@@ -212,6 +209,7 @@ artist_want :: proc(d: ^Data, page: ^Artist_Page) {
 	if d.account != .Signed_In {
 		return
 	}
+	slot := mem.ptr_sub(page, &d.artists.pages[0])
 	for part in Artist_Part {
 		if page.parts[part] != nil {
 			continue
@@ -219,7 +217,7 @@ artist_want :: proc(d: ^Data, page: ^Artist_Page) {
 		// Waiting first: push_job may drop a held job of this page, and
 		// that sets its part back to nil.
 		page.parts[part] = Artist_Waiting{}
-		push_job(d, {payload = Artist_Job{artist = page.id, gen = page.gen, part = part}})
+		push_job(d, {payload = Artist_Job{artist = page.id, gen = page.gen, slot = slot, part = part}})
 	}
 }
 

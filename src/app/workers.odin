@@ -639,7 +639,7 @@ run_job :: proc(d: ^Data, job: Job) -> (res: Result) {
 			fail(&res, err)
 		}
 	case Artist_Job:
-		content, err := artist_part_spec(p.part).load(s, p.artist, {&d.artists, p.gen}, alloc)
+		content, err := artist_part_spec(p.part).load(s, p.artist, {&d.artists, p.slot, p.gen}, alloc)
 		if err != nil {
 			fail(&res, err)
 			return
