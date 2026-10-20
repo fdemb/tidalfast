@@ -1,6 +1,7 @@
 package tidal_tests
 
 import "core:testing"
+import "core:unicode/utf8"
 
 import "../src/platform"
 import "../src/ui"
@@ -592,4 +593,74 @@ test_text_field_click_after_shortcut :: proc(t: ^testing.T) {
 	lo, hi = ui.field_selection(f)
 	testing.expect_value(t, lo, 0)
 	testing.expect_value(t, hi, len("hello world"))
+}
+
+// Word movement and double-click words land where a scan over every
+// boundary does, from any byte offset, inside a cluster or past the end.
+@(test)
+test_edit_words_match_scan :: proc(t: ^testing.T) {
+	is_word :: proc(s: string, at: int) -> bool {
+		r, _ := utf8.decode_rune_in_string(s[at:])
+		return ui.is_word_rune(r)
+	}
+	prev :: proc(bounds: []int, p: int) -> int {
+		best := 0
+		for b in bounds {
+			if b >= p {
+				break
+			}
+			best = b
+		}
+		return best
+	}
+	next :: proc(bounds: []int, p: int) -> int {
+		for b in bounds {
+			if b > p {
+				return b
+			}
+		}
+		return bounds[len(bounds) - 1]
+	}
+	for s in ([]string{"", "a", " ", "Paranoid Android, 1997", "a👨‍👩‍👧b, cé  d_e 12 ", "  夜に駆ける 밤편지", "عيونك حبيبي!"}) {
+		bounds := ui.cluster_bounds(s)
+		for p in 0 ..= len(s) {
+			left := p
+			for left > 0 && !is_word(s, prev(bounds, left)) {
+				left = prev(bounds, left)
+			}
+			for left > 0 && is_word(s, prev(bounds, left)) {
+				left = prev(bounds, left)
+			}
+			testing.expectf(t, ui.word_left(s, bounds, p) == left, "%q word_left(%d) = %d, want %d", s, p, ui.word_left(s, bounds, p), left)
+
+			right := p
+			for right < len(s) && !is_word(s, right) {
+				right = next(bounds, right)
+			}
+			for right < len(s) && is_word(s, right) {
+				right = next(bounds, right)
+			}
+			testing.expectf(t, ui.word_right(s, bounds, p) == right, "%q word_right(%d) = %d, want %d", s, p, ui.word_right(s, bounds, p), right)
+
+			if len(s) == 0 {
+				continue
+			}
+			at := 0
+			for b in bounds[:len(bounds) - 1] {
+				if b <= p {
+					at = b
+				}
+			}
+			word := is_word(s, at)
+			lo, hi := at, next(bounds, at)
+			for lo > 0 && is_word(s, prev(bounds, lo)) == word {
+				lo = prev(bounds, lo)
+			}
+			for hi < len(s) && is_word(s, hi) == word {
+				hi = next(bounds, hi)
+			}
+			got_lo, got_hi := ui.word_at(s, bounds, p)
+			testing.expectf(t, got_lo == lo && got_hi == hi, "%q word_at(%d) = [%d, %d), want [%d, %d)", s, p, got_lo, got_hi, lo, hi)
+		}
+	}
 }
