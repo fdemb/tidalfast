@@ -439,7 +439,8 @@ Piece :: struct {
 
 // Shaping is shape_uncached's scratch, in the temp allocator: the string's
 // codepoints, the glyphs shaped so far with each one's codepoint index, and
-// the pieces that index into both. glyphs and cps only change together
+// the pieces that index into both, and the grapheme boundaries
+// kb_text_shape found. glyphs and cps only change together
 // (shaping_append, flip), so cps[i] is always glyphs[i]'s codepoint.
 @(private)
 Shaping :: struct {
@@ -447,6 +448,9 @@ Shaping :: struct {
 	glyphs: [dynamic]Glyph,
 	cps:    [dynamic]int,
 	pieces: [dynamic]Piece,
+	// boundary[i] is true if a grapheme cluster starts at codepoint i. nil
+	// if shaping failed or every codepoint is a cluster of its own.
+	boundary: []bool,
 }
 
 @(private)
@@ -606,6 +610,16 @@ kb_shape_once :: proc(t: ^State, font: Font, size: f32, sh: ^Shaping, stack: Fon
 			append(&sh.pieces, piece)
 		}
 	}
+	sh.boundary = nil
+	if kbts.ShapeError(ctx) == .NONE && !single_codepoint_graphemes(sh.runes) {
+		sh.boundary = make([]bool, len(sh.runes) + 1, context.temp_allocator)
+		for i in 1 ..< len(sh.runes) {
+			cp: kbts.shape_codepoint
+			if kbts.ShapeGetShapeCodepoint(ctx, i32(i), &cp) {
+				sh.boundary[i] = .GRAPHEME in cp.BreakFlags
+			}
+		}
+	}
 	for _ in 0 ..< pushed {
 		_ = kbts.ShapePopFont(ctx)
 	}
@@ -665,7 +679,7 @@ bidi_reorder :: proc(t: ^State, sh: ^Shaping, paragraph_rtl: bool) -> []int {
 // glyph its grapheme cluster.
 @(private)
 place_pieces :: proc(sh: ^Shaping, order: []int) -> (glyphs: []Glyph, width: f32) {
-	clusters := grapheme_starts(sh.runes)
+	clusters := grapheme_starts(sh.runes, sh.boundary)
 	out := make([]Glyph, len(sh.glyphs), context.temp_allocator)
 	n := 0
 	for i in order {
@@ -721,19 +735,51 @@ bidi_class :: proc(r: rune) -> kbts.Bidi_Class {
 	return class
 }
 
-// grapheme_starts returns, for each codepoint, the index of the first
-// codepoint of its grapheme cluster, from kb_text_shape's segmentation.
-grapheme_starts :: proc(runes: []rune) -> []int {
-	starts := make([]int, len(runes), context.temp_allocator)
-	simple := true
-	for r, i in runes {
-		starts[i] = i
+// single_codepoint_graphemes is true if every codepoint in runes is sure to
+// be a grapheme cluster of its own.
+@(private)
+single_codepoint_graphemes :: proc(runes: []rune) -> bool {
+	for r in runes {
 		// Below U+0300 every codepoint but CR LF is a cluster of its own.
-		simple &&= r < 0x300 && r != '\r'
+		if r >= 0x300 || r == '\r' {
+			return false
+		}
 	}
-	if simple || len(runes) == 0 {
+	return true
+}
+
+// grapheme_starts returns, for each codepoint, the index of the first
+// codepoint of its grapheme cluster, from kb_text_shape's segmentation:
+// boundary, if shaping found it already, or else its break engine.
+// boundary is changed.
+grapheme_starts :: proc(runes: []rune, boundary: []bool = nil) -> []int {
+	starts := make([]int, len(runes), context.temp_allocator)
+	for &start, i in starts {
+		start = i
+	}
+	if len(runes) == 0 || single_codepoint_graphemes(runes) {
 		return starts
 	}
+	boundary := boundary if boundary != nil else grapheme_boundaries(runes)
+	// kb_text_shape breaks before the last pictograph of a ZWJ sequence, so
+	// 👨‍👩‍👧 came out as 👨‍👩‍ and 👧. Rule GB11 joins them.
+	for i in 1 ..< len(runes) {
+		if runes[i - 1] == 0x200d && pictographic(runes[i]) {
+			boundary[i] = false
+		}
+	}
+	for i in 1 ..< len(runes) {
+		if !boundary[i] {
+			starts[i] = starts[i - 1]
+		}
+	}
+	return starts
+}
+
+// grapheme_boundaries runs kb_text_shape's break engine over runes and
+// returns where grapheme clusters start.
+@(private)
+grapheme_boundaries :: proc(runes: []rune) -> []bool {
 	boundary := make([]bool, len(runes) + 1, context.temp_allocator)
 	state: kbts.break_state
 	kbts.BreakBegin(&state, .DONT_KNOW, .STRICT, {})
@@ -751,19 +797,7 @@ grapheme_starts :: proc(runes: []rune) -> []int {
 			boundary[b.Position] = true
 		}
 	}
-	// kb_text_shape breaks before the last pictograph of a ZWJ sequence, so
-	// 👨‍👩‍👧 came out as 👨‍👩‍ and 👧. Rule GB11 joins them.
-	for i in 1 ..< len(runes) {
-		if runes[i - 1] == 0x200d && pictographic(runes[i]) {
-			boundary[i] = false
-		}
-	}
-	for i in 1 ..< len(runes) {
-		if !boundary[i] {
-			starts[i] = starts[i - 1]
-		}
-	}
-	return starts
+	return boundary
 }
 
 // pictographic approximates Extended_Pictographic: the emoji blocks and the

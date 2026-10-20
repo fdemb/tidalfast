@@ -653,3 +653,32 @@ test_large_working_set_is_not_swept_every_frame :: proc(t: ^testing.T) {
 	}
 	testing.expect_value(t, state.last_sweep, last)
 }
+
+// Shaped text and the editor split a string into the same grapheme
+// clusters: shaping takes them from kb_text_shape's shaper, the editor
+// from its break engine.
+@(test)
+test_shaped_clusters_match_grapheme_starts :: proc(t: ^testing.T) {
+	s: Shaper
+	context.allocator = shaper_init(&s)
+	defer shaper_destroy(&s)
+
+	for str in ([]string{"밤편지 é̃x", "q̣̇q̣̇", "किकि नमस्ते", "น้ำน้ำ", "👨‍👩‍👧 🇵🇱 ok", "👍🏽 ❤️", "é̂ b"}) {
+		run := shape_loaded(&s, .Regular, 13, str)
+		testing.expectf(t, !run.pending, "%q still pending", str)
+		runes := utf8.string_to_runes(str, context.temp_allocator)
+		starts := text.grapheme_starts(runes)
+		want := make(map[u32]bool, context.temp_allocator)
+		for start in starts {
+			want[u32(start)] = true
+		}
+		got := make(map[u32]bool, context.temp_allocator)
+		for g in run.glyphs {
+			got[g.cluster] = true
+		}
+		testing.expectf(t, len(got) == len(want), "%q: %d clusters drawn, %d in the editor", str, len(got), len(want))
+		for c in got {
+			testing.expectf(t, want[c], "%q: cluster %d isn't a grapheme start", str, c)
+		}
+	}
+}
