@@ -1293,10 +1293,14 @@ static void keyboard_enter(void *data, struct wl_keyboard *k, uint32_t serial, s
   request_redraw();
 }
 
-static void keyboard_leave(void *data, struct wl_keyboard *k, uint32_t serial, struct wl_surface *s) {
-  g_key_window = false;
+static void stop_repeat(void) {
   g_repeat_key = 0;
   arm_timer(g_repeat_fd, 0, 0);
+}
+
+static void keyboard_leave(void *data, struct wl_keyboard *k, uint32_t serial, struct wl_surface *s) {
+  g_key_window = false;
+  stop_repeat();
   request_redraw();
 }
 
@@ -1364,10 +1368,7 @@ static void keyboard_key(void *data, struct wl_keyboard *k, uint32_t serial, uin
       arm_timer(g_repeat_fd, g_repeat_delay / 1000.0, 1.0 / g_repeat_rate);
     }
   } else {
-    if (g_repeat_key == keycode) {
-      g_repeat_key = 0;
-      arm_timer(g_repeat_fd, 0, 0);
-    }
+    if (g_repeat_key == keycode) stop_repeat();
     push_event((Event){
         .kind = EVENT_KEY_UP,
         .modifiers = g_modifiers,
@@ -1391,6 +1392,7 @@ static void keyboard_modifiers(void *data, struct wl_keyboard *k, uint32_t seria
 static void keyboard_repeat_info(void *data, struct wl_keyboard *k, int32_t rate, int32_t delay) {
   g_repeat_rate = rate;
   g_repeat_delay = delay;
+  stop_repeat();
 }
 
 static const struct wl_keyboard_listener g_keyboard_listener = {
@@ -1416,6 +1418,7 @@ static void seat_capabilities(void *data, struct wl_seat *seat, uint32_t caps) {
   } else if (!(caps & WL_SEAT_CAPABILITY_KEYBOARD) && g_keyboard) {
     wl_keyboard_release(g_keyboard);
     g_keyboard = NULL;
+    stop_repeat();
   }
 }
 
