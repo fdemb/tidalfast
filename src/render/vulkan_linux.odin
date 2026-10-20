@@ -1198,7 +1198,7 @@ end_frame :: proc(r: ^Renderer) {
 	buffers[n] = cmd
 	n += 1
 	wait_stage := vk.PipelineStageFlags{.COLOR_ATTACHMENT_OUTPUT}
-	submit := vk.SubmitInfo {
+	info := vk.SubmitInfo {
 		sType                = .SUBMIT_INFO,
 		waitSemaphoreCount   = 1,
 		pWaitSemaphores      = &f.acquired,
@@ -1208,9 +1208,10 @@ end_frame :: proc(r: ^Renderer) {
 		signalSemaphoreCount = 1,
 		pSignalSemaphores    = &g.rendered[image],
 	}
-	vk.ResetFences(g.device, 1, &f.fence)
-	vk.QueueSubmit(g.queue, 1, &submit, f.fence)
-	f.ready = false
+	if !submit(r, f, &info) {
+		free_buffer(g, &capture)
+		return
+	}
 	present := vk.PresentInfoKHR {
 		sType              = .PRESENT_INFO_KHR,
 		waitSemaphoreCount = 1,
@@ -1268,17 +1269,29 @@ submit_uploads :: proc(r: ^Renderer, f: ^Gpu_Frame) {
 	if !f.uploading {
 		return
 	}
-	g := &r.gpu
 	vk.EndCommandBuffer(f.upload)
 	f.uploading = false
-	submit := vk.SubmitInfo {
+	info := vk.SubmitInfo {
 		sType              = .SUBMIT_INFO,
 		commandBufferCount = 1,
 		pCommandBuffers    = &f.upload,
 	}
+	submit(r, f, &info)
+}
+
+// submit queues the slot's command buffers to signal its fence. If the
+// queue refuses them, nothing will signal the fence, so the slot stays
+// ready and slot_ready doesn't wait on it.
+@(private)
+submit :: proc(r: ^Renderer, f: ^Gpu_Frame, info: ^vk.SubmitInfo) -> bool {
+	g := &r.gpu
 	vk.ResetFences(g.device, 1, &f.fence)
-	vk.QueueSubmit(g.queue, 1, &submit, f.fence)
+	if res := vk.QueueSubmit(g.queue, 1, info, f.fence); res != .SUCCESS {
+		log.errorf("render: vkQueueSubmit failed: %v", res)
+		return false
+	}
 	f.ready = false
+	return true
 }
 
 // record_capture copies the drawn image into a host buffer after the
