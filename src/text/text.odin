@@ -1430,7 +1430,12 @@ take_loaded :: proc(t: ^State) {
 		if face < len(Font) {
 			face = NO_FACE
 		}
-		cache_face(t, fallback_key(res.font, res.codepoint), face)
+		// font_stack may have found the character in a fallback face while
+		// the loader looked. Runs already use that face, so it stays.
+		key := fallback_key(res.font, res.codepoint)
+		if cached, ok := cached_face(t, key); !ok || cached < 0 {
+			cache_face(t, key, face)
+		}
 		list := &t.fallbacks[res.font]
 		if face >= 0 && !slice.contains(list[:t.fallback_counts[res.font]], u8(face)) {
 			list[t.fallback_counts[res.font]] = u8(face)
