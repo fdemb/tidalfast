@@ -2369,3 +2369,36 @@ login_after_sign_out_keeps_its_item :: proc(t: ^testing.T) {
 	testing.expect(t, saved, "the new login is still in the Keychain")
 	testing.expect_value(t, a.access_token, "new")
 }
+
+// A sign-out after a hot reload deletes the Keychain item that a login
+// saved before the reload.
+@(test)
+sign_out_after_reload_forgets_the_login :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := mock_data_state(&m)
+	defer data_state_free(s)
+	d := &s.data
+	sign_in(s)
+	data_jobs(d)
+
+	app.sign_out(s, "Your TIDAL session ended. Log in again.")
+	tidal.session_restore(d.session, {token_type = "Bearer", access_token = "new", refresh_token = "new-r", user_id = 123, user_kind = .Logged_In_User})
+	app.auth_changed(d.session, d)
+	run_disk(s)
+	_, saved := keychain_auth(d)
+	testing.expect(t, saved, "the new login is in the Keychain")
+
+	shell := platform.Shell {
+		request_redraw = proc "c" () {},
+	}
+	app.data_unload(s)
+	app.data_reload(s, &shell)
+
+	app.sign_out(s, "Your TIDAL session ended. Log in again.")
+	app.workers_stop(d)
+	run_disk(s)
+	_, saved = keychain_auth(d)
+	testing.expect(t, !saved, "the keychain item went")
+}

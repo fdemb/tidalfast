@@ -177,10 +177,12 @@ Data :: struct {
 	results:        jobs.Queue(Result, RESULT_QUEUE),
 	threads:        [WORKERS]posix.pthread_t,
 	running:        bool,
-	// From unload to reload: the login state (heap) and the backoff.
+	// From unload to reload: the login state (heap), the backoff and the
+	// auth epoch, which keychain_saved and queued Forgets are compared with.
 	saved_auth:     []u8,
 	saved_backoff:  time.Tick,
 	saved_reason:   Small,
+	saved_epoch:    u64,
 	login:          Login,
 	// The hi-res login's PKCE verifier and client key. A new session on
 	// reload takes them, so a login page opened before it still works.
@@ -281,6 +283,7 @@ data_unload :: proc(s: ^State) {
 		until, reason := tidal.backoff_state(d.session, context.temp_allocator)
 		d.saved_backoff = until
 		d.saved_reason = small(reason)
+		d.saved_epoch = tidal.session_epoch(d.session)
 		tidal.session_destroy(d.session)
 		d.session = nil
 	}
@@ -293,6 +296,7 @@ data_reload :: proc(s: ^State, shell: ^platform.Shell) {
 		return
 	}
 	session_open(d)
+	tidal.session_set_epoch(d.session, d.saved_epoch)
 	if d.saved_auth != nil {
 		// partial: a login approved before the unload may not have loaded
 		// its session yet. Its Login_Wait finishes it with these tokens.
