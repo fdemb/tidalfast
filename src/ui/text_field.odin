@@ -59,8 +59,8 @@ text_field :: proc(id: string, f: ^Text_Field, placeholder: string, width, heigh
 
 	// The frame's edits for this field, in order. They were queued while it
 	// had the focus, so text typed before a Tab still goes in. After Escape
-	// gives up the focus, the rest wait for the field to get it back from
-	// a focus or a click.
+	// gives up the focus, the rest are dropped until a focus or a click for
+	// this field.
 	live := true
 	for e in u.edits[:u.edit_count] {
 		if e.target != b.key || b.key == 0 {
