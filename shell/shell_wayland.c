@@ -875,7 +875,7 @@ static void source_send(void *data, struct wl_data_source *s, const char *mime, 
   Clip_Send *t = NULL;
   for (int i = 0; i < CLIP_SENDS && !t; i++)
     if (g_sends[i].fd < 0) t = &g_sends[i];
-  if (!t || fcntl(fd, F_SETFL, O_NONBLOCK) != 0 || !(t->data = malloc(g_clip_len + 1))) {
+  if (!t || !set_nonblocking(fd) || !(t->data = malloc(g_clip_len + 1))) {
     close(fd);
     return;
   }
