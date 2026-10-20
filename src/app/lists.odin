@@ -753,24 +753,25 @@ lists_forget :: proc(d: ^Data, epoch: u64) {
 	// A cover write that sees the user gone writes nothing, and one that
 	// didn't finishes before disk_forget deletes the folder.
 	sync.atomic_store(&d.lists.user, 0)
-	job := Job{auth = d.auth_gen, payload = Disk_Job{op = .Forget, user = user, epoch = epoch}}
-	if !jobs.push(&d.lists.queue, job) {
-		log.error("lists: no room to forget the account that signed out")
+	forget := Disk_Job{op = .Forget, user = user, epoch = epoch}
+	if !jobs.push(&d.lists.queue, Job{auth = d.auth_gen, payload = forget}) {
+		// With the queue full or stopped, waiting here on the Keychain
+		// beats a login that comes back at the next start.
+		disk_forget(d, forget)
 	}
 }
 
-// disk_forget deletes what a sign-out left: the Keychain item, unless a
-// login since has saved over it, and the user's folder.
+// disk_forget deletes what a sign-out left: the user's folder, and the
+// Keychain item unless a login since has saved over it. The folder goes
+// first, since the Keychain can block on the user.
 disk_forget :: proc(d: ^Data, job: Disk_Job) {
-	{
-		sync.guard(&d.keychain_mutex)
-		if d.keychain_saved < job.epoch {
-			keychain_delete(&d.keychain)
-		}
-	}
 	if d.lists.root != "" && job.user != 0 {
 		sync.guard(&d.lists.mutex)
 		os.remove_all(disk_dir(d.lists.root, job.user, context.temp_allocator))
+	}
+	sync.guard(&d.keychain_mutex)
+	if d.keychain_saved < job.epoch {
+		keychain_delete(&d.keychain)
 	}
 }
 

@@ -1390,3 +1390,24 @@ quit_after_sign_out_forgets_the_account :: proc(t: ^testing.T) {
 	test_state_free(s)
 	free(s)
 }
+
+// A sign-out that can't queue its Forget does it at once.
+@(test)
+sign_out_with_the_disk_queue_stopped_forgets_at_once :: proc(t: ^testing.T) {
+	dir := cache_dir("forget-now")
+	defer delete(dir, runtime.heap_allocator())
+	defer os.remove_all(dir)
+	s := cache_state(dir)
+	defer cache_state_free(s)
+	d := &s.data
+	user_dir := app.disk_dir(dir, 7, context.temp_allocator)
+	sidebar(s, updated = 1, count = 300)
+	run_disk(s)
+	testing.expect(t, os.exists(user_dir), "the account has a folder")
+
+	jobs.stop(&d.lists.queue)
+	app.sign_out(s, "Signed out.")
+	_, saved := keychain_auth(d)
+	testing.expect(t, !saved, "the keychain item went")
+	testing.expect(t, !os.exists(user_dir), "the account's folder went")
+}
