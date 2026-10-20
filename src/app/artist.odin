@@ -8,7 +8,7 @@ package app
 //
 // The page, its full top tracks (Artist_Top_Tracks) and a shelf's grid
 // (Artist_Grid) are places in the History, told apart by
-// Pending.artist_view, so Back and Forward go through them. All three show
+// List_Place.artist_view, so Back and Forward go through them. All three show
 // the open list, the artist's top tracks, which moving between them keeps.
 // What shows is worked out from the place and the open list each frame
 // (artist_place), so nothing has to be reset on leaving.
@@ -85,7 +85,7 @@ bio_free :: proc(b: ^Bio_Layout) {
 }
 
 // artist_key is the page key of an artist place.
-artist_key :: proc(s: ^State, p: ^Pending) -> i64 {
+artist_key :: proc(s: ^State, p: ^List_Place) -> i64 {
 	if s.data.fake {
 		return artist_fake_key(p.index)
 	}
@@ -95,7 +95,7 @@ artist_key :: proc(s: ^State, p: ^Pending) -> i64 {
 
 // artist_list_open says whether the open list is the top tracks of the
 // artist of place p.
-artist_list_open :: proc(s: ^State, p: ^Pending) -> bool {
+artist_list_open :: proc(s: ^State, p: ^List_Place) -> bool {
 	if s.data.fake {
 		sr := &s.search
 		return sr.fake_source == .Artist && p.index >= 0 && p.index < len(s.rows) && small_str(&sr.fake_title) == s.rows[p.index].artist
@@ -106,20 +106,20 @@ artist_list_open :: proc(s: ^State, p: ^Pending) -> bool {
 
 // artist_place is the artist place showing, or nil when the main view
 // shows something else.
-artist_place :: proc(s: ^State) -> ^Pending {
+artist_place :: proc(s: ^State) -> ^List_Place {
 	h := &s.history
 	if h.count == 0 {
 		return nil
 	}
-	p := &h.places[h.at]
-	if p.kind != .List || p.source != .Artist || !artist_list_open(s, p) {
+	p, ok := &h.places[h.at].(List_Place)
+	if !ok || p.source != .Artist || !artist_list_open(s, p) {
 		return nil
 	}
 	return p
 }
 
 // artist_view_place is the artist place p as view.
-artist_view_place :: proc(p: Pending, view: Artist_View) -> Pending {
+artist_view_place :: proc(p: List_Place, view: Artist_View) -> List_Place {
 	p := p
 	p.artist_view = view
 	return p
@@ -144,7 +144,7 @@ open_card :: proc(s: ^State, source: Source, f: Found) {
 
 // draw_artist draws the place p of the main view, main_w wide: the page or
 // a grid. The full top tracks are the table, which draw_main_view draws.
-draw_artist :: proc(s: ^State, p: ^Pending, main_w: f32) {
+draw_artist :: proc(s: ^State, p: ^List_Place, main_w: f32) {
 	page := artist_find(&s.data, artist_key(s, p))
 	if page == nil {
 		return
@@ -449,7 +449,7 @@ pill_width :: proc(label: string) -> f32 {
 }
 
 @(private = "file")
-draw_artist_actions :: proc(s: ^State, p: ^Pending, page: ^Artist_Page) {
+draw_artist_actions :: proc(s: ^State, p: ^List_Place, page: ^Artist_Page) {
 	playable := row_playable(s, 0)
 	ui.spacer(ui.px(4))
 	{
@@ -459,7 +459,7 @@ draw_artist_actions :: proc(s: ^State, p: ^Pending, page: ^Artist_Page) {
 			ui.column("", {}, ui.children_sum(), ui.fill())
 			ui.spacer(ui.fill())
 			if pill("artist_play", text.ICON_PLAY, "Play", true, playable).clicked {
-				pending_set(s, {kind = .Play, order = .In_Order})
+				pending_set(s, Play_Row{order = .In_Order})
 			}
 			ui.spacer(ui.fill())
 		}
@@ -468,7 +468,7 @@ draw_artist_actions :: proc(s: ^State, p: ^Pending, page: ^Artist_Page) {
 			ui.column("", {}, ui.children_sum(), ui.fill())
 			ui.spacer(ui.fill())
 			if pill("artist_shuffle", text.ICON_SHUFFLE, "Shuffle", false, playable).clicked {
-				pending_set(s, {kind = .Play, order = .Shuffled})
+				pending_set(s, Play_Row{order = .Shuffled})
 			}
 			ui.spacer(ui.fill())
 		}
@@ -517,15 +517,15 @@ draw_artist_actions :: proc(s: ^State, p: ^Pending, page: ^Artist_Page) {
 }
 
 @(private = "file")
-draw_artist_menu :: proc(s: ^State, p: ^Pending, page: ^Artist_Page) {
+draw_artist_menu :: proc(s: ^State, p: ^List_Place, page: ^Artist_Page) {
 	if ui.menu("artist_menu") {
 		ui.text_style(.Regular, 13, TEXT)
 		playable := row_playable(s, 0)
 		if ui.menu_item("Play").clicked && playable {
-			pending_set(s, {kind = .Play, order = .In_Order})
+			pending_set(s, Play_Row{order = .In_Order})
 		}
 		if ui.menu_item("Shuffle").clicked && playable {
-			pending_set(s, {kind = .Play, order = .Shuffled})
+			pending_set(s, Play_Row{order = .Shuffled})
 		}
 		if ui.menu_item("Show all top tracks").clicked {
 			pending_set(s, artist_view_place(p^, Artist_Top_Tracks{}))
@@ -544,7 +544,7 @@ draw_artist_menu :: proc(s: ^State, p: ^Pending, page: ^Artist_Page) {
 // table draws them. view is the page's scroll view, which the keyboard's
 // selection scrolls.
 @(private = "file")
-draw_top_tracks :: proc(s: ^State, p: ^Pending, view: ^ui.Box, width: f32) {
+draw_top_tracks :: proc(s: ^State, p: ^List_Place, view: ^ui.Box, width: f32) {
 	n := view_count(s)
 	{
 		ui.parent(section_title("Top tracks"))
@@ -585,7 +585,7 @@ draw_artist_grid :: proc(s: ^State, page: ^Artist_Page, part: Artist_Part, conte
 		back.box.background = SURFACE
 		back.box.hover_color = SURFACE_ACTIVE
 		if back.clicked || ui.take_key(.Escape) {
-			pending_set(s, {kind = .Back})
+			pending_set(s, Go_Back{})
 		}
 		ui.spacer(ui.px(14))
 		ui.column("", {}, ui.fill(), ui.fill())

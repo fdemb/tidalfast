@@ -205,11 +205,11 @@ draw_history_buttons :: proc(s: ^State) {
 		ui.spacer(ui.px(10))
 	}
 	if history_button(text.ICON_CARET_LEFT + "###back", "Back", history_can_back(s)).clicked {
-		pending_set(s, {kind = .Back})
+		pending_set(s, Go_Back{})
 	}
 	ui.spacer(ui.px(2))
 	if history_button(text.ICON_CARET_RIGHT + "###forward", "Forward", history_can_forward(s)).clicked {
-		pending_set(s, {kind = .Forward})
+		pending_set(s, Go_Forward{})
 	}
 	if s.titlebar_h > 0 {
 		titlebar_space(ui.fill())
@@ -293,7 +293,7 @@ draw_sidebar :: proc(s: ^State) {
 		}
 		sig := ui.signal(item)
 		if sig.clicked {
-			pending_set(s, {kind = .Playlist, index = i})
+			pending_set(s, Playlist_Place{index = i})
 		}
 		ui.spacer(ui.px(ROW_PAD))
 		cover_art(s, .Playlist, entry.image, entry.seed, 40, ui.px(40))
@@ -744,7 +744,7 @@ draw_track_menu :: proc(s: ^State) {
 	if ui.menu("track_menu") {
 		ui.text_style(.Regular, 13, TEXT)
 		if ui.menu_item("Play").clicked && i >= 0 {
-			pending_set(s, {kind = .Play, index = i})
+			pending_set(s, Play_Row{index = i})
 		}
 		fake := s.data.fake
 		if row != nil && (fake || row.album_id != 0 || first_artist(row.artists) != 0) {
@@ -1070,10 +1070,10 @@ row_playable :: proc(s: ^State, i: int) -> bool {
 	return row != nil && (row.id != 0 || s.data.fake)
 }
 
-// play_ordered plays the row of a .Play. With an order it first sets
+// play_ordered plays the row of a Play_Row. With an order it first sets
 // shuffle to match, then plays the first row, or a loaded row picked at
 // random. It returns false when there's nothing to play.
-play_ordered :: proc(s: ^State, p: Pending) -> bool {
+play_ordered :: proc(s: ^State, p: Play_Row) -> bool {
 	i := p.index
 	switch p.order {
 	case .Keep:
@@ -1145,22 +1145,28 @@ status_text :: proc(s: ^State) -> string {
 // queue's. So opening another list, closing the search or replacing the
 // queue waits until the frame is done, and pending_apply does it then.
 // The last one asked for in a frame wins.
-Pending :: struct {
-	kind:   Pending_Kind,
-	source: Source, // .List
-	// .Playlist: the sidebar entry. .Play: the row. .List with the fake
-	// data: the row in State.rows whose album or artist to list.
-	index:  int,
-	id:     Small,
-	name:   Small,
-	image:  Small,
-	hint:   int,
-	// .List of .Artist: the page, its full top tracks or a shelf's grid.
-	artist_view: Artist_View,
-	order:  Play_Order, // .Play
+Pending :: union {
+	Playlist_Place,
+	List_Place,
+	Close_Search,
+	Play_Row,
+	Go_Back,
+	Go_Forward,
 }
 
-// Play_Order is what Play and Shuffle on a page ask .Play for: the first
+Close_Search :: struct {}
+
+// Play_Row plays row index of the open list, or with an order the row it
+// picks.
+Play_Row :: struct {
+	index: int,
+	order: Play_Order,
+}
+
+Go_Back :: struct {}
+Go_Forward :: struct {}
+
+// Play_Order is what Play and Shuffle on a page ask Play_Row for: the first
 // row with shuffle off, or a random row with it on. Keep plays index and
 // leaves shuffle as it is.
 Play_Order :: enum u8 {
@@ -1169,15 +1175,38 @@ Play_Order :: enum u8 {
 	Shuffled,
 }
 
-Pending_Kind :: enum u8 {
-	None,
-	Playlist, // open a sidebar entry
-	List, // open an album, an artist or a playlist that isn't in the sidebar
-	Search, // a search in the history, never pending: id is the query
-	Close_Search,
-	Play,
-	Back,
-	Forward,
+// Place is what the main view shows, as the History keeps it. A search is
+// only ever a place: typing starts it, not a Pending.
+Place :: union {
+	Playlist_Place,
+	List_Place,
+	Search_Place,
+}
+
+// Playlist_Place is a sidebar entry. A TIDAL playlist goes by id once it's
+// in the History (playlist_place), since the sidebar can change order
+// before Back returns to it.
+Playlist_Place :: struct {
+	index: int,
+	id:    Small,
+}
+
+// List_Place is an album, an artist or a playlist that isn't in the
+// sidebar. With the fake data index is the row in State.rows whose album or
+// artist to list.
+List_Place :: struct {
+	source:      Source,
+	index:       int,
+	id:          Small,
+	name:        Small,
+	image:       Small,
+	hint:        int,
+	// .Artist: the page, its full top tracks or a shelf's grid.
+	artist_view: Artist_View,
+}
+
+Search_Place :: struct {
+	query: Small,
 }
 
 pending_set :: proc(s: ^State, p: Pending) {
@@ -1187,51 +1216,69 @@ pending_set :: proc(s: ^State, p: Pending) {
 // pending_apply does what the last frame asked for. Run it after the frame
 // is drawn; it returns true when it changed something worth a frame.
 pending_apply :: proc(s: ^State) -> bool {
-	p := s.pending
-	s.pending = {}
-	switch p.kind {
-	case .None, .Search:
+	pending := s.pending
+	s.pending = nil
+	switch p in pending {
+	case nil:
 		return false
-	case .Playlist, .List:
+	case Playlist_Place:
 		history_visit(s, p)
-		place_go(s, &p)
-	case .Close_Search:
+		place_go(s, p)
+	case List_Place:
+		history_visit(s, p)
+		place_go(s, p)
+	case Close_Search:
 		if search_showing(s) {
-			history_visit(s, {kind = .Playlist, index = s.library.playlist})
+			history_visit(s, Playlist_Place{index = s.library.playlist})
 		}
 		search_close(s)
-	case .Play:
+	case Play_Row:
 		if !play_ordered(s, p) {
 			return false
 		}
-	case .Back, .Forward:
-		h := &s.history
-		to := history_from(s) - 1 if p.kind == .Back else history_from(s) + 1
-		if to < 0 || to >= h.count {
+	case Go_Back:
+		if !history_step(s, -1) {
 			return false
 		}
-		place := h.places[to]
-		if place.kind == .Search {
-			search_go(s, small_str(&place.id), to)
-		} else {
-			h.at = to
-			place_go(s, &place)
+	case Go_Forward:
+		if !history_step(s, 1) {
+			return false
 		}
 	}
 	ui.data_changed()
 	return true
 }
 
-// place_go shows a place, a Pending of kind .Playlist or .List, without
-// recording it in the history. A search's place is recorded when its
-// results show (search_shown).
-place_go :: proc(s: ^State, p: ^Pending) {
+// history_step goes by places back or forward from history_from. A search
+// is searched for again, and the history moves to it once its results show
+// (search_shown).
+history_step :: proc(s: ^State, by: int) -> bool {
+	h := &s.history
+	to := history_from(s) + by
+	if to < 0 || to >= h.count {
+		return false
+	}
+	if search, ok := h.places[to].(Search_Place); ok {
+		search_go(s, small_str(&search.query), to)
+		return true
+	}
+	h.at = to
+	place_go(s, h.places[to])
+	return true
+}
+
+// place_go shows a sidebar entry or a list without recording it in the
+// history. A search's place is searched for again instead, see
+// history_step.
+place_go :: proc(s: ^State, place: Place) {
 	search_stop(s)
-	#partial switch p.kind {
-	case .Playlist:
-		select_playlist(s, playlist_index(s, p))
-	case .List:
-		open_list(s, p)
+	place := place
+	switch &p in place {
+	case Playlist_Place:
+		select_playlist(s, playlist_index(s, &p))
+	case List_Place:
+		open_list(s, &p)
+	case Search_Place:
 	}
 }
 
@@ -1239,7 +1286,7 @@ HISTORY_MAX :: 50
 
 // History is the places visited, oldest first; at is the one showing.
 History :: struct {
-	places: [HISTORY_MAX]Pending,
+	places: [HISTORY_MAX]Place,
 	count:  int,
 	at:     int,
 }
@@ -1247,21 +1294,23 @@ History :: struct {
 // history_visit records p as the place showing next, dropping the places
 // Forward would have gone to. Searches in a row are one place, so typing a
 // query leaves one entry however many times the debounce ran out.
-history_visit :: proc(s: ^State, p: Pending) {
+history_visit :: proc(s: ^State, p: Place) {
 	h := &s.history
 	if h.count == 0 {
 		h.places[0] = playlist_place(s, s.library.playlist)
 		h.count, h.at = 1, 0
 	}
 	p := p
-	if p.kind == .Playlist {
-		p = playlist_place(s, p.index)
+	if entry, ok := p.(Playlist_Place); ok {
+		p = playlist_place(s, entry.index)
 	}
-	now := &h.places[h.at]
-	if now.kind == p.kind && now.source == p.source && now.index == p.index && now.id == p.id && same_artist_view(now.artist_view, p.artist_view) {
+	now := h.places[h.at]
+	if same_place(now, p) {
 		return
 	}
-	if now.kind != .Search || p.kind != .Search {
+	_, was_search := now.(Search_Place)
+	_, is_search := p.(Search_Place)
+	if !was_search || !is_search {
 		if h.at == HISTORY_MAX - 1 {
 			copy(h.places[:], h.places[1:])
 			h.at -= 1
@@ -1272,19 +1321,37 @@ history_visit :: proc(s: ^State, p: Pending) {
 	h.count = h.at + 1
 }
 
+@(private = "file")
+same_place :: proc(a, b: Place) -> bool {
+	switch x in a {
+	case nil:
+		return b == nil
+	case Playlist_Place:
+		y, ok := b.(Playlist_Place)
+		return ok && x == y
+	case List_Place:
+		y, ok := b.(List_Place)
+		return ok && x.source == y.source && x.index == y.index && x.id == y.id && same_artist_view(x.artist_view, y.artist_view)
+	case Search_Place:
+		y, ok := b.(Search_Place)
+		return ok && x == y
+	}
+	return false
+}
+
 // playlist_place is sidebar entry i as a place. A TIDAL playlist goes by
 // its id, since the sidebar can change order before Back returns to it.
-playlist_place :: proc(s: ^State, i: int) -> Pending {
+playlist_place :: proc(s: ^State, i: int) -> Playlist_Place {
 	items := s.data.sidebar.items
 	if s.data.fake || i < 1 || i > len(items) {
-		return {kind = .Playlist, index = i}
+		return {index = i}
 	}
-	return {kind = .Playlist, id = small(items[i - 1].id)}
+	return {id = small(items[i - 1].id)}
 }
 
 // playlist_index is where a playlist place is in the sidebar now, -1 when
 // it's gone.
-playlist_index :: proc(s: ^State, p: ^Pending) -> int {
+playlist_index :: proc(s: ^State, p: ^Playlist_Place) -> int {
 	if p.id.len == 0 {
 		return p.index
 	}
