@@ -212,7 +212,8 @@ open_url :: proc(url: string) -> bool {
 // empty.
 spawn_detached :: proc(argv: []cstring) -> bool {
 	fds: [2]linux.Fd
-	if linux.pipe2(&fds, {.CLOEXEC}) != .NONE {
+	if err := linux.pipe2(&fds, {.CLOEXEC}); err != .NONE {
+		log.warnf("os_services: couldn't make a pipe for %s: %v", argv[0], err)
 		return false
 	}
 	read_end, write_end := posix.FD(fds[0]), posix.FD(fds[1])
@@ -231,17 +232,24 @@ spawn_detached :: proc(argv: []cstring) -> bool {
 		}
 		posix._exit(0 if grandchild > 0 else 1)
 	}
-	posix.close(write_end)
-	defer posix.close(read_end)
 	if pid < 0 {
+		log.warnf("os_services: couldn't fork for %s: %v", argv[0], posix.errno())
+		posix.close(read_end)
+		posix.close(write_end)
 		return false
 	}
+	posix.close(write_end)
+	defer posix.close(read_end)
 	status: c.int
 	waited := posix.waitpid(pid, &status, {})
 	for waited < 0 && posix.errno() == .EINTR {
 		waited = posix.waitpid(pid, &status, {})
 	}
-	if waited < 0 || !posix.WIFEXITED(status) || posix.WEXITSTATUS(status) != 0 {
+	if waited < 0 {
+		log.warnf("os_services: couldn't wait for %s: %v", argv[0], posix.errno())
+		return false
+	}
+	if !posix.WIFEXITED(status) || posix.WEXITSTATUS(status) != 0 {
 		log.warnf("os_services: couldn't fork for %s", argv[0])
 		return false
 	}
