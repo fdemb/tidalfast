@@ -311,9 +311,9 @@ queue_follow :: proc(s: ^State, v: ^Track_View) {
 			pb.items, pb.entries = items, entries
 			pb.order = make([]int, pb.capacity, a)
 		}
-		pb.items = ([^]Queue_Item)(raw_data(pb.items))[:n]
-		pb.entries = ([^]audio.Queue_Entry)(raw_data(pb.entries))[:n]
-		pb.order = ([^]int)(raw_data(pb.order))[:n]
+		pb.items = queue_len(pb.items, n)
+		pb.entries = queue_len(pb.entries, n)
+		pb.order = queue_len(pb.order, n)
 		if n > old {
 			slice.zero(pb.items[old:])
 			slice.zero(pb.entries[old:])
@@ -328,6 +328,12 @@ queue_follow :: proc(s: ^State, v: ^Track_View) {
 			queue_fill(pb, i, row, a)
 		}
 	}
+}
+
+// queue_len is s at length n, which can be up to the queue's capacity.
+@(private = "file")
+queue_len :: proc(s: []$T, n: int) -> []T {
+	return ([^]T)(raw_data(s))[:n]
 }
 
 // queue_reset makes a new, empty queue of n items, and returns its
