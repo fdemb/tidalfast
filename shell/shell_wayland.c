@@ -840,12 +840,14 @@ typedef struct {
   int fd; // -1 for a free slot
   char *data;
   size_t length, done;
+  uint64_t started;
 } Clip_Send;
 
 static char *g_clip; // what we offer, or NULL
 static size_t g_clip_len;
 static struct wl_data_source *g_clip_source;
 static Clip_Send g_sends[CLIP_SENDS] = {{.fd = -1}, {.fd = -1}, {.fd = -1}, {.fd = -1}};
+static uint64_t g_send_count;
 static struct wl_data_offer *g_offer; // the current selection, from another client
 static bool g_offer_text;
 static int g_receive_fd = -1;
@@ -860,22 +862,29 @@ static bool set_nonblocking(int fd) {
 
 static void source_target(void *data, struct wl_data_source *s, const char *mime) {}
 
-static void send_more(Clip_Send *t) {
+static void end_send(Clip_Send *t) {
   if (t->fd < 0) return;
-  ssize_t n = 0;
-  while (t->done < t->length && (n = write(t->fd, t->data + t->done, t->length - t->done)) > 0) t->done += (size_t)n;
-  if (t->done < t->length && n < 0 && errno == EAGAIN) return;
   close(t->fd);
   free(t->data);
   *t = (Clip_Send){.fd = -1};
 }
 
-// Each send keeps its own copy, since a new selection frees ours.
+static void send_more(Clip_Send *t) {
+  if (t->fd < 0) return;
+  ssize_t n = 0;
+  while (t->done < t->length && (n = write(t->fd, t->data + t->done, t->length - t->done)) > 0) t->done += (size_t)n;
+  if (t->done < t->length && n < 0 && errno == EAGAIN) return;
+  end_send(t);
+}
+
+// Each send keeps its own copy, since a new selection frees ours. With
+// every slot busy, the oldest send gives way.
 static void source_send(void *data, struct wl_data_source *s, const char *mime, int32_t fd) {
-  Clip_Send *t = NULL;
-  for (int i = 0; i < CLIP_SENDS && !t; i++)
-    if (g_sends[i].fd < 0) t = &g_sends[i];
-  if (!t || !set_nonblocking(fd) || !(t->data = malloc(g_clip_len + 1))) {
+  Clip_Send *t = &g_sends[0];
+  for (int i = 1; i < CLIP_SENDS && t->fd >= 0; i++)
+    if (g_sends[i].fd < 0 || g_sends[i].started < t->started) t = &g_sends[i];
+  end_send(t);
+  if (!set_nonblocking(fd) || !(t->data = malloc(g_clip_len + 1))) {
     close(fd);
     return;
   }
@@ -883,6 +892,7 @@ static void source_send(void *data, struct wl_data_source *s, const char *mime, 
   t->fd = fd;
   t->length = g_clip_len;
   t->done = 0;
+  t->started = ++g_send_count;
   send_more(t);
 }
 
