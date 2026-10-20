@@ -35,8 +35,10 @@ default_read_line :: proc(prompt: string, allocator := context.allocator) -> str
 // ---- Token handling ----
 
 // token_refresh gets a new access token with refresh_token and stores it.
-// TIDAL may rotate the refresh token; the new one is kept.
+// TIDAL may rotate the refresh token; the new one is kept. It waits for a
+// refresh another thread has under way.
 token_refresh :: proc(s: ^Session, refresh_token: string) -> (ok: bool, err: Error) {
+	sync.guard(&s.refresh_mutex)
 	return refresh_tokens(s, refresh_token, session_epoch(s))
 }
 
