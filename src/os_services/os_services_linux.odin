@@ -265,6 +265,9 @@ spawn_detached :: proc(argv: []cstring) -> bool {
 	case n < 0:
 		log.warnf("os_services: couldn't tell if %s started: %v", argv[0], posix.errno())
 		return false
+	case n != 0:
+		log.warnf("os_services: couldn't tell if %s started: short read", argv[0])
+		return false
 	}
 	return true
 }
