@@ -221,7 +221,7 @@ token_refresh_and_request_refresh_take_turns :: proc(t: ^testing.T) {
 		_, err := tidal.token_refresh(s, "refresh-0")
 		assert(err == nil)
 	})
-	time.sleep(100 * time.Millisecond)
+	testing.expect(t, wait_for_count(&m, "POST /token", 1), "token_refresh reached the mock")
 	_, err := tidal.request(s, {method = .GET, path = "echo"}, context.temp_allocator)
 	thread.join(refresh)
 	thread.destroy(refresh)
