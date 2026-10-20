@@ -51,6 +51,7 @@ Artist_Cache :: struct {
 Artist_Page :: struct {
 	id:            i64, // 0 for a free slot; the fake data's are negative, see artist_fake_key
 	gen:           u64,
+	slot:          int, // its index in Artist_Cache.pages
 	used:          u64, // the visit it was last opened in
 	name, picture: Small, // what it was opened with, then the Info part's
 	parts:         [Artist_Part]Artist_Part_State,
@@ -165,6 +166,7 @@ artist_visit :: proc(s: ^State, id: i64, name, picture: Small) -> ^Artist_Page {
 		page^ = {
 			id      = id,
 			gen     = c.next_gen,
+			slot    = slot,
 			name    = name,
 			picture = picture,
 		}
@@ -209,7 +211,6 @@ artist_want :: proc(d: ^Data, page: ^Artist_Page) {
 	if d.account != .Signed_In {
 		return
 	}
-	slot := mem.ptr_sub(page, &d.artists.pages[0])
 	for part in Artist_Part {
 		if page.parts[part] != nil {
 			continue
@@ -217,7 +218,7 @@ artist_want :: proc(d: ^Data, page: ^Artist_Page) {
 		// Waiting first: push_job may drop a held job of this page, and
 		// that sets its part back to nil.
 		page.parts[part] = Artist_Waiting{}
-		push_job(d, {payload = Artist_Job{artist = page.id, gen = page.gen, slot = slot, part = part}})
+		push_job(d, {payload = Artist_Job{artist = page.id, gen = page.gen, slot = page.slot, part = part}})
 	}
 }
 
