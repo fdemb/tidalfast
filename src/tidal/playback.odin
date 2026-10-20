@@ -1,6 +1,5 @@
 package tidal
 
-import "core:encoding/base64"
 import "core:encoding/json"
 import "core:fmt"
 import "core:log"
@@ -83,21 +82,8 @@ parse_playback_info :: proc(obj: json.Object, allocator := context.allocator) ->
 		quality     = strings.clone(jstr(obj, "audioQuality"), allocator),
 		sample_rate = jint(obj, "sampleRate", 44100),
 		bit_depth   = jint(obj, "bitDepth", 16),
-		track_gain  = jf64(obj, "trackReplayGain", 0),
-		track_peak  = jf64(obj, "trackPeakAmplitude", 1),
-		album_gain  = jf64(obj, "albumReplayGain", 0),
-		album_peak  = jf64(obj, "albumPeakAmplitude", 1),
 	}
-	if info.track_peak <= 0 {
-		info.track_peak = 1
-	}
-	if info.album_peak <= 0 {
-		info.album_peak = 1
-	}
-	// Some tracks have no album gain; the track's is the best guess then.
-	if !jhas(obj, "albumReplayGain") && jhas(obj, "trackReplayGain") {
-		info.album_gain, info.album_peak = info.track_gain, info.track_peak
-	}
+	info.track_gain, info.track_peak, info.album_gain, info.album_peak = playback_gain(obj)
 
 	mime := jstr(obj, "manifestMimeType")
 	log.debugf("playback info: %s, %d-bit %d Hz, %s manifest", jstr(obj, "audioQuality"), info.bit_depth, info.sample_rate, "DASH" if strings.contains(mime, MANIFEST_MIME_MPD) else "BTS" if strings.contains(mime, MANIFEST_MIME_BTS) else "unknown")
@@ -107,34 +93,22 @@ parse_playback_info :: proc(obj: json.Object, allocator := context.allocator) ->
 	if !strings.contains(mime, MANIFEST_MIME_BTS) {
 		return {}, make_error(.Unknown_Manifest_Format, "Unknown manifest format", detail = mime)
 	}
-	raw, derr := base64.decode(jstr(obj, "manifest"), allocator = context.temp_allocator)
-	if derr != nil {
-		return {}, make_error(.Manifest_Decode, "Stream manifest is not valid base64")
-	}
-	v, jerr := json.parse(raw, .JSON, true, context.temp_allocator)
-	m, is_obj := v.(json.Object)
-	if jerr != nil || !is_obj {
-		return {}, make_error(.Manifest_Decode, "BTS manifest is not valid JSON")
-	}
+	data := decode_manifest(jstr(obj, "manifest"), context.temp_allocator) or_return
+	bts := parse_bts(data, context.temp_allocator) or_return
 	// LOSSLESS comes unencrypted ("NONE"). Anything else needs keys we
 	// don't have.
-	if enc := jstr(m, "encryptionType"); enc != "" && enc != "NONE" {
+	if enc := bts.encryption_type; enc != "" && enc != "NONE" {
 		return {}, make_error(.Stream_Not_Available, "Encrypted stream", detail = enc)
 	}
-	codec := strings.to_upper(jstr(m, "codecs"), context.temp_allocator)
-	if dot := strings.index_byte(codec, '.'); dot >= 0 {
-		codec = codec[:dot]
+	info.codec = strings.clone(bts.codec, allocator)
+	info.mime_type = strings.clone(bts.mime_type, allocator)
+	if bts.codec != "FLAC" && !strings.contains(info.mime_type, "flac") {
+		return {}, make_error(.Lossy_Stream, "Not a FLAC stream", detail = bts.codec)
 	}
-	info.codec = strings.clone(codec, allocator)
-	info.mime_type = strings.clone(jstr(m, "mimeType"), allocator)
-	if codec != "FLAC" && !strings.contains(info.mime_type, "flac") {
-		return {}, make_error(.Lossy_Stream, "Not a FLAC stream", detail = codec)
-	}
-	urls, _ := jarr(m, "urls")
-	if len(urls) == 0 {
+	if len(bts.urls) == 0 {
 		return {}, make_error(.Manifest_Decode, "Manifest has no URLs")
 	}
-	url, _ := urls[0].(json.String)
+	url := bts.urls[0]
 	if url == "" {
 		return {}, make_error(.Manifest_Decode, "Manifest URL is empty")
 	}
@@ -146,11 +120,7 @@ parse_playback_info :: proc(obj: json.Object, allocator := context.allocator) ->
 @(private = "file")
 parse_dash_playback :: proc(info: Stream_Info, manifest: string, allocator := context.allocator) -> (out: Stream_Info, err: Error) {
 	out = info
-	raw, derr := base64.decode(manifest, allocator = context.temp_allocator)
-	if derr != nil {
-		return {}, make_error(.Manifest_Decode, "Stream manifest is not valid base64")
-	}
-	mpd := string(raw)
+	mpd := decode_manifest(manifest, context.temp_allocator) or_return
 	// Widevine and PlayReady streams name their DRM here.
 	if strings.contains(mpd, "ContentProtection") {
 		return {}, make_error(.Stream_Not_Available, "Encrypted stream", detail = "ContentProtection")
@@ -172,4 +142,25 @@ parse_dash_playback :: proc(info: Stream_Info, manifest: string, allocator := co
 		out.sample_rate = dash.audio_sampling_rate
 	}
 	return out, nil
+}
+
+// playback_gain reads the ReplayGain of a playbackinfo answer: gains in dB,
+// linear peaks. A missing gain is 0 dB and a missing peak 1.0, so it does
+// nothing. Without an album gain, the track's is the best guess.
+@(private)
+playback_gain :: proc(obj: json.Object) -> (track_gain, track_peak, album_gain, album_peak: f64) {
+	track_gain = jf64(obj, "trackReplayGain", 0)
+	track_peak = jf64(obj, "trackPeakAmplitude", 1)
+	album_gain = jf64(obj, "albumReplayGain", 0)
+	album_peak = jf64(obj, "albumPeakAmplitude", 1)
+	if track_peak <= 0 {
+		track_peak = 1
+	}
+	if album_peak <= 0 {
+		album_peak = 1
+	}
+	if !jhas(obj, "albumReplayGain") && jhas(obj, "trackReplayGain") {
+		album_gain, album_peak = track_gain, track_peak
+	}
+	return
 }

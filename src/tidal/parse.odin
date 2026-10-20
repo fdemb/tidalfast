@@ -374,7 +374,7 @@ parse_lyrics :: proc(p: ^Parser, obj: json.Object) -> Lyrics {
 }
 
 parse_stream :: proc(p: ^Parser, obj: json.Object) -> Stream {
-	return Stream {
+	st := Stream {
 		track_id = ji64(obj, "trackId", -1),
 		audio_mode = pstr(p, obj, "audioMode"),
 		audio_quality = pstr(p, obj, "audioQuality"),
@@ -382,15 +382,12 @@ parse_stream :: proc(p: ^Parser, obj: json.Object) -> Stream {
 		manifest_hash = pstr(p, obj, "manifestHash"),
 		manifest = pstr(p, obj, "manifest"),
 		asset_presentation = pstr(p, obj, "assetPresentation") if jhas(obj, "assetPresentation") else "FULL",
-		// Gain and amplitude default to 1.0 when unavailable
-		album_replay_gain = jf64(obj, "albumReplayGain", 1.0),
-		album_peak_amplitude = jf64(obj, "albumPeakAmplitude", 1.0),
-		track_replay_gain = jf64(obj, "trackReplayGain", 1.0),
-		track_peak_amplitude = jf64(obj, "trackPeakAmplitude", 1.0),
 		// Not reported for low and hi-res qualities. Assume 16 bit / 44.1 kHz.
 		bit_depth = jint(obj, "bitDepth", 16),
 		sample_rate = jint(obj, "sampleRate", 44100),
 	}
+	st.track_replay_gain, st.track_peak_amplitude, st.album_replay_gain, st.album_peak_amplitude = playback_gain(obj)
+	return st
 }
 
 parse_user :: proc(p: ^Parser, obj: json.Object) -> User {

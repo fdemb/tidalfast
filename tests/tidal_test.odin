@@ -482,6 +482,36 @@ bts_manifest :: proc(t: ^testing.T) {
 	testing.expect(t, tidal.is_error(uerr, .Unknown_Manifest_Format))
 }
 
+// A stream without ReplayGain leaves the volume alone, 0 dB at peak 1.0,
+// whichever call read it.
+@(test)
+missing_replay_gain_is_0_db :: proc(t: ^testing.T) {
+	a: Test_Arena
+	allocator := arena_begin(&a)
+	defer vmem.arena_destroy(&a.arena)
+
+	bts := `{"mimeType":"audio/flac","codecs":"flac","encryptionType":"NONE","urls":["https://sp.example/track.flac"]}`
+	src := fmt.tprintf(
+		`{{"trackId":1,"audioQuality":"LOSSLESS","manifestMimeType":"application/vnd.tidal.bts","manifest":"%s"}}`,
+		base64.encode(transmute([]u8)string(bts), allocator = allocator),
+	)
+	obj := parse_obj(t, src, allocator)
+	p := test_parser(allocator)
+	st := tidal.parse_stream(&p, obj)
+	testing.expect_value(t, st.track_replay_gain, 0)
+	testing.expect_value(t, st.album_replay_gain, 0)
+	testing.expect_value(t, st.track_peak_amplitude, 1)
+	testing.expect_value(t, st.album_peak_amplitude, 1)
+
+	info, err := tidal.parse_playback_info(obj, allocator)
+	testing.expect_value(t, err, nil)
+	testing.expect_value(t, info.track_gain, 0)
+	testing.expect_value(t, info.album_gain, 0)
+	testing.expect_value(t, info.track_peak, 1)
+	testing.expect_value(t, info.album_peak, 1)
+	testing.expect_value(t, info.url, "https://sp.example/track.flac")
+}
+
 @(test)
 pkce_url :: proc(t: ^testing.T) {
 	s := tidal.session_create()
