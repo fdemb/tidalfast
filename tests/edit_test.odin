@@ -595,6 +595,34 @@ test_text_field_click_after_shortcut :: proc(t: ^testing.T) {
 	testing.expect_value(t, hi, len("hello world"))
 }
 
+// Escape in an empty field gives up the focus, and a click on the field
+// later in the same frame takes it back.
+@(test)
+test_text_field_click_after_escape :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer field_ui_destroy(&u)
+	f := new(ui.Text_Field)
+	defer free(f)
+	now := 0.0
+	frame :: proc(u: ^ui.State, f: ^ui.Text_Field, now: ^f64, events: ..platform.Event) -> ui.Field_Signal {
+		now^ += 0.016
+		ui.begin_frame(u, events, nil, nil, 300, 200, now^)
+		sig := ui.text_field("search", f, "Search", ui.px(200), ui.px(30))
+		ui.end_frame()
+		return sig
+	}
+	frame(&u, f, &now)
+	frame(&u, f, &now)
+	sig := frame(&u, f, &now, {kind = .Mouse_Down, x = 50, y = 15, button = .Left, click_count = 1}, {kind = .Mouse_Up, x = 50, y = 15, button = .Left})
+	testing.expect(t, sig.focused)
+
+	sig = frame(&u, f, &now, {kind = .Key_Down, key = .Escape}, {kind = .Mouse_Down, x = 50, y = 15, button = .Left, click_count = 1}, {kind = .Mouse_Up, x = 50, y = 15, button = .Left})
+	testing.expect(t, sig.focused, "the click took the focus back")
+	sig = frame(&u, f, &now)
+	testing.expect(t, sig.focused, "and kept it")
+}
+
 // Word movement and double-click words land where a scan over every
 // boundary does, from any byte offset, inside a cluster or past the end.
 @(test)
