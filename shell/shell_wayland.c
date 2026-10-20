@@ -1029,7 +1029,7 @@ static void device_selection(void *data, struct wl_data_device *d, struct wl_dat
   if (g_offer && g_offer != offer) wl_data_offer_destroy(g_offer);
   g_offer = offer;
   g_offer_text = offer && g_new_offer.text;
-  g_selection_ours = offer && g_new_offer.ours;
+  g_selection_ours = offer && g_new_offer.ours && g_clip_source;
   receive_selection();
 }
 
