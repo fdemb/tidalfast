@@ -653,7 +653,7 @@ test_edit_words_match_scan :: proc(t: ^testing.T) {
 		}
 		return bounds[len(bounds) - 1]
 	}
-	for s in ([]string{"", "a", " ", "Paranoid Android, 1997", "a👨‍👩‍👧b, cé  d_e 12 ", "  夜に駆ける 밤편지", "عيونك حبيبي!"}) {
+	for s in ([]string{"", "a", " ", "Paranoid Android, 1997", "a👨‍👩‍👧b, cé  d_e 12 ", "  夜に駆ける 밤편지", "عيونك حبيبي!", "é yy", "가 가"}) {
 		bounds := ui.cluster_bounds(s)
 		for p in 0 ..= len(s) {
 			left := p
@@ -665,7 +665,13 @@ test_edit_words_match_scan :: proc(t: ^testing.T) {
 			}
 			testing.expectf(t, ui.word_left(s, bounds, p) == left, "%q word_left(%d) = %d, want %d", s, p, ui.word_left(s, bounds, p), left)
 
-			right := p
+			at := 0
+			for b in bounds[:len(bounds) - 1] {
+				if b <= p {
+					at = b
+				}
+			}
+			right := at
 			for right < len(s) && !is_word(s, right) {
 				right = next(bounds, right)
 			}
@@ -676,12 +682,6 @@ test_edit_words_match_scan :: proc(t: ^testing.T) {
 
 			if len(s) == 0 {
 				continue
-			}
-			at := 0
-			for b in bounds[:len(bounds) - 1] {
-				if b <= p {
-					at = b
-				}
 			}
 			word := is_word(s, at)
 			lo, hi := at, next(bounds, at)

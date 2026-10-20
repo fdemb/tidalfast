@@ -192,15 +192,10 @@ word_left :: proc(s: string, bounds: []int, p: int) -> int {
 // the end of the word after them.
 word_right :: proc(s: string, bounds: []int, p: int) -> int {
 	i, found := slice.binary_search(bounds, p)
-	last := len(bounds) - 1
-	// Off a bound, the rest of p's cluster ends at bounds[i] and goes by the
-	// codepoint at p.
-	if !found && cluster_is_word(s, p) {
-		for i < last && cluster_is_word(s, bounds[i]) {
-			i += 1
-		}
-		return bounds[i]
+	if !found {
+		i -= 1
 	}
+	last := len(bounds) - 1
 	for i < last && !cluster_is_word(s, bounds[i]) {
 		i += 1
 	}
