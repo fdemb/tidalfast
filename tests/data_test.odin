@@ -76,31 +76,6 @@ queue_full_and_remove_if :: proc(t: ^testing.T) {
 }
 
 @(test)
-queue_stop_wakes_waiters :: proc(t: ^testing.T) {
-	Shared :: struct {
-		q:      jobs.Queue(Test_Job, 2),
-		popped: bool, // pop_wait returned ok
-		done:   bool,
-	}
-	sh: Shared
-	worker := thread.create_and_start_with_poly_data(&sh, proc(sh: ^Shared) {
-		_, _, ok := jobs.pop_wait(&sh.q)
-		sh.popped = ok
-		sync.atomic_store(&sh.done, true)
-	})
-	time.sleep(20 * time.Millisecond)
-	testing.expect(t, !sync.atomic_load(&sh.done))
-	jobs.stop(&sh.q)
-	thread.join(worker)
-	thread.destroy(worker)
-	testing.expect(t, !sh.popped)
-	// Stopped: pushes fail until start, but requeue still goes in.
-	testing.expect(t, !jobs.push(&sh.q, {1}))
-	jobs.start(&sh.q)
-	testing.expect(t, jobs.push(&sh.q, {1}))
-}
-
-@(test)
 queue_push_wait_blocks_until_room :: proc(t: ^testing.T) {
 	Shared :: struct {
 		q:      jobs.Queue(Test_Job, 1),
@@ -480,51 +455,114 @@ cover_decode_premultiplies_trns :: proc(t: ^testing.T) {
 	}
 }
 
+Wait_Shared :: struct {
+	q:        jobs.Queue(Test_Job, 1),
+	work:     proc(sh: ^Wait_Shared),
+	finished: bool,
+	ok:       bool,
+	stopped:  bool,
+	popped:   int,
+}
+
+// blocks_until runs sh.work on a thread, checks it is still waiting after
+// 20 ms, runs wake and waits up to 2 s for the work to return. On a timeout
+// it fails and stops the queue to free the thread, so a lost wakeup fails
+// the test instead of hanging it. A thread that ignores the stop as well
+// ends the test and is left running with sh, so sh is static.
+@(private = "file")
+blocks_until :: proc(t: ^testing.T, sh: ^Wait_Shared, wake: proc(sh: ^Wait_Shared), loc := #caller_location) {
+	finished_within :: proc(sh: ^Wait_Shared, d: time.Duration) -> bool {
+		deadline := time.tick_add(time.tick_now(), d)
+		for !sync.atomic_load(&sh.finished) {
+			if time.tick_diff(time.tick_now(), deadline) <= 0 {
+				return false
+			}
+			time.sleep(time.Millisecond)
+		}
+		return true
+	}
+	sync.atomic_store(&sh.finished, false)
+	worker := thread.create_and_start_with_poly_data(sh, proc(sh: ^Wait_Shared) {
+		sh.work(sh)
+		sync.atomic_store(&sh.finished, true)
+	})
+	time.sleep(20 * time.Millisecond)
+	testing.expect(t, !sync.atomic_load(&sh.finished), "returned before the wakeup", loc = loc)
+	wake(sh)
+	if !finished_within(sh, 2 * time.Second) {
+		testing.expect(t, false, "no wakeup within 2 s", loc = loc)
+		jobs.stop(&sh.q)
+		if !finished_within(sh, 2 * time.Second) {
+			testing.fail_now(t, "the stop did not wake it either", loc)
+		}
+	}
+	thread.join(worker)
+	thread.destroy(worker)
+}
+
 // Every way room comes back wakes a push_wait, and every way an item comes
 // in wakes a pop_wait_where waiting for that item.
 @(test)
 queue_waiters_wake_on_each_change :: proc(t: ^testing.T) {
-	Shared :: struct {
-		q:      jobs.Queue(Test_Job, 1),
-		ok:     bool,
-		popped: int,
-	}
-	push_waits :: proc(t: ^testing.T, sh: ^Shared, free_room: proc(sh: ^Shared)) {
-		sync.atomic_store(&sh.ok, false)
-		worker := thread.create_and_start_with_poly_data(sh, proc(sh: ^Shared) {
-			sync.atomic_store(&sh.ok, jobs.push_wait(&sh.q, {2}))
-		})
-		time.sleep(20 * time.Millisecond)
-		testing.expect(t, !sync.atomic_load(&sh.ok))
-		free_room(sh)
-		thread.join(worker)
-		thread.destroy(worker)
-		testing.expect(t, sh.ok)
-	}
-	sh: Shared
+	@(static) sh_storage: Wait_Shared
+	sh := &sh_storage
 	jobs.push(&sh.q, {1})
 	_, _, _ = jobs.pop_wait(&sh.q)
-	push_waits(t, &sh, proc(sh: ^Shared) {jobs.done(&sh.q)})
-	push_waits(t, &sh, proc(sh: ^Shared) {
+	sh.work = proc(sh: ^Wait_Shared) {sh.ok = jobs.push_wait(&sh.q, {2})}
+	blocks_until(t, sh, proc(sh: ^Wait_Shared) {jobs.done(&sh.q)})
+	testing.expect(t, sh.ok)
+	blocks_until(t, sh, proc(sh: ^Wait_Shared) {
 		all :: proc(_: ^Test_Job, _: rawptr) -> bool {return true}
 		jobs.remove_if(&sh.q, all, nil)
 	})
+	testing.expect(t, sh.ok)
 
-	pop_waits :: proc(t: ^testing.T, sh: ^Shared, add_item: proc(sh: ^Shared)) {
-		sync.atomic_store(&sh.popped, 0)
-		worker := thread.create_and_start_with_poly_data(sh, proc(sh: ^Shared) {
-			is_seven :: proc(job: ^Test_Job) -> bool {return job.id == 7}
-			job, _, ok, _ := jobs.pop_wait_where(&sh.q, is_seven, 5 * time.Second)
-			sync.atomic_store(&sh.popped, job.id if ok else -1)
-		})
-		time.sleep(20 * time.Millisecond)
-		testing.expect_value(t, sync.atomic_load(&sh.popped), 0)
-		add_item(sh)
-		thread.join(worker)
-		thread.destroy(worker)
-		testing.expect_value(t, sh.popped, 7)
+	sh.work = proc(sh: ^Wait_Shared) {
+		is_seven :: proc(job: ^Test_Job) -> bool {return job.id == 7}
+		job, _, ok, _ := jobs.pop_wait_where(&sh.q, is_seven, 5 * time.Second)
+		sh.popped = job.id if ok else -1
 	}
 	jobs.remove_if(&sh.q, proc(_: ^Test_Job, _: rawptr) -> bool {return true}, nil)
-	pop_waits(t, &sh, proc(sh: ^Shared) {jobs.push(&sh.q, {7})})
-	pop_waits(t, &sh, proc(sh: ^Shared) {jobs.requeue(&sh.q, {7}, {})})
+	sh.popped = 0
+	blocks_until(t, sh, proc(sh: ^Wait_Shared) {jobs.push(&sh.q, {7})})
+	testing.expect_value(t, sh.popped, 7)
+	sh.popped = 0
+	blocks_until(t, sh, proc(sh: ^Wait_Shared) {jobs.requeue(&sh.q, {7}, {})})
+	testing.expect_value(t, sh.popped, 7)
+}
+
+// stop wakes every kind of waiter.
+@(test)
+queue_stop_wakes_waiters :: proc(t: ^testing.T) {
+	@(static) sh_storage: Wait_Shared
+	sh := &sh_storage
+	stop :: proc(sh: ^Wait_Shared) {jobs.stop(&sh.q)}
+
+	sh.ok = true
+	sh.work = proc(sh: ^Wait_Shared) {_, _, sh.ok = jobs.pop_wait(&sh.q)}
+	blocks_until(t, sh, stop)
+	testing.expect(t, !sh.ok)
+	// Stopped: pushes fail until start.
+	testing.expect(t, !jobs.push(&sh.q, {1}))
+	jobs.start(&sh.q)
+	testing.expect(t, jobs.push(&sh.q, {1}))
+
+	sh.ok = true
+	sh.work = proc(sh: ^Wait_Shared) {sh.ok = jobs.push_wait(&sh.q, {2})}
+	blocks_until(t, sh, stop)
+	testing.expect(t, !sh.ok)
+
+	jobs.start(&sh.q)
+	_, _ = jobs.try_pop(&sh.q)
+	sh.work = proc(sh: ^Wait_Shared) {
+		_, _, _, sh.stopped = jobs.pop_wait_where(&sh.q, proc(_: ^Test_Job) -> bool {return true}, 5 * time.Second)
+	}
+	blocks_until(t, sh, stop)
+	testing.expect(t, sh.stopped)
+
+	jobs.start(&sh.q)
+	sh.stopped = false
+	sh.work = proc(sh: ^Wait_Shared) {sh.stopped = jobs.sleep(&sh.q, 5 * time.Second)}
+	blocks_until(t, sh, stop)
+	testing.expect(t, sh.stopped)
 }
