@@ -1343,3 +1343,46 @@ damaged_queue_position_keeps_the_queue :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(queue.rows), 300)
 	testing.expect(t, os.exists(path), "the queue's file stays")
 }
+
+// A position file left from an older queue file, with another key, is
+// ignored.
+@(test)
+stale_queue_position_is_ignored :: proc(t: ^testing.T) {
+	dir := cache_dir("queue-stale-place")
+	defer delete(dir, runtime.heap_allocator())
+	defer os.remove_all(dir)
+	s := cache_state(dir)
+	defer cache_state_free(s)
+	s.playback.player = audio.create(no_wake, 0, null_output = true)
+	defer app.playback_shutdown(s)
+	queue_with_position(t, s, {magic = app.QUEUE_POSITION_MAGIC, index = 3, sample = 0, rate = 44100}, key = 1)
+
+	res, _ := app.disk_run(&s.data, {payload = app.Disk_Job{op = .Read_Queue, user = 7}})
+	defer app.result_free(&res)
+	queue, hit := res.payload.(app.Queue_File_Result)
+	testing.expect(t, hit, "the queue's file reads back")
+	testing.expect_value(t, queue.header.index, 7)
+}
+
+// A sign-out right before quitting, before the disk thread got to it,
+// still deletes the Keychain item and the account's folder.
+@(test)
+quit_after_sign_out_forgets_the_account :: proc(t: ^testing.T) {
+	dir := cache_dir("forget-at-quit")
+	defer delete(dir, runtime.heap_allocator())
+	defer os.remove_all(dir)
+	s := cache_state(dir)
+	d := &s.data
+	user_dir := app.disk_dir(dir, 7, context.temp_allocator)
+	sidebar(s, updated = 1, count = 300)
+	run_disk(s)
+	testing.expect(t, os.exists(user_dir), "the account has a folder")
+
+	app.sign_out(s, "Signed out.")
+	app.data_shutdown(s)
+	_, saved := keychain_auth(d)
+	testing.expect(t, !saved, "the keychain item went")
+	testing.expect(t, !os.exists(user_dir), "the account's folder went")
+	test_state_free(s)
+	free(s)
+}
