@@ -1,6 +1,7 @@
-# Checks text on Linux with the two kinds of Noto Sans distributions ship:
-# static files per weight (Debian, Ubuntu) and one variable font whose
-# weights are named instances (Fedora). Runs the tests, then the app with
+# Checks text on Linux with the Noto Sans setups distributions ship: Debian
+# and Ubuntu's fonts-noto-core alone (Regular and Bold only), with
+# fonts-noto-extra (every weight as its own file), and Fedora's variable font
+# whose weights are named instances. Runs the tests, then the app with
 # fake data under a headless Weston on Mesa's software Vulkan, and uploads
 # frames of the library and the text screen.
 name: linux-text
@@ -23,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        noto: [static, variable]
+        noto: [core, extra, variable]
     steps:
       - uses: actions/checkout@v5
       - name: Install packages
@@ -33,6 +34,7 @@ jobs:
             libvulkan-dev glslang-tools libfreetype-dev libfontconfig-dev libcurl4-openssl-dev \
             fonts-noto-core fonts-noto-color-emoji fonts-noto-cjk weston mesa-vulkan-drivers dbus gnome-keyring \
             python3-pil
+          if [ "${{ matrix.noto }}" = extra ]; then sudo apt-get install -y fonts-noto-extra; fi
       - name: Use Fedora's variable Noto Sans
         if: matrix.noto == 'variable'
         run: |

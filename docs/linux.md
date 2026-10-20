@@ -7,7 +7,7 @@ apt install build-essential clang pkg-config libwayland-dev wayland-protocols li
     glslang-tools libfreetype-dev libfontconfig-dev libcurl4-openssl-dev
 ```
 
-The text is in Noto Sans (`fonts-noto-core` on Debian and Ubuntu), with Noto Color Emoji for emoji. Without Noto Sans it falls back to whatever fontconfig gives for it.
+The text is in Noto Sans, with Noto Color Emoji for emoji. On Debian and Ubuntu, `fonts-noto-core` has only its Regular and Bold; Medium and SemiBold are in `fonts-noto-extra`, and without it fontconfig gives Regular for Medium and Bold for SemiBold. Fedora's variable Noto Sans has all four as named instances. Without Noto Sans the app uses whatever fontconfig gives for it. The `linux-text` workflow checks all three setups.
 
 Odin's `vendor:miniaudio` and `vendor:stb` link static libraries that Odin doesn't ship built for Linux. Build them once in the Odin install by running `build_miniaudio.sh` in `$(odin root)/vendor/miniaudio/src` and `build_stb.sh` in `$(odin root)/vendor/stb/src`. libsecret is opened with `dlopen` when the login is first saved or read, so it's only needed at run time, and only to keep the login.
 

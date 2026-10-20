@@ -86,6 +86,20 @@ test_truncate_ltr :: proc(t: ^testing.T) {
 	testing.expect_value(t, width, 8)
 }
 
+// A label sized to its text gets its width plus padding, and draws in that
+// less the padding. In f32 that can come back a hair under the width, as
+// it did for "Discovery" in Noto Sans, which then lost its last letters.
+@(test)
+test_truncate_padded_fit :: proc(t: ^testing.T) {
+	gs := glyphs(6)
+	run_width, pad: f32 = 59.2, 4
+	avail := (run_width + 2 * pad) - 2 * pad
+	testing.expect(t, avail < run_width, "the padding round trip loses a bit")
+	_, last, _, _, width := text.truncate(gs, run_width, avail, 8, false)
+	testing.expect_value(t, last, 6)
+	testing.expect_value(t, width, run_width)
+}
+
 @(test)
 test_truncate_rtl :: proc(t: ^testing.T) {
 	// Right to left, the logical end is on the left: glyphs stay from the
@@ -384,12 +398,17 @@ test_shape :: proc(t: ^testing.T) {
 	bold := text.shape(state, .Bold, 13, "Blue in Green")
 	testing.expect(t, bold.width > a.width, "bold is wider")
 	// The weights can be instances of one variable font, whose default
-	// instance is all kb_text_shape reads.
+	// instance is all kb_text_shape reads. A weight the system lacks, like
+	// Medium with only Debian's fonts-noto-core, gets the one below's font.
 	width: f32
+	below := text.Font.Regular
 	for font in ([]text.Font{.Regular, .Medium, .Semibold, .Bold}) {
 		w := text.shape(state, font, 13, "Blue in Green").width
-		testing.expectf(t, w > width, "%v is wider than the weight below", font)
+		if font == .Regular || state.faces[font].name != state.faces[below].name {
+			testing.expectf(t, w > width, "%v is wider than the weight below", font)
+		}
 		width = w
+		below = font
 	}
 
 	arabic := shape_loaded(&sh, .Regular, 13, "عيونك")
