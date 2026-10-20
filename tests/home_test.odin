@@ -1,12 +1,15 @@
 package tidal_tests
 
 import "core:fmt"
+import "core:mem"
 import vmem "core:mem/virtual"
 import "core:testing"
 
 import "../src/app"
 import "../src/jobs"
+import "../src/platform"
 import "../src/tidal"
+import "../src/ui"
 
 @(private = "file")
 artists_list :: proc(title: string, n: int) -> tidal.Item_List {
@@ -170,4 +173,76 @@ home_falls_back_then_fails :: proc(t: ^testing.T) {
 	testing.expect_value(t, h.status, app.Home_Status.Loading)
 	queued, _ := jobs.pending(&d.queue)
 	testing.expect_value(t, queued, 1)
+}
+
+@(private = "file")
+home_node :: proc(s: ^app.State, label: string, role: platform.Access_Role) -> (platform.Access_Node, bool) {
+	nodes, _ := ui.access_tree(&s.ui)
+	for n in nodes {
+		if n.role == role && string(n.label) == label {
+			return n, true
+		}
+	}
+	return {}, false
+}
+
+@(private = "file")
+home_press :: proc(t: ^testing.T, s: ^app.State, label: string, loc := #caller_location) -> platform.Event {
+	n, ok := home_node(s, label, .Button)
+	testing.expectf(t, ok, "no button %q", label, loc = loc)
+	return {kind = .Access_Press, target = n.id}
+}
+
+// With the fake data, Home in the sidebar shows the greeting, eight
+// shortcuts and the shelves. A shortcut opens its playlist, a card its
+// album, and Back comes back to Home.
+@(test)
+home_page_opens_from_the_sidebar :: proc(t: ^testing.T) {
+	fonts: Fonts
+	if !testing.expect(t, fonts_init(&fonts)) {
+		return
+	}
+	defer fonts_destroy(&fonts)
+	context.allocator = mem.arena_allocator(&fonts.arena)
+	s := library_state(true)
+	defer library_state_free(s)
+	f := Frame{fonts = &fonts, size = {1100, 2400}}
+	library_frame(t, s, &f)
+	library_frame(t, s, &f, home_press(t, s, "Home"))
+	library_frame(t, s, &f)
+	library_frame(t, s, &f)
+	testing.expect(t, app.home_showing(s), "Home shows")
+	library_frame(t, s, &f)
+	testing.expect(t, !f.animating, "Home asks for no frames once it settles")
+	_, greeted := access_node(s, "Good ")
+	testing.expect(t, greeted, "the greeting")
+	for i in 0 ..< 8 {
+		_, ok := home_node(s, app.PLAYLISTS[i], .Button)
+		testing.expectf(t, ok, "shortcut %d", i)
+	}
+	_, ninth := home_node(s, app.PLAYLISTS[8], .Button)
+	testing.expect(t, !ninth, "eight shortcuts")
+	for title in ([]string{"Recently played", "Playlists for you", "Artists you might like", "New albums"}) {
+		_, ok := home_node(s, title, .List)
+		testing.expectf(t, ok, "the %s shelf", title)
+	}
+	_, view_all := access_node(s, "View all")
+	testing.expect(t, !view_all, "Home's shelves have no View all")
+
+	library_frame(t, s, &f, home_press(t, s, app.PLAYLISTS[2]))
+	library_frame(t, s, &f)
+	testing.expect(t, !app.home_showing(s), "a shortcut leaves Home")
+	testing.expect_value(t, s.library.playlist, 2)
+
+	app.pending_set(s, app.Go_Back{})
+	app.pending_apply(s)
+	library_frame(t, s, &f)
+	library_frame(t, s, &f)
+	testing.expect(t, app.home_showing(s), "Back comes back to Home")
+
+	album := s.data.home.shelves[0].items[0]
+	library_frame(t, s, &f, home_press(t, s, fmt.tprintf("%s, %s", album.name, album.subtitle)))
+	library_frame(t, s, &f)
+	testing.expect(t, !app.home_showing(s), "a card leaves Home")
+	testing.expect_value(t, app.view_title(s), album.name)
 }

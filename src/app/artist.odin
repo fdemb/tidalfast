@@ -129,13 +129,16 @@ artist_link :: proc(id: i64) -> string {
 	return fmt.tprintf("https://tidal.com/browse/artist/%d", id)
 }
 
-// open_card opens an album, or an artist's page, once the frame is done.
-// With the fake data a card's id is a row of that album or artist.
-@(private = "file")
+// open_card opens an album, an artist's page or a playlist once the frame
+// is done. With the fake data a card's id is a row of that album or
+// artist, or a playlist's sidebar entry.
 open_card :: proc(s: ^State, source: Source, f: Found) {
-	if source == .Artist {
+	#partial switch source {
+	case .Artist:
 		open_artist(s, f.id, f.name, int(f.id))
-	} else {
+	case .Playlist:
+		open_playlist(s, f)
+	case:
 		open_album(s, f.id, f.name, f.image, int(f.id))
 	}
 }
@@ -214,7 +217,6 @@ part_failed :: proc(s: ^State, page: ^Artist_Page, part: Artist_Part, title, id:
 
 // shelf_placeholder stands in for a shelf on its way: its title and grey
 // squares where the covers go.
-@(private = "file")
 shelf_placeholder :: proc(title: string, width: f32) {
 	section_title(title)
 	ui.spacer(ui.px(8))

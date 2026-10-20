@@ -259,6 +259,7 @@ draw_sidebar :: proc(s: ^State) {
 	side := ui.column("sidebar", {.Draw_Background, .Clip}, ui.px(lib.sidebar_w), ui.fill())
 	side.background = PANEL
 	draw_history_buttons(s)
+	draw_home_entry(s)
 	{
 		ui.row("", {}, ui.fill(), ui.px(40))
 		ui.spacer(ui.px(SIDEBAR_INDENT))
@@ -283,7 +284,7 @@ draw_sidebar :: proc(s: ^State) {
 			entry := sidebar_entry(s, i)
 			item := ui.row(fmt.tprintf("##playlist%d", i), {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects, .Draw_Border}, ui.fill(), ui.px(PLAYLIST_ROW_H))
 			item.radius = 6
-			current := lib.playlist == i && !s.search.browsing
+			current := lib.playlist == i && !s.search.browsing && !home_showing(s)
 			row_highlight(item, SIDEBAR_ROWS, current)
 			ui.accessible(item, .Row, fmt.tprintf("%s, %s", entry.name, entry.subtitle), selected = current)
 			if ui.drop_hover(item) {
@@ -357,6 +358,10 @@ draw_main_view :: proc(s: ^State, main_w: f32) {
 		}
 	}
 	draw_login_notice(s)
+	if home_showing(s) {
+		draw_home(s, main_w)
+		return
+	}
 	if p := artist_place(s); p != nil {
 		if _, table := p.artist_view.(Artist_Top_Tracks); !table {
 			draw_artist(s, p, main_w)
@@ -1160,6 +1165,7 @@ status_text :: proc(s: ^State) -> string {
 Pending :: union {
 	Playlist_Place,
 	List_Place,
+	Home_Place,
 	Close_Search,
 	Play_Row,
 	Go_Back,
@@ -1193,6 +1199,7 @@ Place :: union {
 	Playlist_Place,
 	List_Place,
 	Search_Place,
+	Home_Place,
 }
 
 // Playlist_Place is a sidebar entry. A TIDAL playlist goes by id once it's
@@ -1239,8 +1246,11 @@ pending_apply :: proc(s: ^State) -> bool {
 	case List_Place:
 		history_visit(s, p)
 		place_go(s, p)
+	case Home_Place:
+		history_visit(s, p)
+		place_go(s, p)
 	case Close_Search:
-		if search_showing(s) {
+		if search_showing(s) && !home_showing(s) {
 			history_visit(s, Playlist_Place{index = s.library.playlist})
 		}
 		search_close(s)
@@ -1290,6 +1300,8 @@ place_go :: proc(s: ^State, place: Place) {
 		select_playlist(s, playlist_index(s, &p))
 	case List_Place:
 		open_list(s, &p)
+	case Home_Place:
+		home_visit(s)
 	case Search_Place:
 	}
 }
@@ -1347,6 +1359,9 @@ same_place :: proc(a, b: Place) -> bool {
 	case Search_Place:
 		y, ok := b.(Search_Place)
 		return ok && x == y
+	case Home_Place:
+		_, ok := b.(Home_Place)
+		return ok
 	}
 	return false
 }

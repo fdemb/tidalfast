@@ -74,8 +74,9 @@ page_button :: proc(id, icon, name: string, enabled: bool) -> ui.Signal {
 // card_row is a shelf of items width wide: its title, then up to
 // SHELF_CARDS cards in a row that scrolls sideways. A card out of view is
 // built empty, for the focus to move to. id names the shelf among its
-// siblings; source says what the items are, .Artist or .Album.
-card_row :: proc(s: ^State, id, title: string, items: []Found, source: Source, width: f32) -> (sig: Shelf_Signal) {
+// siblings; source says what the items are, .Album, .Artist or .Playlist.
+// Without view_all the shelf has no View all.
+card_row :: proc(s: ^State, id, title: string, items: []Found, source: Source, width: f32, view_all := true) -> (sig: Shelf_Signal) {
 	sig.clicked = -1
 	n := min(len(items), SHELF_CARDS)
 	content := f32(n) * CARD_PITCH - CARD_GAP
@@ -99,7 +100,7 @@ card_row :: proc(s: ^State, id, title: string, items: []Found, source: Source, w
 			}
 			ui.spacer(ui.px(6))
 		}
-		if text_button(fmt.tprintf("View all###%s_all", id), fmt.tprintf("View all %s", title)).clicked {
+		if view_all && text_button(fmt.tprintf("View all###%s_all", id), fmt.tprintf("View all %s", title)).clicked {
 			sig.view_all = true
 		}
 	}
@@ -114,7 +115,7 @@ card_row :: proc(s: ^State, id, title: string, items: []Found, source: Source, w
 	ui.parent(view)
 	first := int(view.view_off.x / CARD_PITCH) - 1
 	last := int(math.ceil((view.view_off.x + view_w) / CARD_PITCH)) + 1
-	kind := cover.Kind.Artist if source == .Artist else .Album
+	kind := card_cover(source)
 	for i in 0 ..< n {
 		if card(s, i, items[i], kind, i >= first && i < last).clicked {
 			sig.clicked = i
@@ -124,6 +125,18 @@ card_row :: proc(s: ^State, id, title: string, items: []Found, source: Source, w
 		}
 	}
 	return
+}
+
+// card_cover is the kind of cover a card of source shows.
+@(private = "file")
+card_cover :: proc(source: Source) -> cover.Kind {
+	#partial switch source {
+	case .Artist:
+		return .Artist
+	case .Playlist:
+		return .Playlist
+	}
+	return .Album
 }
 
 // card is one cover with its title and subtitle under it. Without filled
@@ -166,7 +179,7 @@ card_grid :: proc(s: ^State, id, title: string, items: []Found, source: Source, 
 	cols := max(int((width + CARD_GAP) / CARD_PITCH), 1)
 	n := len(items)
 	row_h := f32(CARD_H + GRID_ROW_GAP)
-	kind := cover.Kind.Artist if source == .Artist else .Album
+	kind := card_cover(source)
 	view := ui.scroll_view(id, ui.fill(), ui.fill(), inset_end = bar_inset(s))
 	ui.accessible(view, .List, title)
 	rows := ui.virtual_rows(view, (n + cols - 1) / cols, row_h)

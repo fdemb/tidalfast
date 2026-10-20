@@ -19,12 +19,22 @@ import "core:log"
 import "core:mem"
 import vmem "core:mem/virtual"
 import "core:strings"
+import "core:sys/posix"
 import "core:time"
 
+import "../text"
 import "../tidal"
+import "../ui"
 
 HOME_SHELVES :: 12
 HOME_STALE :: 10 * time.Minute
+HOME_SHORTCUTS :: 8
+SHORTCUT_H :: 56 // a tile, and its cover
+SHORTCUT_GAP :: 8
+SHORTCUT_WIDE :: 760 // the column's width from which tiles go four to a row
+
+// Home_Place is the Home page as a place in the History.
+Home_Place :: struct {}
 
 Home_Status :: enum u8 {
 	Idle, // not asked for, or asked again on the next home_want
@@ -123,6 +133,153 @@ home_job_dropped :: proc(d: ^Data) {
 home_clear :: proc(d: ^Data) {
 	arena_release(d.home.arena)
 	d.home = {}
+}
+
+// home_showing says whether the main view shows Home: the History's
+// current place is Home. The open list stays as it was underneath.
+home_showing :: proc(s: ^State) -> bool {
+	h := &s.history
+	if h.count == 0 {
+		return false
+	}
+	_, ok := h.places[h.at].(Home_Place)
+	return ok
+}
+
+// Drawing
+
+// draw_home_entry is the Home row at the top of the sidebar, lit while
+// Home shows.
+draw_home_entry :: proc(s: ^State) {
+	current := home_showing(s)
+	ui.row("", {}, ui.fill(), ui.px(40))
+	ui.spacer(ui.px(SIDEBAR_PAD))
+	{
+		b := ui.row("##home", {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects}, ui.fill(), ui.fill())
+		b.radius = 6
+		row_highlight(b, SIDEBAR_ROWS, current)
+		ui.accessible(b, .Button, "Home", selected = current)
+		if ui.signal(b).clicked {
+			pending_set(s, Home_Place{})
+		}
+		ui.spacer(ui.px(ROW_PAD))
+		ui.text_style(.Icon_Fill if current else .Icon, 20, TEXT)
+		icon := ui.label(text.ICON_HOUSE_FILL if current else text.ICON_HOUSE, ui.px(40), ui.fill())
+		icon.text_align = .Center
+		ui.spacer(ui.px(12))
+		ui.text_style(.Semibold, 15, TEXT)
+		ui.label("Home", ui.fill(), ui.fill())
+	}
+	ui.spacer(ui.px(SIDEBAR_PAD))
+}
+
+// draw_home draws the page main_w wide: the greeting, the shortcuts, then
+// the shelves, grey ones while they're on their way, or why they didn't
+// come with a Retry.
+draw_home :: proc(s: ^State, main_w: f32) {
+	h := &s.data.home
+	home_want(&s.data)
+	content_w := min(main_w, CONTENT_MAX) - 2 * PAGE_PAD
+	view := ui.scroll_view("home", ui.fill(), ui.fill(), inset_end = bar_inset(s))
+	ui.accessible(view, .Group, "Home")
+	centred(content_w)
+	ui.spacer(ui.px(24))
+	{
+		ui.row("", {}, ui.fill(), ui.px(44))
+		ui.spacer(ui.px(CARD_PAD))
+		ui.text_style(.Bold, 32, TEXT)
+		hello := greeting()
+		ui.accessible(ui.label(hello, ui.fill(), ui.fill()), .Static_Text, hello)
+	}
+	ui.spacer(ui.px(16))
+	draw_shortcuts(s, content_w)
+	switch {
+	case len(h.shelves) > 0:
+		for shelf, i in h.shelves {
+			sig := card_row(s, fmt.tprintf("home%d", i), shelf.title, shelf.items, shelf.source, content_w, view_all = false)
+			if sig.clicked >= 0 {
+				open_card(s, shelf.source, shelf.items[sig.clicked])
+			}
+		}
+	case h.status == .Failed:
+		ui.parent(section_title("For you"))
+		ui.text_style(.Regular, 13, DIM)
+		message := small_str(&h.error)
+		ui.label(fmt.tprintf("Couldn't load: %s", message) if message != "" else "Couldn't load", ui.text_size(), ui.fill())
+		ui.spacer(ui.px(8))
+		if text_button("Retry###home_retry", "Retry loading Home").clicked {
+			home_retry(&s.data)
+			ui.data_changed()
+		}
+	case:
+		for _ in 0 ..< 3 {
+			shelf_placeholder("", content_w)
+		}
+	}
+	ui.spacer(ui.px(48))
+}
+
+// greeting says good morning, afternoon or evening by the local time.
+@(private = "file")
+greeting :: proc() -> string {
+	now := posix.time(nil)
+	local: posix.tm
+	posix.localtime_r(&now, &local)
+	switch local.tm_hour {
+	case 5 ..< 12:
+		return "Good morning"
+	case 12 ..< 18:
+		return "Good afternoon"
+	}
+	return "Good evening"
+}
+
+// draw_shortcuts is the sidebar's first HOME_SHORTCUTS entries as tiles,
+// four to a row in a wide column and two in a narrow one. A click opens
+// the entry. The tiles share a keyed parent, so the arrows move through
+// them as a grid.
+@(private = "file")
+draw_shortcuts :: proc(s: ^State, width: f32) {
+	n := min(sidebar_count(s), HOME_SHORTCUTS)
+	if n == 0 {
+		return
+	}
+	inner := width - 2 * CARD_PAD
+	cols := 4 if inner >= SHORTCUT_WIDE else 2
+	tile_w := (inner - f32(cols - 1) * SHORTCUT_GAP) / f32(cols)
+	grid := ui.column("shortcuts", {}, ui.fill(), ui.children_sum())
+	ui.accessible(grid, .List, "Shortcuts")
+	for first := 0; first < n; first += cols {
+		if first > 0 {
+			ui.spacer(ui.px(SHORTCUT_GAP))
+		}
+		ui.row("", {}, ui.fill(), ui.px(SHORTCUT_H))
+		ui.spacer(ui.px(CARD_PAD))
+		for i in first ..< min(first + cols, n) {
+			if i > first {
+				ui.spacer(ui.px(SHORTCUT_GAP))
+			}
+			if shortcut(s, i, tile_w).clicked {
+				pending_set(s, Playlist_Place{index = i})
+			}
+		}
+	}
+}
+
+@(private = "file")
+shortcut :: proc(s: ^State, i: int, width: f32) -> ui.Signal {
+	entry := sidebar_entry(s, i)
+	b := ui.row(fmt.tprintf("##shortcut%d", i), {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects, .Clip}, ui.px(width), ui.px(SHORTCUT_H))
+	b.radius = 6
+	b.background = SURFACE
+	b.hover_color = SURFACE_ACTIVE
+	ui.accessible(b, .Button, entry.name)
+	cover_art(s, .Playlist, entry.image, entry.seed, SHORTCUT_H, ui.px(SHORTCUT_H), 6)
+	ui.spacer(ui.px(14))
+	ui.text_style(.Semibold, 14, TEXT)
+	ui.label(entry.name, ui.fill(), ui.fill())
+	ui.spacer(ui.px(12))
+	return ui.signal(b)
 }
 
 // The worker's side.
