@@ -16,8 +16,8 @@
 // compose sequences for dead keys. Trackpad scrolls carry phases, and the
 // shell adds momentum after the fingers lift, since Wayland leaves that to
 // the client. Not here yet: accessibility (AT-SPI) and Now Playing (MPRIS);
-// the app's tree is kept for the test driver's ax-dump and ax-press, and
-// media keys reach the app while the window has the keyboard.
+// the shell takes the app's tree only for the test driver's ax-dump and
+// ax-press, and media keys reach the app while the window has the keyboard.
 
 #define _GNU_SOURCE
 #include <dlfcn.h>
@@ -1017,7 +1017,8 @@ static const struct wl_data_device_listener g_device_listener = {
 // Accessibility
 //
 // Not exposed to assistive apps yet (AT-SPI over D-Bus). The shell keeps a
-// copy of the tree for the test driver, and only when it runs.
+// copy of the tree for the test driver, and offers set_accessibility only
+// when it runs.
 
 typedef struct {
   uint64_t id;
@@ -1027,12 +1028,10 @@ typedef struct {
   char *label, *value; // malloc'd, or NULL
 } Shell_Node;
 
-static bool g_keep_nodes;
 static Shell_Node *g_nodes;
 static uint32_t g_node_count, g_node_cap;
 
 static void set_accessibility(const Access_Node *nodes, uint32_t count) {
-  if (!g_keep_nodes) return;
   for (uint32_t i = 0; i < g_node_count; i++) {
     free(g_nodes[i].label);
     free(g_nodes[i].value);
@@ -2091,7 +2090,6 @@ int main(int argc, char **argv) {
   g_repeat_fd = new_timer();
   g_momentum_fd = new_timer();
   g_test_fd = new_timer();
-  g_keep_nodes = getenv("TIDALFAST_SHELL_TEST") != NULL;
 
   if (!connect_wayland()) return 1;
   measure_mark("launched");
@@ -2103,7 +2101,7 @@ int main(int argc, char **argv) {
       .set_text_input = set_text_input,
       .set_clipboard = set_clipboard,
       .get_clipboard = get_clipboard,
-      .set_accessibility = set_accessibility,
+      .set_accessibility = getenv("TIDALFAST_SHELL_TEST") ? set_accessibility : NULL,
   };
 
   if (!open_app(&g_app)) return 1;
