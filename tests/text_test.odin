@@ -8,6 +8,7 @@ import "core:time"
 import "../src/kbts"
 import "../src/render"
 import "../src/text"
+import "../src/ui"
 
 @(test)
 test_subpixel_buckets :: proc(t: ^testing.T) {
@@ -612,4 +613,48 @@ test_measure_empty :: proc(t: ^testing.T) {
 	defer fonts_destroy(&f)
 	m := text.measure(f.state, .Semibold, 14, "")
 	testing.expect_value(t, m.width, f32(0))
+}
+
+// A text field's caret sits on the leading edge of the cluster after it:
+// the right edge of a Hebrew letter even when Latin follows it, and for a
+// space or a digit, the edge its neighbours' direction gives.
+@(test)
+test_field_caret_mixed_direction :: proc(t: ^testing.T) {
+	s: Shaper
+	context.allocator = shaper_init(&s)
+	defer shaper_destroy(&s)
+
+	glyph_of :: proc(run: ^text.Run, cluster: u32) -> text.Glyph {
+		for g in run.glyphs {
+			if g.cluster == cluster {
+				return g
+			}
+		}
+		return {}
+	}
+	Case :: struct {
+		str:     string,
+		offset:  int, // a byte offset in str
+		cluster: u32, // the codepoint index that starts there
+		right:   bool, // the caret goes on the cluster's right edge
+	}
+	cases := []Case{
+		{"aאבb", len("a"), 1, true},
+		{"aאבb", len("aא"), 2, true},
+		{"aאb", len("a"), 1, true},
+		{"aאb", len("aא"), 2, false},
+		{"אב גד", len("אב"), 2, true},
+		{"a אב", len("a"), 1, false},
+		{"א12ב", len("א"), 1, false},
+		{"א12ב", len("א1"), 2, false},
+	}
+	for c in cases {
+		run := shape_loaded(&s, .Regular, 13, c.str)
+		testing.expectf(t, !run.pending, "%q still pending", c.str)
+		g := glyph_of(run, c.cluster)
+		want := g.pen + g.advance if c.right else g.pen
+		lay := ui.field_layout(s.state, .Regular, 13, c.str)
+		caret := ui.field_caret_x(lay, c.offset)
+		testing.expectf(t, abs(caret - want) < 0.01, "%q at %d: caret %v, want %v", c.str, c.offset, caret, want)
+	}
 }

@@ -428,6 +428,7 @@ field_layout :: proc(t: ^text.State, font: text.Font, size: f32, s: string) -> (
 		}
 	}
 	has := make([]bool, n, context.temp_allocator)
+	order := make([dynamic]int, 0, n, context.temp_allocator) // clusters with a glyph, left to right
 	for g in run.glyphs {
 		c := int(g.cluster)
 		if c >= len(cp_cluster) {
@@ -437,37 +438,52 @@ field_layout :: proc(t: ^text.State, font: text.Font, size: f32, s: string) -> (
 		if !has[j] {
 			lay.x0[j], lay.x1[j] = g.pen, g.pen + g.advance
 			has[j] = true
+			append(&order, j)
 		} else {
 			lay.x0[j] = min(lay.x0[j], g.pen)
 			lay.x1[j] = max(lay.x1[j], g.pen + g.advance)
 		}
 	}
-	// A cluster reads right to left when the next one with a glyph sits to
-	// its left, or the one before sits to its right.
-	center :: proc(lay: Field_Layout, k: int) -> f32 {
-		return (lay.x0[k] + lay.x1[k]) / 2
+	// A letter reads in its script's direction. Any other cluster reads
+	// the way of its neighbours on screen: left to right when the next
+	// cluster in the text is drawn just to its right, right to left when
+	// just to its left, and else the paragraph's way.
+	next := make([]int, n, context.temp_allocator)
+	following := -1
+	for k := n - 1; k >= 0; k -= 1 {
+		next[k] = following
+		if has[k] {
+			following = k
+		}
 	}
-	prev := -1
+	strong := make([]bool, n, context.temp_allocator)
 	for k in 0 ..< n {
-		if !has[k] {
+		lay.rtl[k] = run.rtl
+		r, _ := utf8.decode_rune_in_string(s[lay.bounds[k]:])
+		#partial switch text.bidi_class(r) {
+		case .L:
+			lay.rtl[k], strong[k] = false, true
+		case .R, .AL:
+			lay.rtl[k], strong[k] = true, true
+		}
+	}
+	for i in 1 ..< len(order) {
+		l, r := order[i - 1], order[i]
+		rtl: bool
+		switch {
+		case next[l] == r:
+			rtl = false
+		case next[r] == l:
+			rtl = true
+		case:
 			continue
 		}
-		next := -1
-		for j in k + 1 ..< n {
-			if has[j] {
-				next = j
-				break
-			}
+		if !strong[l] {
+			lay.rtl[l] = rtl
 		}
-		switch {
-		case next >= 0:
-			lay.rtl[k] = center(lay, next) < center(lay, k)
-		case prev >= 0:
-			lay.rtl[k] = center(lay, prev) > center(lay, k)
-		case:
-			lay.rtl[k] = run.rtl
+		if !strong[r] {
+			lay.rtl[r] = rtl
 		}
-		prev = k
 	}
 	for k := 0; k < n; {
 		if !has[k] {
