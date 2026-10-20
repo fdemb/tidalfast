@@ -78,6 +78,16 @@ The page, its full top tracks and a shelf's grid are places of their own in the 
 
 The biography breaks into lines at spaces and line breaks. A word wider than the column, such as a link or a paragraph of Chinese or Japanese, which has no spaces, breaks between grapheme clusters (`ui.cluster_bounds`), as many as fit on each line, with their widths from one shaping of the word (`ui.cluster_widths`). The lines are kept with the page as byte ranges into its text, and broken again only when the width, the font, its size, the display scale or the text system's fallback fonts change, or a new biography arrives. More and Less only change how many of them show.
 
+### The Home page
+
+Home is a row of its own in the sidebar, under Back and Forward and above "Your Library", with Phosphor's house: outlined, and filled and lit while Home shows. It isn't where the app starts; the app still opens on the sidebar's first entry. The page is in `src/app/home.odin`, one scroll view with its content in the artist page's centred column (`CONTENT_MAX`, `PAGE_PAD`) and the player bar's inset at its end.
+
+At the top is a greeting by the local hour: Good morning from 5 to 12, Good afternoon to 18, Good evening the rest. Under it are the sidebar's first eight entries as shortcut tiles, Liked Songs first: 56 pt tall, the cover at the left and the name next to it, on the surface grey with rounded corners, four to a row when the column is at least 760 pt wide and two otherwise. A click opens that sidebar entry. The tiles share a keyed parent, so the arrow keys move through them as a grid.
+
+Then come the shelves from TIDAL's home feed (see [TIDAL data](tidal-data.md#the-home-feed)), drawn with the artist page's `card_row`: ‹ and › paging, cards built empty out of view, round covers for artists. Home's shelves have no View all. A card opens its album, artist page or playlist through `open_card`. While the first fetch is out the page shows three grey shelves; if it failed with nothing to show, it says why, with a Retry. A refresh keeps the old shelves on screen until the new ones land.
+
+Home is a place in the history (`Home_Place`), so Back and Forward go through it. What the main view shows is worked out from the history's current place (`home_showing`), and the open list stays as it was underneath, so going back from Home to a playlist or an artist page fetches nothing. While Home shows, no sidebar playlist is lit. With `TIDALFAST_FAKE=1` the shelves are made from the fake rows' albums and artists and the fake playlists, with gradient covers.
+
 ## Performance
 
 `TIDALFAST_BENCH=1`, release build, Apple M1, 1100×700 window, overlay on. About 10 rows and 1,000 to 1,800 instances in view. ui is everything before `render.end_frame`:
