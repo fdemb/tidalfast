@@ -1294,7 +1294,7 @@ read_init :: proc(p: ^Player, sl: ^Slot) -> bool {
 	buf := make([dynamic]u8, 0, 16 << 10, context.temp_allocator)
 	chunk: [4096]u8
 	for {
-		n, res := stream_read(st, i64(len(buf)), chunk[:], interrupt, p)
+		n, res := stream_read(st, i64(len(buf)), chunk[:], wait_for_bytes, p)
 		append(&buf, ..chunk[:n])
 		#partial switch res {
 		case .Interrupted:
@@ -1347,7 +1347,7 @@ demux_read :: proc(p: ^Player, sl: ^Slot, dst: []u8) -> (n: int, res: Read_Resul
 		if dm.sample < len(dm.samples) {
 			smp := dm.samples[dm.sample]
 			want := min(i64(len(dst) - n), i64(smp.size) - dm.consumed)
-			got, r := stream_read(st, dm.moof + smp.offset + dm.consumed, dst[n:n + int(want)], interrupt, p)
+			got, r := stream_read(st, dm.moof + smp.offset + dm.consumed, dst[n:n + int(want)], wait_for_bytes, p)
 			n += got
 			dm.consumed += i64(got)
 			dm.fpos += i64(got)
@@ -1377,7 +1377,7 @@ demux_read :: proc(p: ^Player, sl: ^Slot, dst: []u8) -> (n: int, res: Read_Resul
 				return n, .Failed
 			}
 			moof := dm.box[:size]
-			got, rr := stream_read(st, dm.pos, moof, interrupt, p)
+			got, rr := stream_read(st, dm.pos, moof, wait_for_bytes, p)
 			if rr != .Ok {
 				return n, rr
 			}
@@ -1447,7 +1447,7 @@ demux_read :: proc(p: ^Player, sl: ^Slot, dst: []u8) -> (n: int, res: Read_Resul
 @(private = "file")
 read_box_header :: proc(p: ^Player, sl: ^Slot, offset: i64) -> (box: Mp4_Box, res: Read_Result) {
 	hdr: [16]u8
-	got, r := stream_read(&sl.stream, offset, hdr[:8], interrupt, p)
+	got, r := stream_read(&sl.stream, offset, hdr[:8], wait_for_bytes, p)
 	if r == .Eof || (r == .Ok && got < 8) {
 		return {}, .Eof
 	}
@@ -1456,7 +1456,7 @@ read_box_header :: proc(p: ^Player, sl: ^Slot, offset: i64) -> (box: Mp4_Box, re
 	}
 	b, bst := mp4_box_header(hdr[:8])
 	if bst == .Need_More {
-		got, r = stream_read(&sl.stream, offset + 8, hdr[8:16], interrupt, p)
+		got, r = stream_read(&sl.stream, offset + 8, hdr[8:16], wait_for_bytes, p)
 		if r != .Ok {
 			return {}, .Eof if r == .Eof else r
 		}
@@ -1508,7 +1508,7 @@ read_header :: proc(p: ^Player, sl: ^Slot) -> bool {
 	buf := make([dynamic]u8, 0, 64 << 10, context.temp_allocator)
 	chunk: [16 << 10]u8
 	for {
-		n, res := stream_read(st, i64(len(buf)), chunk[:], interrupt, p)
+		n, res := stream_read(st, i64(len(buf)), chunk[:], wait_for_bytes, p)
 		append(&buf, ..chunk[:n])
 		#partial switch res {
 		case .Interrupted:
@@ -1570,7 +1570,7 @@ find_start :: proc(p: ^Player, sl: ^Slot, target: i64) -> (offset, sample: i64, 
 		found := false
 		for len(buf) < 1 << 20 {
 			chunk: [16 << 10]u8
-			n, res := stream_read(st, guess + i64(len(buf)), chunk[:], interrupt, p)
+			n, res := stream_read(st, guess + i64(len(buf)), chunk[:], wait_for_bytes, p)
 			append(&buf, ..chunk[:n])
 			if res == .Interrupted {
 				return 0, 0, false
@@ -1601,12 +1601,18 @@ find_start :: proc(p: ^Player, sl: ^Slot, target: i64) -> (offset, sample: i64, 
 	return b.lo_offset, b.lo_sample, true
 }
 
-// interrupt runs while a read waits for bytes: light commands go through,
-// a heavy one makes the read give up.
+// wait_for_bytes runs while a read waits for bytes: light commands go
+// through, a heavy one makes the read give up. Then it sleeps until a post
+// with no timeout: the fetch thread posts every change a read looks at, so
+// a paused track waiting on a stalled server costs no CPU.
 @(private = "file")
-interrupt :: proc(data: rawptr) -> bool {
+wait_for_bytes :: proc(data: rawptr) -> bool {
 	p := (^Player)(data)
-	return run_commands(p, .Light) == .Heavy_Waiting
+	if run_commands(p, .Light) == .Heavy_Waiting {
+		return true
+	}
+	wake_wait(&p.watch.wake)
+	return false
 }
 
 // dr_flac's view of a slot: the header, then the file from frame_off on.
@@ -1653,7 +1659,7 @@ vread :: proc "c" (dec: ^ma.decoder, out: rawptr, n: c.size_t, read: ^c.size_t) 
 			}
 		}
 	} else if done < len(dst) {
-		got, res := stream_read(st, sl.frame_off + sl.vpos - head, dst[done:], interrupt, sl.player)
+		got, res := stream_read(st, sl.frame_off + sl.vpos - head, dst[done:], wait_for_bytes, sl.player)
 		done += got
 		sl.vpos += i64(got)
 		#partial switch res {

@@ -5,6 +5,7 @@ import "core:encoding/json"
 import "core:fmt"
 import "core:math"
 import "core:math/rand"
+import "core:net"
 import "core:slice"
 import "core:sync"
 import "core:testing"
@@ -581,6 +582,7 @@ read_through :: proc(url: string, file: []u8, window, read_size: int) -> bool {
 	audio.stream_open(st, url)
 	deadline := time.tick_add(time.tick_now(), 3 * time.Second)
 	give_up :: proc(data: rawptr) -> bool {
+		time.sleep(time.Millisecond)
 		return time.tick_diff(time.tick_now(), (^time.Tick)(data)^) <= 0
 	}
 	got := make([]u8, len(file), context.temp_allocator)
@@ -613,4 +615,32 @@ stream_wakes_coalesce :: proc(t: ^testing.T) {
 	}
 	testing.expect(t, audio.stream_done(st), "the file arrived")
 	testing.expectf(t, sync.atomic_load(&wake.sema.count) == 1, "%d wake-ups pending", sync.atomic_load(&wake.sema.count))
+}
+
+// A paused track waiting for bytes that don't come sleeps until something
+// happens. A command marked pending without a post shows whether the decode
+// thread looked anyway; resuming, which posts, still gets through.
+@(test)
+paused_read_does_not_poll :: proc(t: ^testing.T) {
+	// A server that never answers: connections queue and nobody accepts.
+	sock, err := net.listen_tcp({address = net.IP4_Loopback, port = 0})
+	testing.expect(t, err == nil)
+	defer net.close(sock)
+	ep, _ := net.bound_endpoint(sock)
+
+	p := audio.create(no_wake, 0, null_output = true)
+	defer audio.destroy(p)
+	audio.play(p, {kind = .Flac, serial = 1, url = fmt.tprintf("http://127.0.0.1:%d/a.flac", ep.port), gain = 1, seconds = 5}, paused = true)
+	time.sleep(300 * time.Millisecond)
+
+	sync.atomic_store(&p.cmd_pending, true)
+	time.sleep(500 * time.Millisecond)
+	testing.expect(t, sync.atomic_load(&p.cmd_pending), "the decode thread woke with nothing posted")
+
+	audio.set_paused(p, false)
+	start := time.tick_now()
+	for audio.status(p).state != .Playing && time.tick_since(start) < time.Second {
+		time.sleep(5 * time.Millisecond)
+	}
+	testing.expect_value(t, audio.status(p).state, audio.Play_State.Playing)
 }

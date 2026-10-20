@@ -197,15 +197,16 @@ Read_Result :: enum u8 {
 	Ok,
 	Eof, // fewer bytes than asked: the file ends
 	Failed, // the fetch gave up
-	Interrupted, // interrupt returned true
+	Interrupted, // wait returned true
 }
 
 // stream_read copies len(dst) bytes from offset, waiting for them to
 // arrive. It takes them as they come, so dst may be longer than the window.
-// While it waits it calls interrupt, which can handle commands and return
-// true to give up. Moves the read position to the end of what it copied,
-// and n counts those bytes whatever the result.
-stream_read :: proc(st: ^Stream, offset: i64, dst: []u8, interrupt: proc(data: rawptr) -> bool, data: rawptr) -> (n: int, res: Read_Result) {
+// Each time the bytes aren't there yet it calls wait, which sleeps until
+// the stream's wake is posted, can handle commands, and returns true to
+// give up. Moves the read position to the end of what it copied, and n
+// counts those bytes whatever the result.
+stream_read :: proc(st: ^Stream, offset: i64, dst: []u8, wait: proc(data: rawptr) -> bool, data: rawptr) -> (n: int, res: Read_Result) {
 	for {
 		sync.lock(&st.mutex)
 		at := offset + i64(n)
@@ -248,10 +249,9 @@ stream_read :: proc(st: ^Stream, offset: i64, dst: []u8, interrupt: proc(data: r
 		if failed {
 			return n, .Failed
 		}
-		if interrupt != nil && interrupt(data) {
+		if wait(data) {
 			return n, .Interrupted
 		}
-		wake_wait(st.wake, 100 * time.Millisecond)
 	}
 }
 
@@ -353,6 +353,7 @@ fetch_main :: proc "c" (arg: rawptr) -> rawptr {
 		ok := code == .E_OK && (t.status == 200 || t.status == 206 || (t.status == 416 && !st.dash))
 		if t.status == 416 && st.length < 0 && !st.dash {
 			st.length = st.win_end
+			wake_post(st.wake)
 		}
 		if ok && st.dash {
 			// A whole segment: on to the next. After the last the length is known.
@@ -490,6 +491,7 @@ header_callback :: proc "c" (buffer: [^]byte, size: c.size_t, nitems: c.size_t, 
 				sync.guard(&st.mutex)
 				if st.gen == t.gen {
 					st.length = total
+					wake_post(st.wake)
 				}
 			}
 		}
@@ -498,6 +500,7 @@ header_callback :: proc "c" (buffer: [^]byte, size: c.size_t, nitems: c.size_t, 
 			sync.guard(&st.mutex)
 			if st.gen == t.gen {
 				st.length = total
+				wake_post(st.wake)
 			}
 			// A 200 to a range request sends the file from the start.
 			t.skip = t.pos
