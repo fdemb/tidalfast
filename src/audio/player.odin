@@ -156,7 +156,9 @@ wake_post :: proc "contextless" (w: ^Wake) {
 }
 
 // wake_wait sleeps until a post. A post after it returns wakes the next
-// wait, so news posted after the caller last looked is never lost.
+// wait, so news posted after the caller last looked is never lost. One
+// return can stand for many posts of different news, so the caller must
+// look at all the state it waits on again before it waits again.
 wake_wait :: proc "contextless" (w: ^Wake) {
 	sync.atomic_sema_wait(&w.sema)
 	sync.atomic_store(&w.pending, false)
