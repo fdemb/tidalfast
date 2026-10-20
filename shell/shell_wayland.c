@@ -1496,7 +1496,7 @@ static void seat_capabilities(void *data, struct wl_seat *seat, uint32_t caps) {
   } else if (!(caps & WL_SEAT_CAPABILITY_KEYBOARD) && g_keyboard) {
     wl_keyboard_release(g_keyboard);
     g_keyboard = NULL;
-    stop_repeat();
+    keyboard_leave(NULL, NULL, 0, NULL);
   }
 }
 
