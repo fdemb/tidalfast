@@ -462,7 +462,11 @@ Wait_Shared :: struct {
 	ok:       bool,
 	stopped:  bool,
 	popped:   int,
+	ticket:   jobs.Ticket,
 }
+
+@(private = "file")
+every_job :: proc(_: ^Test_Job, _: rawptr) -> bool {return true}
 
 // blocks_until runs sh.work on a thread, checks it is still waiting after
 // 20 ms, runs wake and waits up to 2 s for the work to return. On a timeout
@@ -511,10 +515,7 @@ queue_waiters_wake_on_each_change :: proc(t: ^testing.T) {
 	sh.work = proc(sh: ^Wait_Shared) {sh.ok = jobs.push_wait(&sh.q, {2})}
 	blocks_until(t, sh, proc(sh: ^Wait_Shared) {jobs.done(&sh.q)})
 	testing.expect(t, sh.ok)
-	blocks_until(t, sh, proc(sh: ^Wait_Shared) {
-		all :: proc(_: ^Test_Job, _: rawptr) -> bool {return true}
-		jobs.remove_if(&sh.q, all, nil)
-	})
+	blocks_until(t, sh, proc(sh: ^Wait_Shared) {jobs.remove_if(&sh.q, every_job, nil)})
 	testing.expect(t, sh.ok)
 
 	sh.work = proc(sh: ^Wait_Shared) {
@@ -522,12 +523,17 @@ queue_waiters_wake_on_each_change :: proc(t: ^testing.T) {
 		job, _, ok, _ := jobs.pop_wait_where(&sh.q, is_seven, 5 * time.Second)
 		sh.popped = job.id if ok else -1
 	}
-	jobs.remove_if(&sh.q, proc(_: ^Test_Job, _: rawptr) -> bool {return true}, nil)
+	jobs.remove_if(&sh.q, every_job, nil)
 	sh.popped = 0
 	blocks_until(t, sh, proc(sh: ^Wait_Shared) {jobs.push(&sh.q, {7})})
 	testing.expect_value(t, sh.popped, 7)
+	// requeue takes back an item popped with pop_wait, so finish the one the
+	// worker popped and pop one here.
+	jobs.done(&sh.q)
+	jobs.push(&sh.q, {7})
+	_, sh.ticket, _ = jobs.pop_wait(&sh.q)
 	sh.popped = 0
-	blocks_until(t, sh, proc(sh: ^Wait_Shared) {jobs.requeue(&sh.q, {7}, {})})
+	blocks_until(t, sh, proc(sh: ^Wait_Shared) {jobs.requeue(&sh.q, {7}, sh.ticket)})
 	testing.expect_value(t, sh.popped, 7)
 }
 
