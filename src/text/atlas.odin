@@ -96,16 +96,16 @@ atlas_begin_frame :: proc(a: ^Atlas, r: ^render.Renderer) {
 @(private)
 atlas_retire :: proc(a: ^Atlas, r: ^render.Renderer) {
 	retired: [MAX_PAGES]bool
-	any := false
+	freed := false
 	for &p, i in a.pages[:a.page_count] {
 		if p.size > 0 && p.last_used < a.frame {
 			render.texture_destroy(r, p.texture)
 			p.texture, p.size = 0, 0
 			retired[i] = true
-			any = true
+			freed = true
 		}
 	}
-	if !any {
+	if !freed {
 		atlas_clear(a, r)
 		return
 	}
@@ -294,9 +294,9 @@ entry_slot :: proc(a: ^Atlas, key: u64) -> (int, bool) {
 	return slot, false
 }
 
-// atlas_pack finds room for a w by h bitmap plus a one texel gap, growing
-// a page of its kind or adding one, in a freed slot first, if the others
-// are full.
+// atlas_pack finds room for a w by h bitmap plus a one texel gap. If the
+// pages of its kind are full, it grows one or adds one, in a freed slot
+// first.
 @(private)
 atlas_pack :: proc(a: ^Atlas, r: ^render.Renderer, color: bool, w, h: int) -> (page, x, y: int, ok: bool) {
 	rect := stbrp.Rect{w = stbrp.Coord(w + 1), h = stbrp.Coord(h + 1)}

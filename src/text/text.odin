@@ -507,8 +507,9 @@ font_stack :: proc(t: ^State, font: Font, runes: []rune) -> (stack: Font_Stack, 
 			continue
 		}
 		// A cached face is used as is, unless it's a black and white one
-		// for an emoji, which a colour face found since should draw.
-		// Otherwise the faces found so far may have r now.
+		// for an emoji, which a colour face found since should draw. With
+		// no face cached, or NO_FACE or PENDING, the fallback faces found
+		// so far may have r now.
 		key := fallback_key(font, r)
 		face, cached := cached_face(t, key)
 		if !cached || face < 0 || emoji_presentation(r) && !t.faces[face].color {
@@ -751,7 +752,7 @@ single_codepoint_graphemes :: proc(runes: []rune) -> bool {
 // grapheme_starts returns, for each codepoint, the index of the first
 // codepoint of its grapheme cluster, from kb_text_shape's segmentation:
 // boundary, if shaping found it already, or else its break engine.
-// boundary is changed.
+// It clears the boundaries rule GB11 joins.
 grapheme_starts :: proc(runes: []rune, boundary: []bool = nil) -> []int {
 	starts := make([]int, len(runes), context.temp_allocator)
 	for &start, i in starts {
