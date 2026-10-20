@@ -50,7 +50,7 @@ Gpu_Frame :: struct {
 	uploading:      bool, // upload has commands recorded since begin
 	fence:          vk.Fence,
 	ready:          bool, // the fence was waited for since the last submit
-	wait_ms:        f32, // how long that wait took, until begin_frame reports it
+	wait_ms:        f32, // time spent waiting for the GPU to free the slot, until begin_frame reports it
 	acquired:       vk.Semaphore,
 	instances:      Gpu_Buffer,
 	set:            vk.DescriptorSet, // the instance buffer and samplers
@@ -690,7 +690,7 @@ slot_ready :: proc(r: ^Renderer) -> ^Gpu_Frame {
 	}
 	wait := time.tick_now()
 	vk.WaitForFences(g.device, 1, &f.fence, true, max(u64))
-	f.wait_ms = f32(time.duration_milliseconds(time.tick_since(wait)))
+	f.wait_ms += f32(time.duration_milliseconds(time.tick_since(wait)))
 	f.ready = true
 	free_dead(r, f)
 	return f
@@ -706,7 +706,9 @@ flush_slot :: proc(r: ^Renderer) -> ^Gpu_Frame {
 	if !submit_uploads(r, f) {
 		return nil
 	}
+	wait := time.tick_now()
 	vk.DeviceWaitIdle(r.gpu.device)
+	f.wait_ms += f32(time.duration_milliseconds(time.tick_since(wait)))
 	f.ready = true
 	free_dead(r, f)
 	return f
@@ -1241,9 +1243,7 @@ end_frame :: proc(r: ^Renderer) {
 		if swapchain_stale(g, want) {
 			make_swapchain(r, want.width, want.height)
 		}
-		wait := time.tick_now()
 		image = acquire(r, f, want)
-		r.drawable_wait_ms = f32(time.duration_milliseconds(time.tick_since(wait)))
 	}
 	if image == max(u32) {
 		submit_uploads(r, f)
@@ -1370,7 +1370,9 @@ acquire :: proc(r: ^Renderer, f: ^Gpu_Frame, want: vk.Extent2D) -> u32 {
 			return max(u32)
 		}
 		image: u32
+		wait := time.tick_now()
 		res := vk.AcquireNextImageKHR(g.device, g.swapchain, u64(1e9), f.acquired, 0, &image)
+		r.drawable_wait_ms += f32(time.duration_milliseconds(time.tick_since(wait)))
 		#partial switch res {
 		case .SUCCESS, .SUBOPTIMAL_KHR:
 			return image
