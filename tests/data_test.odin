@@ -432,6 +432,7 @@ cover_decode_premultiplies_trns :: proc(t: ^testing.T) {
 	}
 }
 
+@(private = "file")
 Wait_Shared :: struct {
 	q:        jobs.Queue(Test_Job, 1),
 	work:     proc(sh: ^Wait_Shared),
@@ -549,7 +550,8 @@ queue_stop_wakes_waiters :: proc(t: ^testing.T) {
 	jobs.start(&sh.q)
 	_, _ = jobs.try_pop(&sh.q)
 	sh.work = proc(sh: ^Wait_Shared) {
-		_, _, _, sh.stopped = jobs.pop_wait_where(&sh.q, proc(_: ^Test_Job) -> bool {return true}, 5 * time.Second)
+		any_job :: proc(_: ^Test_Job) -> bool {return true}
+		_, _, _, sh.stopped = jobs.pop_wait_where(&sh.q, any_job, 5 * time.Second)
 	}
 	blocks_until(t, sh, stop)
 	testing.expect(t, sh.stopped)
