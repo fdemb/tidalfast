@@ -480,42 +480,6 @@ retry_later :: proc(d: ^Data, res: Result) -> bool {
 	return false
 }
 
-// is_local says a job sends nothing to TIDAL, so a backoff doesn't hold
-// it. A cover counts until it's found missing from disk.
-@(private = "file")
-is_local :: proc(job: ^Job) -> bool {
-	#partial switch p in job.payload {
-	case Save_Settings_Job, Launch_Log_Job, Disk_Job:
-		return true
-	case Cover_Job:
-		return !p.image.remote
-	case Artwork_Job:
-		return !p.image.remote
-	}
-	return false
-}
-
-// requeued is job as it goes back in the queue. A Login_Wait that polled
-// keeps the interval TIDAL asked for, slow_down included, and polls again
-// no sooner than that interval from now. A cover that went to TIDAL waits
-// out the backoff with the other requests.
-@(private = "file")
-requeued :: proc(job: Job, res: Result) -> Job {
-	job := job
-	#partial switch &p in job.payload {
-	case Cover_Job:
-		p.image.remote ||= res.err != nil
-	case Artwork_Job:
-		p.image.remote ||= res.err != nil
-	case Login_Wait_Job:
-		if wait, ok := res.payload.(Login_Wait_Result); ok && wait.interval > 0 {
-			p.interval = wait.interval
-			p.not_before = time.tick_add(time.tick_now(), time.Duration(f64(p.interval) * f64(time.Second)))
-		}
-	}
-	return job
-}
-
 // arena_new makes a growing arena that lives in its own first block, so a
 // result can hand it on by pointer without a header on the heap. Free it
 // with arena_release: vmem.arena_destroy would write to it after unmapping
