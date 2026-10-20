@@ -725,5 +725,7 @@ flac_header_size :: proc(t: ^testing.T) {
 	for audio.status(q).error.serial != 2 && time.tick_since(start) < 5 * time.Second {
 		time.sleep(5 * time.Millisecond)
 	}
-	testing.expect_value(t, audio.status(q).error.serial, u64(2))
+	s := audio.status(q)
+	testing.expect_value(t, s.error.serial, u64(2))
+	testing.expect_value(t, audio.error_text(&s.error), "the FLAC header is too big")
 }

@@ -109,8 +109,8 @@ parse_flac_header :: proc(data: []u8, h: ^Flac_Header) -> Parse_Status {
 	if !have_info {
 		return .Invalid
 	}
-	// The caller keeps the header's bytes, so the last block must be here
-	// whole too.
+	// audio_start must lie inside the file, so a file cut inside its last
+	// block is caught here.
 	if len(data) < pos {
 		return .Need_More
 	}
@@ -126,7 +126,7 @@ parse_flac_header :: proc(data: []u8, h: ^Flac_Header) -> Parse_Status {
 flac_decoder_head :: proc(data: []u8, h: ^Flac_Header, allocator := context.allocator) -> []u8 {
 	head := make([]u8, 42, allocator)
 	copy(head, "fLaC")
-	head[4], head[7] = 0x80, 34
+	head[4], head[7] = 0x80, 34 // last block, type 0 (STREAMINFO), length 34
 	si := head[8:]
 	copy(si, data[h.streaminfo:][:34])
 	si[13] &= 0xf0
