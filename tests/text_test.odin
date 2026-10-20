@@ -1,6 +1,7 @@
 package tidal_tests
 
 import "core:mem"
+import "core:strings"
 import "core:testing"
 import "core:unicode/utf8"
 import "core:time"
@@ -657,4 +658,28 @@ test_field_caret_mixed_direction :: proc(t: ^testing.T) {
 		caret := ui.field_caret_x(lay, c.offset)
 		testing.expectf(t, abs(caret - want) < 0.01, "%q at %d: caret %v, want %v", c.str, c.offset, caret, want)
 	}
+}
+
+// A selection is drawn as its pieces on screen, left to right: one for a
+// run in one direction, however long, and two for Latin split by Hebrew.
+@(test)
+test_field_selection_spans :: proc(t: ^testing.T) {
+	s: Shaper
+	context.allocator = shaper_init(&s)
+	defer shaper_destroy(&s)
+
+	long := strings.repeat("שלום ", 300, context.temp_allocator)
+	run := shape_loaded(&s, .Regular, 13, long)
+	testing.expect(t, !run.pending)
+	lay := ui.field_layout(s.state, .Regular, 13, long)
+	spans := ui.field_spans(lay, 0, len(long))
+	testing.expectf(t, len(spans) == 1 && abs(spans[0].x) < 0.01 && abs(spans[0].y - run.width) < 0.01, "all of %d clusters: %v, want [0, %v]", len(lay.bounds) - 1, spans, run.width)
+
+	mixed := "ab אב cd"
+	run = shape_loaded(&s, .Regular, 13, mixed)
+	lay = ui.field_layout(s.state, .Regular, 13, mixed)
+	// "b א" is b on the left, then the space, then א at the right end of
+	// the Hebrew word: two pieces with ב between them.
+	spans = ui.field_spans(lay, len("a"), len("ab א"))
+	testing.expectf(t, len(spans) == 2 && spans[0].x < spans[1].x, "%q: %v", mixed, spans)
 }

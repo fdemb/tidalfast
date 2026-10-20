@@ -1,5 +1,6 @@
 package ui
 
+import "core:slice"
 import "core:unicode/utf8"
 
 import "../platform"
@@ -574,12 +575,9 @@ field_spans :: proc(lay: Field_Layout, lo, hi: int) -> [][2]f32 {
 			append(&spans, [2]f32{lay.x0[k], lay.x1[k]})
 		}
 	}
-	// Few clusters, so a simple sort.
-	for i in 1 ..< len(spans) {
-		for j := i; j > 0 && spans[j].x < spans[j - 1].x; j -= 1 {
-			spans[j], spans[j - 1] = spans[j - 1], spans[j]
-		}
-	}
+	slice.sort_by(spans[:], proc(a, b: [2]f32) -> bool {
+		return a.x < b.x
+	})
 	out := make([dynamic][2]f32, 0, len(spans), context.temp_allocator)
 	for sp in spans {
 		if len(out) > 0 && sp.x <= out[len(out) - 1].y + 0.5 {
