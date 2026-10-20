@@ -392,3 +392,26 @@ temp_tail_is_whole_pages_past_keep :: proc(t: ^testing.T) {
 	_, size = app.temp_tail(base, 64 << 10, 64 << 10)
 	testing.expect_value(t, size, 0)
 }
+
+@(private = "file")
+png_of :: proc(src: []u8, w, h, channels: int) -> []u8 {
+	png := make([dynamic]u8, context.temp_allocator)
+	write :: proc "c" (ctx: rawptr, data: rawptr, size: i32) {
+		context = runtime.default_context()
+		out := (^[dynamic]u8)(ctx)
+		append(out, ..([^]u8)(data)[:size])
+	}
+	stbi.write_png_to_func(write, &png, i32(w), i32(h), i32(channels), raw_data(src), i32(w * channels))
+	return png[:]
+}
+
+// No cover is near this big, so decode refuses it from the header
+// instead of allocating hundreds of megabytes on a worker.
+@(test)
+cover_decode_refuses_huge_images :: proc(t: ^testing.T) {
+	w, h := 8192, 2049 // just over 4096 * 4096 pixels
+	png := png_of(make([]u8, w * h, context.temp_allocator), w, h, 1)
+	pixels, _, _, ok := cover.decode(png, 80)
+	defer cover.free_pixels(pixels)
+	testing.expect(t, !ok)
+}

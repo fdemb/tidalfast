@@ -20,6 +20,7 @@ BUCKETS :: 4096 // a power of two
 ID_MAX :: 48 // TIDAL image ids are UUIDs, 36 bytes
 FADE_SECONDS :: 0.25
 RETRY_SECONDS :: 30 // a failed cover still on screen is tried again after this
+MAX_SOURCE_PIXELS :: 4096 * 4096 // the largest cover TIDAL serves is 1280 square
 
 Kind :: enum u8 {
 	Album, // album covers, also used for tracks
@@ -384,8 +385,12 @@ alpha :: proc(e: ^Entry, now: f64) -> f32 {
 // With px set it scales the image to px square first, filtering in linear
 // light, so the texture is drawn at exactly its size and needs no mipmaps.
 // The pixels are malloc'd; free them with free_pixels. Safe on any thread.
+// An image over MAX_SOURCE_PIXELS is refused from its header.
 decode :: proc(data: []u8, px := 0) -> (pixels: []u8, w, h: int, ok: bool) {
 	x, y, channels: i32
+	if stbi.info_from_memory(raw_data(data), i32(len(data)), &x, &y, &channels) == 0 || int(x) * int(y) > MAX_SOURCE_PIXELS {
+		return nil, 0, 0, false
+	}
 	p := stbi.load_from_memory(raw_data(data), i32(len(data)), &x, &y, &channels, 4)
 	if p == nil {
 		return nil, 0, 0, false
