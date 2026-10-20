@@ -88,6 +88,7 @@ Disk_Op :: enum u8 {
 	Write_Queue, // Disk_Job.blob, from queue_encode
 	Write_Queue_Position, // Disk_Job.blob, a Queue_Position
 	Delete_Queue,
+	Forget, // what a sign-out leaves, see disk_forget
 }
 
 Lists :: struct {
@@ -740,24 +741,44 @@ lists_signed_in :: proc(d: ^Data, user: i64) {
 	disk_push(d, {op = .Read_Queue})
 }
 
-// lists_forget drops what's kept for the account that signed out: in memory
-// and its folder on disk.
-lists_forget :: proc(d: ^Data) {
+// lists_forget drops what's kept in memory for the account that signed
+// out, and queues disk_forget for its folder and Keychain item. epoch is
+// the session's auth epoch after the sign-out. A Forget still queued for an
+// earlier sign-out stays.
+lists_forget :: proc(d: ^Data, epoch: u64) {
 	lists_clear(d)
 	refresh_drop(d)
 	jobs.remove_if(&d.lists.queue, drop_disk_job, nil)
-	dir := disk_dir(d.lists.root, d.lists.user, context.temp_allocator) if disk_on(d) else ""
-	// The delete and the user going are one step under the mutex, so a
-	// cover write waiting on it sees the user gone.
-	sync.guard(&d.lists.mutex)
-	if dir != "" {
-		os.remove_all(dir)
-	}
+	user := sync.atomic_load(&d.lists.user)
+	// A cover write that sees the user gone writes nothing, and one that
+	// didn't finishes before disk_forget deletes the folder.
 	sync.atomic_store(&d.lists.user, 0)
+	job := Job{auth = d.auth_gen, payload = Disk_Job{op = .Forget, user = user, epoch = epoch}}
+	if !jobs.push(&d.lists.queue, job) {
+		log.error("lists: no room to forget the account that signed out")
+	}
+}
+
+// disk_forget deletes what a sign-out left: the Keychain item, unless a
+// login since has saved over it, and the user's folder.
+disk_forget :: proc(d: ^Data, job: Disk_Job) {
+	{
+		sync.guard(&d.keychain_mutex)
+		if d.keychain_saved < job.epoch {
+			keychain_delete(&d.keychain)
+		}
+	}
+	if d.lists.root != "" && job.user != 0 {
+		sync.guard(&d.lists.mutex)
+		os.remove_all(disk_dir(d.lists.root, job.user, context.temp_allocator))
+	}
 }
 
 @(private = "file")
 drop_disk_job :: proc(job: ^Job, _: rawptr) -> bool {
+	if disk, ok := job.payload.(Disk_Job); ok && disk.op == .Forget {
+		return false
+	}
 	job_free(job)
 	return true
 }
@@ -796,9 +817,17 @@ disk_stop :: proc(d: ^Data) {
 }
 
 // lists_shutdown frees everything the cache holds. The disk thread has
-// stopped.
+// stopped. A sign-out's Forget still queued is done now, so the login isn't
+// restored at the next start.
 lists_shutdown :: proc(d: ^Data) {
 	jobs.remove_if(&d.lists.queue, drop_disk_job, nil)
+	for {
+		job, ok := jobs.try_pop(&d.lists.queue)
+		if !ok {
+			break
+		}
+		disk_forget(d, job.payload.(Disk_Job))
+	}
 	lists_clear(d)
 	refresh_drop(d)
 	delete(d.lists.root, runtime.heap_allocator())
@@ -881,6 +910,9 @@ disk_run :: proc(d: ^Data, queued: Job) -> (res: Result, reply: bool) {
 	case .Read:
 		disk_read(&res, path, job.source, small_str(&id))
 		return res, true
+	case .Forget:
+		disk_forget(d, job)
+		return
 	case .Read_Queue, .Write_Queue, .Delete_Queue:
 		path = queue_path(dir, context.temp_allocator)
 	case .Write_Queue_Position:
@@ -901,7 +933,7 @@ disk_run :: proc(d: ^Data, queued: Job) -> (res: Result, reply: bool) {
 		return // that account is gone
 	}
 	switch job.op {
-	case .Read, .Read_Queue:
+	case .Read, .Read_Queue, .Forget:
 	case .Write_Queue, .Write_Queue_Position:
 		disk_write(dir, path, job.blob)
 	case .Write:

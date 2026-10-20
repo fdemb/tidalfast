@@ -174,6 +174,7 @@ Disk_Job :: struct {
 	source: Source, // .None for the sidebar
 	id:     Small,
 	view:   u32, // reading a list: the Track_View.gen it's for
+	epoch:  u64, // .Forget: the session's auth epoch after the sign-out
 	blob:   []u8, // writes: the file, heap, freed by the disk thread
 }
 

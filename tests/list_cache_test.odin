@@ -135,7 +135,6 @@ track_jobs :: proc(s: ^app.State) -> int {
 
 // run_disk runs the queued disk jobs and hands reads to the app. It
 // returns how many it ran.
-@(private = "file")
 run_disk :: proc(s: ^app.State) -> int {
 	n := 0
 	for {
@@ -880,9 +879,10 @@ sign_out_deletes_the_cache :: proc(t: ^testing.T) {
 	// A write queued before the sign-out doesn't bring the folder back.
 	app.sidebar_save(d)
 	job, _ := jobs.try_pop(&d.lists.queue)
-	// sign_out without the Keychain.
+	// sign_out without the login screen.
 	app.account_end(s)
-	app.lists_forget(d)
+	app.lists_forget(d, tidal.session_epoch(d.session))
+	run_disk(s)
 	testing.expect(t, !os.exists(user_dir))
 	testing.expect_value(t, d.lists.count, 0)
 	res, _ := app.disk_run(d, job)
@@ -959,7 +959,8 @@ covers_on_disk :: proc(t: ^testing.T) {
 	testing.expect(t, ok && slice.equal(back, jpeg))
 
 	app.account_end(s)
-	app.lists_forget(d)
+	app.lists_forget(d, tidal.session_epoch(d.session))
+	run_disk(s)
 	testing.expect(t, !os.exists(cdir))
 	app.cover_write(d, cdir, path, jpeg) // from before the sign-out
 	testing.expect(t, !os.exists(cdir))
