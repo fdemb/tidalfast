@@ -49,6 +49,7 @@ Page :: struct {
 	size:      int, // texels across, up to PAGE_SIZE or COLOR_PAGE_SIZE; 0 when freed
 	color:     bool,
 	last_used: u64, // the Atlas.frame a glyph was last drawn from it
+	packed:    int, // texels handed to glyphs, gaps included, dropped ones too
 	packer:    stbrp.Context,
 	nodes:     []stbrp.Node,
 }
@@ -96,21 +97,33 @@ atlas_begin_frame :: proc(a: ^Atlas, r: ^render.Renderer) {
 	a.frame += 1
 }
 
-// atlas_retire frees the pages nothing was drawn from last frame. If the
-// entries filled, it drops every glyph not drawn last frame, on every page.
-// Their texels stay taken, since the packer can't free one rectangle, so a
-// dropped glyph drawn again takes new room and the pages fill sooner; when
-// they do, the cold ones go or the atlas clears as below. If the pages
-// filled, it drops the glyphs on the pages it freed, and clears the atlas
-// instead if every page was drawn from. It also clears if the glyphs drawn
-// last frame fill half the entries, since that leaves less than a quarter of
-// the table before it fills again.
+// atlas_retire runs at the begin_frame after the atlas filled.
+//
+// If the entries filled, it drops every glyph not drawn last frame, on every
+// page. Their texels stay taken, since the packer can't free one rectangle,
+// so it also frees each page where the glyphs drawn last frame cover less
+// than a quarter of what was packed, with those glyphs; they are rasterized
+// again when next drawn. It clears the atlas instead if the glyphs drawn
+// fill half the entries, since that leaves less than a quarter of the table
+// before it fills again.
+//
+// If the pages filled, it frees the pages nothing was drawn from last frame
+// and drops their glyphs, or clears the atlas if every page was drawn from.
 @(private)
 atlas_retire :: proc(a: ^Atlas, r: ^render.Renderer) {
+	live: [MAX_PAGES]int
+	if a.full == .Entries {
+		for e in a.entries {
+			if e.w > 0 && e.last_drawn == u16(a.frame) {
+				live[e.page] += (int(e.w) + 1) * (int(e.h) + 1)
+			}
+		}
+	}
 	retired: [MAX_PAGES]bool
 	freed := false
 	for &p, i in a.pages[:a.page_count] {
-		if p.size > 0 && p.last_used < a.frame {
+		mostly_dead := a.full == .Entries && live[i] * 4 < p.packed
+		if p.size > 0 && (p.last_used < a.frame || mostly_dead) {
 			render.texture_destroy(r, p.texture)
 			p.texture, p.size = 0, 0
 			retired[i] = true
@@ -290,6 +303,7 @@ glyph_entry :: proc(t: ^State, r: ^render.Renderer, face_index: u8, id: u16, px_
 			render.convert_premultiplied(pixels)
 		}
 		render.texture_update(r, a.pages[page].texture, pixels, x, y, w, h, converted = true)
+		a.pages[page].packed += (w + 1) * (h + 1)
 		e.x, e.y, e.w, e.h = u16(x), u16(y), u16(w), u16(h)
 		e.left, e.top = i16(left), i16(top)
 		e.page = u8(page)
@@ -345,6 +359,7 @@ atlas_pack :: proc(a: ^Atlas, r: ^render.Renderer, color: bool, w, h: int) -> (p
 	p.size = (COLOR_PAGE_SIZE if color else PAGE_SIZE) >> PAGE_START_SHIFT
 	p.texture = render.texture_create(r, p.size, p.size, .BGRA8 if color else .R8)
 	p.color = color
+	p.packed = 0
 	stbrp.init_target(&p.packer, i32(p.size), i32(p.size), raw_data(p.nodes), i32(len(p.nodes)))
 	a.page_count = max(a.page_count, page + 1)
 	for stbrp.pack_rects(&p.packer, &rect, 1) != 1 {

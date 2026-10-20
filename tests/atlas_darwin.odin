@@ -228,9 +228,40 @@ atlas_full_table_on_a_hot_page_takes_new_glyphs :: proc(t: ^testing.T) {
 	testing.expect_value(t, rasterized, 40)
 }
 
+// fill_table draws hot text every frame and new small glyphs at scale 1
+// until the glyph table is three quarters full, each filler variant only
+// until it is all in the atlas. At scale 1 the filler fits in one page.
+@(private = "file")
+fill_table :: proc(s: ^text.State, r: ^render.Renderer, hot: string, hot_size: f32) {
+	b := strings.builder_make(context.temp_allocator)
+	for ranges in ([][2]rune{{0x21, 0x7e}, {0xa1, 0x17f}, {0x391, 0x3a9}, {0x3b1, 0x3c9}, {0x410, 0x44f}}) {
+		for c in ranges[0] ..= ranges[1] {
+			strings.write_rune(&b, c)
+		}
+	}
+	filler := strings.clone(strings.to_string(b))
+	fonts := []text.Font{.Regular, .Medium, .Semibold, .Bold}
+	a := &s.atlas
+	variant := 0
+	for i := 0; i < 5000 && a.entry_count < len(a.entries) * 3 / 4; i += 1 {
+		free_all(context.temp_allocator)
+		render.begin_frame(r, 1000, 1000, 1, {})
+		text.begin_frame(s, r)
+		text.draw(s, r, .Regular, hot_size, {0, 0}, render.WHITE, hot)
+		size := 5 + 0.25 * f32(variant / len(fonts))
+		for x: f32 = 0; x < 1; x += 0.25 {
+			text.draw(s, r, fonts[variant % len(fonts)], size, {x, 0}, render.WHITE, filler)
+		}
+		if !s.needs_redraw {
+			variant += 1
+		}
+	}
+}
+
 // When the glyph table fills with glyphs on a page that is still drawn
 // from, the glyphs not drawn in the frame that filled it go and the page
-// stays. Text drawn every frame keeps its bitmaps and isn't rasterized again.
+// stays while what is drawn covers a quarter of it. Text drawn every frame
+// keeps its bitmaps and isn't rasterized again.
 @(test)
 atlas_full_table_drops_glyphs_not_drawn :: proc(t: ^testing.T) {
 	device := MTLCreateSystemDefaultDevice()
@@ -252,45 +283,70 @@ atlas_full_table_drops_glyphs_not_drawn :: proc(t: ^testing.T) {
 		render.destroy(r)
 	}
 
-	// At scale 1 the small glyphs that fill the table fit in one page.
 	frame :: proc(s: ^text.State, r: ^render.Renderer) {
 		free_all(context.temp_allocator)
 		render.begin_frame(r, 1000, 1000, 1, {})
 		text.begin_frame(s, r)
 	}
-	b := strings.builder_make(context.temp_allocator)
-	for ranges in ([][2]rune{{0x21, 0x7e}, {0xa1, 0x17f}, {0x391, 0x3a9}, {0x3b1, 0x3c9}, {0x410, 0x44f}}) {
-		for c in ranges[0] ..= ranges[1] {
-			strings.write_rune(&b, c)
-		}
-	}
-	filler := strings.clone(strings.to_string(b))
-	fonts := []text.Font{.Regular, .Medium, .Semibold, .Bold}
-
-	// Each filler variant is drawn only until it is all in the atlas.
+	hot :: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+	fill_table(s, r, hot, 140)
 	a := &s.atlas
-	variant := 0
-	for i := 0; i < 5000 && a.entry_count < len(a.entries) * 3 / 4; i += 1 {
-		frame(s, r)
-		text.draw(s, r, .Regular, 13, {0, 0}, render.WHITE, "Hot")
-		size := 5 + 0.25 * f32(variant / len(fonts))
-		for x: f32 = 0; x < 1; x += 0.25 {
-			text.draw(s, r, fonts[variant % len(fonts)], size, {x, 0}, render.WHITE, filler)
-		}
-		if !s.needs_redraw {
-			variant += 1
-		}
-	}
 	testing.expect(t, a.entry_count >= len(a.entries) * 3 / 4, "the glyph table filled up")
-	text.draw(s, r, .Regular, 20, {0, 0}, render.WHITE, "ABC")
+	testing.expect_value(t, text.atlas_pages(s), 1)
+	// New glyphs with the table this full set full to .Entries.
+	text.draw(s, r, .Regular, 20, {0, 0}, render.WHITE, "123")
+	testing.expect(t, a.full == .Entries, "the table is full")
 
 	frame(s, r)
 	testing.expect_value(t, s.stats.pages, 1)
 	testing.expect(t, a.entry_count < len(a.entries) / 4, "the glyphs not drawn are gone")
-	text.draw(s, r, .Regular, 13, {0, 0}, render.WHITE, "Hot")
+	text.draw(s, r, .Regular, 140, {0, 0}, render.WHITE, hot)
 	testing.expect_value(t, s.stats.rasterized, 0)
-	text.draw(s, r, .Regular, 20, {0, 0}, render.WHITE, "ABC")
+	text.draw(s, r, .Regular, 20, {0, 0}, render.WHITE, "123")
 	testing.expect_value(t, s.stats.rasterized, 3)
+}
+
+// When the glyph table fills and what is drawn covers less than a quarter
+// of a page, the page goes with the glyphs drawn from it, which come back
+// rasterized again, so dropped glyphs can't hold most of the pages.
+@(test)
+atlas_full_table_frees_mostly_dead_pages :: proc(t: ^testing.T) {
+	device := MTLCreateSystemDefaultDevice()
+	if device == nil {
+		return // no GPU to test with
+	}
+	backing := make([]byte, 64 << 20)
+	defer delete(backing)
+	arena: mem.Arena
+	mem.arena_init(&arena, backing)
+	context.allocator = mem.arena_allocator(&arena)
+	r := new(render.Renderer)
+	r.gpu.device = device
+	r.gpu.queue = render.msg(device, "newCommandQueue")
+	s := new(text.State)
+	testing.expect(t, text.init(s))
+	defer {
+		text.destroy(s, r)
+		render.destroy(r)
+	}
+
+	frame :: proc(s: ^text.State, r: ^render.Renderer) {
+		free_all(context.temp_allocator)
+		render.begin_frame(r, 1000, 1000, 1, {})
+		text.begin_frame(s, r)
+	}
+	fill_table(s, r, "Hot", 13)
+	a := &s.atlas
+	testing.expect(t, a.entry_count >= len(a.entries) * 3 / 4, "the glyph table filled up")
+	testing.expect_value(t, text.atlas_pages(s), 1)
+	text.draw(s, r, .Regular, 20, {0, 0}, render.WHITE, "123")
+	testing.expect(t, a.full == .Entries, "the table is full")
+
+	frame(s, r)
+	testing.expect_value(t, s.stats.pages, 0)
+	text.draw(s, r, .Regular, 13, {0, 0}, render.WHITE, "Hot")
+	testing.expect_value(t, s.stats.rasterized, 3)
+	testing.expect_value(t, text.atlas_pages(s), 1)
 }
 
 // last_drawn keeps 16 bits of the frame, so a glyph last drawn 65536 frames
