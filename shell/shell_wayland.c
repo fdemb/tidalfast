@@ -112,6 +112,7 @@ static struct wl_cursor_theme *g_cursor_theme;
 static struct wl_surface *g_cursor_surface;
 
 static bool g_configured;
+static bool g_configure_unanswered; // acked, and no frame drawn since
 static float g_width = DEFAULT_WIDTH, g_height = DEFAULT_HEIGHT; // points
 static float g_scale = 1;
 static int32_t g_buffer_scale = 1; // without fractional scaling
@@ -225,6 +226,7 @@ static void apply_scale(void) {
 static void draw_frame(void) {
   if (!g_app.api.frame || !g_configured) return;
   atomic_store(&g_needs_redraw, false);
+  g_configure_unanswered = false;
   // The callback goes with the commit the renderer's present makes.
   if (!g_frame_callback) {
     g_frame_callback = wl_surface_frame(g_surface);
@@ -265,9 +267,10 @@ static void frame_done(void *data, struct wl_callback *callback, uint32_t time) 
 // When a frame callback is pending, the deadline by which it should have
 // come; 0 when a redraw shouldn't wait for one. Input waits for it too:
 // Wayland doesn't merge pointer motion, and with MAILBOX a fast mouse
-// would otherwise draw a frame per event.
+// would otherwise draw a frame per event. A configure doesn't wait, so the
+// compositor gets a frame at the new size soon after it.
 static double frame_deadline(void) {
-  if (!g_frame_callback) return 0;
+  if (!g_frame_callback || g_configure_unanswered) return 0;
   double deadline = g_frame_requested + 2 * g_frame_interval;
   return now_seconds() < deadline ? deadline : 0;
 }
@@ -1442,9 +1445,7 @@ static void xdg_surface_configure(void *data, struct xdg_surface *s, uint32_t se
     g_height = g_pending_height;
   }
   push_event((Event){.kind = EVENT_RESIZE, .x = g_width, .y = g_height});
-  // Draw now, so the compositor gets a frame at the new size with this
-  // configure.
-  draw_frame();
+  g_configure_unanswered = true;
 }
 
 static const struct xdg_surface_listener g_xdg_surface_listener = {.configure = xdg_surface_configure};
@@ -2030,9 +2031,9 @@ int main(int argc, char **argv) {
 #if HOT_RELOAD
   watch_app();
 #endif
-  // The first configure draws the first frame.
   while (!g_configured && wl_display_dispatch(g_display) >= 0) {
   }
+  draw_frame();
   measure_mark("window");
   setup_shell_test();
   request_redraw();
