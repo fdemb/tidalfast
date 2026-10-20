@@ -95,7 +95,7 @@ Status :: enum u8 {
 	Playing,
 	Added,
 	Copied,
-	Copied_Artist, // the open artist's link
+	Copied_Page, // the link to the open artist, album or playlist
 	Adding,
 	Already_In,
 	Add_Failed,
@@ -142,14 +142,39 @@ Track_Columns :: struct {
 	number, cover, album, added, heart, duration, more: f32,
 }
 
+// List_Kind is what the open list is, which picks its header and its
+// columns.
+List_Kind :: enum u8 {
+	Playlist, // a playlist or Liked Songs, the only lists with dates added
+	Album, // every row is the same album, so no cover or album column
+	Artist, // an artist's top tracks
+	Search, // the songs found
+}
+
+// list_kind is the open list's kind. The fake data's .None is its
+// playlists, and so is the real data's before a list opens.
+list_kind :: proc(s: ^State) -> List_Kind {
+	source := s.search.fake_source if s.data.fake else s.data.view.source
+	#partial switch source {
+	case .Album:
+		return .Album
+	case .Artist:
+		return .Artist
+	case .Search:
+		return .Search
+	}
+	return .Playlist
+}
+
 // track_columns follows spotifast: the album shows above 560 pt and the date
-// added above 760, in lists that have one.
-track_columns :: proc(width: f32, dated: bool) -> Track_Columns {
+// added above 760, in lists that have them.
+track_columns :: proc(width: f32, kind: List_Kind) -> Track_Columns {
+	album := kind == .Album
 	return {
 		number = 44,
-		cover = 52,
-		album = clamp(width * 0.28, 140, 360) if width > 560 else 0,
-		added = 120 if dated && width > 760 else 0,
+		cover = 0 if album else 52,
+		album = clamp(width * 0.28, 140, 360) if width > 560 && !album else 0,
+		added = 120 if kind == .Playlist && width > 760 else 0,
 		heart = 36,
 		duration = 56,
 		more = 36,
@@ -216,12 +241,18 @@ draw_history_buttons :: proc(s: ^State) {
 	}
 }
 
-// hero_under_titlebar is how far the artist page's picture runs up under
-// the titlebar: all of it, unless the login notice is above the page.
+// hero_under_titlebar is how far the header of the artist page or a track
+// list runs up under the titlebar: all of it, unless the login notice is
+// above it. The search results and an artist's grid keep their headers
+// below it.
 hero_under_titlebar :: proc(s: ^State) -> f32 {
-	p := artist_place(s)
-	if p == nil || p.artist_view != nil || login_notice_shown(s) {
+	if login_notice_shown(s) || search_showing(s) {
 		return 0
+	}
+	if p := artist_place(s); p != nil {
+		if _, grid := p.artist_view.(Artist_Grid); grid {
+			return 0
+		}
 	}
 	return s.titlebar_h
 }
@@ -341,19 +372,12 @@ draw_sidebar_handle :: proc(s: ^State, window_w: f32) {
 }
 
 draw_main_view :: proc(s: ^State, main_w: f32) {
-	lib := &s.library
-	// Only playlists and Liked Songs say when a track was added. The fake
-	// data's .None is its playlists.
-	source := s.search.fake_source if s.data.fake else s.data.view.source
-	cols := track_columns(main_w - 2 * LIST_PAD, source in bit_set[Source]{.None, .Liked, .Playlist})
-	// Durations are m:ss however long, so the widest has the longest
-	// track's count of minute digits.
-	cols.duration = max(cols.duration, ui.counter_width(.Regular, 13, fmt.tprintf("%d:00", max(s.data.view.longest / 60, 10))) + 2 * CELL_PAD)
+	under := hero_under_titlebar(s)
 	ui.column("main", {.Clip}, ui.fill(), ui.fill())
 	if s.titlebar_h > 0 {
-		// Over the artist page's picture, or above the other views.
+		// Over the page's or the list's header, or above the search results.
 		strip := ui.box_make("", {.Window_Drag}, ui.px(main_w), ui.px(s.titlebar_h))
-		if hero_under_titlebar(s) > 0 {
+		if under > 0 {
 			strip.flags += {.Floating_X, .Floating_Y}
 		}
 	}
@@ -368,31 +392,108 @@ draw_main_view :: proc(s: ^State, main_w: f32) {
 			return
 		}
 	}
-
-	{
-		ui.row("", {}, ui.fill(), ui.px(124))
-		ui.spacer(ui.px(24))
-		if kind, image, show := view_cover(s); show {
-			cover_art(s, kind, image, u32(lib.playlist) * 7919 + 13, 92, ui.px(92), 46 if kind == .Artist else 4)
-			ui.spacer(ui.px(18))
+	if search_showing(s) {
+		draw_search_header(s)
+		if !draw_search_tabs(s) {
+			draw_found_list(s)
+			return
 		}
-		ui.column("", {}, ui.fill(), ui.fill())
-		ui.spacer(ui.px(26))
-		ui.text_style(.Bold, 28, TEXT)
-		title := ui.label(view_title(s), ui.fill(), ui.px(38))
-		ui.accessible(title, .Static_Text, title.label)
-		ui.text_style(.Regular, 13, SECONDARY)
-		subtitle := ui.label(view_subtitle(s), ui.fill(), ui.px(20))
-		ui.accessible(subtitle, .Static_Text, subtitle.label)
-		ui.text_style(.Regular, 12, DIM)
-		status := ui.label(status_text(s), ui.fill(), ui.px(18))
-		ui.accessible(status, .Static_Text, status.label)
 	}
-	if search_showing(s) && !draw_search_tabs(s) {
-		draw_found_list(s)
-		return
-	}
+	draw_track_list(s, main_w, under)
+}
 
+// draw_search_header is the search results' title, what was found and the
+// status line, above the tabs.
+draw_search_header :: proc(s: ^State) {
+	ui.row("", {}, ui.fill(), ui.px(124))
+	ui.spacer(ui.px(24))
+	ui.column("", {}, ui.fill(), ui.fill())
+	ui.spacer(ui.px(26))
+	ui.text_style(.Bold, 28, TEXT)
+	title := ui.label(view_title(s), ui.fill(), ui.px(38))
+	ui.accessible(title, .Static_Text, title.label)
+	ui.text_style(.Regular, 13, SECONDARY)
+	subtitle := ui.label(view_subtitle(s), ui.fill(), ui.px(20))
+	ui.accessible(subtitle, .Static_Text, subtitle.label)
+	ui.text_style(.Regular, 12, DIM)
+	status := ui.label(status_text(s), ui.fill(), ui.px(18))
+	ui.accessible(status, .Static_Text, status.label)
+}
+
+// draw_track_list is the open list as one scroll view: its header (see
+// list_header.odin), the column headings, the rows and, for an album, its
+// footer. Row 0 is at the header's rows_top, which the anchor, the
+// benchmarks and the keyboard's scrolling all go by.
+draw_track_list :: proc(s: ^State, main_w, under: f32) {
+	lib := &s.library
+	kind := list_kind(s)
+	cols := track_columns(main_w - 2 * LIST_PAD, kind)
+	// Durations are m:ss however long, so the widest has the longest
+	// track's count of minute digits.
+	cols.duration = max(cols.duration, ui.counter_width(.Regular, 13, fmt.tprintf("%d:00", max(s.data.view.longest / 60, 10))) + 2 * CELL_PAD)
+	h := list_header(kind, main_w, under)
+	rows_top := header_rows_top(h)
+	n := view_count(s)
+	art := hero_art(s, kind, h)
+	tint := header_tint(s, art)
+	artist := album_artist_page(s) if kind == .Album else nil
+	defer draw_list_menu(s, kind)
+
+	list := ui.scroll_view("tracks", ui.fill(), ui.fill(), inset_end = bar_inset(s))
+	if s.bench.running && s.bench.ui {
+		list.view_off.y = rows_top + bench_offset(s, list.rect.h)
+		list.view_off_target.y = list.view_off.y
+	} else if s.data.bench.running {
+		list.view_off.y = rows_top + cover_bench_offset(s, list)
+		list.view_off_target.y = list.view_off.y
+	} else if lib.anchor_row >= 0 {
+		list.view_off.y = rows_top + f32(lib.anchor_row) * TRACK_ROW_H + lib.anchor_offset
+		list.view_off_target.y = list.view_off.y
+	}
+	lib.anchor_row = -1
+	// In the header top_offset is negative: the view is above row 0.
+	lib.top_row = max(int(math.floor((list.view_off.y - rows_top) / TRACK_ROW_H)), 0)
+	lib.top_offset = list.view_off.y - rows_top - f32(lib.top_row) * TRACK_ROW_H
+
+	if list.view_off.y < header_table_y(h) {
+		draw_list_hero(s, h, kind, art, tint, main_w - list.gutter, artist)
+		draw_list_actions(s, kind, h, tint)
+	} else {
+		ui.spacer(ui.px(header_table_y(h)))
+	}
+	table_header(cols)
+	{
+		// A keyed parent of its own, so the arrow keys find no other box
+		// to move the focus to and reach table_keys.
+		ui.column("rows_group", {}, ui.fill(), ui.children_sum())
+		table := ui.column("rows", {.Focusable}, ui.fill(), ui.children_sum())
+		table.pad = {LIST_PAD, LIST_PAD_Y}
+		ui.accessible(table, .Table, view_title(s))
+		pinned := header_pinned_h(h)
+		if table_keys(s, table, n, list.rect.h - pinned) {
+			// Clear of the pinned bar and headings, with the padding above
+			// and below, so the first and last rows show it.
+			y := rows_top + f32(lib.selected) * TRACK_ROW_H
+			ui.scroll_to(list, y - pinned - LIST_PAD_Y, y + TRACK_ROW_H + LIST_PAD_Y)
+		}
+		rows := ui.virtual_rows(list, n, TRACK_ROW_H, rows_top)
+		for i in rows.first ..< rows.last {
+			track_row(s, i, cols)
+		}
+		if cols.cover > 0 {
+			cover_prefetch(s, rows.first - COVER_PREFETCH_ROWS, rows.first, 40)
+			cover_prefetch(s, rows.last, rows.last + COVER_PREFETCH_ROWS, 40)
+		}
+	}
+	if kind == .Album {
+		draw_album_footer(s, list, artist, rows_top + f32(n) * TRACK_ROW_H + LIST_PAD_Y, main_w - list.gutter)
+	}
+	draw_pinned_header(s, list, h, cols, tint)
+}
+
+// table_header is the column headings over the rows, and the line under
+// them.
+table_header :: proc(cols: Track_Columns) {
 	{
 		ui.row("", {}, ui.fill(), ui.px(HEADER_H))
 		ui.text_style(.Regular, 12, SECONDARY)
@@ -407,40 +508,13 @@ draw_main_view :: proc(s: ^State, main_w: f32) {
 			ui.spacer(ui.px(cols.heart))
 		}
 		header_cell("Time", cols.duration, .Right)
-		ui.spacer(ui.px(cols.more + 8 + ui.scroll_gutter("tracks") + LIST_PAD))
+		ui.spacer(ui.px(cols.more + 8 + LIST_PAD))
 	}
-	line := ui.box_make("", {.Draw_Background}, ui.fill(), ui.px(1))
+	ui.row("", {}, ui.fill(), ui.px(1))
+	ui.spacer(ui.px(LIST_PAD))
+	line := ui.box_make("", {.Draw_Background}, ui.fill(), ui.fill())
 	line.background = OUTLINE
-
-	list := ui.scroll_view("tracks", ui.fill(), ui.fill(), {.Focusable}, bar_inset(s))
-	list.pad = {LIST_PAD, LIST_PAD_Y}
-	ui.accessible(list, .Table, view_title(s))
-	if s.bench.running && s.bench.ui {
-		list.view_off.y = bench_offset(s, list.rect.h)
-		list.view_off_target.y = list.view_off.y
-	} else if s.data.bench.running {
-		list.view_off.y = cover_bench_offset(s, list)
-		list.view_off_target.y = list.view_off.y
-	} else if lib.anchor_row >= 0 {
-		list.view_off.y = LIST_PAD_Y + f32(lib.anchor_row) * TRACK_ROW_H + lib.anchor_offset
-		list.view_off_target.y = list.view_off.y
-	}
-	lib.anchor_row = -1
-	lib.top_row = int((list.view_off.y - LIST_PAD_Y) / TRACK_ROW_H)
-	lib.top_offset = list.view_off.y - LIST_PAD_Y - f32(lib.top_row) * TRACK_ROW_H
-	if table_keys(s, list, view_count(s)) {
-		// With the padding above and below, so the first and last rows show it.
-		ui.scroll_to(list, f32(lib.selected) * TRACK_ROW_H, f32(lib.selected + 1) * TRACK_ROW_H + 2 * LIST_PAD_Y)
-	}
-
-	{
-		rows := ui.virtual_rows(list, view_count(s), TRACK_ROW_H)
-		for i in rows.first ..< rows.last {
-			track_row(s, i, cols)
-		}
-		cover_prefetch(s, rows.first - COVER_PREFETCH_ROWS, rows.first, 40)
-		cover_prefetch(s, rows.last, rows.last + COVER_PREFETCH_ROWS, 40)
-	}
+	ui.spacer(ui.px(LIST_PAD))
 }
 
 header_cell :: proc(label: string, width: f32, align: ui.Align) {
@@ -456,8 +530,9 @@ header_cell :: proc(label: string, width: f32, align: ui.Align) {
 // arrow keys while the table has the focus, and plays the selected row with
 // Enter or Space. A row selected past count, as in an artist's full top
 // tracks, isn't one of them. It returns true when the selection moved, for
-// the caller to scroll it into view.
-table_keys :: proc(s: ^State, list: ^ui.Box, count: int) -> (moved: bool) {
+// the caller to scroll it into view. Page Up and Down go by view_h, the
+// height the rows show in.
+table_keys :: proc(s: ^State, list: ^ui.Box, count: int, view_h: f32) -> (moved: bool) {
 	lib := &s.library
 	sel := lib.selected if lib.selected < count else -1
 	if ui.signal(list).keyboard && sel >= 0 {
@@ -466,7 +541,7 @@ table_keys :: proc(s: ^State, list: ^ui.Box, count: int) -> (moved: bool) {
 	if !ui.has_focus(list) {
 		return
 	}
-	page := max(int(list.rect.h / TRACK_ROW_H) - 1, 1)
+	page := max(int(view_h / TRACK_ROW_H) - 1, 1)
 	moved = true
 	switch {
 	case ui.take_key(.Down):
@@ -525,8 +600,10 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 		ui.text_style(.Regular, 14, ACCENT if current else SECONDARY)
 		num := ui.label(fmt.tprint(i + 1), ui.px(cols.number), ui.fill())
 		num.text_align = .Center
+		if cols.cover > 0 {
+			cover_art(s, .Album, track.cover, u32(i) * 2654435761 >> 7, 40, ui.px(cols.cover))
+		}
 	}
-	cover_art(s, .Album, track.cover, u32(i) * 2654435761 >> 7, 40, ui.px(cols.cover))
 	{
 		ui.column("", {}, ui.fill(), ui.fill())
 		ui.spacer(ui.px(9))
@@ -695,7 +772,9 @@ loading_row :: proc(i: int, cols: Track_Columns) {
 		b.radius = 4
 		ui.spacer(ui.fill())
 	}
-	bar(40, 40, ui.px(cols.cover), SURFACE)
+	if cols.cover > 0 {
+		bar(40, 40, ui.px(cols.cover), SURFACE)
+	}
 	ui.spacer(ui.px(4))
 	bar(180, 12, ui.fill(), SURFACE)
 }
@@ -1129,7 +1208,7 @@ status_text :: proc(s: ^State) -> string {
 	if status := data_status(s); status != "" {
 		return status
 	}
-	if lib.status == .Copied_Artist {
+	if lib.status == .Copied_Page {
 		return fmt.tprintf("Copied the link to %s", view_title(s))
 	}
 	t := view_row(s, lib.status_track)
@@ -1150,7 +1229,7 @@ status_text :: proc(s: ^State) -> string {
 		return fmt.tprintf("Couldn't add %s to %s", t.title, sidebar_entry(s, lib.status_list).name)
 	case .Copied:
 		return fmt.tprintf("Copied the link to %s", t.title)
-	case .Copied_Artist:
+	case .Copied_Page:
 	}
 	return ""
 }

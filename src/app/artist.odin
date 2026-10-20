@@ -497,7 +497,7 @@ draw_artist_actions :: proc(s: ^State, p: ^List_Place, page: ^Artist_Page) {
 			b.radius = 20
 			if sig.clicked {
 				ui.copy_to_clipboard(artist_link(page.id))
-				set_status(s, .Copied_Artist, -1)
+				set_status(s, .Copied_Page, -1)
 			}
 			ui.tooltip(sig, "Copy artist link")
 			ui.spacer(ui.px(4))
@@ -536,7 +536,7 @@ draw_artist_menu :: proc(s: ^State, p: ^List_Place, page: ^Artist_Page) {
 			ui.menu_separator()
 			if ui.menu_item("Copy artist link").clicked {
 				ui.copy_to_clipboard(artist_link(page.id))
-				set_status(s, .Copied_Artist, -1)
+				set_status(s, .Copied_Page, -1)
 			}
 		}
 	}
@@ -559,13 +559,13 @@ draw_top_tracks :: proc(s: ^State, p: ^List_Place, view: ^ui.Box, width: f32) {
 	if !s.data.fake && n == 0 && !s.data.view.done {
 		shown = TOP_TRACKS // loading: the rows stand empty
 	}
-	cols := track_columns(width, false)
+	cols := track_columns(width, .Artist)
 	// A keyed parent of its own, so the arrow keys find no other box to
 	// move the focus to and reach table_keys.
 	ui.column("top_tracks_group", {}, ui.fill(), ui.children_sum())
 	list := ui.column("top_tracks", {.Focusable}, ui.fill(), ui.px(f32(shown) * TRACK_ROW_H))
 	ui.accessible(list, .Table, "Top tracks")
-	if table_keys(s, list, min(n, TOP_TRACKS)) {
+	if table_keys(s, list, min(n, TOP_TRACKS), list.rect.h) {
 		top := list.rect.y - view.rect.y + view.view_off.y
 		sel := f32(s.library.selected)
 		ui.scroll_to(view, top + sel * TRACK_ROW_H, top + (sel + 1) * TRACK_ROW_H)

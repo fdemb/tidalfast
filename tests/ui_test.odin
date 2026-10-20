@@ -185,24 +185,75 @@ test_ui_virtual_range :: proc(t: ^testing.T) {
 
 @(test)
 test_track_columns :: proc(t: ^testing.T) {
-	narrow := app.track_columns(560, true)
+	narrow := app.track_columns(560, .Playlist)
 	testing.expect_value(t, narrow.album, f32(0))
 	testing.expect_value(t, narrow.added, f32(0))
-	testing.expect(t, narrow.number > 0 && narrow.duration > 0)
+	testing.expect(t, narrow.number > 0 && narrow.cover > 0 && narrow.duration > 0)
 
-	medium := app.track_columns(561, true)
+	medium := app.track_columns(561, .Playlist)
 	testing.expect_value(t, medium.album, f32(561 * 0.28))
 	testing.expect_value(t, medium.added, f32(0))
 
-	wide := app.track_columns(761, true)
+	wide := app.track_columns(761, .Playlist)
 	testing.expect(t, wide.album > 0)
 	testing.expect_value(t, wide.added, f32(120))
-	testing.expect_value(t, app.track_columns(760, true).added, f32(0))
-	testing.expect_value(t, app.track_columns(2000, true).album, f32(360))
+	testing.expect_value(t, app.track_columns(760, .Playlist).added, f32(0))
+	testing.expect_value(t, app.track_columns(2000, .Playlist).album, f32(360))
 
-	undated := app.track_columns(2000, false)
-	testing.expect_value(t, undated.added, f32(0))
-	testing.expect_value(t, undated.album, f32(360))
+	// Only playlists have dates added.
+	for kind in ([?]app.List_Kind{.Artist, .Search}) {
+		undated := app.track_columns(2000, kind)
+		testing.expect_value(t, undated.added, f32(0))
+		testing.expect_value(t, undated.album, f32(360))
+		testing.expect(t, undated.cover > 0)
+	}
+
+	// Every row of an album is the same album: no cover, no album column.
+	album := app.track_columns(2000, .Album)
+	testing.expect_value(t, album.cover, f32(0))
+	testing.expect_value(t, album.album, f32(0))
+	testing.expect_value(t, album.added, f32(0))
+	testing.expect(t, album.number > 0 && album.heart > 0 && album.duration > 0 && album.more > 0)
+}
+
+// The header collapses as the list scrolls: the pinned bar's background
+// fades in as the hero's bottom reaches it, its Play and title as the
+// actions go under it, and the headings pin as they reach it. Search
+// results have no bar, so their headings pin at once.
+@(test)
+test_header_collapse :: proc(t: ^testing.T) {
+	h := app.list_header(.Album, 1000, 28)
+	testing.expect_value(t, h.hero, f32(28 + 200 + 2 * app.HERO_PAD))
+	testing.expect_value(t, h.bar, f32(28 + app.COMPACT_H))
+	table := app.header_table_y(h)
+	testing.expect_value(t, app.header_rows_top(h), table + app.HEADER_H + 1 + app.LIST_PAD_Y)
+
+	top := app.header_collapse(h, 0)
+	testing.expect(t, top.bar == 0 && top.content == 0 && !top.pinned, "nothing at the top")
+	half := app.header_collapse(h, h.hero - h.bar - app.BAR_FADE / 2)
+	testing.expect_value(t, half.bar, f32(0.5))
+	testing.expect_value(t, half.content, f32(0))
+	under := app.header_collapse(h, h.hero - h.bar)
+	testing.expect(t, under.bar == 1 && under.content == 0 && !under.pinned, "the bar is opaque once the hero is under it")
+	at := app.header_collapse(h, table - h.bar)
+	testing.expect(t, at.content == 1 && !at.pinned, "Play and the title show as the headings reach the bar")
+	past := app.header_collapse(h, table - h.bar + 1)
+	testing.expect(t, past.pinned && past.bar == 1 && past.content == 1, "then the headings pin")
+
+	search := app.list_header(.Search, 1000, 28)
+	testing.expect_value(t, app.header_rows_top(search), f32(app.HEADER_H + 1 + app.LIST_PAD_Y))
+	testing.expect(t, !app.header_collapse(search, 0).pinned)
+	scrolled := app.header_collapse(search, 1)
+	testing.expect(t, scrolled.pinned && scrolled.bar == 0 && scrolled.content == 0, "search results pin their headings, with no bar")
+}
+
+@(test)
+test_title_size :: proc(t: ^testing.T) {
+	testing.expect_value(t, app.title_size(400, 600), f32(app.TITLE_MAX))
+	testing.expect_value(t, app.title_size(800, 600), f32(52)) // 54 down to a step of 4
+	testing.expect_value(t, app.title_size(8000, 600), f32(app.TITLE_MIN))
+	testing.expect_value(t, app.list_duration(51 * 60 + 2), "51 min 2 sec")
+	testing.expect_value(t, app.list_duration(3 * 3600 + 20 * 60 + 59), "3 hr 20 min")
 }
 
 // Builds a frame with one clickable box at the top left, the way an app
