@@ -139,16 +139,20 @@ failed_refresh_is_shared_with_waiting_requests :: proc(t: ^testing.T) {
 	m.token_delay = 300 * time.Millisecond
 	m.answers["/expired"] = {401, `{"status":401,"userMessage":"The token has expired."}`}
 
-	workers: [3]^thread.Thread
-	for &w in workers {
-		w = thread.create_and_start_with_poly_data(s, proc(s: ^tidal.Session) {
-			_, err := tidal.request(s, {method = .GET, path = "expired"}, context.temp_allocator)
-			assert(tidal.is_error(err, .Refresh_Failed))
+	workers: [3]Thread_Result
+	threads: [len(workers)]^thread.Thread
+	for &w, i in workers {
+		w.s = s
+		threads[i] = thread.create_and_start_with_poly_data(&w, proc(w: ^Thread_Result) {
+			_, w.err = tidal.request(w.s, {method = .GET, path = "expired"}, context.temp_allocator)
 		})
 	}
+	for th in threads {
+		thread.join(th)
+		thread.destroy(th)
+	}
 	for w in workers {
-		thread.join(w)
-		thread.destroy(w)
+		testing.expect(t, tidal.is_error(w.err, .Refresh_Failed), fmt.tprint(w.err))
 	}
 	testing.expect_value(t, mock_count(&m, "POST /token"), 1)
 	testing.expect_value(t, mock_count(&m, "GET /expired"), 3)
@@ -171,14 +175,10 @@ failed_refresh_of_a_cleared_login_is_not_shared :: proc(t: ^testing.T) {
 	tidal.session_restore(s, {token_type = "Bearer", access_token = "old", refresh_token = "refresh-0", expiry_time = expired, user_id = 123, user_kind = .Logged_In_User})
 	m.token_delay = 300 * time.Millisecond
 
-	Old_Refresh :: struct {
-		s:   ^tidal.Session,
-		err: tidal.Error,
-	}
-	old := Old_Refresh {
+	old := Thread_Result {
 		s = s,
 	}
-	refresh := thread.create_and_start_with_poly_data(&old, proc(old: ^Old_Refresh) {
+	refresh := thread.create_and_start_with_poly_data(&old, proc(old: ^Thread_Result) {
 		_, old.err = tidal.token_refresh(old.s, "refresh-0")
 	})
 	testing.expect(t, wait_for_count(&m, "POST /token", 1), "the old login's refresh reached the mock")
@@ -190,6 +190,13 @@ failed_refresh_of_a_cleared_login_is_not_shared :: proc(t: ^testing.T) {
 	testing.expect(t, tidal.is_error(old.err, .Cancelled), fmt.tprint(old.err))
 	testing.expect_value(t, err, nil)
 	testing.expect_value(t, mock_count(&m, "POST /token"), 2)
+}
+
+// What a test thread got back, checked after thread.join.
+@(private = "file")
+Thread_Result :: struct {
+	s:   ^tidal.Session,
+	err: tidal.Error,
 }
 
 @(private = "file")
@@ -217,14 +224,17 @@ token_refresh_and_request_refresh_take_turns :: proc(t: ^testing.T) {
 	tidal.session_restore(s, {token_type = "Bearer", access_token = "old", refresh_token = "refresh-0", expiry_time = expired, user_id = 123, user_kind = .Logged_In_User})
 	m.token_delay = 300 * time.Millisecond
 
-	refresh := thread.create_and_start_with_poly_data(s, proc(s: ^tidal.Session) {
-		_, err := tidal.token_refresh(s, "refresh-0")
-		assert(err == nil)
+	r := Thread_Result {
+		s = s,
+	}
+	refresh := thread.create_and_start_with_poly_data(&r, proc(r: ^Thread_Result) {
+		_, r.err = tidal.token_refresh(r.s, "refresh-0")
 	})
 	testing.expect(t, wait_for_count(&m, "POST /token", 1), "token_refresh reached the mock")
 	_, err := tidal.request(s, {method = .GET, path = "echo"}, context.temp_allocator)
 	thread.join(refresh)
 	thread.destroy(refresh)
+	testing.expect_value(t, r.err, nil)
 	testing.expect_value(t, err, nil)
 	testing.expect_value(t, mock_count(&m, "POST /token"), 1)
 	testing.expect_value(t, tidal.session_auth(s, context.temp_allocator).access_token, "access-1")
