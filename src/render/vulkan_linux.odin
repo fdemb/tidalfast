@@ -132,7 +132,7 @@ Gpu_Texture :: struct {
 init :: proc(r: ^Renderer, surface: rawptr) -> (ok: bool) {
 	g := &r.gpu
 	defer if !ok {
-		stop(r)
+		release(r)
 	}
 	ws := (^platform.Wayland_Surface)(surface)
 	if ws == nil || ws.display == nil || ws.surface == nil {
@@ -281,6 +281,14 @@ reload :: proc(r: ^Renderer) -> bool {
 }
 
 destroy :: proc(r: ^Renderer) {
+	release(r)
+	r^ = {}
+}
+
+// release frees the GPU objects, so g.device is nil and the renderer draws
+// nothing, but keeps the frame being built, which a failed submit can stop
+// halfway through, and the capture path the shell set.
+release :: proc(r: ^Renderer) {
 	g := &r.gpu
 	if g.device != nil {
 		vk.DeviceWaitIdle(g.device)
@@ -317,16 +325,12 @@ destroy :: proc(r: ^Renderer) {
 		}
 		vk.DestroyInstance(g.instance, nil)
 	}
-	r^ = {}
-}
-
-// stop destroys the renderer after a failure, so g.device is nil and it
-// draws nothing, but keeps the capture path the shell set.
-@(private)
-stop :: proc(r: ^Renderer) {
-	path := r.capture_path
-	destroy(r)
-	r.capture_path = path
+	r.gpu = {}
+	for &slot in r.textures {
+		slot = {generation = slot.generation}
+	}
+	r.instances = nil
+	r.capacity = {}
 }
 
 // gpu_allocated is the device memory the renderer holds, in bytes. Safe
@@ -1426,7 +1430,7 @@ submit :: proc(r: ^Renderer, f: ^Gpu_Frame, info: ^vk.SubmitInfo) -> bool {
 	vk.ResetFences(g.device, 1, &f.fence)
 	if res := vk.QueueSubmit(g.queue, 1, info, f.fence); res != .SUCCESS {
 		log.errorf("render: vkQueueSubmit failed, drawing nothing from now on: %v", res)
-		stop(r)
+		release(r)
 		return false
 	}
 	f.ready = false
