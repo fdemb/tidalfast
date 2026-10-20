@@ -224,10 +224,7 @@ stream_read :: proc(st: ^Stream, offset: i64, dst: []u8, interrupt: proc(data: r
 			want = clamp(st.length - at, 0, want)
 		}
 		k := clamp(st.win_end - at, 0, want)
-		cap := i64(len(st.buf))
-		for i in 0 ..< k {
-			dst[i64(n) + i] = st.buf[(at + i) % cap]
-		}
+		ring_read(st.buf, at, dst[n:][:k])
 		n += int(k)
 		at += k
 		if k == want {
@@ -411,6 +408,20 @@ window_full :: proc(st: ^Stream) -> bool {
 	return st.win_end - keep_from(st) >= i64(len(st.buf))
 }
 
+// ring_read copies the bytes from file offset at into dst, which is no
+// longer than buf.
+@(private = "file")
+ring_read :: proc(buf: []u8, at: i64, dst: []u8) {
+	k := copy(dst, buf[at % i64(len(buf)):])
+	copy(dst[k:], buf)
+}
+
+@(private = "file")
+ring_write :: proc(buf: []u8, at: i64, src: []u8) {
+	k := copy(buf[at % i64(len(buf)):], src)
+	copy(buf, src[k:])
+}
+
 // keep_from is the oldest byte the window must still hold: KEEP_BEHIND
 // before the reader, or less in a small window, which must keep most of
 // itself for the bytes ahead. Caller holds the mutex.
@@ -528,9 +539,7 @@ write_callback :: proc "c" (buffer: [^]byte, size: c.size_t, nitems: c.size_t, u
 		}
 		room := cap - (st.win_end - keep_from(st))
 		k := min(room, i64(len(data)))
-		for i in 0 ..< k {
-			st.buf[(st.win_end + i) % cap] = data[i]
-		}
+		ring_write(st.buf, st.win_end, data[:k])
 		st.win_end += k
 		st.win_start = max(st.win_start, st.win_end - cap)
 		t.pos = st.win_end
