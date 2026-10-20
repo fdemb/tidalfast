@@ -179,33 +179,35 @@ cluster_is_word :: proc(s: string, start: int) -> bool {
 // to the start of the word before them.
 word_left :: proc(s: string, bounds: []int, p: int) -> int {
 	i, _ := slice.binary_search(bounds, p)
-	start := i
 	for i > 0 && !cluster_is_word(s, bounds[i - 1]) {
 		i -= 1
 	}
 	for i > 0 && cluster_is_word(s, bounds[i - 1]) {
 		i -= 1
 	}
-	return p if i == start else bounds[i]
+	return bounds[i]
 }
 
 // word_right is where Option-Right goes from p: over separators, then to
 // the end of the word after them.
 word_right :: proc(s: string, bounds: []int, p: int) -> int {
-	j, found := slice.binary_search(bounds, p)
-	if found {
-		j += 1
+	i, found := slice.binary_search(bounds, p)
+	last := len(bounds) - 1
+	// Off a bound, the rest of p's cluster ends at bounds[i] and goes by the
+	// codepoint at p.
+	if !found && cluster_is_word(s, p) {
+		for i < last && cluster_is_word(s, bounds[i]) {
+			i += 1
+		}
+		return bounds[i]
 	}
-	p := p
-	for p < len(s) && !cluster_is_word(s, p) {
-		p = bounds[j]
-		j += 1
+	for i < last && !cluster_is_word(s, bounds[i]) {
+		i += 1
 	}
-	for p < len(s) && cluster_is_word(s, p) {
-		p = bounds[j]
-		j += 1
+	for i < last && cluster_is_word(s, bounds[i]) {
+		i += 1
 	}
-	return p
+	return bounds[i]
 }
 
 // word_at is the run of word or separator clusters around p, for a
