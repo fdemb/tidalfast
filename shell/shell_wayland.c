@@ -948,9 +948,28 @@ static void clear_paste(void) {
   g_paste_len = 0;
 }
 
+// While our own copy is the selection, get_clipboard reads it directly.
+static void receive_selection(void) {
+  clear_paste();
+  int fds[2];
+  if (g_selection_ours || !g_offer || !g_offer_text || pipe2(fds, O_CLOEXEC) != 0) return;
+  // The write end goes to the source client, which may expect it to block.
+  wl_data_offer_receive(g_offer, "text/plain;charset=utf-8", fds[1]);
+  wl_display_flush(g_display);
+  close(fds[1]);
+  if (!set_nonblocking(fds[0])) {
+    close(fds[0]);
+    return;
+  }
+  g_receive_fd = fds[0];
+}
+
 // A paste waits up to 100 ms for a selection that is still arriving, then
-// pastes nothing rather than part of it.
+// pastes nothing rather than part of it. Some compositors don't send the
+// selection again when the window gets the keyboard back, so a paste with
+// nothing received asks for it itself.
 static size_t get_clipboard(uint8_t *buffer, size_t capacity) {
+  if (g_receive_fd < 0 && g_paste_len == 0) receive_selection();
   double deadline = now_seconds() + 0.1;
   while (!g_selection_ours && g_receive_fd >= 0) {
     int timeout = (int)ceil((deadline - now_seconds()) * 1000);
@@ -965,21 +984,6 @@ static size_t get_clipboard(uint8_t *buffer, size_t capacity) {
   size_t length = g_selection_ours ? g_clip_len : g_paste_len;
   if (buffer && capacity && length) memcpy(buffer, text, length < capacity ? length : capacity);
   return length;
-}
-
-// While our own copy is the selection, get_clipboard reads it directly.
-static void receive_selection(void) {
-  clear_paste();
-  int fds[2];
-  if (g_selection_ours || !g_offer || !g_offer_text || pipe2(fds, O_CLOEXEC) != 0) return;
-  // The write end goes to the source client, which may expect it to block.
-  wl_data_offer_receive(g_offer, "text/plain;charset=utf-8", fds[1]);
-  close(fds[1]);
-  if (!set_nonblocking(fds[0])) {
-    close(fds[0]);
-    return;
-  }
-  g_receive_fd = fds[0];
 }
 
 typedef struct {
