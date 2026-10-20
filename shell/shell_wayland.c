@@ -940,8 +940,16 @@ static void receive_more(void) {
   g_receive_fd = -1;
 }
 
+// The selection may be a password, so it doesn't outlive the focus.
+static void clear_paste(void) {
+  if (g_receive_fd >= 0) close(g_receive_fd);
+  g_receive_fd = -1;
+  explicit_bzero(g_paste, g_paste_len);
+  g_paste_len = 0;
+}
+
 // A paste waits up to 100 ms for a selection that is still arriving, then
-// takes what came.
+// pastes nothing rather than part of it.
 static size_t get_clipboard(uint8_t *buffer, size_t capacity) {
   double deadline = now_seconds() + 0.1;
   while (!g_selection_ours && g_receive_fd >= 0) {
@@ -950,22 +958,13 @@ static size_t get_clipboard(uint8_t *buffer, size_t capacity) {
     if (timeout > 0 && poll(&p, 1, timeout) > 0) {
       receive_more();
     } else {
-      close(g_receive_fd);
-      g_receive_fd = -1;
+      clear_paste();
     }
   }
   const uint8_t *text = g_selection_ours ? (const uint8_t *)g_clip : g_paste;
   size_t length = g_selection_ours ? g_clip_len : g_paste_len;
   if (buffer && capacity && length) memcpy(buffer, text, length < capacity ? length : capacity);
   return length;
-}
-
-// The selection may be a password, so it doesn't outlive the focus.
-static void clear_paste(void) {
-  if (g_receive_fd >= 0) close(g_receive_fd);
-  g_receive_fd = -1;
-  explicit_bzero(g_paste, g_paste_len);
-  g_paste_len = 0;
 }
 
 // While our own copy is the selection, get_clipboard reads it directly.
