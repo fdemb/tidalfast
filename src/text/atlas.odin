@@ -12,10 +12,12 @@ import "../render"
 // goes into R8 pages, colour glyphs (emoji) into BGRA pages. A page starts
 // at a quarter of its full side and doubles when it fills, keeping what it
 // holds; a full-size page that fills gets a sibling. When the entries fill,
-// the next frame drops every glyph not drawn in the frame that filled up.
-// When the pages fill, it frees the pages nothing was drawn from in that
-// frame, and their glyphs. If every page was drawn from, or the glyphs drawn
-// fill half the entries, the whole atlas starts over.
+// the next frame drops every glyph not drawn in the frame that filled up,
+// and frees the pages those drawn cover less than a quarter of. When the
+// pages fill, it frees the pages nothing was drawn from in that frame, and
+// their glyphs. If the pages filled and every page was drawn from, or the
+// entries filled and the glyphs drawn fill half of them, the whole atlas
+// starts over.
 
 PAGE_SIZE :: 2048
 COLOR_PAGE_SIZE :: 1024
@@ -140,7 +142,7 @@ atlas_retire :: proc(a: ^Atlas, r: ^render.Renderer) {
 		// last_drawn wraps, so a glyph not drawn for 65536 frames can look
 		// drawn; its page may be gone.
 		drawn := e.last_drawn == u16(a.frame) && (e.w == 0 || on_kept_page)
-		keep := drawn if a.full == .Entries else on_kept_page
+		keep := drawn if a.full == .Entries else (e.w == 0 || on_kept_page)
 		if e.key != 0 && keep {
 			append(&kept, e)
 		}
@@ -267,10 +269,10 @@ glyph_entry :: proc(t: ^State, r: ^render.Renderer, face_index: u8, id: u16, px_
 		}
 		return e
 	}
-	if a.full != .No || a.entry_count >= len(a.entries) * 3 / 4 {
-		if a.full == .No {
-			a.full = .Entries
-		}
+	if a.full == .No && a.entry_count >= len(a.entries) * 3 / 4 {
+		a.full = .Entries
+	}
+	if a.full != .No {
 		t.needs_redraw = true
 		return nil
 	}
