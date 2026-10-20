@@ -666,10 +666,24 @@ slot_ready :: proc(r: ^Renderer) -> ^Gpu_Frame {
 	vk.WaitForFences(g.device, 1, &f.fence, true, max(u64))
 	f.ready = true
 	free_dead(r, f)
-	f.staging_used = 0
 	return f
 }
 
+// flush_slot runs the uploads recorded so far and waits for the GPU to
+// finish everything, so what waits in the slot can go now instead of
+// after the next frame. For when the slot runs out of room to keep it.
+@(private)
+flush_slot :: proc(r: ^Renderer) -> ^Gpu_Frame {
+	f := slot_ready(r)
+	submit_uploads(r, f)
+	vk.DeviceWaitIdle(r.gpu.device)
+	f.ready = true
+	free_dead(r, f)
+	return f
+}
+
+// free_dead frees what waited for the GPU to finish with the slot and
+// empties its staging buffer.
 @(private)
 free_dead :: proc(r: ^Renderer, f: ^Gpu_Frame) {
 	g := &r.gpu
@@ -681,6 +695,7 @@ free_dead :: proc(r: ^Renderer, f: ^Gpu_Frame) {
 		free_buffer(g, &b)
 	}
 	f.dead_buffer_count = 0
+	f.staging_used = 0
 }
 
 // upload_cmd returns the slot's upload command buffer, begun.
@@ -700,12 +715,17 @@ upload_cmd :: proc(r: ^Renderer) -> vk.CommandBuffer {
 
 // stage copies bytes into the slot's staging buffer and returns their
 // offset, growing the buffer if it's full. A buffer that copies recorded
-// this frame still read waits with the slot's dead.
+// this frame still read waits with the slot's dead, or if there's no room
+// for it there, flush_slot runs those copies first.
 @(private)
 stage :: proc(r: ^Renderer, bytes: []byte) -> (buffer: vk.Buffer, offset: int, ok: bool) {
 	g := &r.gpu
 	f := slot_ready(r)
 	at := mem.align_forward_int(f.staging_used, 16)
+	if at + len(bytes) > f.staging.size && f.staging_used > 0 && f.dead_buffer_count == len(f.dead_buffers) {
+		f = flush_slot(r)
+		at = 0
+	}
 	if at + len(bytes) > f.staging.size {
 		size := max(STAGING_START, 2 * f.staging.size, len(bytes))
 		next, made := new_buffer(g, size, {.TRANSFER_SRC})
@@ -715,12 +735,9 @@ stage :: proc(r: ^Renderer, bytes: []byte) -> (buffer: vk.Buffer, offset: int, o
 		if f.staging.buffer != 0 {
 			if f.staging_used == 0 {
 				free_buffer(g, &f.staging)
-			} else if f.dead_buffer_count < len(f.dead_buffers) {
+			} else {
 				f.dead_buffers[f.dead_buffer_count] = f.staging
 				f.dead_buffer_count += 1
-			} else {
-				vk.DeviceWaitIdle(g.device)
-				free_buffer(g, &f.staging)
 			}
 		}
 		f.staging = next
@@ -844,8 +861,7 @@ gpu_texture_free :: proc(r: ^Renderer, t: Gpu_Texture) {
 	}
 	f := slot_ready(r)
 	if f.dead_count == MAX_DEAD {
-		vk.DeviceWaitIdle(r.gpu.device)
-		free_dead(r, f)
+		f = flush_slot(r)
 	}
 	f.dead[f.dead_count] = t
 	f.dead_count += 1
@@ -1263,7 +1279,8 @@ acquire :: proc(r: ^Renderer, f: ^Gpu_Frame, want: vk.Extent2D) -> u32 {
 	return max(u32)
 }
 
-// submit_uploads runs the slot's uploads on a frame that draws nothing.
+// submit_uploads runs the slot's uploads on their own, on a frame that draws
+// nothing or when flush_slot needs them done.
 @(private)
 submit_uploads :: proc(r: ^Renderer, f: ^Gpu_Frame) {
 	if !f.uploading {
