@@ -1051,6 +1051,8 @@ static void device_enter(void *data, struct wl_data_device *d, uint32_t serial, 
 
 static void device_leave(void *data, struct wl_data_device *d) { end_drag(); }
 static void device_motion(void *data, struct wl_data_device *d, uint32_t time, wl_fixed_t x, wl_fixed_t y) {}
+// We never accept a drag, so the drop is refused: finish would be a protocol
+// error without an accepted action.
 static void device_drop(void *data, struct wl_data_device *d) { end_drag(); }
 
 static const struct wl_data_device_listener g_device_listener = {
@@ -2134,7 +2136,11 @@ int main(int argc, char **argv) {
   signal(SIGPIPE, SIG_IGN);
   // The random part tells apart two instances with the same pid in different pid namespaces.
   uint64_t nonce = 0;
-  getrandom(&nonce, sizeof nonce, 0);
+  if (getrandom(&nonce, sizeof nonce, GRND_NONBLOCK) != (ssize_t)sizeof nonce) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    nonce = (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
+  }
   snprintf(g_own_mime, sizeof g_own_mime, "application/x-tidalfast-%d-%016llx", getpid(), (unsigned long long)nonce);
 
   g_redraw_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
