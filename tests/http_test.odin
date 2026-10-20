@@ -259,3 +259,25 @@ discarded_responses_are_freed :: proc(t: ^testing.T) {
 	delete(resp.etag, allocator)
 	testing.expectf(t, len(track.allocation_map) == 0, "a failed refresh leaked %d allocations", len(track.allocation_map))
 }
+
+// Adding by ISRC looks tracks up only until the first one TIDAL has, not
+// every match.
+@(test)
+add_by_isrc_stops_at_the_first_track :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := mock_session(t, &m)
+	defer tidal.session_destroy(s)
+	s.config.openapi_v2_location = m.base_url
+	m.answers["/tracks"] = {200, `{"data":[{"id":"5007","type":"tracks"},{"id":"5008","type":"tracks"},{"id":"5009","type":"tracks"}]}`}
+	m.answers["/tracks/5007"] = {404, `{"status":404,"userMessage":"not found"}`}
+	m.answers["/tracks/5008"] = {200, `{"id":5008,"title":"Eight"}`}
+	m.answers["/tracks/5009"] = {200, `{"id":5009,"title":"Nine"}`}
+
+	ok, err := tidal.favorites_add_track_by_isrc(s, "USSM12209515")
+	testing.expect_value(t, err, nil)
+	testing.expect(t, ok)
+	testing.expect_value(t, mock_count(&m, "GET /tracks/"), 2)
+	testing.expect(t, len(m.liked) == 1 && m.liked[0] == 5008, fmt.tprint(m.liked))
+}

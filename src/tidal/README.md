@@ -50,7 +50,7 @@ What a UI needs to know:
 | Albums and artists | `album_get`, `album_tracks`, `album_items`, `album_similar`, `album_review`, `artist_get`, `artist_albums`, `artist_top_tracks`, `artist_radio`, ... |
 | Playlists and folders | `playlist_get`, `playlist_tracks`, `playlist_tracks_paginated`, `user_playlist_add`, `user_playlist_remove_by_indices`, `folder_get`, `folder_items`, ... |
 | User and favorites | `user_get`, `user_playlists`, `user_create_playlist`, `favorites_tracks`, `favorites_tracks_paginated`, `favorites_add_track`, ... |
-| Browsing | `search`, `home`, `explore`, `page_get`, `page_link_get`, `page_flatten`, `mix_get`, `genres_get`, `tracks_by_isrc`, `albums_by_barcode` |
+| Browsing | `search`, `home`, `explore`, `page_get`, `page_link_get`, `page_flatten`, `mix_get`, `genres_get`, `tracks_by_isrc`, `track_by_isrc`, `albums_by_barcode` |
 
 `examples/cli/main.odin` shows most of these in use.
 

@@ -304,14 +304,14 @@ user_playlist_add_by_isrc :: proc(
 	err: Error,
 ) {
 	scratch_begin(allocator)
-	tracks, terr := tracks_by_isrc(s, isrc, context.temp_allocator)
-	if is_error(terr, .Object_Not_Found) || (terr == nil && len(tracks) == 0) {
+	track, terr := track_by_isrc(s, isrc, context.temp_allocator)
+	if is_error(terr, .Object_Not_Found) {
 		return false, nil
 	}
 	if terr != nil {
 		return false, terr
 	}
-	track_id := tracks[0].id
+	track_id := track.id
 	added := user_playlist_add(s, pl, {fmt.tprint(track_id)}, allow_duplicates, position, allocator = allocator) or_return
 	return slice.contains(added, track_id), nil
 }

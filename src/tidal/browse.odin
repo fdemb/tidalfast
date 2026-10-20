@@ -61,6 +61,39 @@ search :: proc(s: ^Session, query: string, types := SEARCH_ALL, limit := 50, off
 // Invalid_Isrc when TIDAL rejects the code.
 tracks_by_isrc :: proc(s: ^Session, isrc: string, allocator := context.allocator) -> (tracks: []Track, err: Error) {
 	scratch_begin(allocator)
+	ids := isrc_track_ids(s, isrc) or_return
+	out := make([dynamic]Track, 0, len(ids), allocator)
+	for id in ids {
+		t, terr := track_get(s, id, allocator = allocator)
+		if is_error(terr, .Object_Not_Found) {
+			continue
+		}
+		if terr != nil {
+			return nil, terr
+		}
+		append(&out, t)
+	}
+	return out[:], nil
+}
+
+// track_by_isrc returns the first track with an ISRC that TIDAL has. It
+// fails as tracks_by_isrc does, and with Object_Not_Found when no match is
+// available either.
+track_by_isrc :: proc(s: ^Session, isrc: string, allocator := context.allocator) -> (track: Track, err: Error) {
+	scratch_begin(allocator)
+	ids := isrc_track_ids(s, isrc) or_return
+	for id in ids {
+		t, terr := track_get(s, id, allocator = allocator)
+		if !is_error(terr, .Object_Not_Found) {
+			return t, terr
+		}
+	}
+	return {}, make_error(.Object_Not_Found, "No available track found for ISRC")
+}
+
+// The ids of the tracks with an ISRC, in temp memory.
+@(private = "file")
+isrc_track_ids :: proc(s: ^Session, isrc: string) -> (ids: []i64, err: Error) {
 	params := []Param{{"filter[isrc]", isrc}}
 	obj, rerr := request_object(s, {method = .GET, path = "tracks", params = params, base_url = s.config.openapi_v2_location}, context.temp_allocator)
 	if is_error(rerr, .Http) {
@@ -77,17 +110,10 @@ tracks_by_isrc :: proc(s: ^Session, isrc: string, allocator := context.allocator
 		log.warnf("No matching tracks found for ISRC '%s'", isrc)
 		return nil, make_error(.Object_Not_Found, "No matching tracks found for ISRC")
 	}
-	out := make([dynamic]Track, 0, len(data), allocator)
+	out := make([dynamic]i64, 0, len(data), context.temp_allocator)
 	for v in data {
 		item := v.(json.Object) or_continue
-		t, terr := track_get(s, value_i64(item["id"]), allocator = allocator)
-		if is_error(terr, .Object_Not_Found) {
-			continue
-		}
-		if terr != nil {
-			return nil, terr
-		}
-		append(&out, t)
+		append(&out, value_i64(item["id"]))
 	}
 	return out[:], nil
 }

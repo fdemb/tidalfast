@@ -55,14 +55,14 @@ favorites_add_video :: proc(s: ^Session, video_id: string) -> Error {
 // Returns false when no track matched.
 favorites_add_track_by_isrc :: proc(s: ^Session, isrc: string) -> (ok: bool, err: Error) {
 	scratch_begin(context.allocator)
-	tracks, terr := tracks_by_isrc(s, isrc, context.temp_allocator)
-	if is_error(terr, .Object_Not_Found) || (terr == nil && len(tracks) == 0) {
+	track, terr := track_by_isrc(s, isrc, context.temp_allocator)
+	if is_error(terr, .Object_Not_Found) {
 		return false, nil
 	}
 	if terr != nil {
 		return false, terr
 	}
-	favorites_add_track(s, {fmt.tprint(tracks[0].id)}) or_return
+	favorites_add_track(s, {fmt.tprint(track.id)}) or_return
 	return true, nil
 }
 
