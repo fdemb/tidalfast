@@ -218,7 +218,11 @@ glyph_entry :: proc(t: ^State, r: ^render.Renderer, face_index: u8, id: u16, px_
 			return nil
 		}
 		pixels := rasterize(a, face, px_size, size, id, w, h, {-left + f64(bucket) / SUBPIXEL_STEPS, -bottom})
-		render.texture_update(r, a.pages[page].texture, pixels, x, y, w, h)
+		// rasterize hands back its own copy, so a colour glyph converts in place.
+		if face.color {
+			render.convert_premultiplied(pixels)
+		}
+		render.texture_update(r, a.pages[page].texture, pixels, x, y, w, h, converted = true)
 		e.x, e.y, e.w, e.h = u16(x), u16(y), u16(w), u16(h)
 		e.left, e.top = i16(left), i16(top)
 		e.page = u8(page)
