@@ -402,8 +402,12 @@ decode :: proc(data: []u8, px := 0) -> (pixels: []u8, w, h: int, ok: bool) {
 			return nil, 0, 0, false
 		}
 		// Straight alpha in: stb weights the colours by alpha itself.
-		stbi.resize_uint8_srgb(p, x, y, 0, out, i32(px), i32(px), 0, 4, 3, 0)
+		resized := stbi.resize_uint8_srgb(p, x, y, 0, out, i32(px), i32(px), 0, 4, 3, 0) != 0
 		stbi.image_free(p)
+		if !resized {
+			libc.free(out)
+			return nil, 0, 0, false
+		}
 		p, x, y = out, i32(px), i32(px)
 	}
 	pixels = p[:x * y * 4]
