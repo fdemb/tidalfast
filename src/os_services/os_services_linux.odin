@@ -12,6 +12,7 @@ import "core:log"
 import "core:os"
 import "core:strings"
 import "core:sync"
+import "core:sys/linux"
 import "core:sys/posix"
 
 Status :: i32
@@ -206,24 +207,53 @@ open_url :: proc(url: string) -> bool {
 // mask and SIGPIPE back to default: the shell blocks the quit signals for
 // its signalfd and ignores SIGPIPE, and both would survive exec. The child
 // forks again and exits, so the program runs on as an orphan and leaves no
-// zombie behind.
+// zombie behind. False if a fork or the exec fails: the grandchild writes
+// exec's errno to a close-on-exec pipe, which a successful exec closes
+// empty.
 spawn_detached :: proc(argv: []cstring) -> bool {
-	pid := posix.fork()
-	if pid < 0 {
+	fds: [2]linux.Fd
+	if linux.pipe2(&fds, {.CLOEXEC}) != .NONE {
 		return false
 	}
+	read_end, write_end := posix.FD(fds[0]), posix.FD(fds[1])
+	pid := posix.fork()
 	if pid == 0 {
-		if posix.fork() == 0 {
+		grandchild := posix.fork()
+		if grandchild == 0 {
 			none: posix.sigset_t
 			posix.sigemptyset(&none)
 			posix.pthread_sigmask(.SETMASK, &none, nil)
 			posix.signal(.SIGPIPE, nil) // SIG_DFL
 			posix.execvp(argv[0], raw_data(argv))
+			err := posix.errno()
+			posix.write(write_end, ([^]byte)(&err), size_of(err))
+			posix._exit(127)
 		}
-		posix._exit(0)
+		posix._exit(0 if grandchild > 0 else 1)
+	}
+	posix.close(write_end)
+	defer posix.close(read_end)
+	if pid < 0 {
+		return false
 	}
 	status: c.int
-	posix.waitpid(pid, &status, {})
+	for posix.waitpid(pid, &status, {}) < 0 {
+		if posix.errno() != .EINTR {
+			return false
+		}
+	}
+	if !posix.WIFEXITED(status) || posix.WEXITSTATUS(status) != 0 {
+		return false
+	}
+	err: posix.Errno
+	n := posix.read(read_end, ([^]byte)(&err), size_of(err))
+	for n < 0 && posix.errno() == .EINTR {
+		n = posix.read(read_end, ([^]byte)(&err), size_of(err))
+	}
+	if n != 0 {
+		log.warnf("os_services: %s didn't start: %v", argv[0], err)
+		return false
+	}
 	return true
 }
 
