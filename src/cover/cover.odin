@@ -413,7 +413,7 @@ decode :: proc(data: []u8, px := 0) -> (pixels: []u8, w, h: int, ok: bool) {
 	pixels = p[:x * y * 4]
 	// stb_image gives straight alpha. JPEGs are opaque, so this is only a
 	// scan for them; a PNG with transparency gets premultiplied first.
-	if channels == 4 {
+	if channels == 2 || channels == 4 {
 		for i := 0; i < len(pixels); i += 4 {
 			a := u32(pixels[i + 3])
 			if a < 255 {

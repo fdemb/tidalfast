@@ -2,6 +2,7 @@ package tidal_tests
 
 import "base:runtime"
 import "core:fmt"
+import "core:slice"
 import "core:sync"
 import "core:testing"
 import "core:thread"
@@ -414,4 +415,28 @@ cover_decode_refuses_huge_images :: proc(t: ^testing.T) {
 	pixels, _, _, ok := cover.decode(png, 80)
 	defer cover.free_pixels(pixels)
 	testing.expect(t, !ok)
+}
+
+// A gray PNG with alpha comes out of stb_image with straight alpha like an
+// RGBA one, so it decodes to the same pixels as the same image in RGBA,
+// scaled or not.
+@(test)
+cover_decode_premultiplies_gray_alpha :: proc(t: ^testing.T) {
+	gray: [4 * 4 * 2]u8
+	rgba: [4 * 4 * 4]u8
+	for i in 0 ..< 4 * 4 {
+		gray[i * 2], gray[i * 2 + 1] = 128, 128
+		rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2], rgba[i * 4 + 3] = 128, 128, 128, 128
+	}
+	gray_png := png_of(gray[:], 4, 4, 2)
+	rgba_png := png_of(rgba[:], 4, 4, 4)
+	for px in ([]int{0, 2}) {
+		got, w, h, ok := cover.decode(gray_png, px)
+		defer cover.free_pixels(got)
+		want, _, _, _ := cover.decode(rgba_png, px)
+		defer cover.free_pixels(want)
+		testing.expect(t, ok)
+		testing.expect_value(t, [2]int{w, h}, [2]int{4, 4} if px == 0 else [2]int{px, px})
+		testing.expect(t, slice.equal(got, want), fmt.tprint(px, got[:4], want[:4]))
+	}
 }
