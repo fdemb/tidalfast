@@ -1906,11 +1906,11 @@ static void main_loop(void) {
   enum { FD_WAYLAND, FD_REDRAW, FD_WAKE, FD_REPEAT, FD_MOMENTUM, FD_TEST, FD_SIGNAL, FD_INOTIFY };
   int wl_fd = wl_display_get_fd(g_display);
   while (!g_quit) {
-    while (wl_display_prepare_read(g_display) != 0) wl_display_dispatch_pending(g_display);
+    while (wl_display_prepare_read(g_display) != 0)
+      if (wl_display_dispatch_pending(g_display) < 0) goto lost;
     if (wl_display_flush(g_display) < 0 && errno != EAGAIN) {
       wl_display_cancel_read(g_display);
-      fprintf(stderr, "shell: lost the Wayland connection\n");
-      break;
+      goto lost;
     }
     int timeout = -1;
     if (atomic_load(&g_needs_redraw) && g_configured) {
@@ -1922,18 +1922,12 @@ static void main_loop(void) {
     for (int i = 0; i < 8; i++) fds[i] = (struct pollfd){.fd = fd_list[i], .events = POLLIN};
     int n = poll(fds, 8, timeout);
     if (n > 0 && (fds[FD_WAYLAND].revents & POLLIN)) {
-      if (wl_display_read_events(g_display) < 0) {
-        fprintf(stderr, "shell: lost the Wayland connection\n");
-        break;
-      }
+      if (wl_display_read_events(g_display) < 0) goto lost;
     } else {
       wl_display_cancel_read(g_display);
     }
-    if (fds[FD_WAYLAND].revents & (POLLERR | POLLHUP)) {
-      fprintf(stderr, "shell: lost the Wayland connection\n");
-      break;
-    }
-    wl_display_dispatch_pending(g_display);
+    if (fds[FD_WAYLAND].revents & (POLLERR | POLLHUP)) goto lost;
+    if (wl_display_dispatch_pending(g_display) < 0) goto lost;
     if (fds[FD_REDRAW].revents & POLLIN) drain(g_redraw_fd);
     if (fds[FD_WAKE].revents & POLLIN) {
       drain(g_wake_fd);
@@ -1965,6 +1959,9 @@ static void main_loop(void) {
     // frame callback, or its deadline.
     if (atomic_load(&g_needs_redraw) && g_configured && frame_deadline() == 0) draw_frame();
   }
+  return;
+lost:
+  fprintf(stderr, "shell: lost the Wayland connection\n");
 }
 
 int main(int argc, char **argv) {
