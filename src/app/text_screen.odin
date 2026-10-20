@@ -32,7 +32,7 @@ draw_text_screen :: proc(s: ^State, w, h: f32) {
 	}
 	line(s, x, &y, .Semibold, 20, "TIDALfast text")
 	line(s, x, &y, .Regular, 13, "The quick brown fox jumps over the lazy dog. 0123456789")
-	line(s, x, &y, .Regular, 11, "Inter 11: Hamburg Sinfonietta, Björk, Sigur Rós, Łódź")
+	line(s, x, &y, .Regular, 11, "Small 11: Hamburg Sinfonietta, Björk, Sigur Rós, Łódź")
 	for font, i in ([4]text.Font{.Regular, .Medium, .Semibold, .Bold}) {
 		names := [4]string{"Regular", "Medium", "SemiBold", "Bold"}
 		line(s, x, &y, font, 15, fmt.tprintf("%s 15: Hyperballad, Avril 14th", names[i]))

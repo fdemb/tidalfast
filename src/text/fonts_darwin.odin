@@ -1,7 +1,7 @@
 package text
 
-// CoreText and CoreGraphics behind the text code: the primary faces from
-// memory, fallback fonts that CTFontCreateForString and a search of the
+// CoreText and CoreGraphics behind the text code: the system font and the
+// icon faces from memory, fallback fonts that CTFontCreateForString and a search of the
 // installed fonts find, CoreText shaping for morx-only fonts, and glyph
 // bounds and bitmaps for the atlas.
 
@@ -12,7 +12,7 @@ import "core:sys/posix"
 
 import "../kbts"
 
-SIZED_FONTS :: 8
+SIZED_FONTS :: 16
 SCRATCH_SIZE :: 256 // glyphs bigger than this get their own bitmap context
 
 // Font_Ref is a CTFontRef. The loader takes one in a request for a font
@@ -20,7 +20,7 @@ SCRATCH_SIZE :: 256 // glyphs bigger than this get their own bitmap context
 Font_Ref :: CTFontRef
 
 // Face_Native is a face's CoreText side: the font at BASE_SIZE and the last
-// few sizes the atlas asked for.
+// few sizes the shaper and the atlas asked for.
 Face_Native :: struct {
 	ct:         CTFontRef, // at BASE_SIZE
 	sized:      [SIZED_FONTS]Sized_Font,
@@ -28,8 +28,9 @@ Face_Native :: struct {
 }
 
 Sized_Font :: struct {
-	size: f32,
-	font: CTFontRef,
+	size:    f32,
+	optical: f32, // the optical size it's pinned to, or 0 for CoreText's pick
+	font:    CTFontRef,
 }
 
 // Raster is the atlas's scratch bitmaps.
@@ -58,9 +59,86 @@ font_ref_release :: proc(ref: Font_Ref) {
 	cf_release(ref)
 }
 
-// load_primary loads one of the built-in faces from its #load data.
+// SYSTEM_WEIGHTS are the kCTFontWeightTrait values of NSFontWeightRegular,
+// Medium, Semibold and Bold.
 @(private)
-load_primary :: proc(t: ^State, font: Font, data: []byte) -> bool {
+SYSTEM_WEIGHTS := #partial [Font]CGFloat {
+	.Regular  = 0,
+	.Medium   = 0.23,
+	.Semibold = 0.3,
+	.Bold     = 0.4,
+}
+
+// load_system loads the system UI font, SF Pro, at font's weight. The
+// weights are instances of one variable font, so the faces share its
+// mapped file and kb_text_shape tables.
+@(private)
+load_system :: proc(t: ^State, font: Font) -> bool {
+	base := CTFontCreateUIFontForLanguage(CT_FONT_UI_FONT_SYSTEM, BASE_SIZE, nil)
+	if base == nil {
+		return false
+	}
+	defer cf_release(base)
+	weight := SYSTEM_WEIGHTS[font]
+	number := CFNumberCreate(nil, CF_NUMBER_CGFLOAT_TYPE, &weight)
+	defer cf_release(number)
+	trait_keys := [1]rawptr{kCTFontWeightTrait}
+	trait_values := [1]rawptr{number}
+	traits := CFDictionaryCreate(nil, &trait_keys[0], &trait_values[0], 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks)
+	defer cf_release(traits)
+	keys := [1]rawptr{kCTFontTraitsAttribute}
+	values := [1]rawptr{traits}
+	attrs := CFDictionaryCreate(nil, &keys[0], &values[0], 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks)
+	defer cf_release(attrs)
+	desc := CTFontDescriptorCreateWithAttributes(attrs)
+	defer cf_release(desc)
+	ct := CTFontCreateCopyWithAttributes(base, BASE_SIZE, nil, desc)
+	if ct == nil {
+		return false
+	}
+	defer cf_release(ct)
+
+	path: [1024]u8
+	if !font_path(ct, path[:]) {
+		return false
+	}
+	face := &t.faces[font]
+	shared := false
+	for &other in t.faces[:int(font)] {
+		other_path: [1024]u8
+		if font_path(other.ct, other_path[:]) && string(cstring(&other_path[0])) == string(cstring(&path[0])) && kbts.FontCount(other.file) == 1 {
+			face^ = other
+			face.native = {}
+			face.mapped = false
+			face.blob = nil
+			if !face_native_init(face, ct, 0) {
+				return false
+			}
+			shared = true
+			break
+		}
+	}
+	if !shared {
+		data, ok := map_file(cstring(&path[0]))
+		if !ok {
+			return false
+		}
+		index := collection_index(data, ct) if kbts.FontCount(data) > 1 else 0
+		if !load_face(face, ct, data, index, true) {
+			posix.munmap(raw_data(data), uint(len(data)))
+			return false
+		}
+	}
+	// The instance's metrics rather than the default one's.
+	face.ascent = f32(CTFontGetAscent(face.ct)) / BASE_SIZE
+	face.descent = f32(CTFontGetDescent(face.ct)) / BASE_SIZE
+	t.loader.primary[font] = face.ct
+	return true
+}
+
+// load_embedded loads one of the built-in faces from its #load data.
+@(private)
+load_embedded :: proc(t: ^State, font: Font, data: []byte) -> bool {
 	// The #load data lives in this dylib's image. A debug build, which
 	// hot reload may replace, takes a copy. A release build never
 	// reloads, and the shell never closes a dylib, so CoreText and
@@ -99,6 +177,7 @@ face_native_init :: proc(face: ^Face, ct: Font_Ref, index: int) -> bool {
 	face.name = font_name_hash(ct)
 	face.color = CTFontGetSymbolicTraits(ct) & CT_FONT_COLOR_GLYPHS_TRAIT != 0
 	face.coretext_shaping = !font_has_table(ct, "GSUB") && font_has_table(ct, "morx")
+	face.native_advances = face.hmetrics > 0 && font_has_table(ct, "fvar")
 	return true
 }
 
@@ -151,10 +230,8 @@ known_or_load :: proc(l: ^Loader, ct: CTFontRef, need: rune, res: ^Load_Result) 
 	if l.known_count == MAX_FACES {
 		return false
 	}
-	url := CTFontCopyAttribute(ct, kCTFontURLAttribute)
-	defer cf_release(url)
 	path: [1024]u8
-	if url == nil || !CFURLGetFileSystemRepresentation(url, true, &path[0], len(path)) {
+	if !font_path(ct, path[:]) {
 		return false
 	}
 	data, ok := map_file(cstring(&path[0]))
@@ -224,14 +301,10 @@ search_fallback :: proc(l: ^Loader, font: Font, str: CFStringRef, r: rune, res: 
 		if (traits & CT_FONT_BOLD_TRAIT != 0) == want_bold {
 			score += 2
 		}
-		url := CTFontCopyAttribute(ct, kCTFontURLAttribute)
 		path: [1024]u8
-		if url != nil && CFURLGetFileSystemRepresentation(url, true, &path[0], len(path)) {
-			if !strings.contains(string(cstring(&path[0])), "/Supplemental/") {
-				score += 1
-			}
+		if font_path(ct, path[:]) && !strings.contains(string(cstring(&path[0])), "/Supplemental/") {
+			score += 1
 		}
-		cf_release(url)
 		append(&candidates, Candidate{ct, score})
 	}
 	slice.stable_sort_by(candidates[:], proc(a, b: Candidate) -> bool {return a.score > b.score})
@@ -284,6 +357,14 @@ warm_face :: proc(face: ^Face, r: rune) {
 	CTFontDrawGlyphs(face.ct, &glyph, &pos, 1, ctx)
 }
 
+// font_path writes the path of ct's file into buf, NUL-terminated.
+@(private)
+font_path :: proc(ct: CTFontRef, buf: []u8) -> bool {
+	url := CTFontCopyAttribute(ct, kCTFontURLAttribute)
+	defer cf_release(url)
+	return url != nil && CFURLGetFileSystemRepresentation(url, true, raw_data(buf), len(buf))
+}
+
 // collection_index returns the index of the face in a .ttc whose name
 // table is byte for byte the one CoreText reports for ct, or 0.
 collection_index :: proc(data: []byte, ct: CTFontRef) -> int {
@@ -327,19 +408,52 @@ run_font_face :: proc(t: ^State, ct: CTFontRef, name: u64) -> int {
 	return PENDING
 }
 
-// sized_font returns face's CTFont at size, keeping the last few sizes.
+// sized_font returns face's CTFont at size, keeping the last few. With
+// optical above 0 its optical size is pinned there, else CoreText sets it
+// to size.
 @(private)
-sized_font :: proc(face: ^Face, size: f32) -> CTFontRef {
+sized_font :: proc(face: ^Face, size: f32, optical: f32 = 0) -> CTFontRef {
 	for s in face.sized {
-		if s.font != nil && s.size == size {
+		if s.font != nil && s.size == size && s.optical == optical {
 			return s.font
 		}
 	}
 	slot := &face.sized[face.sized_next]
 	face.sized_next = (face.sized_next + 1) % SIZED_FONTS
 	cf_release(slot.font)
-	slot^ = {size, CTFontCreateCopyWithAttributes(face.ct, CGFloat(size), nil, nil)}
+	desc: CTFontDescriptorRef
+	if optical > 0 {
+		value := CGFloat(optical)
+		number := CFNumberCreate(nil, CF_NUMBER_CGFLOAT_TYPE, &value)
+		keys := [1]rawptr{kCTFontOpticalSizeAttribute}
+		values := [1]rawptr{number}
+		attrs := CFDictionaryCreate(nil, &keys[0], &values[0], 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks)
+		desc = CTFontDescriptorCreateWithAttributes(attrs)
+		cf_release(attrs)
+		cf_release(number)
+	}
+	slot^ = {size, optical, CTFontCreateCopyWithAttributes(face.ct, CGFloat(size), nil, desc)}
+	cf_release(desc)
 	return slot.font
+}
+
+// raster_font is face's CTFont for drawing at px_size pixels for text
+// size points. A variable font's optical size would follow px_size, which
+// on a 2x screen picks the design for text twice the size, so it's pinned
+// to size.
+@(private)
+raster_font :: proc(face: ^Face, px_size, size: f32) -> CTFontRef {
+	return sized_font(face, px_size, size if face.native_advances else 0)
+}
+
+// native_advance is glyph id's advance in the face's instance at size, in
+// points.
+@(private)
+native_advance :: proc(t: ^State, face: int, size: f32, id: u16) -> f32 {
+	glyph := CGGlyph(id)
+	advance: CGSize
+	CTFontGetAdvancesForGlyphs(sized_font(&t.faces[face], size), 0, &glyph, &advance, 1)
+	return f32(advance.width)
 }
 
 // coretext_shape shapes runes[start:end], all one direction and one
@@ -440,12 +554,13 @@ bitmap_context :: proc(r: ^Raster, color: bool, w, h: int) -> CGContextRef {
 }
 
 
-// rasterize draws one glyph at px_size with its origin at origin (pixels from the
-// bitmap's bottom left) and returns the w by h bitmap, top row first, in
-// context.temp_allocator: coverage bytes, or premultiplied BGRA for colour.
+// rasterize draws one glyph at px_size, for text size points, with its
+// origin at origin (pixels from the bitmap's bottom left) and returns the w
+// by h bitmap, top row first, in context.temp_allocator: coverage bytes, or
+// premultiplied BGRA for colour.
 @(private)
-rasterize :: proc(a: ^Atlas, face: ^Face, px_size: f32, glyph: u16, w, h: int, origin: [2]f64) -> []byte {
-	font := sized_font(face, px_size)
+rasterize :: proc(a: ^Atlas, face: ^Face, px_size, size: f32, glyph: u16, w, h: int, origin: [2]f64) -> []byte {
+	font := raster_font(face, px_size, size)
 	color := face.color
 	ctx := a.raster.color_scratch if color else a.raster.scratch
 	ctx_h := SCRATCH_SIZE
@@ -475,11 +590,12 @@ rasterize :: proc(a: ^Atlas, face: ^Face, px_size: f32, glyph: u16, w, h: int, o
 	return out
 }
 
-// glyph_box is the glyph's ink at px_size in pixels from the pen on the
-// baseline, y up: left, bottom, right, top. Empty for a glyph with none.
+// glyph_box is the glyph's ink at px_size, for text size points, in pixels
+// from the pen on the baseline, y up: left, bottom, right, top. Empty for a
+// glyph with none.
 @(private)
-glyph_box :: proc(a: ^Atlas, face: ^Face, px_size: f32, glyph: u16) -> [4]f64 {
-	font := sized_font(face, px_size)
+glyph_box :: proc(a: ^Atlas, face: ^Face, px_size, size: f32, glyph: u16) -> [4]f64 {
+	font := raster_font(face, px_size, size)
 	glyph := glyph
 	bounds: CGRect
 	CTFontGetBoundingRectsForGlyphs(font, 0, &glyph, &bounds, 1)

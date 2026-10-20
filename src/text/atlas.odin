@@ -107,11 +107,12 @@ subpixel :: proc(x: f32) -> (whole: f32, bucket: u8) {
 	return whole, u8(q - whole * SUBPIXEL_STEPS)
 }
 
-// glyph_key packs what identifies a glyph bitmap. px_size is quantized to a
-// quarter pixel. Never 0.
-glyph_key :: proc(face: u8, id: u16, px_size: f32, bucket: u8) -> u64 {
-	size := u64(u32(math.round(px_size * 4)))
-	return 1 << 63 | u64(face) << 56 | u64(id) << 40 | size << 8 | u64(bucket)
+// glyph_key packs what identifies a glyph bitmap: the pixel size, and the
+// point size, which sets a variable font's optical size. Both are quantized
+// to a quarter. Never 0.
+glyph_key :: proc(face: u8, id: u16, px_size, size: f32, bucket: u8) -> u64 {
+	sizes := u64(u16(math.round(px_size * 4))) << 16 | u64(u16(math.round(size * 4)))
+	return 1 << 63 | u64(face) << 56 | u64(id) << 40 | sizes << 8 | u64(bucket)
 }
 
 // draw_run draws a run with its top left at pos (points), truncated with an
@@ -124,7 +125,7 @@ draw_run :: proc(t: ^State, r: ^render.Renderer, run: ^Run, pos: [2]f32, color: 
 	width := run.width
 	shift, ellipsis_x: f32
 	ellipsis: ^Run
-	if max_width > 0 && run.width > max_width {
+	if max_width > 0 && run.width > max_width + FIT_SLACK {
 		ellipsis = shape(t, run.font, run.size, ELLIPSIS)
 		first, last: int
 		first, last, shift, ellipsis_x, width = truncate(glyphs, run.width, max_width, ellipsis.width, run.rtl)
@@ -162,7 +163,7 @@ draw_glyph :: proc(t: ^State, r: ^render.Renderer, g: Glyph, size: f32, x, basel
 	if face.color {
 		whole, bucket = math.round(x), 0
 	}
-	e := glyph_entry(t, r, g.face, g.id, size * r.scale, bucket)
+	e := glyph_entry(t, r, g.face, g.id, size * r.scale, size, bucket)
 	if e == nil || e.w == 0 {
 		return
 	}
@@ -173,12 +174,13 @@ draw_glyph :: proc(t: ^State, r: ^render.Renderer, g: Glyph, size: f32, x, basel
 	render.push_image(r, rect, t.atlas.pages[e.page].texture, src, tint)
 }
 
-// glyph_entry finds a glyph bitmap, rasterizing it on a miss. nil if the
-// atlas is full; the glyph then shows up from the next frame.
+// glyph_entry finds a glyph bitmap at px_size for text size points,
+// rasterizing it on a miss. nil if the atlas is full; the glyph then shows
+// up from the next frame.
 @(private)
-glyph_entry :: proc(t: ^State, r: ^render.Renderer, face_index: u8, id: u16, px_size: f32, bucket: u8) -> ^Atlas_Entry {
+glyph_entry :: proc(t: ^State, r: ^render.Renderer, face_index: u8, id: u16, px_size, size: f32, bucket: u8) -> ^Atlas_Entry {
 	a := &t.atlas
-	key := glyph_key(face_index, id, px_size, bucket)
+	key := glyph_key(face_index, id, px_size, size, bucket)
 	mask := len(a.entries) - 1
 	slot := int(mix64(key)) & mask
 	for a.entries[slot].key != 0 {
@@ -200,7 +202,7 @@ glyph_entry :: proc(t: ^State, r: ^render.Renderer, face_index: u8, id: u16, px_
 	defer a.raster_time += time.tick_since(start)
 
 	face := &t.faces[face_index]
-	box := glyph_box(a, face, px_size, id)
+	box := glyph_box(a, face, px_size, size, id)
 	e := Atlas_Entry{key = key}
 	if box[2] > box[0] && box[3] > box[1] {
 		// One pixel of padding on each side, and room for the subpixel shift.
@@ -215,7 +217,7 @@ glyph_entry :: proc(t: ^State, r: ^render.Renderer, face_index: u8, id: u16, px_
 			t.needs_redraw = true
 			return nil
 		}
-		pixels := rasterize(a, face, px_size, id, w, h, {-left + f64(bucket) / SUBPIXEL_STEPS, -bottom})
+		pixels := rasterize(a, face, px_size, size, id, w, h, {-left + f64(bucket) / SUBPIXEL_STEPS, -bottom})
 		render.texture_update(r, a.pages[page].texture, pixels, x, y, w, h)
 		e.x, e.y, e.w, e.h = u16(x), u16(y), u16(w), u16(h)
 		e.left, e.top = i16(left), i16(top)

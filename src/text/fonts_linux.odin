@@ -1,7 +1,7 @@
 package text
 
-// fontconfig and FreeType behind the text code. fontconfig finds fallback
-// fonts on the loader thread; FreeType rasterizes glyphs for the atlas on
+// fontconfig and FreeType behind the text code. The text font is the
+// built-in Noto Sans. fontconfig finds fallback fonts on the loader thread; FreeType rasterizes glyphs for the atlas on
 // the UI thread. Faces load into kb_text_shape on the loader as on macOS,
 // and get their FreeType face on the UI thread the first time a glyph is
 // drawn, so FreeType is only ever used from one thread.
@@ -82,6 +82,7 @@ FT_GlyphSlotRec :: struct {
 #assert(offset_of(FT_GlyphSlotRec, bitmap) == 152 && offset_of(FT_GlyphSlotRec, outline) == 200)
 
 FT_FACE_FLAG_FIXED_SIZES :: 1 << 1
+FT_LOAD_NO_SCALE :: 1 << 0
 FT_FACE_FLAG_COLOR :: 1 << 14
 FT_LOAD_NO_HINTING :: 1 << 1
 FT_LOAD_NO_BITMAP :: 1 << 3
@@ -100,6 +101,7 @@ foreign freetype {
 	FT_Set_Char_Size :: proc(face: ^FT_FaceRec, width, height: c.long, h_res, v_res: c.uint) -> FT_Error ---
 	FT_Select_Size :: proc(face: ^FT_FaceRec, strike: c.int) -> FT_Error ---
 	FT_Load_Glyph :: proc(face: ^FT_FaceRec, glyph_index: c.uint, load_flags: i32) -> FT_Error ---
+	FT_Get_Advance :: proc(face: ^FT_FaceRec, glyph_index: c.uint, load_flags: i32, advance: ^c.long) -> FT_Error ---
 	FT_Outline_Get_CBox :: proc(outline: ^FT_Outline, box: ^FT_BBox) ---
 	FT_Outline_Translate :: proc(outline: ^FT_Outline, dx, dy: c.long) ---
 	FT_Outline_Get_Bitmap :: proc(library: FT_Library, outline: ^FT_Outline, bitmap: ^FT_Bitmap) -> FT_Error ---
@@ -145,7 +147,7 @@ foreign libc_mincore {
 // Face_Native is a face's FreeType side, made on the UI thread by
 // face_ft the first time the atlas needs it.
 Face_Native :: struct {
-	index:     int, // in a collection
+	index:     int, // in a collection, with a variable font's named instance in the high bits
 	ft:        ^FT_FaceRec,
 	ft_failed: bool,
 	ft_size:   f32, // the pixel size last set on ft
@@ -178,11 +180,70 @@ raster_destroy :: proc(r: ^Raster) {
 @(private)
 font_ref_release :: proc(ref: Font_Ref) {}
 
-// load_primary loads one of the built-in faces from its #load data. A debug
-// build, which hot reload may replace, takes a copy; a release build reads
-// the image's bytes in place, as on macOS.
+// FC_WEIGHTS are fontconfig's weights for each font, for its fallbacks.
 @(private)
-load_primary :: proc(t: ^State, font: Font, data: []byte) -> bool {
+FC_WEIGHTS := [Font]c.int {
+	.Regular   = 80,
+	.Medium    = 100,
+	.Semibold  = 180,
+	.Bold      = 200,
+	.Icon      = 200,
+	.Icon_Fill = 200,
+}
+
+// NOTO_SANS is the text font: Noto Sans as one variable font, with
+// Regular, Medium, SemiBold and Bold as named instances. Distributions
+// differ in which Noto Sans weights they install, if any, so it's built in.
+// tools/noto.sh takes it from Noto's release.
+@(private)
+NOTO_SANS := #load("../../assets/fonts/NotoSans-Variable.ttf")
+
+// NOTO_WEIGHTS are the wght of each font's named instance.
+@(private)
+NOTO_WEIGHTS := #partial [Font]f32 {
+	.Regular  = 400,
+	.Medium   = 500,
+	.Semibold = 600,
+	.Bold     = 700,
+}
+
+// load_system loads the built-in Noto Sans at font's weight. The weights
+// share its bytes and kb_text_shape tables, which hold the default
+// instance, so the others get their advances from FreeType, which
+// FT_New_Memory_Face gives the instance.
+@(private)
+load_system :: proc(t: ^State, font: Font) -> bool {
+	instance := fvar_instance(NOTO_SANS, "wght", NOTO_WEIGHTS[font])
+	if instance < 0 {
+		return false
+	}
+	face := &t.faces[font]
+	if font == .Regular {
+		if !load_embedded(t, font, NOTO_SANS) {
+			return false
+		}
+	} else {
+		face^ = t.faces[Font.Regular]
+		face.native = {}
+		face.blob = nil
+		face.name = hash.fnv64a(transmute([]byte)FONT_NAMES[font])
+	}
+	face.index = instance << 16
+	face.native_advances = instance > 0 && face.hmetrics > 0
+	return true
+}
+
+// file_face_name is the name of face index in the font file at path.
+@(private)
+file_face_name :: proc(path: cstring, index: int) -> u64 {
+	return hash.fnv64a(transmute([]byte)string(path)) ~ (u64(index) + 1) * 0x9e37_79b9_7f4a_7c15
+}
+
+// load_embedded loads one of the built-in faces from its #load data. A
+// debug build, which hot reload may replace, takes a copy; a release build
+// reads the image's bytes in place, as on macOS.
+@(private)
+load_embedded :: proc(t: ^State, font: Font, data: []byte) -> bool {
 	data := data
 	when ODIN_DEBUG {
 		copied := make([]byte, len(data))
@@ -199,10 +260,10 @@ load_primary :: proc(t: ^State, font: Font, data: []byte) -> bool {
 
 @(private)
 FONT_NAMES := [Font]string {
-	.Regular   = "Inter Regular",
-	.Medium    = "Inter Medium",
-	.Semibold  = "Inter SemiBold",
-	.Bold      = "Inter Bold",
+	.Regular   = "Noto Sans Regular",
+	.Medium    = "Noto Sans Medium",
+	.Semibold  = "Noto Sans SemiBold",
+	.Bold      = "Noto Sans Bold",
 	.Icon      = "Phosphor Bold",
 	.Icon_Fill = "Phosphor Fill",
 }
@@ -216,7 +277,7 @@ face_native_init :: proc(face: ^Face, ct: Font_Ref, index: int) -> bool {
 		return false
 	}
 	face.index = index
-	face.color = font_table(face.file, index, "CBDT") || font_table(face.file, index, "sbix")
+	face.color = font_table(face.file, index, "CBDT") != nil || font_table(face.file, index, "sbix") != nil
 	return true
 }
 
@@ -227,37 +288,6 @@ face_native_free :: proc(face: ^Face) {
 	}
 }
 
-// font_table says whether face index of the font file data has the table.
-@(private)
-font_table :: proc(data: []byte, index: int, tag: string) -> bool {
-	be32 :: proc(data: []byte, at: int) -> int {
-		if at < 0 || at + 4 > len(data) {
-			return -1
-		}
-		return int(data[at]) << 24 | int(data[at + 1]) << 16 | int(data[at + 2]) << 8 | int(data[at + 3])
-	}
-	offset := 0
-	if be32(data, 0) == int(table_tag("ttcf")) {
-		offset = be32(data, 12 + 4 * index)
-	}
-	if offset < 0 || offset + 12 > len(data) {
-		return false
-	}
-	tables := int(data[offset + 4]) << 8 | int(data[offset + 5])
-	want := int(table_tag(tag))
-	for j in 0 ..< tables {
-		if be32(data, offset + 12 + 16 * j) == want {
-			return true
-		}
-	}
-	return false
-}
-
-// table_tag packs a four letter OpenType table tag big-endian.
-table_tag :: proc(s: string) -> u32 {
-	return u32(s[0]) << 24 | u32(s[1]) << 16 | u32(s[2]) << 8 | u32(s[3])
-}
-
 // load finds a fallback font with the request's character, the way
 // fontconfig orders them for a sans-serif face of the font's weight, and
 // loads the first whose cmap (as kb_text_shape reads it) has it.
@@ -265,14 +295,6 @@ table_tag :: proc(s: string) -> u32 {
 load :: proc(l: ^Loader, req: Load_Request) -> (res: Load_Result) {
 	res.request = req
 	r := req.codepoint
-	WEIGHTS := [Font]c.int {
-		.Regular   = 80,
-		.Medium    = 100,
-		.Semibold  = 180,
-		.Bold      = 200,
-		.Icon      = 200,
-		.Icon_Fill = 200,
-	}
 	pattern := FcPatternCreate()
 	defer FcPatternDestroy(pattern)
 	charset := FcCharSetCreate()
@@ -283,7 +305,7 @@ load :: proc(l: ^Loader, req: Load_Request) -> (res: Load_Result) {
 	// like DejaVu Sans would win 😀 with a black and white glyph. Ask for
 	// the emoji family for characters drawn as emoji by default.
 	FcPatternAddString(pattern, "family", "emoji" if emoji_presentation(r) else "sans-serif")
-	FcPatternAddInteger(pattern, "weight", WEIGHTS[req.font])
+	FcPatternAddInteger(pattern, "weight", FC_WEIGHTS[req.font])
 	FcConfigSubstitute(nil, pattern, FC_MATCH_PATTERN)
 	FcDefaultSubstitute(pattern)
 	result: c.int
@@ -317,7 +339,7 @@ load :: proc(l: ^Loader, req: Load_Request) -> (res: Load_Result) {
 // whose cmap (as kb_text_shape reads it) lacks need counts as a failure.
 @(private)
 known_or_load :: proc(l: ^Loader, path: cstring, index: int, need: rune, res: ^Load_Result) -> bool {
-	name := hash.fnv64a(transmute([]byte)string(path)) ~ (u64(index) + 1) * 0x9e37_79b9_7f4a_7c15
+	name := file_face_name(path, index)
 	for &k in l.known[:l.known_count] {
 		if k.name == name {
 			if kbts.CodepointToGlyphId(&k.kb, need) == 0 {
@@ -352,6 +374,21 @@ known_or_load :: proc(l: ^Loader, path: cstring, index: int, need: rune, res: ^L
 @(private)
 coretext_shape :: proc(t: ^State, face: int, runes: []rune, start, end: int, size: f32, out: ^[dynamic]Glyph, cps: ^[dynamic]int, pending: ^bool) -> f32 {
 	return 0
+}
+
+// native_advance is glyph id's advance in the face's instance at size, in
+// points, from FreeType, which applies the instance's HVAR or gvar.
+@(private)
+native_advance :: proc(t: ^State, face: int, size: f32, id: u16) -> f32 {
+	f := &t.faces[face]
+	ft := face_ft(&t.atlas, f)
+	units: c.long
+	if ft == nil || FT_Get_Advance(ft, c.uint(id), FT_LOAD_NO_SCALE, &units) != 0 {
+		return default_advance(f, id) * size / f.units_per_em
+	}
+	// Without HVAR it loads the glyph into the slot load_glyph remembers.
+	t.atlas.raster.loaded_face = nil
+	return f32(units) * size / f.units_per_em
 }
 
 // face_ft returns the face's FreeType face, making it the first time.
@@ -422,8 +459,9 @@ load_glyph :: proc(a: ^Atlas, face: ^Face, px_size: f32, glyph: u16) -> (slot: ^
 
 // glyph_box is the glyph's ink at px_size in pixels from the pen on the
 // baseline, y up: left, bottom, right, top. Empty for a glyph with none.
+// size matters only on macOS.
 @(private)
-glyph_box :: proc(a: ^Atlas, face: ^Face, px_size: f32, glyph: u16) -> [4]f64 {
+glyph_box :: proc(a: ^Atlas, face: ^Face, px_size, size: f32, glyph: u16) -> [4]f64 {
 	slot, scale, ok := load_glyph(a, face, px_size, glyph)
 	if !ok {
 		return {}
@@ -450,9 +488,9 @@ glyph_box :: proc(a: ^Atlas, face: ^Face, px_size: f32, glyph: u16) -> [4]f64 {
 // rasterize draws one glyph at px_size with its origin at origin (pixels
 // from the bitmap's bottom left) and returns the w by h bitmap, top row
 // first, in context.temp_allocator: coverage bytes, or premultiplied BGRA
-// for colour.
+// for colour. size, the text's size in points, matters only on macOS.
 @(private)
-rasterize :: proc(a: ^Atlas, face: ^Face, px_size: f32, glyph: u16, w, h: int, origin: [2]f64) -> []byte {
+rasterize :: proc(a: ^Atlas, face: ^Face, px_size, size: f32, glyph: u16, w, h: int, origin: [2]f64) -> []byte {
 	bpp := 4 if face.color else 1
 	out := make([]byte, w * h * bpp, context.temp_allocator)
 	slot, scale, ok := load_glyph(a, face, px_size, glyph)

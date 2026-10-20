@@ -1957,10 +1957,16 @@ superseded_login_wait_job :: proc(t: ^testing.T) {
 	testing.expect(t, !shows(screen, "Try again"), screen)
 	testing.expect_value(t, tidal.session_auth(d.session, context.temp_allocator).access_token, "")
 
-	// There and back to the code before the queued poll ran.
+	// There and back to the code before the queued poll ran. With the
+	// workers running, a worker could take the poll between the first two
+	// calls and spend the code for an attempt that's gone by the time
+	// TIDAL answers.
+	app.workers_stop(d)
 	app.device_begin(d)
 	app.pkce_show(d)
 	app.device_begin(d)
+	app.workers_start(d)
+	app.data_retry(d)
 	for _ in 0 ..< 2 {
 		res, ok = wait_result(d, 5 * time.Second)
 		testing.expect(t, ok)

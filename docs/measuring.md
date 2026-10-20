@@ -66,7 +66,7 @@ The startup marks, in order:
 | `main` | the shell's `main` started: dyld has loaded the executable and its frameworks |
 | `launched` | `applicationDidFinishLaunching`: AppKit is set up |
 | `dylib` | the app dylib is copied and opened |
-| `init` | the app's `init` returned: renderer, shaders, Inter, caches, workers |
+| `init` | the app's `init` returned: renderer, shaders, fonts, caches, workers |
 | `window` | the window is ordered front |
 | `first_frame` | the first frame is committed and its drawable presented |
 | `library` | the first frame with the sidebar's playlists (fake: the first frame) |

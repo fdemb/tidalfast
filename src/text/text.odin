@@ -1,4 +1,5 @@
-// Text: Inter and the Phosphor icons loaded from memory into kb_text_shape and the OS's font
+// Text: the system's UI font (SF Pro on macOS, Noto Sans on Linux) and the
+// built-in Phosphor icons loaded into kb_text_shape and the OS's font
 // rasterizer (CoreText on macOS, FreeType on Linux), shaping with
 // kb_text_shape, rasterizing into glyph atlases, and drawing through the
 // rect renderer.
@@ -9,13 +10,18 @@
 // rasterized at physical pixel sizes and placed on whole pixels, with one of
 // four bitmaps per glyph for the fractional x position.
 //
-// Characters Inter lacks go to a fallback font that CTFontCreateForString
+// Characters the system font lacks go to a fallback font that CTFontCreateForString
 // picks on macOS and fontconfig on Linux (fonts_darwin.odin,
 // fonts_linux.odin). Its file is loaded into kb_text_shape too, so both
-// sides see the same glyph IDs. Fallbacks load on a worker thread (loader.odin). Some macOS fonts (Geeza Pro for Arabic, Apple Color Emoji)
+// sides see the same glyph IDs. Fallbacks load on a worker thread
+// (loader.odin). Some macOS fonts (Geeza Pro for Arabic, Apple Color Emoji)
 // carry only Apple's morx shaping tables, which kb_text_shape can't read.
 // Runs in those fonts are shaped by CoreText instead, which still gets them
 // the right glyphs from the same file.
+//
+// SF Pro is one variable font, and kb_text_shape reads only its default
+// instance, so for variable fonts the advances come from the OS
+// (native_advance) and kb_text_shape adds its kerning to them.
 //
 // kb_text_shape splits text into runs of one direction, script and font,
 // but its bidi resolution is incomplete, so shape_uncached picks the
@@ -48,12 +54,9 @@ Font :: enum u8 {
 	Icon_Fill, // Phosphor Fill
 }
 
+// The icon fonts are built in. The others are the system's (load_system).
 @(private)
-FONT_FILES := [Font][]byte {
-	.Regular   = #load("../../assets/fonts/Inter-Regular.ttf"),
-	.Medium    = #load("../../assets/fonts/Inter-Medium.ttf"),
-	.Semibold  = #load("../../assets/fonts/Inter-SemiBold.ttf"),
-	.Bold      = #load("../../assets/fonts/Inter-Bold.ttf"),
+ICON_FILES := #partial [Font][]byte {
 	.Icon      = #load("../../assets/fonts/Phosphor-Bold.ttf"),
 	.Icon_Fill = #load("../../assets/fonts/Phosphor-Fill.ttf"),
 }
@@ -88,6 +91,9 @@ SWEEP_EVERY :: 256
 BASE_SIZE :: 16
 
 ELLIPSIS :: "…"
+// Points a run may exceed max_width by and still fit: a box sized to the
+// run, less its padding, can come out a rounding error narrower than it.
+FIT_SLACK :: 0.001
 
 // A shaped glyph. Runs store glyphs in visual order, left to right.
 Glyph :: struct {
@@ -135,6 +141,12 @@ Face :: struct {
 	ascent, descent:  f32, // in em
 	color:            bool, // colour bitmaps (emoji): drawn from the BGRA atlas
 	coretext_shaping: bool, // morx without GSUB: kb_text_shape can't shape it
+	// An instance of a variable font, whose advances kb_text_shape gets
+	// wrong: it reads the default instance's. They come from the OS, plus
+	// what kb_text_shape adds to the default ones (kerning).
+	native_advances:  bool,
+	hmtx:             []byte, // the default instance's advances, in file
+	hmetrics:         int, // advances in hmtx
 	file:             []byte,
 	mapped:           bool,
 	blob:             rawptr, // kb_text_shape's parsed tables, malloc'd
@@ -175,7 +187,7 @@ State :: struct {
 	generation:      u64,
 	// Whether each font has each BMP codepoint, two bits apiece: 0 not
 	// asked yet, 1 yes, 2 no. kb_text_shape's cmap lookup is slow enough
-	// (half a microsecond in Inter) to matter once per character.
+	// (about half a microsecond) to matter once per character.
 	coverage:        [Font][]u8,
 
 	shaper_memory:   []byte,
@@ -196,7 +208,7 @@ State :: struct {
 	needs_redraw:    bool,
 }
 
-// init loads the Inter faces, allocates the caches from context.allocator,
+// init loads the system font and the icons, allocates the caches from context.allocator,
 // which must outlive the State (the persistent arena), and starts the font
 // loader. The fallback cache grows, so it's malloc'd instead. wake is
 // called from the loader thread when fonts arrive.
@@ -217,7 +229,8 @@ init :: proc(t: ^State, wake: proc "c" () = nil) -> bool {
 	atlas_init(&t.atlas)
 
 	for font in Font {
-		if !load_primary(t, font, FONT_FILES[font]) {
+		ok := load_embedded(t, font, ICON_FILES[font]) if font >= .Icon else load_system(t, font)
+		if !ok {
 			return false
 		}
 		t.face_count += 1
@@ -421,10 +434,10 @@ shape_uncached :: proc(t: ^State, font: Font, size: f32, s: string) -> Run {
 		append(&runes, r)
 	}
 
-	// Find fallback faces for whatever Inter doesn't have. Only the ones
+	// Find fallback faces for whatever the font doesn't have. Only the ones
 	// this string needs go on the font stack: kb_text_shape is slower with
 	// more fonts to choose from. Characters whose font is still loading get
-	// Inter's missing glyph, which draw_run leaves blank.
+	// the font's missing glyph, which draw_run leaves blank.
 	primary := &t.faces[font]
 	needed: bit_set[0 ..< MAX_FACES]
 	pending := false
@@ -483,13 +496,19 @@ shape_uncached :: proc(t: ^State, font: Font, size: f32, s: string) -> Run {
 				break
 			}
 			face := face_of(t, run.Font)
+			native := t.faces[face].native_advances
 			piece := Piece{face = face, rtl = run.Direction == .KBTS_DIRECTION_RTL, first = len(glyphs)}
 			scale := size / t.faces[face].units_per_em
 			x: f32
 			for g in kbts.GlyphIteratorNext(&run.Glyphs) {
+				advance := f32(g.AdvanceX) * scale
+				// A mark's zero advance stays zero.
+				if native && g.AdvanceX != 0 {
+					advance += native_advance(t, face, size, g.Id) - default_advance(&t.faces[face], g.Id) * scale
+				}
 				append(&glyphs, Glyph{
 					pen = x,
-					advance = f32(g.AdvanceX) * scale,
+					advance = advance,
 					offset = {f32(g.OffsetX) * scale, -f32(g.OffsetY) * scale},
 					id = g.Id,
 					face = u8(face),
@@ -497,7 +516,7 @@ shape_uncached :: proc(t: ^State, font: Font, size: f32, s: string) -> Run {
 				})
 				// With the context API this is always the codepoint index.
 				append(&cps, clamp(int(g.UserIdOrCodepointIndex), 0, len(runes) - 1))
-				x += f32(g.AdvanceX) * scale
+				x += advance
 			}
 			piece.count = len(glyphs) - piece.first
 			piece.width = x
@@ -959,7 +978,7 @@ visual_order :: proc(levels: []u8, order: []int) {
 // ellipsis_x. Spaces next to the ellipsis go too. width is the result's
 // width.
 truncate :: proc(glyphs: []Glyph, run_width, max_width, ellipsis_width: f32, rtl: bool) -> (first, last: int, shift, ellipsis_x, width: f32) {
-	if run_width <= max_width {
+	if run_width <= max_width + FIT_SLACK {
 		return 0, len(glyphs), 0, 0, run_width
 	}
 	avail := max_width - ellipsis_width
@@ -1054,15 +1073,96 @@ face_named :: proc(t: ^State, name: u64) -> int {
 	return NO_FACE
 }
 
+// default_advance is glyph id's advance in the default instance, in font
+// units, from the hmtx table. Glyphs past the last entry take its advance.
+@(private)
+default_advance :: proc(face: ^Face, id: u16) -> f32 {
+	i := 4 * min(int(id), face.hmetrics - 1)
+	if i < 0 || i + 2 > len(face.hmtx) {
+		return 0
+	}
+	return f32(int(face.hmtx[i]) << 8 | int(face.hmtx[i + 1]))
+}
+
+// fvar_instance returns the 1-based number of the first named instance in
+// font file data whose axis tag is at value, 0 if value is the axis's
+// default, or -1 if there's neither. Other axes aren't looked at.
+fvar_instance :: proc(data: []byte, tag: string, value: f32) -> int {
+	be16 :: proc(data: []byte, at: int) -> int {
+		return int(data[at]) << 8 | int(data[at + 1])
+	}
+	fixed :: proc(data: []byte, at: int) -> f32 {
+		return f32(i32(u32(be32(data, at)))) / 65536
+	}
+	fvar := font_table(data, 0, "fvar")
+	if len(fvar) < 16 {
+		return -1
+	}
+	axes, axis_count, axis_size := be16(fvar, 4), be16(fvar, 8), be16(fvar, 10)
+	instance_count, instance_size := be16(fvar, 12), be16(fvar, 14)
+	instances := axes + axis_count * axis_size
+	if instances + instance_count * instance_size > len(fvar) || 4 + 4 * axis_count > instance_size {
+		return -1
+	}
+	for axis in 0 ..< axis_count {
+		record := axes + axis * axis_size
+		if u32(be32(fvar, record)) != table_tag(tag) {
+			continue
+		}
+		if fixed(fvar, record + 8) == value {
+			return 0
+		}
+		for i in 0 ..< instance_count {
+			if fixed(fvar, instances + i * instance_size + 4 + 4 * axis) == value {
+				return i + 1
+			}
+		}
+	}
+	return -1
+}
+
+// font_table returns table tag of face index in the font file data, or nil.
+font_table :: proc(data: []byte, index: int, tag: string) -> []byte {
+	offset := 0
+	if be32(data, 0) == int(table_tag("ttcf")) {
+		offset = be32(data, 12 + 4 * index)
+	}
+	if offset < 0 || offset + 12 > len(data) {
+		return nil
+	}
+	tables := int(data[offset + 4]) << 8 | int(data[offset + 5])
+	for j in 0 ..< tables {
+		record := offset + 12 + 16 * j
+		if be32(data, record) != int(table_tag(tag)) {
+			continue
+		}
+		at, size := be32(data, record + 8), be32(data, record + 12)
+		if at < 0 || size < 0 || at + size > len(data) {
+			return nil
+		}
+		return data[at:][:size]
+	}
+	return nil
+}
+
+// table_tag packs a four letter OpenType table tag big-endian, the way
+// CTFontCopyTable wants it.
+table_tag :: proc(s: string) -> u32 {
+	return u32(s[0]) << 24 | u32(s[1]) << 16 | u32(s[2]) << 8 | u32(s[3])
+}
+
+// be32 reads a big-endian u32 at at, or -1 past the end.
+@(private)
+be32 :: proc(data: []byte, at: int) -> int {
+	if at < 0 || at + 4 > len(data) {
+		return -1
+	}
+	return int(data[at]) << 24 | int(data[at + 1]) << 16 | int(data[at + 2]) << 8 | int(data[at + 3])
+}
+
 // collection_index_of_table returns the index of the first face in a font
 // collection whose table `tag` equals want, or 0.
 collection_index_of_table :: proc(data: []byte, tag: u32, want: []byte) -> int {
-	be32 :: proc(data: []byte, at: int) -> int {
-		if at < 0 || at + 4 > len(data) {
-			return -1
-		}
-		return int(data[at]) << 24 | int(data[at + 1]) << 16 | int(data[at + 2]) << 8 | int(data[at + 3])
-	}
 	count := be32(data, 8)
 	for i in 0 ..< count {
 		offset := be32(data, 12 + 4 * i)
@@ -1179,7 +1279,7 @@ take_loaded :: proc(t: ^State) {
 			font_ref_release(res.ct)
 			continue
 		}
-		// CoreText hands back the font itself (or another Inter) when
+		// CoreText hands back the font itself (or another weight of it) when
 		// nothing has the character.
 		if face < len(Font) {
 			face = NO_FACE

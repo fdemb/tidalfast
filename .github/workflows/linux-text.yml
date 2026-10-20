@@ -1,0 +1,73 @@
+# Checks text on Linux, where Noto Sans is built in. The system's Noto Sans
+# is removed, so nothing can come from it; the fallback fonts for other
+# scripts and emoji stay. Runs the tests, then the app with fake data under
+# a headless Weston on Mesa's software Vulkan, and uploads frames of the
+# library and the text screen.
+name: linux-text
+
+on:
+  push:
+    paths:
+      - "src/text/**"
+      - "assets/fonts/**"
+      - "tests/text_test.odin"
+      - ".github/workflows/linux-text.yml"
+  workflow_dispatch:
+
+env:
+  ODIN_VERSION: dev-2026-10
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang pkg-config libwayland-dev wayland-protocols libxkbcommon-dev \
+            libvulkan-dev glslang-tools libfreetype-dev libfontconfig-dev libcurl4-openssl-dev \
+            fonts-noto-core fonts-noto-color-emoji fonts-noto-cjk weston mesa-vulkan-drivers dbus gnome-keyring \
+            python3-pil
+      - name: Remove the system's Noto Sans
+        run: |
+          sudo rm /usr/share/fonts/truetype/noto/NotoSans-*.ttf
+          sudo fc-cache -f
+          if fc-list | grep -E '/NotoSans-[A-Za-z]+\.ttf'; then exit 1; fi
+      - name: Install Odin
+        run: |
+          mkdir -p "$RUNNER_TEMP/odin"
+          curl -fsSL "https://github.com/odin-lang/Odin/releases/download/$ODIN_VERSION/odin-linux-amd64-$ODIN_VERSION.tar.gz" |
+            tar xz -C "$RUNNER_TEMP/odin" --strip-components=1
+          echo "$RUNNER_TEMP/odin" >> "$GITHUB_PATH"
+      - name: Build miniaudio and stb
+        run: |
+          sh "$(odin root)/vendor/miniaudio/src/build_miniaudio.sh"
+          cd "$(odin root)/vendor/stb/src" && sh build_stb.sh
+      - run: ./build.sh
+      - name: Test
+        run: |
+          # The inner sh expands these, in a private D-Bus session and keyring.
+          # shellcheck disable=SC2016
+          dbus-run-session -- sh -c 'export HOME=$(mktemp -d); eval "$(echo x | gnome-keyring-daemon --unlock --components=secrets)"; odin test tests'
+      - name: Capture frames
+        run: |
+          export XDG_RUNTIME_DIR="$RUNNER_TEMP/xdg"
+          mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+          out="$RUNNER_TEMP/frames"
+          mkdir -p "$out"
+          weston --backend=headless --socket=wl-test --width=1800 --height=1200 &
+          sleep 3
+          WAYLAND_DISPLAY=wl-test TIDALFAST_FAKE=1 TIDALFAST_AUDIO_NULL=1 TIDALFAST_CAPTURE="$out/last.tga" \
+            TIDALFAST_SHELL_TEST="3:size=820,700;5:capture=$out/lib820.tga;6:size=1100,760;8:capture=$out/lib1100.tga;9:size=1600,1000;11:capture=$out/lib1600.tga;12:key=ctrl+2;14:capture=$out/text.tga;15:quit" \
+            timeout 120 ./build/tidalfast 2>&1 | tee "$out/app.log"
+          kill %1 || true
+          python3 -c 'import glob, PIL.Image as I; [I.open(f).save(f[:-4] + ".png") for f in glob.glob("'"$out"'/*.tga")]'
+          rm -f "$out"/*.tga
+          ls -l "$out"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: frames
+          path: ${{ runner.temp }}/frames

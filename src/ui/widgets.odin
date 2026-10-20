@@ -59,8 +59,8 @@ cluster_widths :: proc(font: text.Font, size: f32, s: string, bounds: []int, all
 
 // counter_width is how wide a counter in the shape of pattern can get, such
 // as "-3:45" for a time left: every digit is taken as the widest digit.
-// Inter's digits differ in width, so a label this wide never cuts off
-// any value with the same pattern.
+// SF Pro's digits differ in width, so a label this wide never cuts off any
+// value with the same pattern.
 counter_width :: proc(font: text.Font, size: f32, pattern: string) -> f32 {
 	widest := u8('0')
 	best: f32
