@@ -670,6 +670,8 @@ stream_clear_releases_the_window :: proc(t: ^testing.T) {
 	testing.expect(t, !st.released, "the window holds the file")
 	audio.stream_clear(st)
 	testing.expect(t, st.released, "the window is released")
+	// Only this catches the old bug: macOS's MADV_FREE_REUSABLE may leave
+	// the bytes in place, while Linux's MADV_DONTNEED reads back zeros.
 	when ODIN_OS == .Linux {
 		testing.expect_value(t, slice.count(st.buf[:len(file)], 0), len(file))
 	}
