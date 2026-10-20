@@ -55,6 +55,7 @@ Found :: struct {
 	tracks:   int,
 	artist:   string, // an album's artists, also in subtitle
 	artists:  []Artist_Ref,
+	released: i64, // unix seconds an album came out, 0 when unknown; artist shelves only
 }
 
 FOUND_COVER := [Search_Tab]cover.Kind {
