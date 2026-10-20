@@ -2,6 +2,8 @@ package tidal_tests
 
 import "core:testing"
 
+import vk "vendor:vulkan"
+
 import "../src/render"
 
 // When Vulkan can't start, init tears down what it made and leaves the
@@ -36,4 +38,31 @@ only_overlapping_texture_writes_wait :: proc(t: ^testing.T) {
 	testing.expect(t, render.write_region(&written, {5, 5, 6, 6}), "inside an earlier write")
 	testing.expect(t, !render.write_region(&written, {0, 0, 5, 5}), "the barrier settled the earlier writes")
 	testing.expect(t, render.write_region(&written, {4, 4, 9, 9}), "overlaps the write after the barrier")
+}
+
+// A write that misses each earlier one but lands in the box around them
+// still waits, since the earlier writes are kept only as that box.
+@(test)
+writes_inside_the_box_around_earlier_ones_wait :: proc(t: ^testing.T) {
+	written: [4]i32
+	testing.expect(t, !render.write_region(&written, {0, 0, 10, 10}), "first write")
+	testing.expect(t, !render.write_region(&written, {20, 20, 30, 30}), "apart from the first")
+	testing.expect(t, render.write_region(&written, {12, 12, 15, 15}), "between them")
+}
+
+// The surface may clamp the asked size. The swapchain is made again when
+// the window's size changes, not on every frame its extent differs.
+@(test)
+clamped_swapchain_is_not_made_every_frame :: proc(t: ^testing.T) {
+	g := render.Gpu {
+		swapchain = vk.SwapchainKHR(1),
+		extent    = {640, 480},
+		requested = {800, 600},
+	}
+	testing.expect(t, !render.swapchain_stale(&g, {800, 600}), "same size as asked")
+	testing.expect(t, render.swapchain_stale(&g, {900, 600}), "window resized")
+	g.requested = {}
+	testing.expect(t, render.swapchain_stale(&g, {800, 600}), "out of date after present")
+	g = {requested = {800, 600}}
+	testing.expect(t, render.swapchain_stale(&g, {800, 600}), "no swapchain")
 }

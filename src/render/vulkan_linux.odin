@@ -1238,7 +1238,7 @@ end_frame :: proc(r: ^Renderer) {
 	want := vk.Extent2D{u32(math.round(r.width * r.scale)), u32(math.round(r.height * r.scale))}
 	image := max(u32)
 	if g.pipeline != 0 && want.width > 0 && want.height > 0 {
-		if g.swapchain == 0 || g.requested != want {
+		if swapchain_stale(g, want) {
 			make_swapchain(r, want.width, want.height)
 		}
 		wait := time.tick_now()
@@ -1350,6 +1350,14 @@ end_frame :: proc(r: ^Renderer) {
 		write_tga(r.capture_path, pixels, w, h)
 		free_buffer(g, &f.capture)
 	}
+}
+
+// swapchain_stale says whether the swapchain has to be made again for a
+// window of want pixels. It compares with the size last asked for, not the
+// extent the surface clamped it to, so a clamped size doesn't remake it on
+// every frame.
+swapchain_stale :: proc(g: ^Gpu, want: vk.Extent2D) -> bool {
+	return g.swapchain == 0 || g.requested != want
 }
 
 // acquire gets the next swapchain image, making the swapchain again if
