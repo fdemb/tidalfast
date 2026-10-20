@@ -8,6 +8,7 @@ import "core:testing"
 import "core:unicode/utf8"
 
 import app "../src/app"
+import "../src/cover"
 import "../src/jobs"
 import "../src/tidal"
 import "../src/ui"
@@ -599,6 +600,7 @@ history_forgets_the_oldest_places :: proc(t: ^testing.T) {
 	defer library_state_free(s)
 	f: Frame
 	library_frame(t, s, &f)
+	library_frame(t, s, &f)
 	visits := app.HISTORY_MAX + 10
 	for i in 1 ..= visits {
 		library_frame(t, s, &f, press(s, fmt.tprintf("%s,", app.PLAYLISTS[i % 3 + 1])))
@@ -704,6 +706,7 @@ back_finds_playlists_by_id :: proc(t: ^testing.T) {
 	beta := app.Sidebar_Item{id = "beta-id", name = "Beta", tracks = 2}
 	s.data.sidebar.items = []app.Sidebar_Item{alpha, beta}
 	f: Frame
+	library_frame(t, s, &f)
 	library_frame(t, s, &f)
 	library_frame(t, s, &f, press(s, "Alpha,"))
 	library_frame(t, s, &f, press(s, "Beta,"))
@@ -821,4 +824,27 @@ return_on_a_full_queue_holds_one_search :: proc(t: ^testing.T) {
 	}
 	testing.expect_value(t, searches, 1)
 	testing.expect_value(t, d.held_count, 0)
+}
+
+// A long sidebar asks only for the covers of the playlists that show.
+@(test)
+sidebar_wants_only_visible_covers :: proc(t: ^testing.T) {
+	arena: vmem.Arena
+	_ = vmem.arena_init_growing(&arena)
+	defer vmem.arena_destroy(&arena)
+	context.allocator = vmem.arena_allocator(&arena)
+	s := library_state(false)
+	defer library_state_free(s)
+	s.renderer.scale = 1
+	items := make([]app.Sidebar_Item, 500)
+	for &item, i in items {
+		item = {id = fmt.aprintf("pl-%d", i), name = fmt.aprintf("Playlist %d", i), image = fmt.aprintf("img-%d", i), tracks = 1}
+	}
+	s.data.sidebar.items = items
+	f: Frame
+	library_frame(t, s, &f)
+	library_frame(t, s, &f)
+	testing.expectf(t, s.data.covers.used < 30, "%d covers wanted for a window of about 12 rows", s.data.covers.used)
+	testing.expect(t, cover.lookup(&s.data.covers, cover.key_of("img-0", 40)) != nil, "the first playlist's cover is wanted")
+	testing.expect(t, cover.lookup(&s.data.covers, cover.key_of("img-499", 40)) == nil, "the last playlist's cover isn't")
 }
