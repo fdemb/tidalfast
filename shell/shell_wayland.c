@@ -946,11 +946,17 @@ static void receive_more(void) {
   g_paste_done = true;
 }
 
-static void receive_selection(void) {
+// The selection may be a password, so it doesn't outlive the focus.
+static void clear_paste(void) {
   if (g_receive_fd >= 0) close(g_receive_fd);
   g_receive_fd = -1;
+  explicit_bzero(g_paste, g_paste_len);
   g_paste_len = 0;
   g_paste_done = false;
+}
+
+static void receive_selection(void) {
+  clear_paste();
   int fds[2];
   if (!g_offer || !g_offer_text || pipe2(fds, O_CLOEXEC) != 0) return;
   // The write end goes to the source client, which may expect it to block.
@@ -1363,6 +1369,7 @@ static void stop_repeat(void) {
 static void keyboard_leave(void *data, struct wl_keyboard *k, uint32_t serial, struct wl_surface *s) {
   g_key_window = false;
   stop_repeat();
+  clear_paste();
   request_redraw();
 }
 
