@@ -392,6 +392,13 @@ queue_seal :: proc(file: []u8) {
 	file_seal(file[size_of(Queue_Header):])
 }
 
+// queue_place_ok says whether a place read from a queue file or its
+// position file can be used. Neither is in the list's sum. A day at 768 kHz
+// bounds the position, so rescaling it to another rate can't overflow.
+queue_place_ok :: proc(sample, rate: i64) -> bool {
+	return rate >= 0 && rate <= 768000 && sample >= 0 && (rate == 0 || sample <= rate * 86400)
+}
+
 // queue_decode reads a queue file read whole into data, 16-byte aligned.
 // The rows' strings point into data.
 queue_decode :: proc(data: []u8, allocator: runtime.Allocator) -> (head: Queue_Header, rows: []Row, err: File_Error) {
@@ -405,9 +412,7 @@ queue_decode :: proc(data: []u8, allocator: runtime.Allocator) -> (head: Queue_H
 	if head.format != QUEUE_FORMAT {
 		return {}, nil, .Format
 	}
-	// The header is outside the list's sum. A day at 768 kHz bounds the
-	// position, so rescaling it to another rate can't overflow.
-	if head.rate < 0 || head.rate > 768000 || head.sample < 0 || (head.rate > 0 && head.sample > head.rate * 86400) {
+	if !queue_place_ok(head.sample, head.rate) {
 		return {}, nil, .Damaged
 	}
 	// Without a rate the position can't be placed, so the track starts over.

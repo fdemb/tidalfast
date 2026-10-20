@@ -1298,3 +1298,48 @@ queue_place_is_saved_apart :: proc(t: ^testing.T) {
 	testing.expect_value(t, queue.header.index, 9)
 	testing.expect_value(t, len(queue.rows), 300)
 }
+
+// queue_with_position saves a queue of 300 at row 7, then writes place as
+// its position file, with the queue file's key unless key is given.
+@(private = "file")
+queue_with_position :: proc(t: ^testing.T, s: ^app.State, place: app.Queue_Position, key: Maybe(u64) = nil) -> (queue_path: string) {
+	sidebar(s, updated = 1, count = 300)
+	serve(s, rows_of(LIKED_IDS))
+	app.select_playlist(s, 2)
+	run_disk(s)
+	serve(s, rows_of(ids_from(1000, 1300)))
+	app.playback_play_row(s, 7)
+	app.playback_update(s, nil)
+	run_disk(s)
+
+	dir := app.disk_dir(s.data.lists.root, 7, context.temp_allocator)
+	queue_path = app.queue_path(dir, context.temp_allocator)
+	data, ok := app.file_read(queue_path, context.temp_allocator)
+	testing.expect(t, ok && len(data) >= size_of(app.Queue_Header), "the queue's file was written")
+	place := place
+	place.key = key.? or_else (^app.Queue_Header)(raw_data(data)).key
+	testing.expect_value(t, os.write_entire_file(app.queue_position_path(dir, context.temp_allocator), mem.ptr_to_bytes(&place)), nil)
+	return
+}
+
+// A damaged position file doesn't cost the queue: it reads back at the
+// queue file's own place.
+@(test)
+damaged_queue_position_keeps_the_queue :: proc(t: ^testing.T) {
+	dir := cache_dir("queue-damaged-place")
+	defer delete(dir, runtime.heap_allocator())
+	defer os.remove_all(dir)
+	s := cache_state(dir)
+	defer cache_state_free(s)
+	s.playback.player = audio.create(no_wake, 0, null_output = true)
+	defer app.playback_shutdown(s)
+	path := queue_with_position(t, s, {magic = app.QUEUE_POSITION_MAGIC, index = 3, sample = -5, rate = 44100})
+
+	res, _ := app.disk_run(&s.data, {payload = app.Disk_Job{op = .Read_Queue, user = 7}})
+	defer app.result_free(&res)
+	queue, hit := res.payload.(app.Queue_File_Result)
+	testing.expect(t, hit, "the queue's file reads back")
+	testing.expect_value(t, queue.header.index, 7)
+	testing.expect_value(t, len(queue.rows), 300)
+	testing.expect(t, os.exists(path), "the queue's file stays")
+}

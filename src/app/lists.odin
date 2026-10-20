@@ -977,8 +977,8 @@ queue_position_path :: proc(dir: string, allocator: runtime.Allocator) -> string
 }
 
 // queue_read reads the play queue's file into res, in an arena of its own,
-// at the place in its position file if that goes with it. A file that's
-// damaged or of another format is deleted.
+// at the place in its position file if that goes with it and is sound. A
+// queue file that's damaged or of another format is deleted.
 @(private = "file")
 queue_read :: proc(res: ^Result, path, position_path: string) {
 	res.arena = arena_new()
@@ -993,7 +993,7 @@ queue_read :: proc(res: ^Result, path, position_path: string) {
 	if place, read := file_read(position_path, context.temp_allocator); read && len(place) == size_of(Queue_Position) && len(data) >= size_of(Queue_Header) {
 		p := (^Queue_Position)(raw_data(place))
 		h := (^Queue_Header)(raw_data(data))
-		if p.magic == QUEUE_POSITION_MAGIC && p.key != 0 && p.key == h.key {
+		if p.magic == QUEUE_POSITION_MAGIC && p.key != 0 && p.key == h.key && queue_place_ok(p.sample, p.rate) {
 			h.index, h.sample, h.rate = p.index, p.sample, p.rate
 		}
 	}
