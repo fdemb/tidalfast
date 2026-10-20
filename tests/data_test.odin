@@ -2,6 +2,8 @@ package tidal_tests
 
 import "base:runtime"
 import "core:fmt"
+import "core:hash"
+import "core:slice"
 import "core:sync"
 import "core:testing"
 import "core:thread"
@@ -71,54 +73,6 @@ queue_full_and_remove_if :: proc(t: ^testing.T) {
 	b, _ := jobs.try_pop(&q)
 	testing.expect_value(t, a.id, 0)
 	testing.expect_value(t, b.id, 2)
-}
-
-@(test)
-queue_stop_wakes_waiters :: proc(t: ^testing.T) {
-	Shared :: struct {
-		q:      jobs.Queue(Test_Job, 2),
-		popped: bool, // pop_wait returned ok
-		done:   bool,
-	}
-	sh: Shared
-	worker := thread.create_and_start_with_poly_data(&sh, proc(sh: ^Shared) {
-		_, _, ok := jobs.pop_wait(&sh.q)
-		sh.popped = ok
-		sync.atomic_store(&sh.done, true)
-	})
-	time.sleep(20 * time.Millisecond)
-	testing.expect(t, !sync.atomic_load(&sh.done))
-	jobs.stop(&sh.q)
-	thread.join(worker)
-	thread.destroy(worker)
-	testing.expect(t, !sh.popped)
-	// Stopped: pushes fail until start, but requeue still goes in.
-	testing.expect(t, !jobs.push(&sh.q, {1}))
-	jobs.start(&sh.q)
-	testing.expect(t, jobs.push(&sh.q, {1}))
-}
-
-@(test)
-queue_push_wait_blocks_until_room :: proc(t: ^testing.T) {
-	Shared :: struct {
-		q:      jobs.Queue(Test_Job, 1),
-		pushed: bool,
-	}
-	sh: Shared
-	jobs.push(&sh.q, {1})
-	worker := thread.create_and_start_with_poly_data(&sh, proc(sh: ^Shared) {
-		ok := jobs.push_wait(&sh.q, {2})
-		sync.atomic_store(&sh.pushed, ok)
-	})
-	time.sleep(20 * time.Millisecond)
-	testing.expect(t, !sync.atomic_load(&sh.pushed))
-	first, _ := jobs.try_pop(&sh.q)
-	thread.join(worker)
-	thread.destroy(worker)
-	testing.expect_value(t, first.id, 1)
-	testing.expect(t, sh.pushed)
-	second, _ := jobs.try_pop(&sh.q)
-	testing.expect_value(t, second.id, 2)
 }
 
 @(test)
@@ -391,4 +345,221 @@ temp_tail_is_whole_pages_past_keep :: proc(t: ^testing.T) {
 	testing.expect(t, uintptr(start) + uintptr(size) <= base + (4 << 20))
 	_, size = app.temp_tail(base, 64 << 10, 64 << 10)
 	testing.expect_value(t, size, 0)
+}
+
+@(private = "file")
+png_of :: proc(src: []u8, w, h, channels: int) -> []u8 {
+	png := make([dynamic]u8, context.temp_allocator)
+	write :: proc "c" (ctx: rawptr, data: rawptr, size: i32) {
+		context = runtime.default_context()
+		out := (^[dynamic]u8)(ctx)
+		append(out, ..([^]u8)(data)[:size])
+	}
+	stbi.write_png_to_func(write, &png, i32(w), i32(h), i32(channels), raw_data(src), i32(w * channels))
+	return png[:]
+}
+
+// No cover is near this big, so decode refuses it from the header
+// instead of allocating hundreds of megabytes on a worker.
+@(test)
+cover_decode_refuses_huge_images :: proc(t: ^testing.T) {
+	w, h := 8192, 2049 // just over 4096 * 4096 pixels
+	png := png_of(make([]u8, w * h, context.temp_allocator), w, h, 1)
+	pixels, _, _, ok := cover.decode(png, 80)
+	defer cover.free_pixels(pixels)
+	testing.expect(t, !ok)
+}
+
+// A gray PNG with alpha comes out of stb_image with straight alpha like an
+// RGBA one, so it decodes to the same pixels as the same image in RGBA,
+// scaled or not.
+@(test)
+cover_decode_premultiplies_gray_alpha :: proc(t: ^testing.T) {
+	gray: [4 * 4 * 2]u8
+	rgba: [4 * 4 * 4]u8
+	for i in 0 ..< 4 * 4 {
+		gray[i * 2], gray[i * 2 + 1] = 128, 128
+		rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2], rgba[i * 4 + 3] = 128, 128, 128, 128
+	}
+	gray_png := png_of(gray[:], 4, 4, 2)
+	rgba_png := png_of(rgba[:], 4, 4, 4)
+	for px in ([]int{0, 2}) {
+		got, w, h, ok := cover.decode(gray_png, px)
+		defer cover.free_pixels(got)
+		want, _, _, _ := cover.decode(rgba_png, px)
+		defer cover.free_pixels(want)
+		testing.expect(t, ok)
+		testing.expect_value(t, [2]int{w, h}, [2]int{4, 4} if px == 0 else [2]int{px, px})
+		testing.expect(t, slice.equal(got, want), fmt.tprint(px, got[:4], want[:4]))
+	}
+}
+
+// A gray PNG whose tRNS chunk makes gray 200 transparent. stb_image counts
+// the tRNS alpha as a channel, so decode premultiplies it and that pixel
+// comes out all zero.
+@(test)
+cover_decode_premultiplies_trns :: proc(t: ^testing.T) {
+	chunk :: proc(png: ^[dynamic]u8, kind: string, data: []u8) {
+		be32 :: proc(png: ^[dynamic]u8, v: u32) {
+			append(png, u8(v >> 24), u8(v >> 16), u8(v >> 8), u8(v))
+		}
+		be32(png, u32(len(data)))
+		start := len(png)
+		append(png, kind)
+		append(png, ..data)
+		be32(png, hash.crc32(png[start:]))
+	}
+	// One row: filter 0, gray 200 (the transparent key), gray 100.
+	row := [3]u8{0, 200, 100}
+	// zlib header, one stored deflate block, Adler-32 of the row.
+	idat := make([dynamic]u8, context.temp_allocator)
+	append(&idat, 0x78, 0x01, 0x01, 3, 0, 0xfc, 0xff)
+	append(&idat, ..row[:])
+	adler := hash.adler32(row[:])
+	append(&idat, u8(adler >> 24), u8(adler >> 16), u8(adler >> 8), u8(adler))
+	png := make([dynamic]u8, context.temp_allocator)
+	append(&png, 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n')
+	chunk(&png, "IHDR", {0, 0, 0, 2, 0, 0, 0, 1, 8, 0, 0, 0, 0})
+	chunk(&png, "tRNS", {0, 200})
+	chunk(&png, "IDAT", idat[:])
+	chunk(&png, "IEND", nil)
+	pixels, w, h, ok := cover.decode(png[:])
+	defer cover.free_pixels(pixels)
+	testing.expect(t, ok)
+	testing.expect_value(t, [2]int{w, h}, [2]int{2, 1})
+	if len(pixels) == 8 {
+		testing.expect_value(t, [4]u8{pixels[0], pixels[1], pixels[2], pixels[3]}, [4]u8{0, 0, 0, 0})
+		testing.expect_value(t, [4]u8{pixels[4], pixels[5], pixels[6], pixels[7]}, [4]u8{100, 100, 100, 255})
+	}
+}
+
+@(private = "file")
+Wait_Shared :: struct {
+	q:        jobs.Queue(Test_Job, 1),
+	work:     proc(sh: ^Wait_Shared),
+	finished: bool,
+	ok:       bool,
+	stopped:  bool,
+	popped:   int,
+	ticket:   jobs.Ticket,
+}
+
+@(private = "file")
+every_job :: proc(_: ^Test_Job, _: rawptr) -> bool {return true}
+
+// blocks_until runs sh.work on a thread, checks it is still waiting after
+// 20 ms, runs wake and waits up to 2 s for the work to return. On a timeout
+// it stops the queue to free the thread and ends the test, so a lost wakeup
+// fails the test instead of hanging it or running on against a stopped
+// queue. A thread that ignores the stop as well is left running with sh, so
+// sh is static and the thread comes from the heap rather than the test's
+// allocator, which the test frees when it ends.
+@(private = "file")
+blocks_until :: proc(t: ^testing.T, sh: ^Wait_Shared, wake: proc(sh: ^Wait_Shared), loc := #caller_location) {
+	finished_within :: proc(sh: ^Wait_Shared, d: time.Duration) -> bool {
+		deadline := time.tick_add(time.tick_now(), d)
+		for !sync.atomic_load(&sh.finished) {
+			if time.tick_diff(time.tick_now(), deadline) <= 0 {
+				return false
+			}
+			time.sleep(time.Millisecond)
+		}
+		return true
+	}
+	sync.atomic_store(&sh.finished, false)
+	context.allocator = runtime.heap_allocator()
+	worker := thread.create_and_start_with_poly_data(sh, proc(sh: ^Wait_Shared) {
+		sh.work(sh)
+		sync.atomic_store(&sh.finished, true)
+	})
+	time.sleep(20 * time.Millisecond)
+	testing.expect(t, !sync.atomic_load(&sh.finished), "returned before the wakeup", loc = loc)
+	wake(sh)
+	if !finished_within(sh, 2 * time.Second) {
+		jobs.stop(&sh.q)
+		if finished_within(sh, 2 * time.Second) {
+			thread.join(worker)
+			thread.destroy(worker)
+		}
+		testing.fail_now(t, "no wakeup within 2 s", loc)
+	}
+	thread.join(worker)
+	thread.destroy(worker)
+}
+
+// Every way room comes back wakes a push_wait, and every way an item comes
+// in wakes a pop_wait_where waiting for that item.
+@(test)
+queue_waiters_wake_on_each_change :: proc(t: ^testing.T) {
+	@(static) sh_storage: Wait_Shared
+	sh := &sh_storage
+	jobs.push(&sh.q, {1})
+	sh.work = proc(sh: ^Wait_Shared) {sh.ok = jobs.push_wait(&sh.q, {2})}
+	blocks_until(t, sh, proc(sh: ^Wait_Shared) {
+		job, _ := jobs.try_pop(&sh.q)
+		sh.popped = job.id
+	})
+	testing.expect(t, sh.ok)
+	testing.expect_value(t, sh.popped, 1)
+	job, _, _ := jobs.pop_wait(&sh.q)
+	testing.expect_value(t, job.id, 2)
+	blocks_until(t, sh, proc(sh: ^Wait_Shared) {jobs.done(&sh.q)})
+	testing.expect(t, sh.ok)
+	blocks_until(t, sh, proc(sh: ^Wait_Shared) {jobs.remove_if(&sh.q, every_job, nil)})
+	testing.expect(t, sh.ok)
+
+	sh.work = proc(sh: ^Wait_Shared) {
+		is_seven :: proc(job: ^Test_Job) -> bool {return job.id == 7}
+		job, _, ok, _ := jobs.pop_wait_where(&sh.q, is_seven, 5 * time.Second)
+		sh.popped = job.id if ok else -1
+	}
+	jobs.remove_if(&sh.q, every_job, nil)
+	sh.popped = 0
+	blocks_until(t, sh, proc(sh: ^Wait_Shared) {jobs.push(&sh.q, {7})})
+	testing.expect_value(t, sh.popped, 7)
+	// requeue takes back an item popped with pop_wait, so finish the one the
+	// worker popped and pop one here.
+	jobs.done(&sh.q)
+	jobs.push(&sh.q, {7})
+	_, sh.ticket, _ = jobs.pop_wait(&sh.q)
+	sh.popped = 0
+	blocks_until(t, sh, proc(sh: ^Wait_Shared) {jobs.requeue(&sh.q, {7}, sh.ticket)})
+	testing.expect_value(t, sh.popped, 7)
+}
+
+// stop wakes every kind of waiter.
+@(test)
+queue_stop_wakes_waiters :: proc(t: ^testing.T) {
+	@(static) sh_storage: Wait_Shared
+	sh := &sh_storage
+	stop :: proc(sh: ^Wait_Shared) {jobs.stop(&sh.q)}
+
+	sh.ok = true
+	sh.work = proc(sh: ^Wait_Shared) {_, _, sh.ok = jobs.pop_wait(&sh.q)}
+	blocks_until(t, sh, stop)
+	testing.expect(t, !sh.ok)
+	// Stopped: pushes fail until start.
+	testing.expect(t, !jobs.push(&sh.q, {1}))
+	jobs.start(&sh.q)
+	testing.expect(t, jobs.push(&sh.q, {1}))
+
+	sh.ok = true
+	sh.work = proc(sh: ^Wait_Shared) {sh.ok = jobs.push_wait(&sh.q, {2})}
+	blocks_until(t, sh, stop)
+	testing.expect(t, !sh.ok)
+
+	jobs.start(&sh.q)
+	_, _ = jobs.try_pop(&sh.q)
+	sh.work = proc(sh: ^Wait_Shared) {
+		any_job :: proc(_: ^Test_Job) -> bool {return true}
+		_, _, _, sh.stopped = jobs.pop_wait_where(&sh.q, any_job, 5 * time.Second)
+	}
+	blocks_until(t, sh, stop)
+	testing.expect(t, sh.stopped)
+
+	jobs.start(&sh.q)
+	sh.stopped = false
+	sh.work = proc(sh: ^Wait_Shared) {sh.stopped = jobs.sleep(&sh.q, 5 * time.Second)}
+	blocks_until(t, sh, stop)
+	testing.expect(t, sh.stopped)
 }
