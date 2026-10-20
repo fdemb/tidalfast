@@ -828,10 +828,10 @@ static void set_text_input(const Text_Input *ti) {
 
 // Clipboard
 //
-// The selection is offered as UTF-8 text. Another client's is read once,
-// when it becomes the selection, through a pipe the main loop polls, and
-// pastes copy from what arrived; ours is answered from our copy. Transfers
-// both ways run in the main loop and never block it.
+// The selection is offered as UTF-8 text. Another client's is read on each
+// selection event, through a pipe the main loop polls, and wiped when the
+// window loses the keyboard; pastes copy from what arrived. Ours is answered
+// from our copy. Transfers both ways run in the main loop and never block it.
 
 #define CLIP_MAX (64 << 10) // the app's CLIPBOARD_MAX
 #define CLIP_SENDS 4
@@ -870,6 +870,12 @@ static void end_send(Clip_Send *t) {
   *t = (Clip_Send){.fd = -1};
 }
 
+static void end_receive(void) {
+  if (g_receive_fd < 0) return;
+  close(g_receive_fd);
+  g_receive_fd = -1;
+}
+
 static void send_more(Clip_Send *t) {
   if (t->fd < 0) return;
   ssize_t n = 0;
@@ -878,12 +884,12 @@ static void send_more(Clip_Send *t) {
   end_send(t);
 }
 
-// Each send keeps its own copy, since a new selection frees ours. With
-// every slot busy, the oldest send gives way.
+// Each send keeps its own copy, since a new selection frees ours. A free
+// slot has started 0, so the oldest send gives way only when all are busy.
 static void source_send(void *data, struct wl_data_source *s, const char *mime, int32_t fd) {
   Clip_Send *t = &g_sends[0];
-  for (int i = 1; i < CLIP_SENDS && t->fd >= 0; i++)
-    if (g_sends[i].fd < 0 || g_sends[i].started < t->started) t = &g_sends[i];
+  for (int i = 1; i < CLIP_SENDS; i++)
+    if (g_sends[i].started < t->started) t = &g_sends[i];
   end_send(t);
   if (!set_nonblocking(fd) || !(t->data = malloc(g_clip_len + 1))) {
     close(fd);
@@ -936,14 +942,13 @@ static void receive_more(void) {
   while (g_paste_len < CLIP_MAX && (n = read(g_receive_fd, g_paste + g_paste_len, CLIP_MAX - g_paste_len)) > 0)
     g_paste_len += (size_t)n;
   if (g_paste_len < CLIP_MAX && n < 0 && errno == EAGAIN) return;
-  close(g_receive_fd);
-  g_receive_fd = -1;
+  end_receive();
 }
 
-// The selection may be a password, so it doesn't outlive the focus.
+// The shell's copy of the selection may be a password, so it doesn't
+// outlive the focus.
 static void clear_paste(void) {
-  if (g_receive_fd >= 0) close(g_receive_fd);
-  g_receive_fd = -1;
+  end_receive();
   explicit_bzero(g_paste, g_paste_len);
   g_paste_len = 0;
 }
