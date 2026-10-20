@@ -50,7 +50,10 @@ Gpu_Frame :: struct {
 	uploading:      bool, // upload has commands recorded since begin
 	fence:          vk.Fence,
 	ready:          bool, // the fence was waited for since the last submit
-	wait_ms:        f32, // time spent waiting for the GPU to free the slot, until begin_frame reports it
+	// Time spent waiting for the GPU to free the slot, until begin_frame
+	// reports it. A flush_slot after begin_frame shows up FRAMES_IN_FLIGHT
+	// frames late, when the slot next begins.
+	wait_ms:        f32,
 	acquired:       vk.Semaphore,
 	instances:      Gpu_Buffer,
 	set:            vk.DescriptorSet, // the instance buffer and samplers
