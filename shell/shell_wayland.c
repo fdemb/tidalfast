@@ -1908,9 +1908,13 @@ static void main_loop(void) {
   while (!g_quit) {
     while (wl_display_prepare_read(g_display) != 0)
       if (wl_display_dispatch_pending(g_display) < 0) goto lost;
-    if (wl_display_flush(g_display) < 0 && errno != EAGAIN) {
-      wl_display_cancel_read(g_display);
-      goto lost;
+    bool unflushed = false;
+    if (wl_display_flush(g_display) < 0) {
+      if (errno != EAGAIN) {
+        wl_display_cancel_read(g_display);
+        goto lost;
+      }
+      unflushed = true;
     }
     int timeout = -1;
     if (atomic_load(&g_needs_redraw) && g_configured) {
@@ -1920,6 +1924,7 @@ static void main_loop(void) {
     }
     int fd_list[8] = {wl_fd, g_redraw_fd, g_wake_fd, g_repeat_fd, g_momentum_fd, g_test_fd, g_signal_fd, g_inotify_fd};
     for (int i = 0; i < 8; i++) fds[i] = (struct pollfd){.fd = fd_list[i], .events = POLLIN};
+    if (unflushed) fds[FD_WAYLAND].events |= POLLOUT;
     int n = poll(fds, 8, timeout);
     if (n > 0 && (fds[FD_WAYLAND].revents & POLLIN)) {
       if (wl_display_read_events(g_display) < 0) goto lost;
