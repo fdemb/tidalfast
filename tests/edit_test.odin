@@ -596,7 +596,8 @@ test_text_field_click_after_shortcut :: proc(t: ^testing.T) {
 }
 
 // Escape in an empty field gives up the focus, and a click on the field
-// later in the same frame takes it back.
+// later in the same frame takes it back. A click away after that still
+// takes it away.
 @(test)
 test_text_field_click_after_escape :: proc(t: ^testing.T) {
 	u: ui.State
@@ -653,7 +654,7 @@ test_edit_words_match_scan :: proc(t: ^testing.T) {
 		}
 		return bounds[len(bounds) - 1]
 	}
-	for s in ([]string{"", "a", " ", "Paranoid Android, 1997", "a👨‍👩‍👧b, cé  d_e 12 ", "  夜に駆ける 밤편지", "عيونك حبيبي!", "é yy", "가 가"}) {
+	for s in ([]string{"", "a", " ", "Paranoid Android, 1997", "a👨‍👩‍👧b, cé  d_e 12 ", "  夜に駆ける 밤편지", "عيونك حبيبي!", "e\u0301 yy", "\u1100\u1161 \u1100\u1161"}) {
 		bounds := ui.cluster_bounds(s)
 		for p in 0 ..= len(s) {
 			left := p

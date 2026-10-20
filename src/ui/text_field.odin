@@ -126,7 +126,6 @@ text_field :: proc(id: string, f: ^Text_Field, placeholder: string, width, heigh
 	if !live && u.focus == b.key {
 		u.focus = 0
 	}
-	// Escape may have given up the focus.
 	focused = b.key != 0 && u.focus == b.key
 	sig.focused = focused
 	if !focused {
