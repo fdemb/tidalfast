@@ -285,7 +285,7 @@ measure_step :: proc(s: ^State) {
 	case .Startup_Idle:
 		if due {
 			measure_sample(s, "startup_idle")
-			pending_set(s, {kind = .Playlist, index = longest_list(s)})
+			pending_set(s, Playlist_Place{index = longest_list(s)})
 			measure_wait(m, .Open_List, 0)
 		}
 	case .Open_List:
@@ -310,7 +310,7 @@ measure_step :: proc(s: ^State) {
 	case .Scrolled:
 		if due {
 			measure_sample(s, "scrolled")
-			pending_set(s, {kind = .Play, index = first_playable(s)})
+			pending_set(s, Play_Row{index = first_playable(s)})
 			measure_wait(m, .Play, PLAY_START_LIMIT)
 		}
 	case .Play:

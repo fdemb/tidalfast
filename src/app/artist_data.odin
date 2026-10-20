@@ -235,10 +235,10 @@ artist_result :: proc(d: ^Data, res: ^Result, job: Artist_Job) {
 		page.parts[job.part] = Artist_Failed{res.message}
 		return
 	}
-	artist_ready(page, job.part, res.arena, res.artist)
-	res.arena = nil
+	part, _ := res.payload.(Artist_Result)
+	artist_ready(page, job.part, take(&res.arena), part.content)
 	v := &d.view
-	if _, info := res.artist.(Artist_Info); info && v.source == .Artist && small_str(&v.id) == fmt.tprint(job.artist) {
+	if _, info := part.content.(Artist_Info); info && v.source == .Artist && small_str(&v.id) == fmt.tprint(job.artist) {
 		v.name = page.name
 		v.image = page.picture
 	}

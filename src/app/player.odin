@@ -455,12 +455,12 @@ artwork_result :: proc(s: ^State, res: ^Result, job: Artwork_Job) {
 	case:
 		return
 	}
-	if res.pixels == nil {
+	img, ok := &res.payload.(Image_Result)
+	if !ok || img.pixels == nil {
 		return
 	}
 	artwork_free(a)
-	a^ = {res.pixels, res.w, res.h, job.serial}
-	res.pixels = nil
+	a^ = {take(&img.pixels), img.w, img.h, job.serial}
 }
 
 // stream_result takes a Stream job's result.
@@ -487,7 +487,8 @@ stream_result :: proc(s: ^State, res: ^Result, job: Stream_Job) {
 		if e, _ := res.err.?; e == .Lossy_Stream {
 			// Every track comes like this for this login, so skipping on
 			// would only fail through the queue.
-			pb.message = small(lossy_message(small_str(&res.codec)))
+			stream, _ := res.payload.(Stream_Result)
+			pb.message = small(lossy_message(small_str(&stream.codec)))
 			stop_current(pb)
 			return
 		}
@@ -495,7 +496,8 @@ stream_result :: proc(s: ^State, res: ^Result, job: Stream_Job) {
 		skip_failed(s)
 		return
 	}
-	info := res.stream
+	stream, _ := res.payload.(Stream_Result)
+	info := stream.info
 	mode := audio.queue_gain_mode(pb.entries, pb.order, t.item)
 	rg := audio.Replay_Gain{info.track_gain, info.track_peak, info.album_gain, info.album_peak}
 	heap := runtime.heap_allocator()
@@ -1098,14 +1100,14 @@ queue_file :: proc(pb: ^Playback, allocator: runtime.Allocator) -> []u8 {
 // playback_restore takes the queue's file read at sign-in: the queue comes
 // back with its track paused where it was, its stream resolving so play
 // starts at once.
-playback_restore :: proc(s: ^State, res: ^Result) {
+playback_restore :: proc(s: ^State, file: Queue_File_Result) {
 	pb := &s.playback
-	if !res.hit || pb.index >= 0 || s.data.fake || pb.player == nil || len(res.rows) == 0 {
+	if pb.index >= 0 || s.data.fake || pb.player == nil || len(file.rows) == 0 {
 		return
 	}
-	head := res.queue
-	a := queue_reset(pb, len(res.rows))
-	for &row, i in res.rows {
+	head := file.header
+	a := queue_reset(pb, len(file.rows))
+	for &row, i in file.rows {
 		queue_fill(pb, i, &row, a)
 	}
 	pb.fake = false
@@ -1113,7 +1115,7 @@ playback_restore :: proc(s: ^State, res: ^Result) {
 	// A gen no view is given, so playback_update never takes the queue
 	// for a snapshot of the open list.
 	s.data.queue_view = view_gen(&s.data)
-	pb.loaded = len(res.rows)
+	pb.loaded = len(file.rows)
 	pb.queue_gen += 1
 	i := int(head.index)
 	at := head.sample

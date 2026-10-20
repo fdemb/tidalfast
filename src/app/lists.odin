@@ -204,12 +204,11 @@ lru_find :: proc(d: ^Data, source: Source, id: string) -> int {
 // lru_remove takes entry i out of memory and gives it to the caller.
 lru_remove :: proc(d: ^Data, i: int) -> Track_View {
 	l := &d.lists
-	v := l.entries[i].view
-	l.bytes -= l.entries[i].bytes
+	e := l.entries[i]
+	l.bytes -= e.bytes
 	l.count -= 1
-	l.entries[i] = l.entries[l.count]
-	l.entries[l.count] = {}
-	return v
+	l.entries[i] = take(&l.entries[l.count])
+	return e.view
 }
 
 lru_drop :: proc(d: ^Data, i: int) {
@@ -273,8 +272,7 @@ list_open :: proc(d: ^Data, source: Source, id, name, image: string, hint: int) 
 	v := &d.view
 	if q := &d.queued; q.source == source && small_str(&q.id) == id {
 		// Still loading for the play queue: it opens as far as it got.
-		v^ = q^
-		q^ = {}
+		v^ = take(q)
 		v.name = small(name)
 		v.image = small(image)
 		return
@@ -447,13 +445,10 @@ rows_moved :: proc(s: ^State, m: Row_Marks) {
 refresh_land :: proc(s: ^State) {
 	d := &s.data
 	marks := row_marks(s)
-	old := d.view
-	d.view = d.refresh
+	old := take(&d.view)
+	d.view = take(&d.refresh)
 	d.view.fetched = unix_now()
-	d.refresh = {}
-	if old.has_arena {
-		view_free(d, &old)
-	}
+	view_free(d, &old)
 	rows_moved(s, marks)
 	log.debugf("lists: %s fetched again, %d rows", list_name(d.view.source, small_str(&d.view.id)), d.view.count)
 	list_save(d, &d.view)
@@ -502,10 +497,12 @@ add_result :: proc(s: ^State, res: ^Result, job: Add_Track_Job) {
 	job := job
 	id := small_str(&job.id)
 	err, failed := res.err.?
-	added := res.added
-	if job.source == .Liked && !job.remove && len(res.rows) == 1 {
+	out, _ := res.payload.(Add_Track_Result)
+	listed, has_row := out.row.?
+	added := out.added
+	if job.source == .Liked && !job.remove && has_row {
 		// Liking a liked track adds nothing, and only the count tells.
-		added = res.version.count > i64(d.sidebar.liked_count)
+		added = out.version.count > i64(d.sidebar.liked_count)
 	}
 	resent := job.source == .Liked && liked_answer(d, job.track, !failed)
 	status := Status.Added
@@ -517,18 +514,18 @@ add_result :: proc(s: ^State, res: ^Result, job: Add_Track_Job) {
 		// Unliking: the row leaves the kept copies, at the version the
 		// unliked list was at. The set was told when the job went out, so
 		// the version is recorded and the set isn't fetched again for it.
-		if res.version.count > 0 {
-			list_edited(s, job.source, id, false, Row{id = job.track}, res.version)
-			d.liked.version = res.version
+		if out.version.count > 0 {
+			list_edited(s, job.source, id, false, Row{id = job.track}, out.version)
+			d.liked.version = out.version
 		} else {
 			list_forget(s, job.source, id)
 		}
 	case !added:
 		status = .Already_In
-	case len(res.rows) == 1:
-		list_edited(s, job.source, id, true, res.rows[0], res.version)
+	case has_row:
+		list_edited(s, job.source, id, true, listed, out.version)
 		if job.source == .Liked {
-			d.liked.version = res.version
+			d.liked.version = out.version
 		}
 	case:
 		list_forget(s, job.source, id)
@@ -665,7 +662,7 @@ row_clone :: proc(r: Row, a: runtime.Allocator) -> Row {
 // sidebar_adopt takes a sidebar from TIDAL or from disk. The open playlist
 // is found again by id, since playlists may have come or gone. One from
 // disk is taken only while TIDAL's hasn't come.
-sidebar_adopt :: proc(s: ^State, res: ^Result, from_disk: bool) {
+sidebar_adopt :: proc(s: ^State, res: ^Result, sidebar: Sidebar_Result, from_disk: bool) {
 	d := &s.data
 	lib := &s.library
 	open := ""
@@ -676,16 +673,15 @@ sidebar_adopt :: proc(s: ^State, res: ^Result, from_disk: bool) {
 	fetched := d.sidebar.fetched
 	sidebar_free(d)
 	d.sidebar = {
-		arena        = res.arena,
-		items        = res.playlists,
-		liked_count  = res.liked_count,
-		liked_newest = res.liked_newest,
+		arena        = take(&res.arena),
+		items        = sidebar.playlists,
+		liked_count  = sidebar.liked_count,
+		liked_newest = sidebar.liked_newest,
 		loaded       = true,
 		loading      = loading,
 		fresh        = !from_disk,
 		fetched      = fetched if from_disk else time.tick_now(),
 	}
-	res.arena = nil
 	if lib.status in ADD_STATUSES {
 		lib.status = .None // it names a sidebar entry by its place
 	}
@@ -935,13 +931,14 @@ queue_read :: proc(res: ^Result, path: string) {
 	if !ok {
 		return
 	}
+	out: Queue_File_Result
 	err: File_Error
-	if res.queue, res.rows, err = queue_decode(data, a); err != .None {
+	if out.header, out.rows, err = queue_decode(data, a); err != .None {
 		log.warnf("lists: dropping the play queue's file (%v)", err)
 		os.remove(path)
 		return
 	}
-	res.hit = true
+	res.payload = out
 }
 
 // queue_write_now writes the play queue's file on this thread, after the
@@ -974,12 +971,27 @@ disk_read :: proc(res: ^Result, path: string, source: Source, id: string) {
 	h: ^File_Header
 	err: File_Error
 	if source == .None {
-		h, res.playlists, err = sidebar_decode(data, a)
+		sidebar: Sidebar_Result
+		h, sidebar.playlists, err = sidebar_decode(data, a)
+		if err == .None {
+			sidebar.liked_count = int(h.version.count)
+			sidebar.liked_newest = h.version.newest
+			res.payload = sidebar
+		}
 	} else {
-		if res.space, ok = space_reserve(); !ok {
+		list: List_File_Result
+		if list.space, ok = space_reserve(); !ok {
 			return
 		}
-		h, res.rows, res.loaded, err = list_decode_into(data, source, id, res.space, a)
+		h, list.rows, list.loaded, err = list_decode_into(data, source, id, list.space, a)
+		if err != .None {
+			space_release(list.space)
+		} else {
+			list.total = int(h.hint)
+			list.version = h.version
+			list.fetched = h.fetched
+			res.payload = list
+		}
 	}
 	if err == .Memory {
 		return
@@ -989,12 +1001,6 @@ disk_read :: proc(res: ^Result, path: string, source: Source, id: string) {
 		os.remove(path)
 		return
 	}
-	res.hit = true
-	res.version = h.version
-	res.fetched = h.fetched
-	res.total = int(h.hint)
-	res.liked_count = int(h.version.count)
-	res.liked_newest = h.version.newest
 	now := time.now()
 	os.change_times(path, now, now)
 }
@@ -1117,19 +1123,19 @@ cover_write :: proc(d: ^Data, dir, path: string, data: []u8) {
 }
 
 // disk_result takes a disk read: the open list's rows, the sidebar or the
-// play queue.
+// play queue. A file that wasn't there or wasn't good has no payload.
 disk_result :: proc(s: ^State, res: ^Result, job: Disk_Job) {
 	d := &s.data
 	if job.op == .Read_Queue {
-		if res.job.auth == d.auth_gen {
-			playback_restore(s, res)
+		if queue, hit := res.payload.(Queue_File_Result); hit && res.job.auth == d.auth_gen {
+			playback_restore(s, queue)
 		}
 		return
 	}
 	if job.source == .None {
-		if res.hit && !d.sidebar.fresh {
-			log.debugf("lists: sidebar from disk, %d playlists", len(res.playlists))
-			sidebar_adopt(s, res, true)
+		if sidebar, hit := res.payload.(Sidebar_Result); hit && !d.sidebar.fresh {
+			log.debugf("lists: sidebar from disk, %d playlists", len(sidebar.playlists))
+			sidebar_adopt(s, res, sidebar, true)
 		}
 		return
 	}
@@ -1138,26 +1144,26 @@ disk_result :: proc(s: ^State, res: ^Result, job: Disk_Job) {
 		return
 	}
 	v.reading = false
-	if !res.hit {
+	list, hit := &res.payload.(List_File_Result)
+	if !hit {
 		view_fetch(d, v.source, small_str(&v.id), small_str(&v.name), small_str(&v.image), v.hint)
 		return
 	}
 	// The disk thread decoded the rows into the list's space and their
 	// strings into the arena, so the view takes both as they are. The
 	// arena's copy of itself left in its first block is dead.
-	v.arena = res.arena^
-	v.space, v.rows, v.loaded = res.space, res.rows, res.loaded
+	v.arena = take(&res.arena)^
+	v.space, v.rows, v.loaded = take(&list.space), list.rows, list.loaded
 	v.has_arena = true
-	res.arena, res.space = nil, nil
 	n := len(v.rows)
 	slice.fill(v.loaded, true)
 	v.count = n
 	v.loaded_rows = n
-	v.hint = res.total
-	v.next_offset = res.total
+	v.hint = list.total
+	v.next_offset = list.total
 	v.done = true
-	v.version = res.version
-	v.fetched = res.fetched
+	v.version = list.version
+	v.fetched = list.fetched
 	for &r in v.rows {
 		v.longest = max(v.longest, r.seconds)
 	}

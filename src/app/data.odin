@@ -15,7 +15,6 @@ import "core:math"
 import "core:mem"
 import vmem "core:mem/virtual"
 import "core:os"
-import "core:reflect"
 import "core:slice"
 import "core:strings"
 import "core:sync"
@@ -694,31 +693,8 @@ hold_job :: proc(d: ^Data, job: Job, priority: u8) {
 	d.held_count += 1
 }
 
-// same_request says whether two jobs ask for the same thing. The kinds that
-// wait behind a flag or are sent one at a time each ask for one thing, and
-// an Artwork asks for its track's serial. A Stream's serial and a page's
-// offset are never asked for twice, and every add is its own. Only one
-// follow change per artist is out, see Follow_Out.
-@(private = "file")
-same_request :: proc(held, job: Job) -> bool {
-	#partial switch p in job.payload {
-	case Restore_Job, Login_Start_Job, Login_Wait_Job, Login_Pkce_Job, Playlists_Job, Liked_Ids_Job, Search_Job, Save_Settings_Job:
-		return reflect.union_variant_typeid(held.payload) == reflect.union_variant_typeid(job.payload)
-	case Artwork_Job:
-		h, art := held.payload.(Artwork_Job)
-		return art && h.serial == p.serial
-	case Artist_Job:
-		h, artist := held.payload.(Artist_Job)
-		return artist && h == p
-	}
-	return false
-}
-
 // held_victim is the held job to drop for a new one: one no longer wanted,
-// else the oldest Stream, Artwork or Add_Track, whose track has most likely
-// moved on, Artist, whose page asks again, or Follow, whose button goes
-// back. hold_job keeps one of each other kind and view_pages one page per
-// list, so they never fill the list.
+// else the oldest that held_evictable lets go.
 @(private = "file")
 held_victim :: proc(d: ^Data) -> int {
 	held := d.held[:d.held_count]
@@ -728,8 +704,7 @@ held_victim :: proc(d: ^Data) -> int {
 		}
 	}
 	for h, i in held {
-		#partial switch _ in h.job.payload {
-		case Stream_Job, Artwork_Job, Add_Track_Job, Artist_Job, Follow_Job:
+		if held_evictable(h.job) {
 			return i
 		}
 	}
@@ -737,39 +712,6 @@ held_victim :: proc(d: ^Data) -> int {
 		panic("the hold list is full of jobs that wait behind a flag")
 	}
 	return 0
-}
-
-// held_drop lets go of a held job that won't be pushed. Its caller counted
-// it as out, so the flag holding back the next one is cleared. A like,
-// unlike or follow change never reached TIDAL, so its button goes back.
-@(private = "file")
-held_drop :: proc(d: ^Data, job: ^Job) {
-	l := &d.login
-	#partial switch p in job.payload {
-	case Login_Start_Job:
-		if asked, ok := l.code.(Code_Asked); ok && asked.attempt == p.attempt {
-			l.code = nil
-		}
-	case Login_Wait_Job:
-		if poll, ok := &l.code.(Code_Polling); ok {
-			poll.out = false
-		}
-	case Playlists_Job:
-		d.sidebar.loading = false
-	case Liked_Ids_Job:
-		d.liked.loading = false
-		clear(&d.liked.edits)
-		clear(&d.followed.edits)
-	case Add_Track_Job:
-		if p.source == .Liked {
-			liked_answer(d, p.track, false)
-		}
-	case Follow_Job:
-		follow_answer(d, p.artist, false)
-	case Artist_Job:
-		artist_job_dropped(d, p)
-	}
-	job_free(job)
 }
 
 // held_remove_if drops the held jobs pred picks, as jobs.remove_if does the
@@ -806,18 +748,9 @@ page_held :: proc(d: ^Data, gen: u32) -> bool {
 	return false
 }
 
-// job_free frees what a job owns, once it has run for good or won't run.
-job_free :: proc(job: ^Job) {
-	#partial switch &p in job.payload {
-	case Disk_Job:
-		delete(p.blob, runtime.heap_allocator())
-		p.blob = nil
-	}
-}
-
 @(private = "file")
 drop_account_job :: proc(job: ^Job, _: rawptr) -> bool {
-	if _, cover := job.payload.(Cover_Job); cover {
+	if !for_account(job^) {
 		return false
 	}
 	job_free(job)
@@ -964,39 +897,6 @@ data_retry :: proc(d: ^Data) {
 	}
 }
 
-// held_wanted says whether a held job is still wanted: its login hasn't
-// ended and what it's for still waits for it. Kinds whose answer is checked
-// when it comes, as Stream's track serial is, always are, and so is Search:
-// search_stop drops the held one with the queued one.
-@(private = "file")
-held_wanted :: proc(d: ^Data, job: Job) -> bool {
-	l := &d.login
-	if job.auth != d.auth_gen {
-		return false
-	}
-	_, code_shown := l.card.(Login_Code)
-	#partial switch p in job.payload {
-	case Restore_Job:
-		return d.account == .Restoring
-	case Login_Start_Job:
-		asked, ok := l.code.(Code_Asked)
-		return code_shown && ok && asked.attempt == p.attempt
-	case Login_Wait_Job:
-		_, polling := l.code.(Code_Polling)
-		return code_shown && polling
-	case Login_Pkce_Job:
-		_, exchanging := l.card.(Login_Exchanging)
-		return exchanging
-	case Playlists_Job:
-		return d.account == .Signed_In
-	case Tracks_Job:
-		return track_view(d, p.view) != nil
-	case Artist_Job:
-		return artist_waiting(d, p) != nil
-	}
-	return true
-}
-
 // track_view is the list, open, fetched again or followed by the play
 // queue, that gen names, or nil.
 track_view :: proc(d: ^Data, gen: u32) -> ^Track_View {
@@ -1040,28 +940,21 @@ data_update :: proc(s: ^State, now: f64) {
 
 handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 	d := &s.data
-	_, is_cover := res.job.payload.(Cover_Job)
-	// From a login sign_out has ended. Covers don't depend on the login.
-	if !is_cover && res.job.auth != d.auth_gen {
+	// From an account sign_out has ended.
+	if for_account(res.job) && res.job.auth != d.auth_gen {
 		return
 	}
 	err, failed := res.err.?
-	// Only jobs that sent the login's tokens can end it. A cover carries no
-	// token, and a login job's .Authentication means the user denied it.
-	if failed && err == .Authentication {
-		#partial switch _ in res.job.payload {
-		case Cover_Job, Login_Start_Job, Login_Wait_Job, Login_Pkce_Job:
-		case:
-			sign_out(s, "Your TIDAL session ended. Log in again.")
-			return
-		}
+	if failed && err == .Authentication && ends_login(res.job) {
+		sign_out(s, "Your TIDAL session ended. Log in again.")
+		return
 	}
 	switch p in res.job.payload {
 	case Restore_Job:
 		if res.message.len > 0 {
 			d.message = res.message
 		}
-		if res.signed_in {
+		if restored, _ := res.payload.(Restore_Result); restored.signed_in {
 			signed_in(d)
 		} else {
 			d.account = .Signed_Out
@@ -1091,9 +984,10 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 			}
 			return
 		}
+		link, _ := res.payload.(Login_Link)
 		l^ = {
 			card = Login_Code{},
-			code = Code_Polling{link = res.link, deadline = time.tick_add(time.tick_now(), time.Duration(f64(res.link.expires) * f64(time.Second)))},
+			code = Code_Polling{link = link, deadline = time.tick_add(time.tick_now(), time.Duration(f64(link.expires) * f64(time.Second)))},
 			note = l.note,
 		}
 		request_login_poll(d)
@@ -1127,7 +1021,8 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 			d.message = res.message
 			return
 		}
-		sidebar_adopt(s, res, false)
+		sidebar, _ := res.payload.(Sidebar_Result)
+		sidebar_adopt(s, res, sidebar, false)
 		sidebar_save(d)
 	case Disk_Job:
 		disk_result(s, res, p)
@@ -1157,7 +1052,8 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 			v.in_flight -= held_remove_if(d, page_of, &v.gen)
 			return
 		}
-		view_add_rows(v, int(p.offset), int(p.limit), res.rows, res.total)
+		page, _ := res.payload.(Tracks_Result)
+		view_add_rows(v, int(p.offset), int(p.limit), page.rows, page.total)
 		if v.done {
 			v.in_flight -= held_remove_if(d, page_of, &v.gen)
 		}
@@ -1175,7 +1071,8 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 		search_result(s, res, p)
 	case Cover_Job:
 		key := p.key
-		if failed || res.pixels == nil {
+		img, _ := res.payload.(Image_Result)
+		if failed || img.pixels == nil {
 			cover.set_failed(&d.covers, key, now)
 			return
 		}
@@ -1183,7 +1080,7 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 		// entry is gone or every page is in use; failed covers are retried.
 		e := cover.lookup(&d.covers, key)
 		page: ^cover.Page
-		if e != nil && res.w == int(e.px) && res.h == int(e.px) {
+		if e != nil && img.w == int(e.px) && img.h == int(e.px) {
 			e, page = cover.place(&d.covers, key, s.frame_count, now)
 		}
 		if page == nil {
@@ -1196,7 +1093,7 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 			page.texture = render.texture_create(r, side, side, .RGBA8)
 		}
 		src := cover.src(&d.covers, e)
-		render.texture_update(r, page.texture, res.pixels, int(src.x), int(src.y), res.w, res.h, converted = true)
+		render.texture_update(r, page.texture, img.pixels, int(src.x), int(src.y), img.w, img.h, converted = true)
 		d.bench.uploads += 1
 		d.bench.frame_uploads += 1
 	}
@@ -1216,8 +1113,8 @@ login_wait_done :: proc(d: ^Data, res: ^Result, job: Login_Wait_Job, err: tidal.
 		return // the login started over
 	}
 	poll.out = false
-	if res.link.interval > 0 {
-		poll.link.interval = res.link.interval
+	if wait, _ := res.payload.(Login_Wait_Result); wait.interval > 0 {
+		poll.link.interval = wait.interval
 	}
 	if !failed {
 		signed_in(d)
@@ -1331,14 +1228,13 @@ view_close :: proc(d: ^Data) {
 	v := &d.view
 	if v.has_arena && v.gen == d.queue_view && !view_complete(v) && v.error.len == 0 && !v.reading {
 		queued_drop(d)
-		d.queued = v^
-		v.has_arena = false
+		d.queued = take(v)
 	}
 	jobs.remove_if(&d.queue, drop_track_jobs, &d.queued)
 	refresh_drop(d)
 	if v.has_arena {
 		if d.lists.memory && view_complete(v) && v.fetched != 0 {
-			list_keep(d, v^)
+			list_keep(d, take(v))
 		} else {
 			view_free(d, v)
 		}
@@ -1354,12 +1250,10 @@ queued_drop :: proc(d: ^Data) {
 		return
 	}
 	jobs.remove_if(&d.queue, page_of, &q.gen)
-	if q.has_arena {
-		if d.lists.memory && view_complete(q) && q.fetched != 0 {
-			list_keep(d, q^)
-		} else {
-			view_free(d, q)
-		}
+	if q.has_arena && d.lists.memory && view_complete(q) && q.fetched != 0 {
+		list_keep(d, take(q))
+	} else {
+		view_free(d, q)
 	}
 	q^ = {}
 }
@@ -1478,6 +1372,9 @@ view_release :: proc(v: ^Track_View) {
 // view_free frees a list's memory. Debug builds and tests poison it and
 // keep it until the next one goes, see Data.poison.
 view_free :: proc(d: ^Data, v: ^Track_View) {
+	if !v.has_arena {
+		return
+	}
 	if !d.poison {
 		view_release(v)
 		return
@@ -1489,8 +1386,7 @@ view_free :: proc(d: ^Data, v: ^Track_View) {
 	mem.set(raw_data(v.loaded), POISON, len(v.loaded))
 	mem.set(raw_data(v.gaps), POISON, len(v.gaps) * size_of(Gap))
 	view_release(&d.retired)
-	d.retired = v^
-	v.has_arena = false
+	d.retired = take(v)
 }
 
 // view_bytes is about what a list holds in memory.

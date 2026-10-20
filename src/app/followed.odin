@@ -5,9 +5,7 @@
 // TIDALFAST_FAKE the set starts empty and a press only changes it locally.
 package app
 
-import "base:runtime"
 import "core:log"
-import "core:slice"
 
 // Followed_Set is the followed artists' ids, sorted ascending without
 // duplicates, on the heap until sign-out. Until the first fetch lands it
@@ -15,18 +13,8 @@ import "core:slice"
 Followed_Set :: struct {
 	ids:   [dynamic]i64,
 	known: bool,
-	edits: [dynamic]Liked_Edit, // changes made while a Liked_Ids job is out, for its result
-	out:   map[i64]Follow_Out, // artists with a follow change out to TIDAL
-}
-
-// Follow_Out is an artist whose follow change is out to TIDAL. Only one
-// change per artist is out at a time: the workers could send two in either
-// order, and the app couldn't tell which one TIDAL kept. A press while one
-// is out only changes want, which goes once the change out is answered.
-Follow_Out :: struct {
-	confirmed: bool, // followed, as TIDAL last had it
-	sent:      bool, // what the change out asks for
-	want:      bool, // what the button shows
+	edits: [dynamic]Toggle_Edit, // changes made while a Liked_Ids job is out, for its result
+	out:   map[i64]Toggle_Out, // artists with a follow change out to TIDAL
 }
 
 // Follow_Job follows an artist on TIDAL, or unfollows them.
@@ -37,35 +25,14 @@ Follow_Job :: struct {
 
 // followed_has says whether artist is followed.
 followed_has :: proc(d: ^Data, artist: i64) -> bool {
-	_, found := slice.binary_search(d.followed.ids[:], artist)
-	return found
+	return ids_has(d.followed.ids[:], artist)
 }
 
-// followed_put sets whether artist is followed, keeping the ids sorted.
-followed_put :: proc(d: ^Data, artist: i64, on: bool) {
-	f := &d.followed
-	at, found := slice.binary_search(f.ids[:], artist)
-	switch {
-	case on && !found:
-		if f.ids == nil {
-			f.ids = make([dynamic]i64, 0, 16, runtime.heap_allocator())
-		}
-		inject_at(&f.ids, at, artist)
-	case !on && found:
-		ordered_remove(&f.ids, at)
-	}
-}
-
-// followed_change is followed_put that keeps the change for the result of
-// a fetch that's out, which replays it over what TIDAL sent.
+// followed_change sets whether artist is followed, and keeps the change for
+// the result of a fetch that's out, which replays it over what TIDAL sent.
 followed_change :: proc(d: ^Data, artist: i64, on: bool) {
-	followed_put(d, artist, on)
-	if d.liked.loading {
-		if d.followed.edits == nil {
-			d.followed.edits = make([dynamic]Liked_Edit, runtime.heap_allocator())
-		}
-		append(&d.followed.edits, Liked_Edit{artist, on})
-	}
+	ids_put(&d.followed.ids, artist, on)
+	edit_keep(d, &d.followed.edits, artist, on)
 }
 
 // follow_toggle flips the follow on artist, from the page's button. The
@@ -76,49 +43,32 @@ follow_toggle :: proc(s: ^State, artist: i64) {
 	d := &s.data
 	on := !followed_has(d, artist)
 	if d.fake {
-		followed_put(d, artist, on)
+		ids_put(&d.followed.ids, artist, on)
 		return
 	}
 	if artist <= 0 || !d.followed.known {
 		return
 	}
-	if o, ok := &d.followed.out[artist]; ok {
-		o.want = on
-		followed_change(d, artist, on)
-		return
-	}
-	if d.followed.out == nil {
-		d.followed.out = make(map[i64]Follow_Out, runtime.heap_allocator())
-	}
-	d.followed.out[artist] = {confirmed = !on, sent = on, want = on}
+	send := toggle_want(&d.followed.out, artist, on, !on)
 	followed_change(d, artist, on)
-	push_job(d, {payload = Follow_Job{artist = artist, on = on}})
+	if send {
+		push_job(d, {payload = Follow_Job{artist = artist, on = on}})
+	}
 }
 
 // follow_answer takes TIDAL's answer to the follow change out for artist,
-// or took is false for a refusal or a change dropped before it went. A
-// refusal takes the presses since back too, so the button shows what
-// TIDAL has; after a success the button's newer want goes out.
+// see toggle_answer.
 follow_answer :: proc(d: ^Data, artist: i64, took: bool) {
-	o, ok := d.followed.out[artist]
-	if !ok {
+	want, resend, found := toggle_answer(&d.followed.out, artist, took)
+	if !found {
 		return
-	}
-	if took {
-		o.confirmed = o.sent
-	} else {
-		o.want = o.confirmed
 	}
 	// Even after a success: a fetch out may have listed the set before
 	// TIDAL took the change.
-	followed_change(d, artist, o.want)
-	if o.want == o.confirmed {
-		delete_key(&d.followed.out, artist)
-		return
+	followed_change(d, artist, want)
+	if resend {
+		push_job(d, {payload = Follow_Job{artist = artist, on = want}})
 	}
-	o.sent = o.want
-	d.followed.out[artist] = o
-	push_job(d, {payload = Follow_Job{artist = artist, on = o.sent}})
 }
 
 // follow_result takes a Follow job's answer.
@@ -139,18 +89,9 @@ followed_ids_result :: proc(d: ^Data, res: ^Result, failed: bool) {
 		clear(&f.edits)
 		return
 	}
-	delete(f.ids)
-	f.ids = make([dynamic]i64, 0, len(res.followed), runtime.heap_allocator())
-	append(&f.ids, ..res.followed)
+	ids, _ := res.payload.(Liked_Ids_Result)
+	ids_replace(&f.ids, ids.artists, &f.edits, f.out)
 	f.known = true
-	for e in f.edits {
-		followed_put(d, e.id, e.on)
-	}
-	clear(&f.edits)
-	// A change that went out before the fetch did isn't among the edits.
-	for artist, o in f.out {
-		followed_put(d, artist, o.want)
-	}
 }
 
 // followed_clear frees the set, at sign-out and shut down.

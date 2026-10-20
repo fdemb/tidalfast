@@ -172,7 +172,7 @@ drop_search_jobs :: proc(job: ^Job, _: rawptr) -> bool {
 search_edited :: proc(s: ^State) {
 	search_stop(s)
 	if search_query(s) == "" {
-		pending_set(s, {kind = .Close_Search})
+		pending_set(s, Close_Search{})
 		return
 	}
 	s.search.due = s.ui.time + SEARCH_DEBOUNCE
@@ -229,7 +229,7 @@ search_shown :: proc(s: ^State) {
 		sr.place = nil
 		return
 	}
-	history_visit(s, {kind = .Search, id = sr.query})
+	history_visit(s, Search_Place{query = sr.query})
 }
 
 // search_close leaves the results for the sidebar's playlist.
@@ -278,14 +278,14 @@ search_result :: proc(s: ^State, res: ^Result, job: Search_Job) {
 		sr.error = res.message
 		return
 	}
+	answer, _ := res.payload.(Search_Result)
 	sr.error = {}
 	found_free(sr)
-	sr.arena = res.arena
-	res.arena = nil
-	sr.found = res.found
+	sr.arena = take(&res.arena)
+	sr.found = answer.found
 	sr.query = job.query
 	q := small_str(&sr.query)
-	log.infof("search: \"%s\": %d songs, %d albums, %d artists, %d playlists", q, len(res.rows), len(sr.found.albums), len(sr.found.artists), len(sr.found.playlists))
+	log.infof("search: \"%s\": %d songs, %d albums, %d artists, %d playlists", q, len(answer.rows), len(sr.found.albums), len(sr.found.artists), len(sr.found.playlists))
 
 	browse_begin(s)
 	d := &s.data
@@ -298,7 +298,7 @@ search_result :: proc(s: ^State, res: ^Result, job: Search_Job) {
 	if v.has_arena {
 		v.found = found_clone(sr.found, vmem.arena_allocator(&v.arena))
 	}
-	view_add_rows(v, 0, SEARCH_PAGE, res.rows)
+	view_add_rows(v, 0, SEARCH_PAGE, answer.rows)
 	v.next_offset = SEARCH_PAGE
 	view_request_pages(d)
 	list_loaded(d, v)
@@ -373,7 +373,7 @@ browse_begin :: proc(s: ^State) {
 // open_list opens an album's tracks, an artist's top tracks or a playlist
 // that isn't in the sidebar, for pending_apply. With the fake data it lists
 // the rows of an album or artist.
-open_list :: proc(s: ^State, p: ^Pending) {
+open_list :: proc(s: ^State, p: ^List_Place) {
 	if p.source == .Artist {
 		artist_visit(s, artist_key(s, p), p.name, p.image)
 		if artist_list_open(s, p) {
@@ -409,17 +409,17 @@ go_to_artist :: proc(s: ^State, i: int, k := 0) {
 // the album of row at in State.rows.
 open_album :: proc(s: ^State, id: i64, name, image: string, at: int) {
 	if s.data.fake {
-		pending_set(s, {kind = .List, source = .Album, index = at})
+		pending_set(s, List_Place{source = .Album, index = at})
 	} else if id != 0 {
-		pending_set(s, {kind = .List, source = .Album, id = small(fmt.tprint(id)), name = small(name), image = small(image)})
+		pending_set(s, List_Place{source = .Album, id = small(fmt.tprint(id)), name = small(name), image = small(image)})
 	}
 }
 
 open_artist :: proc(s: ^State, id: i64, name: string, at: int) {
 	if s.data.fake {
-		pending_set(s, {kind = .List, source = .Artist, index = at})
+		pending_set(s, List_Place{source = .Artist, index = at})
 	} else if id != 0 {
-		pending_set(s, {kind = .List, source = .Artist, id = small(fmt.tprint(id)), name = small(name)})
+		pending_set(s, List_Place{source = .Artist, id = small(fmt.tprint(id)), name = small(name)})
 	}
 }
 
@@ -625,8 +625,11 @@ draw_found_list :: proc(s: ^State) {
 // and a playlist's is its sidebar entry.
 @(private = "file")
 open_found :: proc(s: ^State, tab: Search_Tab, f: Found) {
-	p := Pending {
-		kind  = .List,
+	if s.data.fake && tab == .Playlists {
+		pending_set(s, Playlist_Place{index = int(f.id)})
+		return
+	}
+	p := List_Place {
 		name  = small(f.name),
 		image = small(f.image),
 		hint  = f.tracks,
@@ -645,9 +648,6 @@ open_found :: proc(s: ^State, tab: Search_Tab, f: Found) {
 	}
 	if s.data.fake {
 		p.index = int(f.id)
-		if tab == .Playlists {
-			p.kind = .Playlist
-		}
 	}
 	pending_set(s, p)
 }
