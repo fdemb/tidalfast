@@ -327,8 +327,8 @@ request :: proc(s: ^Session, r: Request, allocator := context.allocator) -> (res
 }
 
 // request_json sends r and parses the body. The JSON and the response live
-// in allocator, which should be an arena: unlike request, an error drops
-// the response without freeing it.
+// in allocator, which should be an arena: an HTTP error drops the response
+// without freeing it, and request_object drops it always.
 request_json :: proc(s: ^Session, r: Request, allocator := context.allocator) -> (value: json.Value, resp: Http_Response, err: Error) {
 	resp = request(s, r, allocator) or_return
 	v, jerr := json.parse(resp.body, .JSON, true, allocator)
