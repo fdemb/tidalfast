@@ -853,6 +853,11 @@ static uint8_t g_paste[CLIP_MAX]; // the selection's text, as far as it has arri
 static size_t g_paste_len;
 static bool g_paste_done;
 
+static bool set_nonblocking(int fd) {
+  int flags = fcntl(fd, F_GETFL);
+  return flags >= 0 && fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
+}
+
 static void source_target(void *data, struct wl_data_source *s, const char *mime) {}
 
 static void send_more(Clip_Send *t) {
@@ -936,9 +941,14 @@ static void receive_selection(void) {
   g_paste_len = 0;
   g_paste_done = false;
   int fds[2];
-  if (!g_offer || !g_offer_text || pipe2(fds, O_CLOEXEC | O_NONBLOCK) != 0) return;
+  if (!g_offer || !g_offer_text || pipe2(fds, O_CLOEXEC) != 0) return;
+  // The write end goes to the source client, which may expect it to block.
   wl_data_offer_receive(g_offer, "text/plain;charset=utf-8", fds[1]);
   close(fds[1]);
+  if (!set_nonblocking(fds[0])) {
+    close(fds[0]);
+    return;
+  }
   g_receive_fd = fds[0];
 }
 
