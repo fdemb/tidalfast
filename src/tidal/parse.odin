@@ -129,6 +129,15 @@ parse_artists :: proc(p: ^Parser, arr: json.Array) -> []Artist {
 	return out[:n]
 }
 
+// The "artist" object obj, as artists[0] when that is the same artist.
+@(private = "file")
+primary_artist :: proc(p: ^Parser, obj: json.Object, artists: []Artist) -> ^Artist {
+	if len(artists) > 0 && ji64(obj, "id") == artists[0].id {
+		return &artists[0]
+	}
+	return new_clone(parse_artist(p, obj), p.allocator)
+}
+
 // parse_album parses an album. Pass artists (have_artists = true) to reuse
 // the artists already parsed for a track instead of the album JSON's.
 parse_album :: proc(p: ^Parser, obj: json.Object, artist: ^Artist = nil, artists: []Artist = nil, have_artists := false) -> Album {
@@ -147,7 +156,7 @@ parse_album :: proc(p: ^Parser, obj: json.Object, artist: ^Artist = nil, artists
 			artist = &artists[0]
 		}
 	} else if artist == nil {
-		artist = new_clone(parse_artist(p, obj["artist"].(json.Object) or_else nil), p.allocator)
+		artist = primary_artist(p, obj["artist"].(json.Object) or_else nil, artists)
 	}
 
 	a: Album
@@ -202,7 +211,7 @@ parse_media_info :: proc(p: ^Parser, obj: json.Object, m: ^Media_Info, album: ^A
 	// Sometimes the artist field is not filled, example: 62300893
 	artist: ^Artist
 	if a, ok := jobj(obj, "artist"); ok {
-		artist = new_clone(parse_artist(p, a), p.allocator)
+		artist = primary_artist(p, a, artists)
 	} else if len(artists) > 0 {
 		artist = &artists[0]
 	}

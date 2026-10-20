@@ -163,6 +163,24 @@ parse_track :: proc(t: ^testing.T) {
 	testing.expect_value(t, tr2.listen_url, "https://listen.tidal.com/album/1/track/77646170")
 }
 
+// The primary artist is parsed once when it also leads "artists".
+@(test)
+primary_artist_is_parsed_once :: proc(t: ^testing.T) {
+	a: Test_Arena
+	allocator := arena_begin(&a)
+	defer vmem.arena_destroy(&a.arena)
+
+	p := test_parser(allocator)
+	tr := tidal.parse_track(&p, parse_obj(t, TRACK_JSON, allocator))
+	testing.expect(t, tr.artist == &tr.artists[0])
+	al := tidal.parse_album(&p, parse_obj(t, ALBUM_JSON, allocator))
+	testing.expect(t, al.artist == &al.artists[0])
+
+	other := tidal.parse_track(&p, parse_obj(t, `{"id":1,"artist":{"id":9,"name":"Other"},"artists":[{"id":3634161,"name":"The Beatles"}]}`, allocator))
+	testing.expect(t, other.artist != &other.artists[0])
+	testing.expect_value(t, other.artist.name, "Other")
+}
+
 @(test)
 parse_album_and_media :: proc(t: ^testing.T) {
 	a: Test_Arena
