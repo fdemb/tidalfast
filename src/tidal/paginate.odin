@@ -4,6 +4,7 @@ import "base:runtime"
 import "core:encoding/json"
 import "core:fmt"
 import "core:log"
+import vmem "core:mem/virtual"
 import "core:sync"
 import "core:thread"
 
@@ -104,21 +105,36 @@ free_bodies :: proc(bodies: [][]u8) {
 	delete(bodies, heap)
 }
 
+// next_page_json parses page i of bodies into scratch, emptied first, and frees
+// the body: the JSON's strings are copies.
+@(private)
+next_page_json :: proc(bodies: [][]u8, i: int, scratch: ^vmem.Arena) -> (obj: json.Object, err: Error) {
+	vmem.arena_free_all(scratch)
+	body := bodies[i]
+	bodies[i] = nil
+	defer delete(body, runtime.heap_allocator())
+	v, jerr := json.parse(body, .JSON, true, vmem.arena_allocator(scratch))
+	ok: bool
+	obj, ok = v.(json.Object)
+	if jerr != nil || !ok {
+		return nil, make_error(.Bad_Response, "Expected a JSON object", detail = string(body))
+	}
+	return obj, nil
+}
+
 // paginate fetches `total` items of a list endpoint in parallel and parses
 // them, in order, into allocator.
 @(private)
 paginate :: proc(s: ^Session, r: Request, total: int, $T: typeid, parse: proc(p: ^Parser, obj: json.Object) -> T, allocator: Allocator) -> (items: []T, err: Error) {
 	bodies := fetch_pages(s, r, total) or_return
 	defer free_bodies(bodies)
+	scratch: vmem.Arena
+	defer vmem.arena_destroy(&scratch)
 
 	p := parser_make(s, allocator)
 	out := make([dynamic]T, 0, total, allocator)
-	for body in bodies {
-		v, jerr := json.parse(body, .JSON, true, context.temp_allocator)
-		obj, ok := v.(json.Object)
-		if jerr != nil || !ok {
-			return nil, make_error(.Bad_Response, "Expected a JSON object", detail = string(body))
-		}
+	for _, i in bodies {
+		obj := next_page_json(bodies, i, &scratch) or_return
 		map_items_into(&p, obj, &out, parse)
 	}
 	return out[:], nil

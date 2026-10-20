@@ -2,6 +2,7 @@ package tidal
 
 import "core:encoding/json"
 import "core:fmt"
+import vmem "core:mem/virtual"
 import "core:slice"
 import "core:strconv"
 import "core:strings"
@@ -326,14 +327,12 @@ playlist_item_ids :: proc(s: ^Session, playlist_id: string) -> (ids: []i64, err:
 	}
 	bodies := fetch_pages(s, r, count) or_return
 	defer free_bodies(bodies)
+	scratch: vmem.Arena
+	defer vmem.arena_destroy(&scratch)
 
 	out := make([dynamic]i64, 0, count, context.temp_allocator)
-	for body in bodies {
-		v, jerr := json.parse(body, .JSON, true, context.temp_allocator)
-		obj, ok := v.(json.Object)
-		if jerr != nil || !ok {
-			return nil, make_error(.Bad_Response, "Expected a JSON object", detail = string(body))
-		}
+	for _, i in bodies {
+		obj := next_page_json(bodies, i, &scratch) or_return
 		items, _ := jarr(obj, "items")
 		for item in items {
 			entry, _ := item.(json.Object)
