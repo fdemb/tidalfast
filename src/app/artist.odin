@@ -417,10 +417,9 @@ hero_background :: proc(s: ^State, page: ^Artist_Page, w, h: f32) {
 }
 
 // pill is a round-ended button with an icon and a label, light for the
-// main action. widest, when given, is the longest label it takes, so its
-// width doesn't change between them.
+// main action.
 @(private = "file")
-pill :: proc(id, icon, label: string, light, enabled: bool, widest := "") -> ui.Signal {
+pill :: proc(id, icon, label: string, light, enabled: bool) -> ui.Signal {
 	flags := ui.Box_Flags{.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects}
 	if !enabled {
 		flags += {.Disabled}
@@ -438,13 +437,15 @@ pill :: proc(id, icon, label: string, light, enabled: bool, widest := "") -> ui.
 	glyph.text_align = .Center
 	ui.spacer(ui.px(8))
 	ui.text_style(.Semibold, 14, fg)
-	w := ui.text_width(.Semibold, 14, label)
-	if widest != "" {
-		w = max(w, ui.text_width(.Semibold, 14, widest))
-	}
-	ui.label(label, ui.px(w), ui.fill())
+	ui.label(label, ui.text_size(), ui.fill())
 	ui.spacer(ui.px(20))
 	return ui.signal(b)
+}
+
+// pill_width is how wide pill draws label.
+@(private = "file")
+pill_width :: proc(label: string) -> f32 {
+	return 18 + 18 + 8 + ui.text_width(.Semibold, 14, label) + 20
 }
 
 @(private = "file")
@@ -473,7 +474,8 @@ draw_artist_actions :: proc(s: ^State, p: ^Pending, page: ^Artist_Page) {
 		}
 		ui.spacer(ui.px(10))
 		{
-			ui.column("", {}, ui.children_sum(), ui.fill())
+			// As wide as Following, so Share stays put when it toggles.
+			ui.column("", {}, ui.px(pill_width("Following")), ui.fill())
 			ui.spacer(ui.fill())
 			// Until the set comes, an artist it lacks may be followed.
 			known := s.data.fake || s.data.followed.known
@@ -482,7 +484,7 @@ draw_artist_actions :: proc(s: ^State, p: ^Pending, page: ^Artist_Page) {
 			if following {
 				icon, label = text.ICON_CHECK, "Following"
 			}
-			if pill("artist_follow", icon, label, false, known, "Following").clicked {
+			if pill("artist_follow", icon, label, false, known).clicked {
 				follow_toggle(s, page.id)
 			}
 			ui.spacer(ui.fill())
