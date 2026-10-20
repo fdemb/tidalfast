@@ -513,9 +513,9 @@ callback_never_wakes_the_decoder :: proc(t: ^testing.T) {
 	sync.lock(&p.cmd_mutex)
 	sync.atomic_store(&p.cmd_pending, true)
 	time.sleep(300 * time.Millisecond) // the decode thread is waiting for the lock
-	before := sync.atomic_load(&p.watch.sema.count)
+	before := sync.atomic_load(&p.watch.wake.sema.count)
 	time.sleep(time.Duration(audio.RING_FRAMES / 2 * i64(time.Second) / 44100)) // half the ring
-	after := sync.atomic_load(&p.watch.sema.count)
+	after := sync.atomic_load(&p.watch.wake.sema.count)
 	sync.unlock(&p.cmd_mutex)
 	testing.expect_value(t, after, before)
 	testing.expect(t, wait_audible(p, 1))
@@ -574,9 +574,9 @@ stream_reads_past_its_window :: proc(t: ^testing.T) {
 
 @(private = "file")
 read_through :: proc(url: string, file: []u8, window, read_size: int) -> bool {
-	sema: sync.Atomic_Sema
+	wake: audio.Wake
 	st := new(audio.Stream, context.temp_allocator)
-	audio.stream_init(st, &sema, window)
+	audio.stream_init(st, &wake, window)
 	defer audio.stream_destroy(st)
 	audio.stream_open(st, url)
 	deadline := time.tick_add(time.tick_now(), 3 * time.Second)
@@ -592,4 +592,25 @@ read_through :: proc(url: string, file: []u8, window, read_size: int) -> bool {
 		pos += n
 	}
 	return slice.equal(got, file)
+}
+
+// A stream filling its window wakes the decode thread once, not once per
+// chunk: wake-ups the thread hasn't taken yet don't pile up.
+@(test)
+stream_wakes_coalesce :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	m.files["/big.flac"] = make([]u8, 1 << 20, context.temp_allocator)
+
+	wake: audio.Wake
+	st := new(audio.Stream, context.temp_allocator)
+	audio.stream_init(st, &wake)
+	defer audio.stream_destroy(st)
+	audio.stream_open(st, fmt.tprintf("%sbig.flac", m.base_url))
+	for i := 0; i < 300 && !audio.stream_done(st); i += 1 {
+		time.sleep(10 * time.Millisecond)
+	}
+	testing.expect(t, audio.stream_done(st), "the file arrived")
+	testing.expectf(t, sync.atomic_load(&wake.sema.count) == 1, "%d wake-ups pending", sync.atomic_load(&wake.sema.count))
 }

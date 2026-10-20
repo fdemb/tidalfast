@@ -61,7 +61,7 @@ Stream :: struct {
 	http_status: int, // of the last failed response, 0 for transport errors
 	error:       [96]u8,
 	stop:        bool,
-	wake:        ^sync.Atomic_Sema, // the decode thread's, posted when bytes arrive
+	wake:        ^Wake, // the decode thread's, posted when bytes arrive
 	thread:      posix.pthread_t,
 	// Header and seek data, filled by the decode thread once it has read them.
 	header:      Flac_Header,
@@ -70,7 +70,7 @@ Stream :: struct {
 	logger:      runtime.Logger, // stream_init's caller's, for the fetch thread
 }
 
-stream_init :: proc(st: ^Stream, wake: ^sync.Atomic_Sema, window := STREAM_WINDOW) {
+stream_init :: proc(st: ^Stream, wake: ^Wake, window := STREAM_WINDOW) {
 	// Its own mapping, so stream_clear can give the pages back.
 	buf, err := vmem.reserve_and_commit(uint(window))
 	assert(err == nil, "audio: no memory for the stream window")
@@ -251,7 +251,7 @@ stream_read :: proc(st: ^Stream, offset: i64, dst: []u8, interrupt: proc(data: r
 		if interrupt != nil && interrupt(data) {
 			return n, .Interrupted
 		}
-		sync.atomic_sema_wait_with_timeout(st.wake, 100 * time.Millisecond)
+		wake_wait(st.wake, 100 * time.Millisecond)
 	}
 }
 
@@ -364,7 +364,7 @@ fetch_main :: proc "c" (arg: rawptr) -> rawptr {
 			}
 			if st.seg_next == len(st.seg_urls) {
 				st.length = st.win_end
-				sync.atomic_sema_post(st.wake)
+				wake_post(st.wake)
 			}
 		} else if ok && st.length >= 0 && st.win_end >= st.length {
 			failures = 0
@@ -387,7 +387,7 @@ fetch_main :: proc "c" (arg: rawptr) -> rawptr {
 				log.warnf("audio: fetch failed at byte %d: %s", start, msg)
 				st.failed = true
 				sync.unlock(&st.mutex)
-				sync.atomic_sema_post(st.wake)
+				wake_post(st.wake)
 				continue
 			}
 			// Back off before trying again, unless a new request comes in.
@@ -544,7 +544,7 @@ write_callback :: proc "c" (buffer: [^]byte, size: c.size_t, nitems: c.size_t, u
 		st.win_start = max(st.win_start, st.win_end - cap)
 		t.pos = st.win_end
 		data = data[k:]
-		sync.atomic_sema_post(st.wake)
+		wake_post(st.wake)
 	}
 	return c.size_t(n)
 }

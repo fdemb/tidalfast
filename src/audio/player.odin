@@ -141,16 +141,42 @@ device_reason :: proc(d: ^Device_Info) -> string {
 	return string(d.reason[:d.reason_len])
 }
 
+// Wake is what the decode thread sleeps on. Posts coalesce: while one is
+// pending, more add nothing, so a burst of news wakes the thread once and
+// not once per post.
+Wake :: struct {
+	sema:    sync.Atomic_Sema,
+	pending: bool,
+}
+
+wake_post :: proc "contextless" (w: ^Wake) {
+	if !sync.atomic_exchange(&w.pending, true) {
+		sync.atomic_sema_post(&w.sema)
+	}
+}
+
+// wake_wait sleeps until a post, or for at most timeout when it isn't 0.
+// A post after it returns wakes the next wait, so news posted after the
+// caller last looked is never lost.
+wake_wait :: proc "contextless" (w: ^Wake, timeout: time.Duration = 0) {
+	if timeout > 0 {
+		sync.atomic_sema_wait_with_timeout(&w.sema, timeout)
+	} else {
+		sync.atomic_sema_wait(&w.sema)
+	}
+	sync.atomic_store(&w.pending, false)
+}
+
 // Device_Watch is where the CoreAudio listeners leave their news for the
-// decode thread, and the semaphore the decode thread sleeps on. A listener
+// decode thread, and what the decode thread sleeps on. A listener
 // may still be running after it's removed, so it touches nothing but the
 // watch, and the watch is never freed. Clearing a pointer to the Player
 // before removal wouldn't do: a listener that loaded it just before could
 // still post to the freed Player. Once the player is destroyed nobody
-// waits on the semaphore, and a late post to it does nothing.
+// waits on the wake, and a late post to it does nothing.
 @(private)
 Device_Watch :: struct {
-	sema:            sync.Atomic_Sema, // the decode thread's wake-up: commands, fetch threads, listeners
+	wake:            Wake, // the decode thread's: commands, fetch threads, listeners
 	device_changed:  bool, // the HAL device's alive state changed (atomic)
 	default_changed: bool, // the system's default output changed (atomic)
 	lost_for_test:   bool, // simulate_device_loss (atomic)
@@ -341,7 +367,7 @@ create :: proc(wake_ui: proc "c" (), volume: f32, capture_path := "", window := 
 		assert(terr == nil, "audio: no memory for a track")
 		sl.dash.samples = slice.into_dynamic(make([]Mp4_Sample, MP4_MAX_SAMPLES, a))
 		sl.dash.box = make([]u8, MP4_MAX_BOX, a)
-		stream_init(&sl.stream, &p.watch.sema, max(window, 64 << 10))
+		stream_init(&sl.stream, &p.watch.wake, max(window, 64 << 10))
 	}
 	posix.pthread_create(&p.thread, nil, decode_main, p)
 	return p
@@ -357,7 +383,7 @@ destroy :: proc(p: ^Player) {
 	p.cmd.quit = true
 	sync.unlock(&p.cmd_mutex)
 	sync.atomic_store(&p.cmd_pending, true)
-	sync.atomic_sema_post(&p.watch.sema)
+	wake_post(&p.watch.wake)
 	posix.pthread_join(p.thread)
 	if !p.null_output {
 		unlisten(SYSTEM_OBJECT, PROP_DEFAULT_OUTPUT, device_listener, p.watch)
@@ -443,7 +469,7 @@ when ODIN_TEST {
 	// device had gone away, as the alive listener would.
 	simulate_device_loss :: proc(p: ^Player) {
 		sync.atomic_store(&p.watch.lost_for_test, true)
-		sync.atomic_sema_post(&p.watch.sema)
+		wake_post(&p.watch.wake)
 	}
 
 	// listener_watch is what CoreAudio hands p's listeners, kept after p
@@ -525,7 +551,7 @@ seek_latency :: proc(p: ^Player) -> (id: u32, d: time.Duration, ok: bool) {
 @(private = "file")
 post :: proc(p: ^Player) {
 	sync.atomic_store(&p.cmd_pending, true)
-	sync.atomic_sema_post(&p.watch.sema)
+	wake_post(&p.watch.wake)
 }
 
 // Source_Copy is a Source whose URL and segments are in block.
@@ -619,9 +645,9 @@ decode_main :: proc "c" (arg: rawptr) -> rawptr {
 				left := f64(ring_buffered(&p.pcm)) / f64(p.device_rate)
 				wait = min(wait, time.Duration(left * f64(time.Second)) + time.Millisecond)
 			}
-			sync.atomic_sema_wait_with_timeout(&p.watch.sema, wait)
+			wake_wait(&p.watch.wake, wait)
 		} else {
-			sync.atomic_sema_wait(&p.watch.sema)
+			wake_wait(&p.watch.wake)
 		}
 	}
 	device_close(p, restore = true)
@@ -833,7 +859,7 @@ device_listener :: proc "c" (id: Audio_Object_ID, count: u32, addresses: [^]Prop
 			sync.atomic_store(&w.device_changed, true)
 		}
 	}
-	sync.atomic_sema_post(&w.sema)
+	wake_post(&w.wake)
 	return 0
 }
 
