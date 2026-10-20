@@ -86,6 +86,7 @@ FALLBACK_CAPACITY :: 4096 // to start with; it doubles when three quarters full
 RUN_CAPACITY :: 8192 // slots; the cache holds at most half that
 GLYPH_POOL :: 1 << 18
 SHAPER_MEMORY :: 8 << 20
+ADVANCE_CAPACITY :: 4096 // slots; cleared when three quarters full
 // A cached run nobody drew for this many frames is dropped at the next sweep.
 EVICT_AFTER :: 600
 SWEEP_EVERY :: 256
@@ -163,6 +164,12 @@ Fallback :: struct {
 NO_FACE :: -1
 PENDING :: -2 // asked the loader
 
+// A cached native_advance, by face, glyph and, if ADVANCES_BY_SIZE, size.
+Advance :: struct {
+	key: u64, // 0 is empty
+	em:  f32,
+}
+
 Stats :: struct {
 	shaped:     int, // runs shaped this frame (cache misses)
 	rasterized: int, // glyphs rasterized this frame
@@ -190,6 +197,8 @@ State :: struct {
 	// asked yet, 1 yes, 2 no. kb_text_shape's cmap lookup is slow enough
 	// (about half a microsecond) to matter once per character.
 	coverage:        [Font][]u8,
+	advances:        []Advance,
+	advance_count:   int,
 
 	shaper_memory:   []byte,
 	shaper:          ^kbts.shape_context,
@@ -224,6 +233,7 @@ init :: proc(t: ^State, wake: proc "c" () = nil) -> bool {
 		c = make([]u8, 0x10000 / 4)
 	}
 	t.runs = make([]Run, RUN_CAPACITY)
+	t.advances = make([]Advance, ADVANCE_CAPACITY)
 	t.pool = make([]Glyph, GLYPH_POOL)
 	t.shaper_memory = make([]byte, SHAPER_MEMORY)
 	t.shaper = kbts.PlaceShapeContextFixedMemory(t.shaper_memory)
@@ -293,14 +303,25 @@ begin_frame :: proc(t: ^State, r: ^render.Renderer) {
 	t.stats = {}
 	t.needs_redraw = false
 	take_loaded(t)
-	if t.cache_full || t.run_count > RUN_CAPACITY / 2 * 3 / 4 || t.pool_used > GLYPH_POOL * 3 / 4 {
+	// Sweeping hard only once a run didn't fit: a working set that fits but
+	// stays above some threshold would otherwise be swept every frame.
+	if t.cache_full {
 		sweep(t, 1)
 	} else if t.frame - t.last_sweep >= SWEEP_EVERY {
 		sweep(t, EVICT_AFTER)
 	}
 	atlas_begin_frame(&t.atlas, r)
 	t.stats.runs = t.run_count
-	t.stats.pages = t.atlas.page_count
+	t.stats.pages = atlas_pages(t)
+}
+
+// atlas_pages counts the glyph pages in use now.
+atlas_pages :: proc(t: ^State) -> int {
+	n := 0
+	for page in t.atlas.pages[:t.atlas.page_count] {
+		n += int(page.size > 0)
+	}
+	return n
 }
 
 // shape returns the shaped run for s, from the cache when it can.
@@ -425,14 +446,18 @@ Piece :: struct {
 
 // Shaping is shape_uncached's scratch, in the temp allocator: the string's
 // codepoints, the glyphs shaped so far with each one's codepoint index, and
-// the pieces that index into both. glyphs and cps only change together
-// (shaping_append, peel, flip), so cps[i] is always glyphs[i]'s codepoint.
+// the pieces that index into both, and the grapheme boundaries
+// kb_text_shape found. glyphs and cps only change together
+// (shaping_append, flip), so cps[i] is always glyphs[i]'s codepoint.
 @(private)
 Shaping :: struct {
 	runes:  []rune,
 	glyphs: [dynamic]Glyph,
 	cps:    [dynamic]int,
 	pieces: [dynamic]Piece,
+	// boundary[i] is true if a grapheme cluster starts at codepoint i. nil
+	// if shaping failed or every codepoint is a cluster of its own.
+	boundary: []bool,
 }
 
 @(private)
@@ -459,8 +484,8 @@ shape_uncached :: proc(t: ^State, font: Font, size: f32, s: string) -> Run {
 		descent    = primary.descent * size,
 		generation = t.generation,
 	}
-	// kb_text_shape crashes on no codepoints.
-	if len(s) == 0 {
+	// kb_text_shape crashes on no codepoints, and text at size 0 is nothing.
+	if len(s) == 0 || !(size > 0) {
 		return run
 	}
 	sh := Shaping{runes = utf8.string_to_runes(s, context.temp_allocator)}
@@ -488,9 +513,19 @@ font_stack :: proc(t: ^State, font: Font, runes: []rune) -> (stack: Font_Stack, 
 		if has_codepoint(t, font, r) || ignorable(r) {
 			continue
 		}
-		face := in_fallbacks(t, font, r)
-		if face < 0 {
-			face = fallback_face(t, font, r)
+		// A cached face is used as is, unless it's a black and white one
+		// for an emoji, which a colour face found since should draw. With
+		// no face cached, or NO_FACE or PENDING, the fallback faces found
+		// so far may have r now.
+		key := fallback_key(font, r)
+		face, cached := cached_face(t, key)
+		if !cached || face < 0 || emoji_presentation(r) && !t.faces[face].color {
+			if found := in_fallbacks(t, font, r); found >= 0 {
+				face = found
+				cache_face(t, key, face)
+			} else if !cached {
+				face = fallback_face(t, font, r)
+			}
 		}
 		if face >= 0 {
 			stack.needed += {face}
@@ -562,7 +597,7 @@ kb_shape_once :: proc(t: ^State, font: Font, size: f32, sh: ^Shaping, stack: Fon
 			advance := f32(g.AdvanceX) * scale
 			// A mark's zero advance stays zero.
 			if native && g.AdvanceX != 0 {
-				advance += native_advance(t, face, size, g.Id) - default_advance(&t.faces[face], g.Id) * scale
+				advance += cached_advance(t, face, size, g.Id) - default_advance(&t.faces[face], g.Id) * scale
 			}
 			glyph := Glyph {
 				pen     = x,
@@ -581,6 +616,16 @@ kb_shape_once :: proc(t: ^State, font: Font, size: f32, sh: ^Shaping, stack: Fon
 		if piece.count > 0 {
 			piece.start = slice.min(sh.cps[piece.first:])
 			append(&sh.pieces, piece)
+		}
+	}
+	sh.boundary = nil
+	if kbts.ShapeError(ctx) == .NONE && !single_codepoint_graphemes(sh.runes) {
+		sh.boundary = make([]bool, len(sh.runes) + 1, context.temp_allocator)
+		for i in 1 ..< len(sh.runes) {
+			cp: kbts.shape_codepoint
+			if kbts.ShapeGetShapeCodepoint(ctx, i32(i), &cp) {
+				sh.boundary[i] = .GRAPHEME in cp.BreakFlags
+			}
 		}
 	}
 	for _ in 0 ..< pushed {
@@ -642,7 +687,7 @@ bidi_reorder :: proc(t: ^State, sh: ^Shaping, paragraph_rtl: bool) -> []int {
 // glyph its grapheme cluster.
 @(private)
 place_pieces :: proc(sh: ^Shaping, order: []int) -> (glyphs: []Glyph, width: f32) {
-	clusters := grapheme_starts(sh.runes)
+	clusters := grapheme_starts(sh.runes, sh.boundary)
 	out := make([]Glyph, len(sh.glyphs), context.temp_allocator)
 	n := 0
 	for i in order {
@@ -698,19 +743,51 @@ bidi_class :: proc(r: rune) -> kbts.Bidi_Class {
 	return class
 }
 
-// grapheme_starts returns, for each codepoint, the index of the first
-// codepoint of its grapheme cluster, from kb_text_shape's segmentation.
-grapheme_starts :: proc(runes: []rune) -> []int {
-	starts := make([]int, len(runes), context.temp_allocator)
-	simple := true
-	for r, i in runes {
-		starts[i] = i
+// single_codepoint_graphemes is true if every codepoint in runes is sure to
+// be a grapheme cluster of its own.
+@(private)
+single_codepoint_graphemes :: proc(runes: []rune) -> bool {
+	for r in runes {
 		// Below U+0300 every codepoint but CR LF is a cluster of its own.
-		simple &&= r < 0x300 && r != '\r'
+		if r >= 0x300 || r == '\r' {
+			return false
+		}
 	}
-	if simple || len(runes) == 0 {
+	return true
+}
+
+// grapheme_starts returns, for each codepoint, the index of the first
+// codepoint of its grapheme cluster, from kb_text_shape's segmentation:
+// boundary, if shaping found it already, or else its break engine.
+// It clears the boundaries rule GB11 joins.
+grapheme_starts :: proc(runes: []rune, boundary: []bool = nil) -> []int {
+	starts := make([]int, len(runes), context.temp_allocator)
+	for &start, i in starts {
+		start = i
+	}
+	if len(runes) == 0 || single_codepoint_graphemes(runes) {
 		return starts
 	}
+	boundary := boundary if boundary != nil else grapheme_boundaries(runes)
+	// kb_text_shape breaks before the last pictograph of a ZWJ sequence, so
+	// 👨‍👩‍👧 came out as 👨‍👩‍ and 👧. Rule GB11 joins them.
+	for i in 1 ..< len(runes) {
+		if runes[i - 1] == 0x200d && pictographic(runes[i]) {
+			boundary[i] = false
+		}
+	}
+	for i in 1 ..< len(runes) {
+		if !boundary[i] {
+			starts[i] = starts[i - 1]
+		}
+	}
+	return starts
+}
+
+// grapheme_boundaries runs kb_text_shape's break engine over runes and
+// returns where grapheme clusters start.
+@(private)
+grapheme_boundaries :: proc(runes: []rune) -> []bool {
 	boundary := make([]bool, len(runes) + 1, context.temp_allocator)
 	state: kbts.break_state
 	kbts.BreakBegin(&state, .DONT_KNOW, .STRICT, {})
@@ -728,19 +805,7 @@ grapheme_starts :: proc(runes: []rune) -> []int {
 			boundary[b.Position] = true
 		}
 	}
-	// kb_text_shape breaks before the last pictograph of a ZWJ sequence, so
-	// 👨‍👩‍👧 came out as 👨‍👩‍ and 👧. Rule GB11 joins them.
-	for i in 1 ..< len(runes) {
-		if runes[i - 1] == 0x200d && pictographic(runes[i]) {
-			boundary[i] = false
-		}
-	}
-	for i in 1 ..< len(runes) {
-		if !boundary[i] {
-			starts[i] = starts[i - 1]
-		}
-	}
-	return starts
+	return boundary
 }
 
 // pictographic approximates Extended_Pictographic: the emoji blocks and the
@@ -755,63 +820,74 @@ pictographic :: proc(r: rune) -> bool {
 }
 
 // peel splits spaces and brackets at either logical end of a run into
-// one-glyph runs of their own, as long as each is a glyph to itself.
+// one-glyph runs of their own, as long as each is a glyph to itself. The
+// split glyphs stay where they are in sh.glyphs.
 @(private)
 peel :: proc(t: ^State, sh: ^Shaping) {
 	peelable :: proc(r: rune) -> bool {
 		return r == ' ' || r == 0xa0 || mirror(r) != r
 	}
-	// split moves the glyph at visual index g out of p into a new piece.
-	split :: proc(p: ^Piece, sh: ^Shaping, g: int) -> Piece {
-		glyph := sh.glyphs[g]
-		cp := sh.cps[g]
-		if g == p.first {
-			for &other in sh.glyphs[p.first + 1:][:p.count - 1] {
-				other.pen -= glyph.advance
-			}
-			p.first += 1
+	// edge says whether the glyph at the left or right end of [lo, hi) is
+	// codepoint cp's and no other glyph there is.
+	edge :: proc(cps: []int, lo, hi, cp: int, at_left: bool) -> bool {
+		g, inner := lo, lo + 1
+		if !at_left {
+			g, inner = hi - 1, hi - 2
 		}
-		p.count -= 1
-		p.width -= glyph.advance
-		glyph.pen = 0
-		shaping_append(sh, glyph, cp)
-		return {face = p.face, rtl = p.rtl, start = cp, end = cp + 1, first = len(sh.glyphs) - 1, count = 1, width = glyph.advance}
+		return cps[g] == cp && cps[inner] != cp
 	}
-	// edge returns the visual index of the glyph for codepoint cp if it is
-	// at the visual end where logical `first` or last lands and no other
-	// glyph shares it.
-	edge :: proc(p: Piece, cps: []int, cp: int, first: bool) -> (int, bool) {
-		at_left := first != p.rtl
-		g := p.first if at_left else p.first + p.count - 1
-		inner := g + 1 if at_left else g - 1
-		return g, cps[g] == cp && cps[inner] != cp
+	single :: proc(sh: ^Shaping, p: Piece, g, cp: int) -> Piece {
+		sh.glyphs[g].pen = 0
+		return {face = p.face, rtl = p.rtl, start = cp, end = cp + 1, first = g, count = 1, width = sh.glyphs[g].advance}
 	}
 
-	pieces, runes := &sh.pieces, sh.runes
-	for i := 0; i < len(pieces); i += 1 {
-		if t.faces[pieces[i].face].coretext_shaping {
+	pieces := make([dynamic]Piece, 0, len(sh.pieces), context.temp_allocator)
+	runes, cps := sh.runes, sh.cps[:]
+	for p in sh.pieces {
+		if t.faces[p.face].coretext_shaping {
+			append(&pieces, p)
 			continue
 		}
-		for pieces[i].count > 1 && pieces[i].end - pieces[i].start > 1 && peelable(runes[pieces[i].end - 1]) {
-			g, ok := edge(pieces[i], sh.cps[:], pieces[i].end - 1, false)
-			if !ok {
-				break
+		// The logical end is on the right in a left-to-right run.
+		lo, hi := p.first, p.first + p.count
+		start, end := p.start, p.end
+		for hi - lo > 1 && end - start > 1 && peelable(runes[end - 1]) && edge(cps, lo, hi, end - 1, p.rtl) {
+			if p.rtl {
+				lo += 1
+			} else {
+				hi -= 1
 			}
-			piece := split(&pieces[i], sh, g)
-			pieces[i].end -= 1
-			inject_at(pieces, i + 1, piece)
+			end -= 1
 		}
-		for pieces[i].count > 1 && pieces[i].end - pieces[i].start > 1 && peelable(runes[pieces[i].start]) {
-			g, ok := edge(pieces[i], sh.cps[:], pieces[i].start, true)
-			if !ok {
-				break
+		for hi - lo > 1 && end - start > 1 && peelable(runes[start]) && edge(cps, lo, hi, start, !p.rtl) {
+			if p.rtl {
+				hi -= 1
+			} else {
+				lo += 1
 			}
-			piece := split(&pieces[i], sh, g)
-			pieces[i].start += 1
-			inject_at(pieces, i, piece)
-			i += 1
+			start += 1
+		}
+		left, right: f32
+		for g in sh.glyphs[p.first:lo] {
+			left += g.advance
+		}
+		for g in sh.glyphs[hi:p.first + p.count] {
+			right += g.advance
+		}
+		for &g in sh.glyphs[lo:hi] {
+			g.pen -= left
+		}
+		// The j-th codepoint peeled from either end is the j-th glyph in
+		// from its side.
+		for j in 0 ..< start - p.start {
+			append(&pieces, single(sh, p, p.first + p.count - 1 - j if p.rtl else p.first + j, p.start + j))
+		}
+		append(&pieces, Piece{face = p.face, rtl = p.rtl, start = start, end = end, first = lo, count = hi - lo, width = p.width - left - right})
+		for j := p.end - end - 1; j >= 0; j -= 1 {
+			append(&pieces, single(sh, p, p.first + j if p.rtl else p.first + p.count - 1 - j, p.end - 1 - j))
 		}
 	}
+	sh.pieces = pieces
 }
 
 // flip reverses a run of neutrals whose direction resolve_levels changed,
@@ -965,24 +1041,23 @@ resolve_levels :: proc(kinds: []Bidi_Kind, rtl: []bool, brackets: []rune, paragr
 		}
 	}
 
+	// N1, N2: after[i] is the direction of the first run past i that isn't
+	// neutral.
+	after := make([]bool, len(kinds), context.temp_allocator)
+	next := paragraph_rtl
+	#reverse for kind, i in kinds {
+		after[i] = next
+		if kind != .Neutral {
+			next = acts_rtl[i]
+		}
+	}
+	before := paragraph_rtl
 	for kind, i in kinds {
 		if kind != .Neutral {
+			before = acts_rtl[i]
 			continue
 		}
-		before, after := paragraph_rtl, paragraph_rtl
-		for j := i - 1; j >= 0; j -= 1 {
-			if kinds[j] != .Neutral {
-				before = acts_rtl[j]
-				break
-			}
-		}
-		for j in i + 1 ..< len(kinds) {
-			if kinds[j] != .Neutral {
-				after = acts_rtl[j]
-				break
-			}
-		}
-		rtl[i] = before if before == after else paragraph_rtl
+		rtl[i] = before if before == after[i] else paragraph_rtl
 	}
 	for kind, i in kinds {
 		switch {
@@ -1134,6 +1209,33 @@ default_advance :: proc(face: ^Face, id: u16) -> f32 {
 		return 0
 	}
 	return f32(int(face.hmtx[i]) << 8 | int(face.hmtx[i + 1]))
+}
+
+// cached_advance is native_advance in points, from the advances cache when
+// it can.
+@(private)
+cached_advance :: proc(t: ^State, face: int, size: f32, id: u16) -> f32 {
+	key := 1 << 63 | u64(face) << 48 | u64(id) << 32
+	when ADVANCES_BY_SIZE {
+		key |= u64(transmute(u32)size)
+	}
+	mask := len(t.advances) - 1
+	slot := int(mix64(key)) & mask
+	for t.advances[slot].key != 0 {
+		if t.advances[slot].key == key {
+			return t.advances[slot].em * size
+		}
+		slot = (slot + 1) & mask
+	}
+	if t.advance_count >= len(t.advances) * 3 / 4 {
+		mem.zero_slice(t.advances)
+		t.advance_count = 0
+		slot = int(mix64(key)) & mask
+	}
+	em := native_advance(t, face, size, id)
+	t.advances[slot] = {key, em}
+	t.advance_count += 1
+	return em * size
 }
 
 // fvar_instance returns the 1-based number of the first named instance in
@@ -1336,7 +1438,12 @@ take_loaded :: proc(t: ^State) {
 		if face < len(Font) {
 			face = NO_FACE
 		}
-		cache_face(t, fallback_key(res.font, res.codepoint), face)
+		// font_stack may have found the character in a fallback face while
+		// the loader looked. Runs already use that face, so it stays.
+		key := fallback_key(res.font, res.codepoint)
+		if cached, ok := cached_face(t, key); !ok || cached < 0 {
+			cache_face(t, key, face)
+		}
 		list := &t.fallbacks[res.font]
 		if face >= 0 && !slice.contains(list[:t.fallback_counts[res.font]], u8(face)) {
 			list[t.fallback_counts[res.font]] = u8(face)
