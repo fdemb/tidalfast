@@ -54,25 +54,10 @@ text_field :: proc(id: string, f: ^Text_Field, placeholder: string, width, heigh
 	f.had_focus = focused
 
 	// The mouse goes by the text as it was drawn.
-	if focused && (s.pressed || s.held) {
-		lay := field_layout(u.texts, font, size, field_text(f))
-		origin := b.rect.x + FIELD_PAD - f.scroll
-		if s.pressed {
-			field_unmark(f)
-			p := field_hit(lay, u.input.press_pos[.Left].x - origin)
-			switch {
-			case u.click_count >= 3:
-				field_select_all(f)
-				f.drag = .None
-			case u.click_count == 2:
-				field_select_word(f, p)
-				f.drag = .Words
-				f.drag_origin = {f.anchor, f.cursor}
-			case:
-				field_place(f, p, .Shift in u.input.modifiers)
-				f.drag = .Clusters
-			}
-		} else if s.dragging {
+	origin := b.rect.x + FIELD_PAD - f.scroll
+	if focused && s.held {
+		if s.dragging && !s.pressed {
+			lay := field_layout(u.texts, font, size, field_text(f))
 			p := field_hit(lay, u.input.mouse.x - origin)
 			switch f.drag {
 			case .Clusters:
@@ -135,6 +120,21 @@ text_field :: proc(id: string, f: ^Text_Field, placeholder: string, width, heigh
 		case .Unmark_Text:
 			u.text_resend = true
 			field_unmark(f)
+		case .Press:
+			field_unmark(f)
+			p := field_hit(field_layout(u.texts, font, size, field_text(f)), e.pos.x - origin)
+			switch {
+			case e.click_count >= 3:
+				field_select_all(f)
+				f.drag = .None
+			case e.click_count == 2:
+				field_select_word(f, p)
+				f.drag = .Words
+				f.drag_origin = {f.anchor, f.cursor}
+			case:
+				field_place(f, p, e.extend)
+				f.drag = .Clusters
+			}
 		}
 		f.blink_start = u.time
 	}

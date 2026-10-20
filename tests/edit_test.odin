@@ -562,3 +562,34 @@ test_text_field_keeps_arrows_in_a_row :: proc(t: ^testing.T) {
 	sig = frame(&u, f, &now)
 	testing.expect(t, sig.focused, "Right at the end stays in the field")
 }
+
+// A click after Cmd-F in the same frame places the caret: the field takes
+// the shortcut's select-all and the press in the order they came.
+@(test)
+test_text_field_click_after_shortcut :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer field_ui_destroy(&u)
+	f := new(ui.Text_Field)
+	defer free(f)
+	ui.field_insert(f, "hello world")
+	now := 0.0
+	frame :: proc(u: ^ui.State, f: ^ui.Text_Field, now: ^f64, events: ..platform.Event) {
+		now^ += 0.016
+		ui.begin_frame(u, events, nil, nil, 300, 200, now^)
+		b := ui.text_field("search", f, "Search", ui.px(200), ui.px(30))
+		ui.focus_shortcut(b.box, .F, {ui.PRIMARY})
+		ui.end_frame()
+	}
+	frame(&u, f, &now)
+	frame(&u, f, &now)
+	frame(&u, f, &now, {kind = .Key_Down, key = .F, modifiers = {ui.PRIMARY}}, {kind = .Mouse_Down, x = 50, y = 15, button = .Left, click_count = 1}, {kind = .Mouse_Up, x = 50, y = 15, button = .Left})
+	lo, hi := ui.field_selection(f)
+	testing.expectf(t, lo == hi && lo > 0, "the click placed the caret, selection [%d, %d)", lo, hi)
+
+	// And the other way round, the shortcut after the click selects all.
+	frame(&u, f, &now, {kind = .Mouse_Down, x = 50, y = 15, button = .Left, click_count = 1}, {kind = .Mouse_Up, x = 50, y = 15, button = .Left}, {kind = .Key_Down, key = .F, modifiers = {ui.PRIMARY}})
+	lo, hi = ui.field_selection(f)
+	testing.expect_value(t, lo, 0)
+	testing.expect_value(t, hi, len("hello world"))
+}
