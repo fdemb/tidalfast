@@ -155,15 +155,17 @@ wake_post :: proc "contextless" (w: ^Wake) {
 	}
 }
 
-// wake_wait sleeps until a post, or for at most timeout when it isn't 0.
-// A post after it returns wakes the next wait, so news posted after the
-// caller last looked is never lost.
-wake_wait :: proc "contextless" (w: ^Wake, timeout: time.Duration = 0) {
-	if timeout > 0 {
-		sync.atomic_sema_wait_with_timeout(&w.sema, timeout)
-	} else {
-		sync.atomic_sema_wait(&w.sema)
-	}
+// wake_wait sleeps until a post. A post after it returns wakes the next
+// wait, so news posted after the caller last looked is never lost.
+wake_wait :: proc "contextless" (w: ^Wake) {
+	sync.atomic_sema_wait(&w.sema)
+	sync.atomic_store(&w.pending, false)
+}
+
+// wake_wait_for is wake_wait for at most d.
+wake_wait_for :: proc(w: ^Wake, d: time.Duration) {
+	assert(d > 0)
+	sync.atomic_sema_wait_with_timeout(&w.sema, d)
 	sync.atomic_store(&w.pending, false)
 }
 
@@ -645,7 +647,7 @@ decode_main :: proc "c" (arg: rawptr) -> rawptr {
 				left := f64(ring_buffered(&p.pcm)) / f64(p.device_rate)
 				wait = min(wait, time.Duration(left * f64(time.Second)) + time.Millisecond)
 			}
-			wake_wait(&p.watch.wake, wait)
+			wake_wait_for(&p.watch.wake, wait)
 		} else {
 			wake_wait(&p.watch.wake)
 		}
