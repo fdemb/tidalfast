@@ -477,8 +477,8 @@ shape_uncached :: proc(t: ^State, font: Font, size: f32, s: string) -> Run {
 		descent    = primary.descent * size,
 		generation = t.generation,
 	}
-	// kb_text_shape crashes on no codepoints.
-	if len(s) == 0 {
+	// kb_text_shape crashes on no codepoints, and text at size 0 is nothing.
+	if len(s) == 0 || size <= 0 {
 		return run
 	}
 	sh := Shaping{runes = utf8.string_to_runes(s, context.temp_allocator)}

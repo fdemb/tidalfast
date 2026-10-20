@@ -451,12 +451,9 @@ raster_font :: proc(face: ^Face, px_size, size: f32) -> CTFontRef {
 ADVANCES_BY_SIZE :: true
 
 // native_advance is glyph id's advance in the face's instance at size, in
-// em. At size 0 it's 0.
+// em.
 @(private)
 native_advance :: proc(t: ^State, face: int, size: f32, id: u16) -> f32 {
-	if size <= 0 {
-		return 0
-	}
 	glyph := CGGlyph(id)
 	advance: CGSize
 	CTFontGetAdvancesForGlyphs(sized_font(&t.faces[face], size), 0, &glyph, &advance, 1)
