@@ -625,6 +625,19 @@ test_measure_empty :: proc(t: ^testing.T) {
 	testing.expect_value(t, m.width, f32(0))
 }
 
+// Text at size 0 measures as nothing, not NaN, even in a face whose
+// advances come from its instance at the size.
+@(test)
+test_measure_size_zero :: proc(t: ^testing.T) {
+	f: Fonts
+	if !testing.expect(t, fonts_init(&f)) {
+		return
+	}
+	defer fonts_destroy(&f)
+	m := text.measure(f.state, .Regular, 0, "Size")
+	testing.expect_value(t, m.width, f32(0))
+}
+
 // A working set bigger than three quarters of the run cache, all of it
 // drawn every frame, fits, so begin_frame leaves it alone instead of
 // sweeping every frame.
