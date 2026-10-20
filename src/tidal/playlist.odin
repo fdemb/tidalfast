@@ -348,10 +348,10 @@ playlist_item_ids :: proc(s: ^Session, playlist_id: string) -> (ids: []i64, err:
 // Positions of the items whose id is in media_ids.
 @(private = "file")
 item_indices :: proc(s: ^Session, pl: ^Playlist, media_ids: []string) -> (indices: []int, err: Error) {
-	wanted := make([dynamic]i64, 0, len(media_ids), context.temp_allocator)
+	wanted := make(map[i64]struct{}, len(media_ids), context.temp_allocator)
 	for m in media_ids {
 		if id, ok := strconv.parse_i64(strings.trim_space(m)); ok {
-			append(&wanted, id)
+			wanted[id] = {}
 		}
 	}
 	if len(wanted) == 0 {
@@ -360,7 +360,7 @@ item_indices :: proc(s: ^Session, pl: ^Playlist, media_ids: []string) -> (indice
 	ids := playlist_item_ids(s, pl.id) or_return
 	out := make([dynamic]int, 0, len(wanted), context.temp_allocator)
 	for id, i in ids {
-		if slice.contains(wanted[:], id) {
+		if id in wanted {
 			append(&out, i)
 		}
 	}
