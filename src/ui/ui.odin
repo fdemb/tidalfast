@@ -193,9 +193,10 @@ Key_Press :: struct {
 	modifiers: platform.Modifiers,
 }
 
-// Edit_Event is a key press the UI didn't use, text from the shell, or a
-// text field getting or losing the focus, in the order they came. target is
-// the box that had the focus when it came, or the one that got or lost it.
+// Edit_Event is a key press the UI didn't use, text from the shell, a
+// text field getting or losing the focus, or a left press on one, in the
+// order they came. target is the box that had the focus when it came, or
+// the one that got or lost it or was pressed.
 Edit_Event :: struct {
 	op:                     Edit_Op,
 	target:                 Key,
@@ -205,6 +206,9 @@ Edit_Event :: struct {
 	replace:                bool,
 	replace_lo, replace_hi: int,
 	select_lo, select_hi:   int,
+	pos:                    [2]f32, // .Press: where
+	click_count:            u32, // .Press: 2 for a double-click, 3 for a triple
+	extend:                 bool, // .Press: with Shift
 }
 
 Edit_Op :: enum u8 {
@@ -214,6 +218,7 @@ Edit_Op :: enum u8 {
 	Unmark_Text,
 	Focus,
 	Blur,
+	Press,
 }
 
 // Shortcut is a key that gives a text field the focus, from focus_shortcut.
@@ -280,7 +285,6 @@ State :: struct {
 	// Last frame's focus_shortcut calls, which this frame's keys go by.
 	shortcuts:      [MAX_SHORTCUTS]Shortcut,
 	shortcut_count: int,
-	click_count:    u32, // of the last left press: 2 for a double-click, 3 for a triple
 	window_inactive: bool, // another window has the keyboard
 	wake:           f64, // the earliest time something asked for a frame at, 0 for none
 	// The focused text field, for the shell and the input method.
@@ -657,7 +661,6 @@ mouse_pressed :: proc(u: ^State, e: platform.Event) {
 		if e.click_count >= 2 {
 			u.double_clicked = hover
 		}
-		u.click_count = e.click_count
 	}
 	// The press clicks the box unless it waits for the release, and moves
 	// the focus to it, or its nearest focusable ancestor, or nowhere.
@@ -674,6 +677,9 @@ mouse_pressed :: proc(u: ^State, e: platform.Event) {
 		u.clicked[e.button] = hover
 	}
 	move_focus(u, focus, false)
+	if e.button == .Left && focus == hover && takes_text(u, hover) {
+		queue_edit(u, {op = .Press, target = hover, pos = pos, click_count = e.click_count, extend = .Shift in u.input.modifiers})
+	}
 }
 
 // move_focus gives key the focus. A text field that gets or loses it hears

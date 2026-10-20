@@ -35,6 +35,14 @@ Session :: struct {
 
 	mutex:                sync.Mutex,
 	refresh_mutex:        sync.Mutex,
+	// The last token refresh, written under refresh_mutex. refresh_count
+	// goes up by one per attempt and is read atomically, so a request can
+	// tell whether one finished after it started. refresh_epoch is the auth
+	// epoch of the login it refreshed.
+	refresh_count:        u64,
+	refresh_err:          Error,
+	refresh_ended:        time.Tick,
+	refresh_epoch:        u64,
 
 	backoff_mutex:        sync.Mutex,
 	backoff_until:        time.Tick,
@@ -186,6 +194,15 @@ session_clear_auth :: proc(s: ^Session) {
 // session_epoch returns the session's auth epoch, see session_clear_auth.
 session_epoch :: proc(s: ^Session) -> u64 {
 	return sync.atomic_load(&s.auth_epoch)
+}
+
+// session_set_epoch carries a session's auth epoch over to the one that
+// replaces it, so epochs keep counting up across a hot reload. The epoch
+// never goes back.
+session_set_epoch :: proc(s: ^Session, epoch: u64) {
+	sync.guard(&s.mutex)
+	assert(epoch >= s.auth_epoch, "a session's auth epoch went back")
+	sync.atomic_store(&s.auth_epoch, epoch)
 }
 
 // session_set_login_attempt names the login attempt now under way. A

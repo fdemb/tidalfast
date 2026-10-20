@@ -1,5 +1,6 @@
 package ui
 
+import "core:slice"
 import "core:unicode/utf8"
 
 import "../platform"
@@ -53,67 +54,33 @@ text_field :: proc(id: string, f: ^Text_Field, placeholder: string, width, heigh
 	}
 	f.had_focus = focused
 
-	// The mouse goes by the text as it was drawn.
-	if focused && (s.pressed || s.held) {
-		lay := field_layout(u.texts, font, size, field_text(f))
-		origin := b.rect.x + FIELD_PAD - f.scroll
-		if s.pressed {
-			field_unmark(f)
-			p := field_hit(lay, u.input.press_pos[.Left].x - origin)
-			switch {
-			case u.click_count >= 3:
-				field_select_all(f)
-				f.drag = .None
-			case u.click_count == 2:
-				field_select_word(f, p)
-				f.drag = .Words
-				f.drag_origin = {f.anchor, f.cursor}
-			case:
-				field_place(f, p, .Shift in u.input.modifiers)
-				f.drag = .Clusters
-			}
-		} else if s.dragging {
-			p := field_hit(lay, u.input.mouse.x - origin)
-			switch f.drag {
-			case .Clusters:
-				field_place(f, p, true)
-			case .Words:
-				lo, hi := word_at(field_text(f), lay.bounds, p)
-				a, z := min(lo, f.drag_origin[0]), max(hi, f.drag_origin[1])
-				f.anchor, f.cursor = a, z
-				if p < f.drag_origin[0] {
-					f.anchor, f.cursor = z, a
-				}
-			case .None:
-			}
-		}
-		f.blink_start = u.time
-	}
+	// The mouse goes by where the text was drawn.
+	origin := b.rect.x + FIELD_PAD - f.scroll
 
 	// The frame's edits for this field, in order. They were queued while it
 	// had the focus, so text typed before a Tab still goes in. After Escape
-	// gives up the focus, the rest wait for the field to get it back.
+	// gives up the focus, the rest are dropped until a focus or a click for
+	// this field.
 	live := true
 	for e in u.edits[:u.edit_count] {
 		if e.target != b.key || b.key == 0 {
 			continue
 		}
-		if !live && e.op != .Focus {
-			continue
+		if !live {
+			if e.op != .Focus && e.op != .Press {
+				continue
+			}
+			live = true
 		}
 		switch e.op {
 		case .Focus:
-			if !live && u.focus == 0 {
-				u.focus = b.key
-			}
-			live = true
 			if e.select_all {
 				field_select_all(f)
 			}
 		case .Blur:
 			field_unmark(f)
 		case .Key:
-			used, gave_up := field_key(u, f, b.key, e.key, &sig)
+			used, gave_up := field_key(u, f, e.key, &sig)
 			if used {
 				take_key(e.key.code, e.key.modifiers)
 			}
@@ -135,10 +102,30 @@ text_field :: proc(id: string, f: ^Text_Field, placeholder: string, width, heigh
 		case .Unmark_Text:
 			u.text_resend = true
 			field_unmark(f)
+		case .Press:
+			field_unmark(f)
+			// This hit-tests the text as the batch's earlier edits left it, at
+			// last frame's scroll. Typing and a click rarely share a frame.
+			// When they do, the caret still lands near the click.
+			p := field_hit(field_layout(u.texts, font, size, field_text(f)), e.pos.x - origin)
+			switch {
+			case e.click_count >= 3:
+				field_select_all(f)
+				f.drag = .None
+			case e.click_count == 2:
+				field_select_word(f, p)
+				f.drag = .Words
+				f.drag_origin = {f.anchor, f.cursor}
+			case:
+				field_place(f, p, e.extend)
+				f.drag = .Clusters
+			}
 		}
 		f.blink_start = u.time
 	}
-	// Escape may have given up the focus.
+	if !live && u.focus == b.key {
+		u.focus = 0
+	}
 	focused = b.key != 0 && u.focus == b.key
 	sig.focused = focused
 	if !focused {
@@ -149,6 +136,24 @@ text_field :: proc(id: string, f: ^Text_Field, placeholder: string, width, heigh
 	sig.changed = t != old
 
 	lay := field_layout(u.texts, font, size, t)
+	if focused && s.held {
+		if s.dragging && !s.pressed {
+			p := field_hit(lay, u.input.mouse.x - origin)
+			switch f.drag {
+			case .Clusters:
+				field_place(f, p, true)
+			case .Words:
+				lo, hi := word_at(t, lay.bounds, p)
+				a, z := min(lo, f.drag_origin[0]), max(hi, f.drag_origin[1])
+				f.anchor, f.cursor = a, z
+				if p < f.drag_origin[0] {
+					f.anchor, f.cursor = z, a
+				}
+			case .None:
+			}
+		}
+		f.blink_start = u.time
+	}
 	avail := b.rect.w - 2 * FIELD_PAD
 	caret := field_caret_x(lay, f.cursor)
 	if !focused {
@@ -227,7 +232,7 @@ focus_text_field :: proc(b: ^Box, f: ^Text_Field) {
 // whether it gave up the focus. On macOS Control-A and Control-E also go
 // to the line's ends (CONTROL_LINE_KEYS).
 @(private)
-field_key :: proc(u: ^State, f: ^Text_Field, key: Key, k: Key_Press, sig: ^Field_Signal) -> (used, gave_up: bool) {
+field_key :: proc(u: ^State, f: ^Text_Field, k: Key_Press, sig: ^Field_Signal) -> (used, gave_up: bool) {
 	shift := .Shift in k.modifiers
 	base := k.modifiers - {.Shift}
 	#partial switch k.code {
@@ -316,9 +321,6 @@ field_key :: proc(u: ^State, f: ^Text_Field, key: Key, k: Key_Press, sig: ^Field
 		if f.len > 0 || f.marked {
 			field_clear(f)
 		} else {
-			if u.focus == key {
-				u.focus = 0
-			}
 			sig.cancelled = true
 			gave_up = true
 		}
@@ -428,6 +430,7 @@ field_layout :: proc(t: ^text.State, font: text.Font, size: f32, s: string) -> (
 		}
 	}
 	has := make([]bool, n, context.temp_allocator)
+	order := make([dynamic]int, 0, n, context.temp_allocator) // clusters with a glyph, left to right
 	for g in run.glyphs {
 		c := int(g.cluster)
 		if c >= len(cp_cluster) {
@@ -437,37 +440,52 @@ field_layout :: proc(t: ^text.State, font: text.Font, size: f32, s: string) -> (
 		if !has[j] {
 			lay.x0[j], lay.x1[j] = g.pen, g.pen + g.advance
 			has[j] = true
+			append(&order, j)
 		} else {
 			lay.x0[j] = min(lay.x0[j], g.pen)
 			lay.x1[j] = max(lay.x1[j], g.pen + g.advance)
 		}
 	}
-	// A cluster reads right to left when the next one with a glyph sits to
-	// its left, or the one before sits to its right.
-	center :: proc(lay: Field_Layout, k: int) -> f32 {
-		return (lay.x0[k] + lay.x1[k]) / 2
+	// A letter reads in its script's direction. Any other cluster reads
+	// the way of its neighbours on screen: left to right when the next
+	// cluster in the text is drawn just to its right, right to left when
+	// just to its left, and else the paragraph's way.
+	next := make([]int, n, context.temp_allocator)
+	following := -1
+	for k := n - 1; k >= 0; k -= 1 {
+		next[k] = following
+		if has[k] {
+			following = k
+		}
 	}
-	prev := -1
+	strong := make([]bool, n, context.temp_allocator)
 	for k in 0 ..< n {
-		if !has[k] {
+		lay.rtl[k] = run.rtl
+		r, _ := utf8.decode_rune_in_string(s[lay.bounds[k]:])
+		#partial switch text.bidi_class(r) {
+		case .L:
+			lay.rtl[k], strong[k] = false, true
+		case .R, .AL:
+			lay.rtl[k], strong[k] = true, true
+		}
+	}
+	for i in 1 ..< len(order) {
+		l, r := order[i - 1], order[i]
+		rtl: bool
+		switch {
+		case next[l] == r:
+			rtl = false
+		case next[r] == l:
+			rtl = true
+		case:
 			continue
 		}
-		next := -1
-		for j in k + 1 ..< n {
-			if has[j] {
-				next = j
-				break
-			}
+		if !strong[l] {
+			lay.rtl[l] = rtl
 		}
-		switch {
-		case next >= 0:
-			lay.rtl[k] = center(lay, next) < center(lay, k)
-		case prev >= 0:
-			lay.rtl[k] = center(lay, prev) > center(lay, k)
-		case:
-			lay.rtl[k] = run.rtl
+		if !strong[r] {
+			lay.rtl[r] = rtl
 		}
-		prev = k
 	}
 	for k := 0; k < n; {
 		if !has[k] {
@@ -558,12 +576,9 @@ field_spans :: proc(lay: Field_Layout, lo, hi: int) -> [][2]f32 {
 			append(&spans, [2]f32{lay.x0[k], lay.x1[k]})
 		}
 	}
-	// Few clusters, so a simple sort.
-	for i in 1 ..< len(spans) {
-		for j := i; j > 0 && spans[j].x < spans[j - 1].x; j -= 1 {
-			spans[j], spans[j - 1] = spans[j - 1], spans[j]
-		}
-	}
+	slice.sort_by(spans[:], proc(a, b: [2]f32) -> bool {
+		return a.x < b.x
+	})
 	out := make([dynamic][2]f32, 0, len(spans), context.temp_allocator)
 	for sp in spans {
 		if len(out) > 0 && sp.x <= out[len(out) - 1].y + 0.5 {

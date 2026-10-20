@@ -135,7 +135,6 @@ track_jobs :: proc(s: ^app.State) -> int {
 
 // run_disk runs the queued disk jobs and hands reads to the app. It
 // returns how many it ran.
-@(private = "file")
 run_disk :: proc(s: ^app.State) -> int {
 	n := 0
 	for {
@@ -555,6 +554,37 @@ queue_gets_the_rest_of_a_closed_list :: proc(t: ^testing.T) {
 	testing.expect(t, app.lru_find(d, .Playlist, "pl") >= 0, "the list is kept once it loaded")
 }
 
+// Two edits before a frame move the queue's rows and leave the list with
+// as many loaded rows as before. The queue follows them anyway. Before
+// this, only a change in the loaded rows made it follow, so it kept the
+// removed track and missed the added one.
+@(test)
+queue_follows_edits_that_keep_the_count :: proc(t: ^testing.T) {
+	s := cache_state()
+	defer cache_state_free(s)
+	s.playback.player = audio.create(no_wake, 0, null_output = true)
+	defer app.playback_shutdown(s)
+	d := &s.data
+	sidebar(s, updated = 1, count = 300)
+	serve(s, rows_of(LIKED_IDS))
+	app.select_playlist(s, 2)
+	serve(s, rows_of(ids_from(1000, 1300)))
+	app.playback_play_row(s, 50)
+	app.playback_update(s, nil)
+	loaded := d.view.loaded_rows
+
+	app.list_edited(s, .Playlist, "pl", false, {id = 1010}, {updated = 2, count = 299})
+	app.list_edited(s, .Playlist, "pl", true, rows_of({77})[0], {updated = 3, count = 300})
+	testing.expect_value(t, d.view.loaded_rows, loaded)
+	app.playback_update(s, nil)
+	if testing.expect_value(t, len(s.playback.entries), 300) {
+		testing.expect_value(t, s.playback.entries[10].id, 1011)
+		testing.expect_value(t, s.playback.entries[299].id, 77)
+	}
+	testing.expect_value(t, s.playback.index, 49)
+	testing.expect_value(t, s.playback.entries[s.playback.index].id, 1050)
+}
+
 // Playing a list that's still loading writes the queue's file at play,
 // when its loaded rows double, and once more when the list has loaded,
 // with every row. Before this it was written once per page.
@@ -880,9 +910,10 @@ sign_out_deletes_the_cache :: proc(t: ^testing.T) {
 	// A write queued before the sign-out doesn't bring the folder back.
 	app.sidebar_save(d)
 	job, _ := jobs.try_pop(&d.lists.queue)
-	// sign_out without the Keychain.
+	// sign_out without the login screen.
 	app.account_end(s)
-	app.lists_forget(d)
+	app.lists_forget(d, tidal.session_epoch(d.session))
+	run_disk(s)
 	testing.expect(t, !os.exists(user_dir))
 	testing.expect_value(t, d.lists.count, 0)
 	res, _ := app.disk_run(d, job)
@@ -959,7 +990,8 @@ covers_on_disk :: proc(t: ^testing.T) {
 	testing.expect(t, ok && slice.equal(back, jpeg))
 
 	app.account_end(s)
-	app.lists_forget(d)
+	app.lists_forget(d, tidal.session_epoch(d.session))
+	run_disk(s)
 	testing.expect(t, !os.exists(cdir))
 	app.cover_write(d, cdir, path, jpeg) // from before the sign-out
 	testing.expect(t, !os.exists(cdir))
@@ -1200,4 +1232,229 @@ refused_drop_of_a_liked_row :: proc(t: ^testing.T) {
 	}
 	app.handle_result(s, &res, 0)
 	testing.expect(t, app.liked_has(d, 700))
+}
+
+// A long list the queue follows comes in page by page, and each page costs
+// the queue only its own rows. Before this every page copied the whole
+// queue again. Each row the queue copied is marked with row -1, which the
+// real queue leaves 0, so a row copied again shows up unmarked. The queue
+// grows by doubling, so it moves only a few times, not once a page.
+@(test)
+queue_takes_pages_as_they_come :: proc(t: ^testing.T) {
+	N :: 30000
+	s := cache_state()
+	defer cache_state_free(s)
+	s.playback.player = audio.create(no_wake, 0, null_output = true)
+	defer app.playback_shutdown(s)
+	d := &s.data
+	sidebar(s, updated = 1, count = 100) // out of date, so the list grows as it loads
+	serve(s, rows_of(LIKED_IDS))
+	app.select_playlist(s, 2)
+	rows := rows_of(ids_from(1000, 1000 + N))
+	pages, copied, grows := 0, 0, 0
+	items: rawptr
+	for {
+		job, ok := jobs.try_pop(&d.queue)
+		if !ok {
+			break
+		}
+		p, tracks := job.payload.(app.Tracks_Job)
+		if !tracks {
+			continue
+		}
+		lo := min(int(p.offset), len(rows))
+		res := app.Result{job = job, payload = app.Tracks_Result{rows = rows[lo:min(lo + int(p.limit), len(rows))], total = len(rows)}}
+		app.handle_result(s, &res, 0)
+		pages += 1
+		if pages == 1 {
+			app.playback_play_row(s, 0)
+		}
+		app.playback_update(s, nil)
+		if raw_data(s.playback.items) != items {
+			grows += 1
+			items = raw_data(s.playback.items)
+		}
+		for &item, i in s.playback.items {
+			if s.playback.entries[i].id != 0 && item.row != -1 {
+				copied += 1
+				item.row = -1
+			}
+		}
+	}
+	testing.expect(t, pages > 200, "the list came in many pages")
+	// About log2 of N over the first page's 50 rows, plus the first one.
+	testing.expectf(t, grows <= 12, "the queue moved %d times for %d pages", grows, pages)
+	testing.expect_value(t, copied, N)
+	if testing.expect_value(t, len(s.playback.entries), N) {
+		testing.expect_value(t, s.playback.entries[N - 1].id, 1000 + N - 1)
+		testing.expect_value(t, s.playback.items[N - 1].title, rows[N - 1].title)
+	}
+	testing.expect_value(t, s.playback.index, 0)
+}
+
+// Pausing and moving to another track save where the queue is, not the
+// queue's rows again, and the queue reads back at the new place.
+@(test)
+queue_place_is_saved_apart :: proc(t: ^testing.T) {
+	dir := cache_dir("queue-place")
+	defer delete(dir, runtime.heap_allocator())
+	defer os.remove_all(dir)
+	s := cache_state(dir)
+	defer cache_state_free(s)
+	s.playback.player = audio.create(no_wake, 0, null_output = true)
+	defer app.playback_shutdown(s)
+	d := &s.data
+	sidebar(s, updated = 1, count = 300)
+	serve(s, rows_of(LIKED_IDS))
+	app.select_playlist(s, 2)
+	run_disk(s)
+	serve(s, rows_of(ids_from(1000, 1300)))
+	app.playback_play_row(s, 7)
+	app.playback_update(s, nil)
+	run_disk(s)
+
+	app.playback_set_paused(s, true)
+	app.playback_update(s, nil)
+	app.playback_next(s)
+	app.playback_update(s, nil)
+	app.playback_next(s)
+	app.playback_update(s, nil)
+	rows_written, places := 0, 0
+	for {
+		job, ok := jobs.try_pop(&d.lists.queue)
+		if !ok {
+			break
+		}
+		op := job.payload.(app.Disk_Job).op
+		rows_written += int(op == .Write_Queue)
+		places += 1
+		res, _ := app.disk_run(d, job)
+		app.result_free(&res)
+	}
+	testing.expect_value(t, rows_written, 0)
+	testing.expect_value(t, places, 1)
+
+	res, _ := app.disk_run(d, {payload = app.Disk_Job{op = .Read_Queue, user = 7}})
+	defer app.result_free(&res)
+	queue, hit := res.payload.(app.Queue_File_Result)
+	testing.expect(t, hit, "the queue's file reads back")
+	testing.expect_value(t, queue.header.index, 9)
+	testing.expect_value(t, len(queue.rows), 300)
+}
+
+// queue_with_position saves a queue of 300 at row 7, then writes place as
+// its position file, with the queue file's key unless key is given.
+@(private = "file")
+queue_with_position :: proc(t: ^testing.T, s: ^app.State, place: app.Queue_Position, key: Maybe(u64) = nil) -> (queue_path: string) {
+	sidebar(s, updated = 1, count = 300)
+	serve(s, rows_of(LIKED_IDS))
+	app.select_playlist(s, 2)
+	run_disk(s)
+	serve(s, rows_of(ids_from(1000, 1300)))
+	app.playback_play_row(s, 7)
+	app.playback_update(s, nil)
+	run_disk(s)
+
+	dir := app.disk_dir(s.data.lists.root, 7, context.temp_allocator)
+	queue_path = app.queue_path(dir, context.temp_allocator)
+	data, ok := app.file_read(queue_path, context.temp_allocator)
+	testing.expect(t, ok && len(data) >= size_of(app.Queue_Header), "the queue's file was written")
+	place := place
+	place.key = key.? or_else (^app.Queue_Header)(raw_data(data)).key
+	testing.expect_value(t, os.write_entire_file(app.queue_position_path(dir, context.temp_allocator), mem.ptr_to_bytes(&place)), nil)
+	return
+}
+
+// A damaged position file doesn't cost the queue: it reads back at the
+// queue file's own place. Before this, an index past the queue's end was
+// taken, and the queue came back empty.
+@(test)
+damaged_queue_position_keeps_the_queue :: proc(t: ^testing.T) {
+	places := [?]app.Queue_Position {
+		{magic = app.QUEUE_POSITION_MAGIC, index = 3, sample = -5, rate = 44100},
+		{magic = app.QUEUE_POSITION_MAGIC, index = 5000, sample = 0, rate = 44100},
+		{magic = app.QUEUE_POSITION_MAGIC, index = -2, sample = 0, rate = 44100},
+	}
+	for place in places {
+		dir := cache_dir("queue-damaged-place")
+		defer delete(dir, runtime.heap_allocator())
+		defer os.remove_all(dir)
+		s := cache_state(dir)
+		defer cache_state_free(s)
+		s.playback.player = audio.create(no_wake, 0, null_output = true)
+		defer app.playback_shutdown(s)
+		path := queue_with_position(t, s, place)
+
+		res, _ := app.disk_run(&s.data, {payload = app.Disk_Job{op = .Read_Queue, user = 7}})
+		defer app.result_free(&res)
+		queue, hit := res.payload.(app.Queue_File_Result)
+		testing.expect(t, hit, "the queue's file reads back")
+		testing.expectf(t, queue.header.index == 7, "index %d read back at %d", place.index, queue.header.index)
+		testing.expect_value(t, len(queue.rows), 300)
+		testing.expect(t, os.exists(path), "the queue's file stays")
+	}
+}
+
+// A position file left from an older queue file, with another key, is
+// ignored.
+@(test)
+stale_queue_position_is_ignored :: proc(t: ^testing.T) {
+	dir := cache_dir("queue-stale-place")
+	defer delete(dir, runtime.heap_allocator())
+	defer os.remove_all(dir)
+	s := cache_state(dir)
+	defer cache_state_free(s)
+	s.playback.player = audio.create(no_wake, 0, null_output = true)
+	defer app.playback_shutdown(s)
+	queue_with_position(t, s, {magic = app.QUEUE_POSITION_MAGIC, index = 3, sample = 0, rate = 44100}, key = 1)
+
+	res, _ := app.disk_run(&s.data, {payload = app.Disk_Job{op = .Read_Queue, user = 7}})
+	defer app.result_free(&res)
+	queue, hit := res.payload.(app.Queue_File_Result)
+	testing.expect(t, hit, "the queue's file reads back")
+	testing.expect_value(t, queue.header.index, 7)
+}
+
+// A sign-out right before quitting, before the disk thread got to it,
+// still deletes the Keychain item and the account's folder.
+@(test)
+quit_after_sign_out_forgets_the_account :: proc(t: ^testing.T) {
+	dir := cache_dir("forget-at-quit")
+	defer delete(dir, runtime.heap_allocator())
+	defer os.remove_all(dir)
+	s := cache_state(dir)
+	d := &s.data
+	user_dir := app.disk_dir(dir, 7, context.temp_allocator)
+	sidebar(s, updated = 1, count = 300)
+	run_disk(s)
+	testing.expect(t, os.exists(user_dir), "the account has a folder")
+
+	app.sign_out(s, "Signed out.")
+	app.data_shutdown(s)
+	_, saved := keychain_auth(d)
+	testing.expect(t, !saved, "the keychain item went")
+	testing.expect(t, !os.exists(user_dir), "the account's folder went")
+	test_state_free(s)
+	free(s)
+}
+
+// A sign-out that can't queue its Forget does it at once.
+@(test)
+sign_out_with_the_disk_queue_stopped_forgets_at_once :: proc(t: ^testing.T) {
+	dir := cache_dir("forget-now")
+	defer delete(dir, runtime.heap_allocator())
+	defer os.remove_all(dir)
+	s := cache_state(dir)
+	defer cache_state_free(s)
+	d := &s.data
+	user_dir := app.disk_dir(dir, 7, context.temp_allocator)
+	sidebar(s, updated = 1, count = 300)
+	run_disk(s)
+	testing.expect(t, os.exists(user_dir), "the account has a folder")
+
+	jobs.stop(&d.lists.queue)
+	app.sign_out(s, "Signed out.")
+	_, saved := keychain_auth(d)
+	testing.expect(t, !saved, "the keychain item went")
+	testing.expect(t, !os.exists(user_dir), "the account's folder went")
 }

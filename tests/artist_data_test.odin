@@ -412,3 +412,47 @@ artist_picture_sizes :: proc(t: ^testing.T) {
 	testing.expect_value(t, cover.pick_size(.Artist, 40, 2), 160)
 	testing.expect_value(t, cover.pick_size(.Artist, 300, 2), 750)
 }
+
+// An evicted page asks for nothing more: its queued jobs go with it, and a
+// shelf a worker already has stops before its next page.
+@(test)
+evicted_artist_page_asks_nothing_more :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := artist_state(&m)
+	defer artist_state_free(s)
+	d := &s.data
+	sign_in(s)
+	data_jobs(d)
+
+	visit(s, 1)
+	in_hand := artist_jobs(d)
+	for id in 2 ..= app.ARTIST_CACHE {
+		visit(s, i64(id))
+	}
+	visit(s, app.ARTIST_CACHE + 1)
+	testing.expect(t, app.artist_find(d, 1) == nil, "the first page was evicted")
+	visit(s, app.ARTIST_CACHE + 2)
+	testing.expect(t, app.artist_find(d, 2) == nil, "the second page was evicted")
+
+	left := 0
+	for h in d.held[:d.held_count] {
+		if p, ok := h.job.payload.(app.Artist_Job); ok && p.artist == 2 {
+			left += 1
+		}
+	}
+	for job in artist_jobs(d) {
+		left += int(job.payload.(app.Artist_Job).artist == 2)
+	}
+	testing.expect_value(t, left, 0)
+
+	for job in in_hand {
+		if job.payload.(app.Artist_Job).part == .Albums {
+			run_now(s, job)
+		}
+	}
+	for r in m.requests {
+		testing.expectf(t, !strings.has_prefix(r, "GET /artists/1/albums"), "asked for %s", r)
+	}
+}

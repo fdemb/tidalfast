@@ -57,3 +57,11 @@ spawned_programs_get_default_signals :: proc(t: ^testing.T) {
 	// Bit n - 1 is signal n.
 	testing.expect_value(t, ignored & (1 << (u64(posix.Signal.SIGPIPE) - 1)), 0)
 }
+
+// A program that can't start is reported, so a missing xdg-open isn't
+// taken for an open browser.
+@(test)
+spawn_reports_a_program_that_cant_start :: proc(t: ^testing.T) {
+	argv := [2]cstring{"tidalfast-no-such-program", nil}
+	testing.expect(t, !os_services.spawn_detached(argv[:]))
+}

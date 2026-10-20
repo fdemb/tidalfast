@@ -129,6 +129,16 @@ parse_artists :: proc(p: ^Parser, arr: json.Array) -> []Artist {
 	return out[:n]
 }
 
+// primary_artist parses obj, the JSON's "artist". When it has the same id as
+// artists[0] it returns that instead, so the two share one Artist.
+@(private = "file")
+primary_artist :: proc(p: ^Parser, obj: json.Object, artists: []Artist) -> ^Artist {
+	if len(artists) > 0 && ji64(obj, "id") == artists[0].id {
+		return &artists[0]
+	}
+	return new_clone(parse_artist(p, obj), p.allocator)
+}
+
 // parse_album parses an album. Pass artists (have_artists = true) to reuse
 // the artists already parsed for a track instead of the album JSON's.
 parse_album :: proc(p: ^Parser, obj: json.Object, artist: ^Artist = nil, artists: []Artist = nil, have_artists := false) -> Album {
@@ -147,7 +157,7 @@ parse_album :: proc(p: ^Parser, obj: json.Object, artist: ^Artist = nil, artists
 			artist = &artists[0]
 		}
 	} else if artist == nil {
-		artist = new_clone(parse_artist(p, obj["artist"].(json.Object) or_else nil), p.allocator)
+		artist = primary_artist(p, obj["artist"].(json.Object) or_else nil, artists)
 	}
 
 	a: Album
@@ -202,7 +212,7 @@ parse_media_info :: proc(p: ^Parser, obj: json.Object, m: ^Media_Info, album: ^A
 	// Sometimes the artist field is not filled, example: 62300893
 	artist: ^Artist
 	if a, ok := jobj(obj, "artist"); ok {
-		artist = new_clone(parse_artist(p, a), p.allocator)
+		artist = primary_artist(p, a, artists)
 	} else if len(artists) > 0 {
 		artist = &artists[0]
 	}
@@ -365,7 +375,7 @@ parse_lyrics :: proc(p: ^Parser, obj: json.Object) -> Lyrics {
 }
 
 parse_stream :: proc(p: ^Parser, obj: json.Object) -> Stream {
-	return Stream {
+	st := Stream {
 		track_id = ji64(obj, "trackId", -1),
 		audio_mode = pstr(p, obj, "audioMode"),
 		audio_quality = pstr(p, obj, "audioQuality"),
@@ -373,15 +383,12 @@ parse_stream :: proc(p: ^Parser, obj: json.Object) -> Stream {
 		manifest_hash = pstr(p, obj, "manifestHash"),
 		manifest = pstr(p, obj, "manifest"),
 		asset_presentation = pstr(p, obj, "assetPresentation") if jhas(obj, "assetPresentation") else "FULL",
-		// Gain and amplitude default to 1.0 when unavailable
-		album_replay_gain = jf64(obj, "albumReplayGain", 1.0),
-		album_peak_amplitude = jf64(obj, "albumPeakAmplitude", 1.0),
-		track_replay_gain = jf64(obj, "trackReplayGain", 1.0),
-		track_peak_amplitude = jf64(obj, "trackPeakAmplitude", 1.0),
 		// Not reported for low and hi-res qualities. Assume 16 bit / 44.1 kHz.
 		bit_depth = jint(obj, "bitDepth", 16),
 		sample_rate = jint(obj, "sampleRate", 44100),
 	}
+	st.track_replay_gain, st.track_peak_amplitude, st.album_replay_gain, st.album_peak_amplitude = playback_gain(obj)
+	return st
 }
 
 parse_user :: proc(p: ^Parser, obj: json.Object) -> User {

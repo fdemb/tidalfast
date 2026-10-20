@@ -484,7 +484,7 @@ measure_line :: proc(s: ^State, kind, name: string, ms: f64, fonts_resident: boo
 		`"arena":%d,"frame_peak":%d,"atlas_pages":%d,"runs":%d,"covers":%d,"cover_bytes":%d,"rows":%d,"view_bytes":%d,` +
 		`"instructions":%d,"cycles":%d,"ui_instructions":%d,"ui_cycles":%d`,
 		kind, name, ms, pm.footprint, pm.footprint_peak, pm.resident, pm.resident_peak, pm.gpu,
-		s.arena.offset, s.frame_arena.peak_used, s.text.atlas.page_count, s.text.run_count, s.data.covers.used, s.data.covers.bytes, view_count(s), view_bytes, pc.instructions, pc.cycles, tc.instructions, tc.cycles)
+		s.arena.offset, s.frame_arena.peak_used, text.atlas_pages(&s.text), s.text.run_count, s.data.covers.used, s.data.covers.bytes, view_count(s), view_bytes, pc.instructions, pc.cycles, tc.instructions, tc.cycles)
 	if fonts_resident {
 		fonts, mapped, resident := text.mapped_fonts(&s.text)
 		fmt.sbprintf(&b, `,"fonts_mapped":%d,"fonts_mapped_bytes":%d,"fonts_resident":%d`, fonts, mapped, resident)

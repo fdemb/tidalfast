@@ -59,14 +59,14 @@ refresh_rate_limit_is_not_an_auth_failure :: proc(t: ^testing.T) {
 	tidal.session_restore(s, {token_type = "Bearer", access_token = "old", refresh_token = "refresh-0", user_id = 123, user_kind = .Logged_In_User})
 
 	m.token_status = 503
-	_, err := tidal.token_refresh(s, "refresh-0")
+	_, err := tidal.token_refresh(s, tidal.session_auth(s, context.temp_allocator))
 	testing.expect(t, tidal.is_error(err, .Refresh_Failed), fmt.tprint(err))
 
 	m.token_status = 429
-	_, err = tidal.token_refresh(s, "refresh-0")
+	_, err = tidal.token_refresh(s, tidal.session_auth(s, context.temp_allocator))
 	testing.expect(t, tidal.is_error(err, .Too_Many_Requests), fmt.tprint(err))
 	testing.expect(t, tidal.backoff_remaining(s) > 0.5)
-	_, err = tidal.token_refresh(s, "refresh-0")
+	_, err = tidal.token_refresh(s, tidal.session_auth(s, context.temp_allocator))
 	testing.expect(t, tidal.is_error(err, .Backing_Off), fmt.tprint(err))
 	testing.expect_value(t, mock_count(&m, "POST /token"), 2)
 
@@ -74,7 +74,7 @@ refresh_rate_limit_is_not_an_auth_failure :: proc(t: ^testing.T) {
 	time.sleep(1100 * time.Millisecond)
 	m.token_status = 400
 	m.token_error = "invalid_grant"
-	_, err = tidal.token_refresh(s, "refresh-0")
+	_, err = tidal.token_refresh(s, tidal.session_auth(s, context.temp_allocator))
 	testing.expect(t, tidal.is_error(err, .Authentication), fmt.tprint(err))
 	testing.expect_value(t, tidal.session_auth(s, context.temp_allocator).refresh_token, "refresh-0")
 }
@@ -108,7 +108,7 @@ refresh_keeps_tokens_unless_refused :: proc(t: ^testing.T) {
 	for c in cases {
 		m.token_status = c.status
 		m.token_error = c.error
-		_, err := tidal.token_refresh(s, "refresh-0")
+		_, err := tidal.token_refresh(s, tidal.session_auth(s, context.temp_allocator))
 		testing.expect(t, err != nil, fmt.tprint(c))
 		testing.expect_value(t, tidal.is_error(err, .Authentication), c.refused)
 		testing.expect_value(t, tidal.is_error(err, .Refresh_Failed), !c.refused)
@@ -119,8 +119,147 @@ refresh_keeps_tokens_unless_refused :: proc(t: ^testing.T) {
 
 	// No answer at all is temporary too.
 	s.config.api_oauth2_token = "http://127.0.0.1:1/token"
-	_, err := tidal.token_refresh(s, "refresh-0")
+	_, err := tidal.token_refresh(s, tidal.session_auth(s, context.temp_allocator))
 	testing.expect(t, tidal.is_error(err, .Refresh_Failed), fmt.tprint(err))
+}
+
+// Requests that waited for a refresh that failed get its failure instead of
+// each sending the refresh again, and a request refreshes once even when
+// TIDAL then says its token expired. A request that starts later tries again.
+@(test)
+failed_refresh_is_shared_with_waiting_requests :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := oauth_session(&m)
+	defer tidal.session_destroy(s)
+	expired := time.time_add(time.now(), -time.Minute)
+	tidal.session_restore(s, {token_type = "Bearer", access_token = "old", refresh_token = "refresh-0", expiry_time = expired, user_id = 123, user_kind = .Logged_In_User})
+	m.token_status = 503
+	m.token_delay = 300 * time.Millisecond
+	m.answers["/expired"] = {401, `{"status":401,"userMessage":"The token has expired."}`}
+
+	workers: [3]Thread_Result
+	threads: [len(workers)]^thread.Thread
+	for &w, i in workers {
+		w.s = s
+		threads[i] = thread.create_and_start_with_poly_data(&w, proc(w: ^Thread_Result) {
+			_, w.err = tidal.request(w.s, {method = .GET, path = "expired"}, context.temp_allocator)
+		})
+	}
+	for th in threads {
+		thread.join(th)
+		thread.destroy(th)
+	}
+	for w in workers {
+		testing.expect(t, tidal.is_error(w.err, .Refresh_Failed), fmt.tprint(w.err))
+	}
+	testing.expect_value(t, mock_count(&m, "POST /token"), 1)
+	testing.expect_value(t, mock_count(&m, "GET /expired"), 3)
+
+	_, err := tidal.request(s, {method = .GET, path = "expired"}, context.temp_allocator)
+	testing.expect(t, tidal.is_error(err, .Refresh_Failed), fmt.tprint(err))
+	testing.expect_value(t, mock_count(&m, "POST /token"), 2)
+}
+
+// A refresh of a login that was cleared fails, and the next login's request
+// that waited for it refreshes on its own instead of taking that failure.
+@(test)
+failed_refresh_of_a_cleared_login_is_not_shared :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := oauth_session(&m)
+	defer tidal.session_destroy(s)
+	expired := time.time_add(time.now(), -time.Minute)
+	tidal.session_restore(s, {token_type = "Bearer", access_token = "old", refresh_token = "refresh-0", expiry_time = expired, user_id = 123, user_kind = .Logged_In_User})
+	m.token_delay = 300 * time.Millisecond
+
+	old := Thread_Result {
+		s = s,
+	}
+	refresh := thread.create_and_start_with_poly_data(&old, proc(old: ^Thread_Result) {
+		_, old.err = tidal.token_refresh(old.s, tidal.session_auth(old.s, context.temp_allocator))
+	})
+	testing.expect(t, wait_for_count(&m, "POST /token", 1), "the old login's refresh reached the mock")
+	tidal.session_clear_auth(s)
+	tidal.session_restore(s, {token_type = "Bearer", access_token = "new", refresh_token = "new-refresh", expiry_time = expired, user_id = 456, user_kind = .Logged_In_User})
+	_, err := tidal.request(s, {method = .GET, path = "echo"}, context.temp_allocator)
+	thread.join(refresh)
+	thread.destroy(refresh)
+	testing.expect(t, tidal.is_error(old.err, .Cancelled), fmt.tprint(old.err))
+	testing.expect_value(t, err, nil)
+	testing.expect_value(t, mock_count(&m, "POST /token"), 2)
+}
+
+// token_refresh with a copy of a login that was cleared since fails and
+// leaves the next login's tokens alone.
+@(test)
+refresh_of_a_cleared_login_keeps_the_next_login :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := oauth_session(&m)
+	defer tidal.session_destroy(s)
+	tidal.session_restore(s, {token_type = "Bearer", access_token = "old", refresh_token = "refresh-0", user_id = 123, user_kind = .Logged_In_User})
+	old := tidal.session_auth(s, context.temp_allocator)
+	tidal.session_clear_auth(s)
+	tidal.session_restore(s, {token_type = "Bearer", access_token = "new", refresh_token = "new-refresh", user_id = 456, user_kind = .Logged_In_User})
+
+	_, err := tidal.token_refresh(s, old)
+	testing.expect(t, tidal.is_error(err, .Cancelled), fmt.tprint(err))
+	testing.expect_value(t, mock_count(&m, "POST /token"), 0)
+	a := tidal.session_auth(s, context.temp_allocator)
+	testing.expect_value(t, a.access_token, "new")
+	testing.expect_value(t, a.refresh_token, "new-refresh")
+}
+
+// What a test thread got back, checked after thread.join.
+@(private = "file")
+Thread_Result :: struct {
+	s:   ^tidal.Session,
+	err: tidal.Error,
+}
+
+@(private = "file")
+wait_for_count :: proc(m: ^Mock, prefix: string, n: int) -> bool {
+	deadline := time.tick_add(time.tick_now(), 2 * time.Second)
+	for mock_count(m, prefix) < n {
+		if time.tick_diff(time.tick_now(), deadline) <= 0 {
+			return false
+		}
+		time.sleep(time.Millisecond)
+	}
+	return true
+}
+
+// token_refresh and a request's refresh take turns, so the request uses the
+// new token instead of sending the old refresh token again.
+@(test)
+token_refresh_and_request_refresh_take_turns :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := oauth_session(&m)
+	defer tidal.session_destroy(s)
+	expired := time.time_add(time.now(), -time.Minute)
+	tidal.session_restore(s, {token_type = "Bearer", access_token = "old", refresh_token = "refresh-0", expiry_time = expired, user_id = 123, user_kind = .Logged_In_User})
+	m.token_delay = 300 * time.Millisecond
+
+	r := Thread_Result {
+		s = s,
+	}
+	refresh := thread.create_and_start_with_poly_data(&r, proc(r: ^Thread_Result) {
+		_, r.err = tidal.token_refresh(r.s, tidal.session_auth(r.s, context.temp_allocator))
+	})
+	testing.expect(t, wait_for_count(&m, "POST /token", 1), "token_refresh reached the mock")
+	_, err := tidal.request(s, {method = .GET, path = "echo"}, context.temp_allocator)
+	thread.join(refresh)
+	thread.destroy(refresh)
+	testing.expect_value(t, r.err, nil)
+	testing.expect_value(t, err, nil)
+	testing.expect_value(t, mock_count(&m, "POST /token"), 1)
+	testing.expect_value(t, tidal.session_auth(s, context.temp_allocator).access_token, "access-1")
 }
 
 // The token expired and the refresh timed out, then TIDAL answers the
@@ -273,21 +412,17 @@ clear_auth_drops_a_refresh_in_flight :: proc(t: ^testing.T) {
 	tidal.session_restore(s, {token_type = "Bearer", access_token = "a", refresh_token = "refresh-0", user_id = 123, user_kind = .Logged_In_User})
 	m.token_delay = 500 * time.Millisecond
 
-	Shared :: struct {
-		s:   ^tidal.Session,
-		err: tidal.Error,
-	}
-	sh := Shared {
+	r := Thread_Result {
 		s = s,
 	}
-	worker := thread.create_and_start_with_poly_data(&sh, proc(sh: ^Shared) {
-		_, sh.err = tidal.token_refresh(sh.s, "refresh-0")
+	worker := thread.create_and_start_with_poly_data(&r, proc(r: ^Thread_Result) {
+		_, r.err = tidal.token_refresh(r.s, tidal.session_auth(r.s, context.temp_allocator))
 	})
-	time.sleep(100 * time.Millisecond)
+	testing.expect(t, wait_for_count(&m, "POST /token", 1), "the refresh reached the mock")
 	tidal.session_clear_auth(s)
 	thread.join(worker)
 	thread.destroy(worker)
-	testing.expect(t, tidal.is_error(sh.err, .Cancelled), fmt.tprint(sh.err))
+	testing.expect(t, tidal.is_error(r.err, .Cancelled), fmt.tprint(r.err))
 	testing.expect_value(t, tidal.session_auth(s, context.temp_allocator).refresh_token, "")
 }
 
@@ -522,6 +657,7 @@ auth_failures_sign_out_once :: proc(t: ^testing.T) {
 	second := fail_job(d, .Authentication)
 
 	app.handle_result(s, &first, 0)
+	run_disk(s)
 	_, saved = keychain_auth(d)
 	testing.expect(t, !saved, "the keychain item went")
 	testing.expect_value(t, tidal.session_auth(d.session, context.temp_allocator).access_token, "")
@@ -565,7 +701,7 @@ refresh_after_the_account_ended_is_not_saved :: proc(t: ^testing.T) {
 	// tokens and saving them.
 	sync.mutex_lock(&d.keychain_mutex)
 	refresh := thread.create_and_start_with_poly_data(d.session, proc(s: ^tidal.Session) {
-		tidal.token_refresh(s, "r")
+		tidal.token_refresh(s, tidal.session_auth(s, context.temp_allocator))
 	})
 	start := time.tick_now()
 	for tidal.session_auth(d.session, context.temp_allocator).access_token != "device-access" && time.tick_since(start) < 5 * time.Second {
@@ -2311,4 +2447,93 @@ like_answered_while_a_fetch_is_out :: proc(t: ^testing.T) {
 	app.add_result(s, &took, job.payload.(app.Add_Track_Job))
 	app.liked_ids_result(d, &without, false)
 	testing.expect(t, app.liked_has(d, 7))
+}
+
+// A session that ends while a worker holds the Keychain, saving or waiting
+// on the user, doesn't hold up the UI thread. The item goes after.
+@(test)
+sign_out_doesnt_wait_for_the_keychain :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := mock_data_state(&m)
+	defer data_state_free(s)
+	d := &s.data
+	sign_in(s)
+	data_jobs(d)
+
+	done: bool
+	sync.lock(&d.keychain_mutex)
+	th := thread.create_and_start_with_poly_data2(s, &done, proc(s: ^app.State, done: ^bool) {
+		app.sign_out(s, "Your TIDAL session ended. Log in again.")
+		sync.atomic_store(done, true)
+	})
+	start := time.tick_now()
+	for !sync.atomic_load(&done) && time.tick_since(start) < 2 * time.Second {
+		time.sleep(time.Millisecond)
+	}
+	returned := sync.atomic_load(&done)
+	sync.unlock(&d.keychain_mutex)
+	thread.join(th)
+	thread.destroy(th)
+	testing.expect(t, returned, "sign_out returned while the Keychain was held")
+	testing.expect(t, app.show_login(s))
+
+	run_disk(s)
+	_, saved := keychain_auth(d)
+	testing.expect(t, !saved, "the keychain item went")
+}
+
+// A login saved after a sign-out, before its cleanup ran, stays.
+@(test)
+login_after_sign_out_keeps_its_item :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := mock_data_state(&m)
+	defer data_state_free(s)
+	d := &s.data
+	sign_in(s)
+	data_jobs(d)
+
+	app.sign_out(s, "Your TIDAL session ended. Log in again.")
+	tidal.session_restore(d.session, {token_type = "Bearer", access_token = "new", refresh_token = "new-r", user_id = 123, user_kind = .Logged_In_User})
+	app.auth_changed(d.session, d)
+	run_disk(s)
+	a, saved := keychain_auth(d)
+	testing.expect(t, saved, "the new login is still in the Keychain")
+	testing.expect_value(t, a.access_token, "new")
+}
+
+// A sign-out after a hot reload deletes the Keychain item that a login
+// saved before the reload.
+@(test)
+sign_out_after_reload_forgets_the_login :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := mock_data_state(&m)
+	defer data_state_free(s)
+	d := &s.data
+	sign_in(s)
+	data_jobs(d)
+
+	app.sign_out(s, "Your TIDAL session ended. Log in again.")
+	tidal.session_restore(d.session, {token_type = "Bearer", access_token = "new", refresh_token = "new-r", user_id = 123, user_kind = .Logged_In_User})
+	app.auth_changed(d.session, d)
+	run_disk(s)
+	_, saved := keychain_auth(d)
+	testing.expect(t, saved, "the new login is in the Keychain")
+
+	shell := platform.Shell {
+		request_redraw = proc "c" () {},
+	}
+	app.data_unload(s)
+	app.data_reload(s, &shell)
+
+	app.sign_out(s, "Your TIDAL session ended. Log in again.")
+	app.workers_stop(d)
+	run_disk(s)
+	_, saved = keychain_auth(d)
+	testing.expect(t, !saved, "the keychain item went")
 }

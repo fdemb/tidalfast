@@ -1,13 +1,18 @@
 package tidal_tests
 
 import "core:mem"
+import "core:strconv"
+import "core:strings"
+import "core:sync"
 import "core:testing"
 import "core:unicode/utf8"
 import "core:time"
 
 import "../src/kbts"
+import "../src/platform"
 import "../src/render"
 import "../src/text"
+import "../src/ui"
 
 @(test)
 test_subpixel_buckets :: proc(t: ^testing.T) {
@@ -180,6 +185,16 @@ test_resolve_levels :: proc(t: ^testing.T) {
 		levels := make([]u8, len(kinds), context.temp_allocator)
 		text.resolve_levels(kinds, rtl, brackets, false, levels)
 		testing.expect(t, slice_equal(levels, []u8{0, 0, 1, 1, 2, 0, 0}), "number after rtl")
+	}
+	// Spans of neutrals take the direction on both sides when it agrees,
+	// else the paragraph's, which also stands in past either end.
+	{
+		kinds := []text.Bidi_Kind{.Neutral, .Strong, .Neutral, .Neutral, .Neutral, .Strong, .Neutral, .Neutral, .Strong, .Neutral, .Neutral}
+		rtl := []bool{true, true, false, false, false, true, true, true, false, true, true}
+		brackets := make([]rune, len(kinds), context.temp_allocator)
+		levels := make([]u8, len(kinds), context.temp_allocator)
+		text.resolve_levels(kinds, rtl, brackets, false, levels)
+		testing.expect(t, slice_equal(levels, []u8{0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0}), "neutral spans")
 	}
 }
 
@@ -560,6 +575,53 @@ test_fallback_cache_limit :: proc(t: ^testing.T) {
 	testing.expect_value(t, state.generation, generation)
 }
 
+// A loader result for a character the fallback faces turned out to have
+// while it looked doesn't replace the face runs already use.
+@(test)
+test_loader_keeps_scanned_fallback :: proc(t: ^testing.T) {
+	s: Shaper
+	context.allocator = shaper_init(&s)
+	defer shaper_destroy(&s)
+	state := s.state
+
+	cjk := shape_loaded(&s, .Regular, 13, "夜")
+	arabic := shape_loaded(&s, .Regular, 13, "ب")
+	if !testing.expect(t, !cjk.pending && !arabic.pending) {
+		return
+	}
+	cjk_face, arabic_face := int(cjk.glyphs[0].face), int(arabic.glyphs[0].face)
+	testing.expect(t, cjk_face != arabic_face)
+
+	// The loader was asked for 龍 and hasn't answered yet.
+	key := (u64(text.Font.Regular) + 1) << 32 | u64('龍')
+	slot := int(text.mix64(key)) & (len(state.fallback_cache) - 1)
+	for state.fallback_cache[slot].key != 0 && state.fallback_cache[slot].key != key {
+		slot = (slot + 1) & (len(state.fallback_cache) - 1)
+	}
+	if state.fallback_cache[slot].key == 0 {
+		state.fallback_used += 1
+	}
+	state.fallback_cache[slot] = {key, text.PENDING}
+
+	run := text.shape(state, .Regular, 13, "龍 1")
+	testing.expect(t, !run.pending)
+	testing.expect_value(t, int(run.glyphs[0].face), cjk_face)
+
+	for i := 0; text.loading(state) && i < 5000; i += 1 {
+		time.sleep(time.Millisecond)
+		text.begin_frame(state, &s.r)
+	}
+	l := &state.loader
+	sync.mutex_lock(&l.mutex)
+	l.results[l.result_count] = {font = .Regular, codepoint = '龍', found = state.faces[arabic_face].name}
+	l.result_count += 1
+	sync.mutex_unlock(&l.mutex)
+	text.begin_frame(state, &s.r)
+
+	run = text.shape(state, .Regular, 13, "龍 2")
+	testing.expect_value(t, int(run.glyphs[0].face), cjk_face)
+}
+
 // A default ignorable a font doesn't map, like U+FE0F in Noto Color Emoji,
 // doesn't stop the font covering the cluster: the shaper hides it anyway.
 // The system font has no U+180B, a Mongolian variation selector.
@@ -612,4 +674,177 @@ test_measure_empty :: proc(t: ^testing.T) {
 	defer fonts_destroy(&f)
 	m := text.measure(f.state, .Semibold, 14, "")
 	testing.expect_value(t, m.width, f32(0))
+}
+
+// A text field's caret sits on the leading edge of the cluster after it:
+// the right edge of a Hebrew letter even when Latin follows it, and for a
+// space or a digit, the edge its neighbours' direction gives.
+@(test)
+test_field_caret_mixed_direction :: proc(t: ^testing.T) {
+	s: Shaper
+	context.allocator = shaper_init(&s)
+	defer shaper_destroy(&s)
+
+	glyph_of :: proc(run: ^text.Run, cluster: u32) -> text.Glyph {
+		for g in run.glyphs {
+			if g.cluster == cluster {
+				return g
+			}
+		}
+		return {}
+	}
+	Case :: struct {
+		str:     string,
+		offset:  int, // a byte offset in str
+		cluster: u32, // the codepoint index that starts there
+		right:   bool, // the caret goes on the cluster's right edge
+	}
+	cases := []Case{
+		{"aאבb", len("a"), 1, true},
+		{"aאבb", len("aא"), 2, true},
+		{"aאb", len("a"), 1, true},
+		{"aאb", len("aא"), 2, false},
+		{"אב גד", len("אב"), 2, true},
+		{"a אב", len("a"), 1, false},
+		{"א12ב", len("א"), 1, false},
+		{"א12ב", len("א1"), 2, false},
+	}
+	for c in cases {
+		run := shape_loaded(&s, .Regular, 13, c.str)
+		testing.expectf(t, !run.pending, "%q still pending", c.str)
+		g := glyph_of(run, c.cluster)
+		want := g.pen + g.advance if c.right else g.pen
+		lay := ui.field_layout(s.state, .Regular, 13, c.str)
+		caret := ui.field_caret_x(lay, c.offset)
+		testing.expectf(t, abs(caret - want) < 0.01, "%q at %d: caret %v, want %v", c.str, c.offset, caret, want)
+	}
+}
+
+// A selection is drawn as its pieces on screen, left to right: one for a
+// run in one direction, however long, and two for Latin split by Hebrew.
+@(test)
+test_field_selection_spans :: proc(t: ^testing.T) {
+	s: Shaper
+	context.allocator = shaper_init(&s)
+	defer shaper_destroy(&s)
+
+	long := strings.repeat("שלום ", 300, context.temp_allocator)
+	run := shape_loaded(&s, .Regular, 13, long)
+	testing.expect(t, !run.pending)
+	lay := ui.field_layout(s.state, .Regular, 13, long)
+	spans := ui.field_spans(lay, 0, len(long))
+	testing.expectf(t, len(spans) == 1 && abs(spans[0].x) < 0.01 && abs(spans[0].y - run.width) < 0.01, "all of %d clusters: %v, want [0, %v]", len(lay.bounds) - 1, spans, run.width)
+
+	mixed := "ab אב cd"
+	run = shape_loaded(&s, .Regular, 13, mixed)
+	lay = ui.field_layout(s.state, .Regular, 13, mixed)
+	// "b א" is b on the left, then the space, then א at the right end of
+	// the Hebrew word: two pieces with ב between them.
+	spans = ui.field_spans(lay, len("a"), len("ab א"))
+	testing.expectf(t, len(spans) == 2 && spans[0].x < spans[1].x, "%q: %v", mixed, spans)
+}
+
+// Dragging in a text field selects from the press to the mouse, by
+// clusters, or by words after a double-click.
+@(test)
+test_text_field_drag_select :: proc(t: ^testing.T) {
+	s: Shaper
+	context.allocator = shaper_init(&s)
+	defer shaper_destroy(&s)
+	u: ui.State
+	ui.init(&u)
+	f := new(ui.Text_Field)
+	ui.field_insert(f, "hello big world")
+	shape_loaded(&s, .Regular, 13, "hello big world")
+	now := 0.0
+	frame :: proc(u: ^ui.State, s: ^Shaper, f: ^ui.Text_Field, now: ^f64, events: ..platform.Event) {
+		now^ += 0.016
+		ui.begin_frame(u, events, nil, s.state, 300, 200, now^)
+		ui.text_field("search", f, "Search", ui.px(250), ui.px(30))
+		ui.end_frame()
+	}
+	frame(&u, &s, f, &now)
+	frame(&u, &s, f, &now)
+	frame(&u, &s, f, &now, {kind = .Mouse_Down, x = 9, y = 15, button = .Left, click_count = 1})
+	frame(&u, &s, f, &now, {kind = .Mouse_Move, x = 240, y = 15})
+	frame(&u, &s, f, &now, {kind = .Mouse_Up, x = 240, y = 15, button = .Left})
+	testing.expect_value(t, ui.field_selected(f), "hello big world")
+
+	frame(&u, &s, f, &now, {kind = .Mouse_Down, x = 240, y = 15, button = .Left, click_count = 2})
+	testing.expect_value(t, ui.field_selected(f), "world")
+	frame(&u, &s, f, &now, {kind = .Mouse_Move, x = 9, y = 15})
+	frame(&u, &s, f, &now, {kind = .Mouse_Up, x = 9, y = 15, button = .Left})
+	testing.expect_value(t, ui.field_selected(f), "hello big world")
+	testing.expect_value(t, f.cursor, 0)
+}
+
+// Text at size 0 measures as nothing, not NaN, even in a face whose
+// advances come from its instance at the size.
+@(test)
+test_measure_size_zero :: proc(t: ^testing.T) {
+	f: Fonts
+	if !testing.expect(t, fonts_init(&f)) {
+		return
+	}
+	defer fonts_destroy(&f)
+	m := text.measure(f.state, .Regular, 0, "Size")
+	testing.expect_value(t, m.width, f32(0))
+}
+
+// A working set bigger than three quarters of the run cache, all of it
+// drawn every frame, fits, so begin_frame leaves it alone instead of
+// sweeping every frame.
+@(test)
+test_large_working_set_is_not_swept_every_frame :: proc(t: ^testing.T) {
+	s: Shaper
+	context.allocator = shaper_init(&s)
+	defer shaper_destroy(&s)
+	state := s.state
+
+	n := text.RUN_CAPACITY / 2 * 7 / 8
+	draw_all :: proc(state: ^text.State, n: int) {
+		buf: [16]byte
+		for i in 0 ..< n {
+			text.shape(state, .Regular, 13, strconv.write_int(buf[:], i64(i), 10))
+		}
+	}
+	draw_all(state, n)
+	testing.expect_value(t, state.run_count, n)
+	last := state.last_sweep
+	for _ in 0 ..< 5 {
+		free_all(context.temp_allocator)
+		text.begin_frame(state, &s.r)
+		draw_all(state, n)
+		testing.expect_value(t, state.stats.shaped, 0)
+	}
+	testing.expect_value(t, state.last_sweep, last)
+}
+
+// Shaped text and the editor split a string into the same grapheme
+// clusters: shaping takes them from kb_text_shape's shaper, the editor
+// from its break engine.
+@(test)
+test_shaped_clusters_match_grapheme_starts :: proc(t: ^testing.T) {
+	s: Shaper
+	context.allocator = shaper_init(&s)
+	defer shaper_destroy(&s)
+
+	for str in ([]string{"밤편지 é̃x", "q̣̇q̣̇", "किकि नमस्ते", "น้ำน้ำ", "👨‍👩‍👧 🇵🇱 ok", "👍🏽 ❤️", "é̂ b"}) {
+		run := shape_loaded(&s, .Regular, 13, str)
+		testing.expectf(t, !run.pending, "%q still pending", str)
+		runes := utf8.string_to_runes(str, context.temp_allocator)
+		starts := text.grapheme_starts(runes)
+		want := make(map[u32]bool, context.temp_allocator)
+		for start in starts {
+			want[u32(start)] = true
+		}
+		got := make(map[u32]bool, context.temp_allocator)
+		for g in run.glyphs {
+			got[g.cluster] = true
+		}
+		testing.expectf(t, len(got) == len(want), "%q: %d clusters drawn, %d in the editor", str, len(got), len(want))
+		for c in got {
+			testing.expectf(t, want[c], "%q: cluster %d isn't a grapheme start", str, c)
+		}
+	}
 }

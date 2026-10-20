@@ -1,6 +1,7 @@
 package tidal_tests
 
 import "core:testing"
+import "core:unicode/utf8"
 
 import "../src/platform"
 import "../src/ui"
@@ -561,4 +562,138 @@ test_text_field_keeps_arrows_in_a_row :: proc(t: ^testing.T) {
 	sig = frame(&u, f, &now, {kind = .Key_Down, key = .Right})
 	sig = frame(&u, f, &now)
 	testing.expect(t, sig.focused, "Right at the end stays in the field")
+}
+
+// A click after Cmd-F in the same frame places the caret: the field takes
+// the shortcut's select-all and the press in the order they came.
+@(test)
+test_text_field_click_after_shortcut :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer field_ui_destroy(&u)
+	f := new(ui.Text_Field)
+	defer free(f)
+	ui.field_insert(f, "hello world")
+	now := 0.0
+	frame :: proc(u: ^ui.State, f: ^ui.Text_Field, now: ^f64, events: ..platform.Event) {
+		now^ += 0.016
+		ui.begin_frame(u, events, nil, nil, 300, 200, now^)
+		b := ui.text_field("search", f, "Search", ui.px(200), ui.px(30))
+		ui.focus_shortcut(b.box, .F, {ui.PRIMARY})
+		ui.end_frame()
+	}
+	frame(&u, f, &now)
+	frame(&u, f, &now)
+	frame(&u, f, &now, {kind = .Key_Down, key = .F, modifiers = {ui.PRIMARY}}, {kind = .Mouse_Down, x = 50, y = 15, button = .Left, click_count = 1}, {kind = .Mouse_Up, x = 50, y = 15, button = .Left})
+	lo, hi := ui.field_selection(f)
+	testing.expectf(t, lo == hi && lo > 0, "the click placed the caret, selection [%d, %d)", lo, hi)
+
+	// And the other way round, the shortcut after the click selects all.
+	frame(&u, f, &now, {kind = .Mouse_Down, x = 50, y = 15, button = .Left, click_count = 1}, {kind = .Mouse_Up, x = 50, y = 15, button = .Left}, {kind = .Key_Down, key = .F, modifiers = {ui.PRIMARY}})
+	lo, hi = ui.field_selection(f)
+	testing.expect_value(t, lo, 0)
+	testing.expect_value(t, hi, len("hello world"))
+}
+
+// Escape in an empty field gives up the focus, and a click on the field
+// later in the same frame takes it back. A click away after that still
+// takes it away.
+@(test)
+test_text_field_click_after_escape :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer field_ui_destroy(&u)
+	f := new(ui.Text_Field)
+	defer free(f)
+	now := 0.0
+	frame :: proc(u: ^ui.State, f: ^ui.Text_Field, now: ^f64, events: ..platform.Event) -> ui.Field_Signal {
+		now^ += 0.016
+		ui.begin_frame(u, events, nil, nil, 300, 200, now^)
+		sig := ui.text_field("search", f, "Search", ui.px(200), ui.px(30))
+		ui.end_frame()
+		return sig
+	}
+	frame(&u, f, &now)
+	frame(&u, f, &now)
+	sig := frame(&u, f, &now, {kind = .Mouse_Down, x = 50, y = 15, button = .Left, click_count = 1}, {kind = .Mouse_Up, x = 50, y = 15, button = .Left})
+	testing.expect(t, sig.focused)
+
+	sig = frame(&u, f, &now, {kind = .Key_Down, key = .Escape}, {kind = .Mouse_Down, x = 50, y = 15, button = .Left, click_count = 1}, {kind = .Mouse_Up, x = 50, y = 15, button = .Left})
+	testing.expect(t, sig.focused, "the click took the focus back")
+	sig = frame(&u, f, &now)
+	testing.expect(t, sig.focused, "and kept it")
+
+	frame(&u, f, &now, {kind = .Key_Down, key = .Escape}, {kind = .Mouse_Down, x = 50, y = 15, button = .Left, click_count = 1}, {kind = .Mouse_Up, x = 50, y = 15, button = .Left}, {kind = .Mouse_Down, x = 250, y = 100, button = .Left, click_count = 1}, {kind = .Mouse_Up, x = 250, y = 100, button = .Left})
+	sig = frame(&u, f, &now)
+	testing.expect(t, !sig.focused, "a click away after that took the focus")
+}
+
+// Word movement and double-click words land where a scan over every
+// boundary does, from any byte offset, inside a cluster or past the end.
+@(test)
+test_edit_words_match_scan :: proc(t: ^testing.T) {
+	is_word :: proc(s: string, at: int) -> bool {
+		r, _ := utf8.decode_rune_in_string(s[at:])
+		return ui.is_word_rune(r)
+	}
+	prev :: proc(bounds: []int, p: int) -> int {
+		best := 0
+		for b in bounds {
+			if b >= p {
+				break
+			}
+			best = b
+		}
+		return best
+	}
+	next :: proc(bounds: []int, p: int) -> int {
+		for b in bounds {
+			if b > p {
+				return b
+			}
+		}
+		return bounds[len(bounds) - 1]
+	}
+	for s in ([]string{"", "a", " ", "Paranoid Android, 1997", "a👨‍👩‍👧b, cé  d_e 12 ", "  夜に駆ける 밤편지", "عيونك حبيبي!", "e\u0301 yy", "\u1100\u1161 \u1100\u1161"}) {
+		bounds := ui.cluster_bounds(s)
+		for p in 0 ..= len(s) {
+			left := p
+			for left > 0 && !is_word(s, prev(bounds, left)) {
+				left = prev(bounds, left)
+			}
+			for left > 0 && is_word(s, prev(bounds, left)) {
+				left = prev(bounds, left)
+			}
+			testing.expectf(t, ui.word_left(s, bounds, p) == left, "%q word_left(%d) = %d, want %d", s, p, ui.word_left(s, bounds, p), left)
+
+			at := 0
+			for b in bounds[:len(bounds) - 1] {
+				if b <= p {
+					at = b
+				}
+			}
+			right := at
+			for right < len(s) && !is_word(s, right) {
+				right = next(bounds, right)
+			}
+			for right < len(s) && is_word(s, right) {
+				right = next(bounds, right)
+			}
+			testing.expectf(t, ui.word_right(s, bounds, p) == right, "%q word_right(%d) = %d, want %d", s, p, ui.word_right(s, bounds, p), right)
+
+			if len(s) == 0 {
+				continue
+			}
+			word := is_word(s, at)
+			lo, hi := at, next(bounds, at)
+			for lo > 0 && is_word(s, prev(bounds, lo)) == word {
+				lo = prev(bounds, lo)
+			}
+			for hi < len(s) && is_word(s, hi) == word {
+				hi = next(bounds, hi)
+			}
+			got_lo, got_hi := ui.word_at(s, bounds, p)
+			testing.expectf(t, got_lo == lo && got_hi == hi, "%q word_at(%d) = [%d, %d), want [%d, %d)", s, p, got_lo, got_hi, lo, hi)
+		}
+	}
 }

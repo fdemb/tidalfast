@@ -22,8 +22,10 @@ import "core:hash"
 import "core:mem"
 import vmem "core:mem/virtual"
 import "core:strings"
+import "core:sync"
 import "core:time"
 
+import "../jobs"
 import "../tidal"
 
 ARTIST_CACHE :: 8
@@ -43,11 +45,13 @@ Artist_Cache :: struct {
 	pages:    [ARTIST_CACHE]Artist_Page,
 	next_gen: u64,
 	visits:   u64, // goes up with every visit, for Artist_Page.used
+	live:     [ARTIST_CACHE]u64, // the pages' gens, which the workers read (atomic)
 }
 
 Artist_Page :: struct {
 	id:            i64, // 0 for a free slot; the fake data's are negative, see artist_fake_key
 	gen:           u64,
+	slot:          int, // its index in Artist_Cache.pages
 	used:          u64, // the visit it was last opened in
 	name, picture: Small, // what it was opened with, then the Info part's
 	parts:         [Artist_Part]Artist_Part_State,
@@ -95,10 +99,19 @@ Artist_Cards :: struct {
 Artist_Job :: struct {
 	artist: i64,
 	gen:    u64, // the page's
+	slot:   int, // and where it's cached
 	part:   Artist_Part,
 }
 
-Artist_Load :: #type proc(s: ^tidal.Session, id: i64, a: mem.Allocator) -> (content: Artist_Content, err: tidal.Error)
+Artist_Load :: #type proc(s: ^tidal.Session, id: i64, live: Artist_Live, a: mem.Allocator) -> (content: Artist_Content, err: tidal.Error)
+
+// Artist_Live is the page a worker's job is for, so the worker can stop
+// once it's evicted, see artist_live.
+Artist_Live :: struct {
+	cache: ^Artist_Cache,
+	slot:  int,
+	gen:   u64,
+}
 
 Artist_Part_Spec :: struct {
 	title:  string,
@@ -136,20 +149,28 @@ artist_visit :: proc(s: ^State, id: i64, name, picture: Small) -> ^Artist_Page {
 	c := &s.data.artists
 	page := artist_find(&s.data, id)
 	if page == nil {
-		page = &c.pages[0]
-		for &p in c.pages {
-			if p.used < page.used {
-				page = &p
+		slot := 0
+		for p, i in c.pages {
+			if p.used < c.pages[slot].used {
+				slot = i
 			}
 		}
+		page = &c.pages[slot]
+		old := page.gen
 		artist_page_free(page)
+		if old != 0 {
+			jobs.remove_if(&s.data.queue, artist_job_of, &old)
+			held_remove_if(&s.data, artist_job_of, &old)
+		}
 		c.next_gen += 1
 		page^ = {
 			id      = id,
 			gen     = c.next_gen,
+			slot    = slot,
 			name    = name,
 			picture = picture,
 		}
+		sync.atomic_store(&c.live[slot], page.gen)
 	}
 	if page.picture.len == 0 {
 		page.picture = picture
@@ -171,6 +192,19 @@ artist_visit :: proc(s: ^State, id: i64, name, picture: Small) -> ^Artist_Page {
 	return page
 }
 
+// artist_job_of picks the Artist jobs of the page of generation gen.
+@(private = "file")
+artist_job_of :: proc(job: ^Job, gen: rawptr) -> bool {
+	p, artist := job.payload.(Artist_Job)
+	return artist && p.gen == (^u64)(gen)^
+}
+
+// artist_live says whether the page live names is still cached. A worker
+// asks between the pages of a shelf.
+artist_live :: proc(live: Artist_Live) -> bool {
+	return sync.atomic_load(&live.cache.live[live.slot]) == live.gen
+}
+
 // artist_want asks for each part of page not asked for yet. Asking again
 // sends nothing more.
 artist_want :: proc(d: ^Data, page: ^Artist_Page) {
@@ -184,7 +218,7 @@ artist_want :: proc(d: ^Data, page: ^Artist_Page) {
 		// Waiting first: push_job may drop a held job of this page, and
 		// that sets its part back to nil.
 		page.parts[part] = Artist_Waiting{}
-		push_job(d, {payload = Artist_Job{artist = page.id, gen = page.gen, part = part}})
+		push_job(d, {payload = Artist_Job{artist = page.id, gen = page.gen, slot = page.slot, part = part}})
 	}
 }
 
@@ -281,15 +315,16 @@ artist_page_free :: proc(page: ^Artist_Page) {
 // artist_clear frees every page, at sign-out and shut down. Generations go
 // on from where they were, so no answer from before matches a new page.
 artist_clear :: proc(d: ^Data) {
-	for &p in d.artists.pages {
+	for &p, i in d.artists.pages {
 		artist_page_free(&p)
+		sync.atomic_store(&d.artists.live[i], 0)
 	}
 }
 
 // The worker's side.
 
 @(private = "file")
-artist_load_info :: proc(s: ^tidal.Session, id: i64, a: mem.Allocator) -> (content: Artist_Content, err: tidal.Error) {
+artist_load_info :: proc(s: ^tidal.Session, id: i64, live: Artist_Live, a: mem.Allocator) -> (content: Artist_Content, err: tidal.Error) {
 	ar := tidal.artist_get(s, id, context.temp_allocator) or_return
 	return Artist_Info{small(ar.name), small(ar.picture)}, nil
 }
@@ -297,7 +332,7 @@ artist_load_info :: proc(s: ^tidal.Session, id: i64, a: mem.Allocator) -> (conte
 // artist_load_bio is the biography without its markup. TIDAL answers 404
 // for an artist without one, which is an empty biography, not a failure.
 @(private = "file")
-artist_load_bio :: proc(s: ^tidal.Session, id: i64, a: mem.Allocator) -> (content: Artist_Content, err: tidal.Error) {
+artist_load_bio :: proc(s: ^tidal.Session, id: i64, live: Artist_Live, a: mem.Allocator) -> (content: Artist_Content, err: tidal.Error) {
 	bio: string
 	bio, err = tidal.artist_bio(s, id, context.temp_allocator)
 	if e, failed := err.?; failed {
@@ -310,22 +345,22 @@ artist_load_bio :: proc(s: ^tidal.Session, id: i64, a: mem.Allocator) -> (conten
 }
 
 @(private = "file")
-artist_load_albums :: proc(s: ^tidal.Session, id: i64, a: mem.Allocator) -> (content: Artist_Content, err: tidal.Error) {
-	return album_pages(s, id, .Albums, a)
+artist_load_albums :: proc(s: ^tidal.Session, id: i64, live: Artist_Live, a: mem.Allocator) -> (content: Artist_Content, err: tidal.Error) {
+	return album_pages(s, id, .Albums, live, a)
 }
 
 @(private = "file")
-artist_load_singles :: proc(s: ^tidal.Session, id: i64, a: mem.Allocator) -> (content: Artist_Content, err: tidal.Error) {
-	return album_pages(s, id, .Singles, a)
+artist_load_singles :: proc(s: ^tidal.Session, id: i64, live: Artist_Live, a: mem.Allocator) -> (content: Artist_Content, err: tidal.Error) {
+	return album_pages(s, id, .Singles, live, a)
 }
 
 @(private = "file")
-artist_load_appears :: proc(s: ^tidal.Session, id: i64, a: mem.Allocator) -> (content: Artist_Content, err: tidal.Error) {
-	return album_pages(s, id, .Appears, a)
+artist_load_appears :: proc(s: ^tidal.Session, id: i64, live: Artist_Live, a: mem.Allocator) -> (content: Artist_Content, err: tidal.Error) {
+	return album_pages(s, id, .Appears, live, a)
 }
 
 @(private = "file")
-artist_load_similar :: proc(s: ^tidal.Session, id: i64, a: mem.Allocator) -> (content: Artist_Content, err: tidal.Error) {
+artist_load_similar :: proc(s: ^tidal.Session, id: i64, live: Artist_Live, a: mem.Allocator) -> (content: Artist_Content, err: tidal.Error) {
 	artists := tidal.artist_similar(s, id, a) or_return
 	cards := make([]Found, min(len(artists), ARTIST_CARDS_MAX), a)
 	for &f, i in cards {
@@ -336,11 +371,15 @@ artist_load_similar :: proc(s: ^tidal.Session, id: i64, a: mem.Allocator) -> (co
 }
 
 // album_pages asks for a shelf's albums ARTIST_PAGE_SIZE at a time until a
-// page comes back short, up to ARTIST_CARDS_MAX.
+// page comes back short, up to ARTIST_CARDS_MAX, or the page it's for is
+// evicted.
 @(private = "file")
-album_pages :: proc(s: ^tidal.Session, id: i64, part: Artist_Part, a: mem.Allocator) -> (content: Artist_Content, err: tidal.Error) {
+album_pages :: proc(s: ^tidal.Session, id: i64, part: Artist_Part, live: Artist_Live, a: mem.Allocator) -> (content: Artist_Content, err: tidal.Error) {
 	cards := make([dynamic]Found, 0, ARTIST_PAGE_SIZE, a)
 	for len(cards) < ARTIST_CARDS_MAX {
+		if !artist_live(live) {
+			return nil, tidal.Api_Error{kind = .Cancelled, message = "Request cancelled", retry_after = -1}
+		}
 		offset := len(cards)
 		albums: []tidal.Album
 		#partial switch part {

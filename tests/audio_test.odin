@@ -3,8 +3,10 @@ package tidal_tests
 import "core:encoding/base64"
 import "core:encoding/json"
 import "core:fmt"
+import "core:log"
 import "core:math"
 import "core:math/rand"
+import "core:net"
 import "core:slice"
 import "core:sync"
 import "core:testing"
@@ -122,6 +124,9 @@ flac_header :: proc(t: ^testing.T) {
 	// The header alone is enough; frames needn't be there.
 	testing.expect_value(t, audio.parse_flac_header(file[:start], h), audio.Parse_Status.Ok)
 	testing.expect_value(t, audio.parse_flac_header(transmute([]u8)string("OggS and more bytes"), h), audio.Parse_Status.Invalid)
+	// Cut inside the last block, PADDING: the first frame's offset is past
+	// the bytes there are, which read_header copies.
+	testing.expect_value(t, audio.parse_flac_header(file[:start - 50], h), audio.Parse_Status.Need_More)
 }
 
 @(test)
@@ -510,11 +515,13 @@ callback_never_wakes_the_decoder :: proc(t: ^testing.T) {
 	sync.lock(&p.cmd_mutex)
 	sync.atomic_store(&p.cmd_pending, true)
 	time.sleep(300 * time.Millisecond) // the decode thread is waiting for the lock
-	before := sync.atomic_load(&p.watch.sema.count)
+	before := sync.atomic_load(&p.watch.wake.sema.count)
 	time.sleep(time.Duration(audio.RING_FRAMES / 2 * i64(time.Second) / 44100)) // half the ring
-	after := sync.atomic_load(&p.watch.sema.count)
+	after := sync.atomic_load(&p.watch.wake.sema.count)
+	pending := sync.atomic_load(&p.watch.wake.pending)
 	sync.unlock(&p.cmd_mutex)
 	testing.expect_value(t, after, before)
+	testing.expect(t, !pending, "no wake is pending")
 	testing.expect(t, wait_audible(p, 1))
 	testing.expect_value(t, audio.status(p).underruns, underruns)
 }
@@ -548,4 +555,177 @@ listener_outlives_the_player :: proc(t: ^testing.T) {
 	sync.atomic_store(&l.stop, true)
 	thread.join(th)
 	thread.destroy(th)
+}
+
+// A read longer than the stream's window completes, and so do reads through
+// a window smaller than the history kept behind the reader. Either used to
+// wait for room that only the read itself could free.
+@(test)
+stream_reads_past_its_window :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	file := make([]u8, 1 << 20, context.temp_allocator)
+	for &b, i in file {
+		b = u8(i ~ i >> 8)
+	}
+	m.files["/big.flac"] = file
+	url := fmt.tprintf("%sbig.flac", m.base_url)
+	for read_size in ([]int{512 << 10, 16 << 10}) {
+		testing.expectf(t, read_through(url, file, 128 << 10, read_size), "%d KiB reads through a 128 KiB window", read_size >> 10)
+	}
+}
+
+@(private = "file")
+read_through :: proc(url: string, file: []u8, window, read_size: int) -> bool {
+	wake: audio.Wake
+	st := new(audio.Stream, context.temp_allocator)
+	audio.stream_init(st, &wake, window)
+	defer audio.stream_destroy(st)
+	audio.stream_open(st, url)
+	deadline := time.tick_add(time.tick_now(), 3 * time.Second)
+	give_up :: proc(data: rawptr) -> bool {
+		time.sleep(time.Millisecond)
+		return time.tick_diff(time.tick_now(), (^time.Tick)(data)^) <= 0
+	}
+	got := make([]u8, len(file), context.temp_allocator)
+	for pos := 0; pos < len(file); {
+		n, res := audio.stream_read(st, i64(pos), got[pos:min(pos + read_size, len(got))], give_up, &deadline)
+		if res != .Ok {
+			return false
+		}
+		pos += n
+	}
+	return slice.equal(got, file)
+}
+
+// A stream filling its window wakes the decode thread once, not once per
+// chunk: wake-ups the thread hasn't taken yet don't pile up.
+@(test)
+stream_wakes_coalesce :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	m.files["/big.flac"] = make([]u8, 1 << 20, context.temp_allocator)
+
+	wake: audio.Wake
+	st := new(audio.Stream, context.temp_allocator)
+	audio.stream_init(st, &wake)
+	defer audio.stream_destroy(st)
+	audio.stream_open(st, fmt.tprintf("%sbig.flac", m.base_url))
+	for i := 0; i < 300 && !audio.stream_done(st); i += 1 {
+		time.sleep(10 * time.Millisecond)
+	}
+	testing.expect(t, audio.stream_done(st), "the file arrived")
+	testing.expectf(t, sync.atomic_load(&wake.sema.count) == 1, "%d wake-ups pending", sync.atomic_load(&wake.sema.count))
+}
+
+// A paused track waiting for bytes that don't come sleeps until something
+// happens. A command marked pending without a post shows whether the decode
+// thread looked anyway; resuming, which posts, still gets through.
+@(test)
+paused_read_does_not_poll :: proc(t: ^testing.T) {
+	// A server that never answers: connections queue and nobody accepts.
+	sock, err := net.listen_tcp({address = net.IP4_Loopback, port = 0})
+	testing.expect(t, err == nil)
+	defer net.close(sock)
+	ep, _ := net.bound_endpoint(sock)
+
+	p := audio.create(no_wake, 0, null_output = true)
+	defer audio.destroy(p)
+	audio.play(p, {kind = .Flac, serial = 1, url = fmt.tprintf("http://127.0.0.1:%d/a.flac", ep.port), gain = 1, seconds = 5}, paused = true)
+	time.sleep(300 * time.Millisecond)
+
+	sync.atomic_store(&p.cmd_pending, true)
+	time.sleep(500 * time.Millisecond)
+	testing.expect(t, sync.atomic_load(&p.cmd_pending), "the decode thread woke with nothing posted")
+
+	audio.set_paused(p, false)
+	start := time.tick_now()
+	for audio.status(p).state != .Playing && time.tick_since(start) < time.Second {
+		time.sleep(5 * time.Millisecond)
+	}
+	testing.expect_value(t, audio.status(p).state, audio.Play_State.Playing)
+}
+
+// stream_clear gives the window's pages back. On Linux they read as zeros
+// after that, which shows the advice took.
+@(test)
+stream_clear_releases_the_window :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	file := make([]u8, 256 << 10, context.temp_allocator)
+	slice.fill(file, 0xa5)
+	m.files["/a.flac"] = file
+
+	wake: audio.Wake
+	st := new(audio.Stream, context.temp_allocator)
+	audio.stream_init(st, &wake)
+	defer audio.stream_destroy(st)
+	audio.stream_open(st, fmt.tprintf("%sa.flac", m.base_url))
+	for i := 0; i < 300 && !audio.stream_done(st); i += 1 {
+		time.sleep(10 * time.Millisecond)
+	}
+	testing.expect(t, audio.stream_done(st), "the file arrived")
+	testing.expect(t, !st.released, "the window holds the file")
+	audio.stream_clear(st)
+	testing.expect(t, st.released, "the window is released")
+	// Only this catches the old bug: macOS's MADV_FREE_REUSABLE may leave
+	// the bytes in place, while Linux's MADV_DONTNEED reads back zeros.
+	when ODIN_OS == .Linux {
+		testing.expect_value(t, slice.count(st.buf[:len(file)], 0), len(file))
+	}
+}
+
+// with_picture puts a PICTURE block of size bytes after STREAMINFO.
+@(private = "file")
+with_picture :: proc(file: []u8, size: int) -> []u8 {
+	out := make([dynamic]u8, 0, len(file) + 4 + size, context.temp_allocator)
+	append(&out, ..file[:42])
+	append(&out, 6, u8(size >> 16), u8(size >> 8), u8(size))
+	resize(&out, len(out) + size)
+	append(&out, ..file[42:])
+	return out[:]
+}
+
+// Cover art in the header plays, and the slot doesn't keep it. A header
+// bigger than any real one fails the track instead of being read whole.
+@(test)
+flac_header_size :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	file, _ := test_flac(400, 100)
+	m.files["/art.flac"] = with_picture(file, 4 << 20)
+	huge := make([dynamic]u8, context.temp_allocator)
+	tag := 20 << 20
+	append(&huge, 'I', 'D', '3', 4, 0, 0, u8(tag >> 21 & 0x7f), u8(tag >> 14 & 0x7f), u8(tag >> 7 & 0x7f), u8(tag & 0x7f))
+	resize(&huge, len(huge) + tag)
+	append(&huge, ..file)
+	m.files["/huge.flac"] = huge[:]
+
+	p := audio.create(no_wake, 0, null_output = true)
+	defer audio.destroy(p)
+	audio.play(p, {kind = .Flac, serial = 1, url = fmt.tprintf("%sart.flac", m.base_url), gain = 1, seconds = 10})
+	testing.expect(t, wait_audible(p, 1), "the track with art plays")
+	held := 0
+	for &sl in p.slots {
+		held += len(sl.stream.head)
+	}
+	testing.expectf(t, held < 4 << 10, "the slots hold %d header bytes", held)
+
+	runner := context.logger
+	context.logger = log.nil_logger() // the failure is logged as an error
+	q := audio.create(no_wake, 0, null_output = true)
+	context.logger = runner
+	defer audio.destroy(q)
+	audio.play(q, {kind = .Flac, serial = 2, url = fmt.tprintf("%shuge.flac", m.base_url), gain = 1, seconds = 10})
+	start := time.tick_now()
+	for audio.status(q).error.serial != 2 && time.tick_since(start) < 5 * time.Second {
+		time.sleep(5 * time.Millisecond)
+	}
+	s := audio.status(q)
+	testing.expect_value(t, s.error.serial, u64(2))
+	testing.expect_value(t, audio.error_text(&s.error), "the FLAC header is too big")
 }

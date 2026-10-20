@@ -349,7 +349,7 @@ pkce_login_against_mock :: proc(t: ^testing.T) {
 	testing.expect(t, tidal.session_is_pkce(s))
 
 	// A refresh goes out with the same client.
-	_, rerr := tidal.token_refresh(s, a.refresh_token)
+	_, rerr := tidal.token_refresh(s, a)
 	testing.expect_value(t, rerr, nil)
 	testing.expect_value(t, m.token_form["client_id"], "6BDSRdpK9hqEBTgU")
 
@@ -621,6 +621,7 @@ Traf :: struct {
 	count:       u32,
 	data_offset: i32, // with trun_flags & 1
 	sizes:       []u32, // with trun_flags & 0x200
+	tfdt:        []u8, // the tfdt body, version and flags included; none when empty
 }
 
 @(private = "file")
@@ -639,6 +640,11 @@ craft_moof :: proc(trafs: ..Traf) -> []u8 {
 			put32(&b, tf.default_len)
 		}
 		close_box(&b, tfhd)
+		if len(tf.tfdt) > 0 {
+			tfdt := open_box(&b, "tfdt")
+			append(&b, ..tf.tfdt)
+			close_box(&b, tfdt)
+		}
 		trun := open_box(&b, "trun")
 		put32(&b, tf.trun_flags)
 		put32(&b, tf.count)
@@ -737,6 +743,60 @@ fmp4_moof_bounds :: proc(t: ^testing.T) {
 	_, _, ost := audio.parse_mp4_init([]u8{0, 0, 0, 0, 'f', 'r', 'e', 'e'})
 	testing.expect_value(t, ost, audio.Parse_Status.Invalid)
 	testing.expect_value(t, len(samples), 1)
+}
+
+// tfdt holds a 32-bit time in version 0 and a 64-bit one in version 1. A
+// body too short for its version, or another version, is refused rather
+// than read as the other layout. So are tfhd and trun versions with no
+// known layout.
+@(test)
+fmp4_box_versions :: proc(t: ^testing.T) {
+	init := audio.Mp4_Init {
+		track_id = 1,
+	}
+	samples := make([dynamic]audio.Mp4_Sample, context.temp_allocator)
+	Case :: struct {
+		name: string,
+		tfdt: []u8,
+		ok:   bool,
+		time: u64,
+	}
+	cases := []Case {
+		{"version 0", {0, 0, 0, 0, 0x12, 0x34, 0x56, 0x78}, true, 0x12345678},
+		{"version 1", {1, 0, 0, 0, 0, 0, 0, 1, 0x12, 0x34, 0x56, 0x78}, true, 0x1_12345678},
+		{"version 1 with a 32-bit time", {1, 0, 0, 0, 0x12, 0x34, 0x56, 0x78}, false, 0},
+		{"version 0 without a time", {0, 0, 0, 0}, false, 0},
+		{"version 2", {2, 0, 0, 0, 0x12, 0x34, 0x56, 0x78}, false, 0},
+	}
+	for c in cases {
+		moof := craft_moof({track = 1, trun_flags = 0x201, count = 1, sizes = {10}, tfdt = c.tfdt})
+		data_start := i64(len(moof) + 8)
+		moof = craft_moof({track = 1, trun_flags = 0x201, count = 1, data_offset = i32(data_start), sizes = {10}, tfdt = c.tfdt})
+		clear(&samples)
+		frag, st := audio.parse_mp4_moof(moof, &init, &samples, data_start, data_start + 100)
+		testing.expectf(t, (st == .Ok) == c.ok, "%s: %v (%s)", c.name, st, frag.reason)
+		if c.ok {
+			testing.expectf(t, frag.has_base_time && frag.base_time == c.time, "%s: base time %v %x", c.name, frag.has_base_time, frag.base_time)
+		}
+	}
+
+	// The version is the top byte of the flags word. trun version 1 only
+	// makes composition offsets signed.
+	Version :: struct {
+		name: string,
+		tfhd: u32,
+		trun: u32,
+		ok:   bool,
+	}
+	versions := []Version{{"tfhd version 1", 1, 0, false}, {"trun version 2", 0, 2, false}, {"trun version 1", 0, 1, true}}
+	for c in versions {
+		tf := Traf{track = 1, tfhd_flags = c.tfhd << 24, trun_flags = c.trun << 24 | 0x201, count = 1, sizes = {10}}
+		tf.data_offset = i32(len(craft_moof(tf)) + 8)
+		moof := craft_moof(tf)
+		clear(&samples)
+		frag, st := audio.parse_mp4_moof(moof, &init, &samples, i64(tf.data_offset), i64(tf.data_offset) + 100)
+		testing.expectf(t, (st == .Ok) == c.ok, "%s: %v (%s)", c.name, st, frag.reason)
+	}
 }
 
 // Random damage to real moof boxes and init segments never crashes the

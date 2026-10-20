@@ -16,8 +16,8 @@
 // compose sequences for dead keys. Trackpad scrolls carry phases, and the
 // shell adds momentum after the fingers lift, since Wayland leaves that to
 // the client. Not here yet: accessibility (AT-SPI) and Now Playing (MPRIS);
-// the app's tree is kept for the test driver's ax-dump and ax-press, and
-// media keys reach the app while the window has the keyboard.
+// the shell takes the app's tree only for the test driver's ax-dump and
+// ax-press, and media keys reach the app while the window has the keyboard.
 
 #define _GNU_SOURCE
 #include <dlfcn.h>
@@ -35,6 +35,7 @@
 #include <sys/eventfd.h>
 #include <sys/inotify.h>
 #include <sys/mman.h>
+#include <sys/random.h>
 #include <sys/signalfd.h>
 #include <sys/stat.h>
 #include <sys/timerfd.h>
@@ -112,6 +113,7 @@ static struct wl_cursor_theme *g_cursor_theme;
 static struct wl_surface *g_cursor_surface;
 
 static bool g_configured;
+static bool g_configure_unanswered; // acked, and no frame drawn since
 static float g_width = DEFAULT_WIDTH, g_height = DEFAULT_HEIGHT; // points
 static float g_scale = 1;
 static int32_t g_buffer_scale = 1; // without fractional scaling
@@ -225,6 +227,7 @@ static void apply_scale(void) {
 static void draw_frame(void) {
   if (!g_app.api.frame || !g_configured) return;
   atomic_store(&g_needs_redraw, false);
+  g_configure_unanswered = false;
   // The callback goes with the commit the renderer's present makes.
   if (!g_frame_callback) {
     g_frame_callback = wl_surface_frame(g_surface);
@@ -265,9 +268,10 @@ static void frame_done(void *data, struct wl_callback *callback, uint32_t time) 
 // When a frame callback is pending, the deadline by which it should have
 // come; 0 when a redraw shouldn't wait for one. Input waits for it too:
 // Wayland doesn't merge pointer motion, and with MAILBOX a fast mouse
-// would otherwise draw a frame per event.
+// would otherwise draw a frame per event. A configure doesn't wait, so the
+// compositor gets a frame at the new size soon after it.
 static double frame_deadline(void) {
-  if (!g_frame_callback) return 0;
+  if (!g_frame_callback || g_configure_unanswered) return 0;
   double deadline = g_frame_requested + 2 * g_frame_interval;
   return now_seconds() < deadline ? deadline : 0;
 }
@@ -825,30 +829,86 @@ static void set_text_input(const Text_Input *ti) {
 
 // Clipboard
 //
-// The selection is offered as UTF-8 text. Reading another client's goes
-// through a pipe it writes to; reading our own is answered from the copy.
+// The selection is offered as UTF-8 text. Another client's is read on each
+// selection event, through a pipe the main loop polls, and wiped when the
+// window loses the keyboard; pastes copy from what arrived. Ours is answered
+// from our copy. Transfers both ways run in the main loop and never block it.
+
+#define CLIP_MAX (64 << 10) // the app's CLIPBOARD_MAX
+#define CLIP_SENDS 4
+
+typedef struct {
+  int fd; // -1 for a free slot
+  char *data;
+  size_t length, done;
+  uint64_t started;
+} Clip_Send;
 
 static char *g_clip; // what we offer, or NULL
 static size_t g_clip_len;
 static struct wl_data_source *g_clip_source;
-static struct wl_data_offer *g_offer; // the current selection, from another client
+static char g_own_mime[64]; // marks the offers that carry our own copy
+static Clip_Send g_sends[CLIP_SENDS] = {{.fd = -1}, {.fd = -1}, {.fd = -1}, {.fd = -1}};
+static uint64_t g_send_count;
+static struct wl_data_offer *g_offer; // the current selection
+static struct wl_data_offer *g_drag_offer; // a drag over the window, never accepted
 static bool g_offer_text;
+static bool g_selection_ours;
+static int g_receive_fd = -1;
+static uint8_t g_paste[CLIP_MAX]; // the selection's text, as far as it has arrived
+static size_t g_paste_len;
+
+static bool set_nonblocking(int fd) {
+  int flags = fcntl(fd, F_GETFL);
+  return flags >= 0 && fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
+}
 
 static void source_target(void *data, struct wl_data_source *s, const char *mime) {}
 
+static void end_send(Clip_Send *t) {
+  if (t->fd < 0) return;
+  close(t->fd);
+  free(t->data);
+  *t = (Clip_Send){.fd = -1};
+}
+
+static void end_receive(void) {
+  if (g_receive_fd < 0) return;
+  close(g_receive_fd);
+  g_receive_fd = -1;
+}
+
+static void send_more(Clip_Send *t) {
+  if (t->fd < 0) return;
+  ssize_t n = 0;
+  while (t->done < t->length && (n = write(t->fd, t->data + t->done, t->length - t->done)) > 0) t->done += (size_t)n;
+  if (t->done < t->length && n < 0 && errno == EAGAIN) return;
+  end_send(t);
+}
+
+// Each send keeps its own copy, since a new selection frees ours. A free
+// slot has started 0, so the oldest send gives way only when all are busy.
 static void source_send(void *data, struct wl_data_source *s, const char *mime, int32_t fd) {
-  size_t done = 0;
-  while (done < g_clip_len) {
-    ssize_t n = write(fd, g_clip + done, g_clip_len - done);
-    if (n <= 0) break;
-    done += (size_t)n;
+  Clip_Send *t = &g_sends[0];
+  for (int i = 1; i < CLIP_SENDS; i++)
+    if (g_sends[i].started < t->started) t = &g_sends[i];
+  end_send(t);
+  if (!set_nonblocking(fd) || !(t->data = malloc(g_clip_len + 1))) {
+    close(fd);
+    return;
   }
-  close(fd);
+  if (g_clip_len) memcpy(t->data, g_clip, g_clip_len);
+  t->fd = fd;
+  t->length = g_clip_len;
+  t->done = 0;
+  t->started = ++g_send_count;
+  send_more(t);
 }
 
 static void source_cancelled(void *data, struct wl_data_source *s) {
   if (s == g_clip_source) {
     g_clip_source = NULL;
+    g_selection_ours = false;
     free(g_clip);
     g_clip = NULL;
     g_clip_len = 0;
@@ -856,78 +916,144 @@ static void source_cancelled(void *data, struct wl_data_source *s) {
   wl_data_source_destroy(s);
 }
 
+static void source_dnd_drop_performed(void *data, struct wl_data_source *s) {}
+static void source_dnd_finished(void *data, struct wl_data_source *s) {}
+static void source_action(void *data, struct wl_data_source *s, uint32_t action) {}
+
 static const struct wl_data_source_listener g_source_listener = {
     .target = source_target,
     .send = source_send,
     .cancelled = source_cancelled,
+    .dnd_drop_performed = source_dnd_drop_performed,
+    .dnd_finished = source_dnd_finished,
+    .action = source_action,
 };
 
 static void set_clipboard(const uint8_t *text, size_t length) {
   if (!g_data_manager || !g_data_device) return;
+  char *copy = malloc(length + 1);
+  if (!copy) return;
+  if (length) memcpy(copy, text, length);
   free(g_clip);
-  g_clip = malloc(length);
-  memcpy(g_clip, text, length);
+  g_clip = copy;
   g_clip_len = length;
   struct wl_data_source *s = wl_data_device_manager_create_data_source(g_data_manager);
   wl_data_source_add_listener(s, &g_source_listener, NULL);
   wl_data_source_offer(s, "text/plain;charset=utf-8");
   wl_data_source_offer(s, "text/plain");
   wl_data_source_offer(s, "UTF8_STRING");
+  wl_data_source_offer(s, g_own_mime);
   wl_data_device_set_selection(g_data_device, s, g_serial);
   g_clip_source = s;
+  g_selection_ours = true;
 }
 
-// get_clipboard reads the whole selection each time it's asked: once for
-// the length and again for the bytes, as the app does.
-static size_t get_clipboard(uint8_t *buffer, size_t capacity) {
-  if (g_clip_source) {
-    if (buffer && capacity) memcpy(buffer, g_clip, g_clip_len < capacity ? g_clip_len : capacity);
-    return g_clip_len;
-  }
-  if (!g_offer || !g_offer_text) return 0;
-  int fds[2];
-  if (pipe2(fds, O_CLOEXEC) != 0) return 0;
-  wl_data_offer_receive(g_offer, "text/plain;charset=utf-8", fds[1]);
-  close(fds[1]);
-  wl_display_flush(g_display);
-  size_t total = 0;
-  uint8_t chunk[4096];
-  for (;;) {
-    struct pollfd p = {.fd = fds[0], .events = POLLIN};
-    if (poll(&p, 1, 1000) <= 0) break;
-    ssize_t n = read(fds[0], chunk, sizeof chunk);
-    if (n <= 0) break;
-    if (buffer && total < capacity) memcpy(buffer + total, chunk, (size_t)n < capacity - total ? (size_t)n : capacity - total);
-    total += (size_t)n;
-  }
-  close(fds[0]);
-  return total;
+static void receive_more(void) {
+  if (g_receive_fd < 0) return;
+  ssize_t n = 0;
+  while (g_paste_len < CLIP_MAX && (n = read(g_receive_fd, g_paste + g_paste_len, CLIP_MAX - g_paste_len)) > 0)
+    g_paste_len += (size_t)n;
+  if (g_paste_len < CLIP_MAX && n < 0 && errno == EAGAIN) return;
+  end_receive();
 }
+
+// The shell's copy of the selection may be a password, so it doesn't
+// outlive the focus.
+static void clear_paste(void) {
+  end_receive();
+  explicit_bzero(g_paste, g_paste_len);
+  g_paste_len = 0;
+}
+
+// While our own copy is the selection, get_clipboard reads it directly.
+static void receive_selection(void) {
+  clear_paste();
+  int fds[2];
+  if (g_selection_ours || !g_offer || !g_offer_text || pipe2(fds, O_CLOEXEC) != 0) return;
+  // The write end goes to the source client, which may expect it to block.
+  wl_data_offer_receive(g_offer, "text/plain;charset=utf-8", fds[1]);
+  wl_display_flush(g_display);
+  close(fds[1]);
+  if (!set_nonblocking(fds[0])) {
+    close(fds[0]);
+    return;
+  }
+  g_receive_fd = fds[0];
+}
+
+// A paste waits up to 100 ms for a selection that is still arriving, then
+// pastes nothing rather than part of it. Some compositors don't send the
+// selection again when the window gets the keyboard back, so a paste with
+// nothing received asks for it itself.
+static size_t get_clipboard(uint8_t *buffer, size_t capacity) {
+  if (g_receive_fd < 0 && g_paste_len == 0) receive_selection();
+  double deadline = now_seconds() + 0.1;
+  while (!g_selection_ours && g_receive_fd >= 0) {
+    int timeout = (int)ceil((deadline - now_seconds()) * 1000);
+    struct pollfd p = {.fd = g_receive_fd, .events = POLLIN};
+    if (timeout > 0 && poll(&p, 1, timeout) > 0) {
+      receive_more();
+    } else {
+      clear_paste();
+    }
+  }
+  const uint8_t *text = g_selection_ours ? (const uint8_t *)g_clip : g_paste;
+  size_t length = g_selection_ours ? g_clip_len : g_paste_len;
+  if (buffer && capacity && length) memcpy(buffer, text, length < capacity ? length : capacity);
+  return length;
+}
+
+typedef struct {
+  bool text, ours;
+} Offer_Flags;
 
 static void offer_offer(void *data, struct wl_data_offer *offer, const char *mime) {
-  if (!strcmp(mime, "text/plain;charset=utf-8")) *(bool *)data = true;
+  Offer_Flags *m = data;
+  if (!strcmp(mime, "text/plain;charset=utf-8")) m->text = true;
+  if (!strcmp(mime, g_own_mime)) m->ours = true;
 }
 
-static const struct wl_data_offer_listener g_offer_listener = {.offer = offer_offer};
+static void offer_source_actions(void *data, struct wl_data_offer *offer, uint32_t actions) {}
+static void offer_action(void *data, struct wl_data_offer *offer, uint32_t action) {}
 
-static bool g_new_offer_text;
+static const struct wl_data_offer_listener g_offer_listener = {
+    .offer = offer_offer,
+    .source_actions = offer_source_actions,
+    .action = offer_action,
+};
+
+// The protocol sends each selection or enter right after its data_offer.
+static Offer_Flags g_new_offer;
 
 static void device_data_offer(void *data, struct wl_data_device *d, struct wl_data_offer *offer) {
-  g_new_offer_text = false;
-  wl_data_offer_add_listener(offer, &g_offer_listener, &g_new_offer_text);
+  g_new_offer = (Offer_Flags){0};
+  wl_data_offer_add_listener(offer, &g_offer_listener, &g_new_offer);
 }
 
 static void device_selection(void *data, struct wl_data_device *d, struct wl_data_offer *offer) {
   if (g_offer && g_offer != offer) wl_data_offer_destroy(g_offer);
   g_offer = offer;
-  g_offer_text = offer && g_new_offer_text;
+  g_offer_text = offer && g_new_offer.text;
+  g_selection_ours = offer && g_new_offer.ours && g_clip_source;
+  receive_selection();
+}
+
+static void end_drag(void) {
+  if (g_drag_offer) wl_data_offer_destroy(g_drag_offer);
+  g_drag_offer = NULL;
 }
 
 static void device_enter(void *data, struct wl_data_device *d, uint32_t serial, struct wl_surface *s, wl_fixed_t x,
-                         wl_fixed_t y, struct wl_data_offer *offer) {}
-static void device_leave(void *data, struct wl_data_device *d) {}
+                         wl_fixed_t y, struct wl_data_offer *offer) {
+  end_drag();
+  g_drag_offer = offer;
+}
+
+static void device_leave(void *data, struct wl_data_device *d) { end_drag(); }
 static void device_motion(void *data, struct wl_data_device *d, uint32_t time, wl_fixed_t x, wl_fixed_t y) {}
-static void device_drop(void *data, struct wl_data_device *d) {}
+// We never accept a drag, so the drop is refused: finish would be a protocol
+// error without an accepted action.
+static void device_drop(void *data, struct wl_data_device *d) { end_drag(); }
 
 static const struct wl_data_device_listener g_device_listener = {
     .data_offer = device_data_offer,
@@ -941,7 +1067,8 @@ static const struct wl_data_device_listener g_device_listener = {
 // Accessibility
 //
 // Not exposed to assistive apps yet (AT-SPI over D-Bus). The shell keeps a
-// copy of the tree for the test driver.
+// copy of the tree for the test driver, and offers set_accessibility only
+// when it runs.
 
 typedef struct {
   uint64_t id;
@@ -1293,10 +1420,15 @@ static void keyboard_enter(void *data, struct wl_keyboard *k, uint32_t serial, s
   request_redraw();
 }
 
-static void keyboard_leave(void *data, struct wl_keyboard *k, uint32_t serial, struct wl_surface *s) {
-  g_key_window = false;
+static void stop_repeat(void) {
   g_repeat_key = 0;
   arm_timer(g_repeat_fd, 0, 0);
+}
+
+static void keyboard_leave(void *data, struct wl_keyboard *k, uint32_t serial, struct wl_surface *s) {
+  g_key_window = false;
+  stop_repeat();
+  clear_paste();
   request_redraw();
 }
 
@@ -1364,10 +1496,7 @@ static void keyboard_key(void *data, struct wl_keyboard *k, uint32_t serial, uin
       arm_timer(g_repeat_fd, g_repeat_delay / 1000.0, 1.0 / g_repeat_rate);
     }
   } else {
-    if (g_repeat_key == keycode) {
-      g_repeat_key = 0;
-      arm_timer(g_repeat_fd, 0, 0);
-    }
+    if (g_repeat_key == keycode) stop_repeat();
     push_event((Event){
         .kind = EVENT_KEY_UP,
         .modifiers = g_modifiers,
@@ -1391,6 +1520,7 @@ static void keyboard_modifiers(void *data, struct wl_keyboard *k, uint32_t seria
 static void keyboard_repeat_info(void *data, struct wl_keyboard *k, int32_t rate, int32_t delay) {
   g_repeat_rate = rate;
   g_repeat_delay = delay;
+  stop_repeat();
 }
 
 static const struct wl_keyboard_listener g_keyboard_listener = {
@@ -1416,6 +1546,7 @@ static void seat_capabilities(void *data, struct wl_seat *seat, uint32_t caps) {
   } else if (!(caps & WL_SEAT_CAPABILITY_KEYBOARD) && g_keyboard) {
     wl_keyboard_release(g_keyboard);
     g_keyboard = NULL;
+    keyboard_leave(NULL, NULL, 0, NULL);
   }
 }
 
@@ -1439,9 +1570,7 @@ static void xdg_surface_configure(void *data, struct xdg_surface *s, uint32_t se
     g_height = g_pending_height;
   }
   push_event((Event){.kind = EVENT_RESIZE, .x = g_width, .y = g_height});
-  // Draw now, so the compositor gets a frame at the new size with this
-  // configure.
-  draw_frame();
+  g_configure_unanswered = true;
 }
 
 static const struct xdg_surface_listener g_xdg_surface_listener = {.configure = xdg_surface_configure};
@@ -1899,15 +2028,19 @@ static bool connect_wayland(void) {
 }
 
 static void main_loop(void) {
-  struct pollfd fds[8];
-  enum { FD_WAYLAND, FD_REDRAW, FD_WAKE, FD_REPEAT, FD_MOMENTUM, FD_TEST, FD_SIGNAL, FD_INOTIFY };
+  enum { FD_WAYLAND, FD_REDRAW, FD_WAKE, FD_REPEAT, FD_MOMENTUM, FD_TEST, FD_SIGNAL, FD_INOTIFY, FD_RECEIVE, FD_SEND, FD_COUNT = FD_SEND + CLIP_SENDS };
+  struct pollfd fds[FD_COUNT];
   int wl_fd = wl_display_get_fd(g_display);
   while (!g_quit) {
-    while (wl_display_prepare_read(g_display) != 0) wl_display_dispatch_pending(g_display);
-    if (wl_display_flush(g_display) < 0 && errno != EAGAIN) {
-      wl_display_cancel_read(g_display);
-      fprintf(stderr, "shell: lost the Wayland connection\n");
-      break;
+    while (wl_display_prepare_read(g_display) != 0)
+      if (wl_display_dispatch_pending(g_display) < 0) goto lost;
+    bool unflushed = false;
+    if (wl_display_flush(g_display) < 0) {
+      if (errno != EAGAIN) {
+        wl_display_cancel_read(g_display);
+        goto lost;
+      }
+      unflushed = true;
     }
     int timeout = -1;
     if (atomic_load(&g_needs_redraw) && g_configured) {
@@ -1915,22 +2048,18 @@ static void main_loop(void) {
       timeout = deadline == 0 ? 0 : (int)ceil((deadline - now_seconds()) * 1000);
       if (timeout < 0) timeout = 0;
     }
-    int fd_list[8] = {wl_fd, g_redraw_fd, g_wake_fd, g_repeat_fd, g_momentum_fd, g_test_fd, g_signal_fd, g_inotify_fd};
-    for (int i = 0; i < 8; i++) fds[i] = (struct pollfd){.fd = fd_list[i], .events = POLLIN};
-    int n = poll(fds, 8, timeout);
+    int fd_list[FD_SEND] = {wl_fd, g_redraw_fd, g_wake_fd, g_repeat_fd, g_momentum_fd, g_test_fd, g_signal_fd, g_inotify_fd, g_receive_fd};
+    for (int i = 0; i < FD_SEND; i++) fds[i] = (struct pollfd){.fd = fd_list[i], .events = POLLIN};
+    for (int i = 0; i < CLIP_SENDS; i++) fds[FD_SEND + i] = (struct pollfd){.fd = g_sends[i].fd, .events = POLLOUT};
+    if (unflushed) fds[FD_WAYLAND].events |= POLLOUT;
+    int n = poll(fds, FD_COUNT, timeout);
     if (n > 0 && (fds[FD_WAYLAND].revents & POLLIN)) {
-      if (wl_display_read_events(g_display) < 0) {
-        fprintf(stderr, "shell: lost the Wayland connection\n");
-        break;
-      }
+      if (wl_display_read_events(g_display) < 0) goto lost;
     } else {
       wl_display_cancel_read(g_display);
     }
-    if (fds[FD_WAYLAND].revents & (POLLERR | POLLHUP)) {
-      fprintf(stderr, "shell: lost the Wayland connection\n");
-      break;
-    }
-    wl_display_dispatch_pending(g_display);
+    if (fds[FD_WAYLAND].revents & (POLLERR | POLLHUP)) goto lost;
+    if (wl_display_dispatch_pending(g_display) < 0) goto lost;
     if (fds[FD_REDRAW].revents & POLLIN) drain(g_redraw_fd);
     if (fds[FD_WAKE].revents & POLLIN) {
       drain(g_wake_fd);
@@ -1958,10 +2087,16 @@ static void main_loop(void) {
       }
       reload_if_changed();
     }
+    if (fds[FD_RECEIVE].revents) receive_more();
+    for (int i = 0; i < CLIP_SENDS; i++)
+      if (fds[FD_SEND + i].revents) send_more(&g_sends[i]);
     // A burst of events becomes one frame. A redraw waits for the pending
     // frame callback, or its deadline.
     if (atomic_load(&g_needs_redraw) && g_configured && frame_deadline() == 0) draw_frame();
   }
+  return;
+lost:
+  fprintf(stderr, "shell: lost the Wayland connection\n");
 }
 
 int main(int argc, char **argv) {
@@ -1999,6 +2134,14 @@ int main(int argc, char **argv) {
   g_signal_fd = signalfd(-1, &quit_signals, SFD_NONBLOCK | SFD_CLOEXEC);
   // A clipboard reader that closes its end early mustn't kill the app.
   signal(SIGPIPE, SIG_IGN);
+  // The random part tells apart two instances with the same pid in different pid namespaces.
+  uint64_t nonce = 0;
+  if (getrandom(&nonce, sizeof nonce, GRND_NONBLOCK) != (ssize_t)sizeof nonce) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    nonce = (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
+  }
+  snprintf(g_own_mime, sizeof g_own_mime, "application/x-tidalfast-%d-%016llx", getpid(), (unsigned long long)nonce);
 
   g_redraw_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
   g_wake_fd = new_timer();
@@ -2016,7 +2159,7 @@ int main(int argc, char **argv) {
       .set_text_input = set_text_input,
       .set_clipboard = set_clipboard,
       .get_clipboard = get_clipboard,
-      .set_accessibility = set_accessibility,
+      .set_accessibility = getenv("TIDALFAST_SHELL_TEST") ? set_accessibility : NULL,
   };
 
   if (!open_app(&g_app)) return 1;
@@ -2025,9 +2168,9 @@ int main(int argc, char **argv) {
 #if HOT_RELOAD
   watch_app();
 #endif
-  // The first configure draws the first frame.
   while (!g_configured && wl_display_dispatch(g_display) >= 0) {
   }
+  draw_frame();
   measure_mark("window");
   setup_shell_test();
   request_redraw();

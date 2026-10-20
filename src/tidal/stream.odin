@@ -25,11 +25,52 @@ stream_is_bts :: proc(s: Stream) -> bool {
 
 // stream_manifest_data base64-decodes the manifest.
 stream_manifest_data :: proc(s: Stream, allocator := context.allocator) -> (data: string, err: Error) {
-	bytes, derr := base64.decode(s.manifest, allocator = allocator)
+	return decode_manifest(s.manifest, allocator)
+}
+
+@(private)
+decode_manifest :: proc(manifest: string, allocator: mem.Allocator) -> (data: string, err: Error) {
+	bytes, derr := base64.decode(manifest, allocator = allocator)
 	if derr != nil {
 		return "", make_error(.Manifest_Decode, "Stream manifest is not valid base64")
 	}
 	return string(bytes), nil
+}
+
+// A decoded BTS manifest: one or more file URLs.
+@(private)
+Bts_Manifest :: struct {
+	codec:           string, // upper case, without the profile: FLAC, MP4A
+	mime_type:       string,
+	encryption_type: string,
+	key_id:          string, // only with an encryption_type
+	urls:            []string,
+}
+
+@(private)
+parse_bts :: proc(data: string, allocator: mem.Allocator) -> (m: Bts_Manifest, err: Error) {
+	v, jerr := json.parse_string(data, .JSON, true, context.temp_allocator)
+	obj, is_obj := v.(json.Object)
+	if jerr != nil || !is_obj {
+		return {}, make_error(.Manifest_Decode, "BTS manifest is not valid JSON")
+	}
+	p := Parser {
+		allocator = allocator,
+	}
+	codec := strings.to_upper(jstr(obj, "codecs"), context.temp_allocator)
+	if dot := strings.index_byte(codec, '.'); dot >= 0 {
+		codec = codec[:dot]
+	}
+	m = Bts_Manifest {
+		codec           = strings.clone(codec, allocator),
+		mime_type       = pstr(&p, obj, "mimeType"),
+		encryption_type = pstr(&p, obj, "encryptionType"),
+		urls            = pstrings(&p, obj, "urls"),
+	}
+	if m.encryption_type != "" {
+		m.key_id = pstr(&p, obj, "keyId")
+	}
+	return m, nil
 }
 
 // mime_type_from_codec maps a codec name to the MIME type TIDAL uses for it.
@@ -93,27 +134,13 @@ stream_get_manifest :: proc(s: Stream, allocator := context.allocator) -> (m: St
 	} else if stream_is_bts(s) {
 		data := stream_manifest_data(s, allocator) or_return
 		m.manifest_parsed = data
-		v, jerr := json.parse_string(data, .JSON, true, context.temp_allocator)
-		obj, is_obj := v.(json.Object)
-		if jerr != nil || !is_obj {
-			return {}, make_error(.Manifest_Decode, "BTS manifest is not valid JSON")
-		}
-		p := Parser {
-			allocator = allocator,
-		}
+		bts := parse_bts(data, allocator) or_return
 		// TODO: Handle more than one download URL
-		m.urls = pstrings(&p, obj, "urls")
-		// Codecs can be read directly from BTS
-		codecs := strings.to_upper(jstr(obj, "codecs"), context.temp_allocator)
-		if dot := strings.index_byte(codecs, '.'); dot >= 0 {
-			codecs = codecs[:dot]
-		}
-		m.codecs = strings.clone(codecs, allocator)
-		m.mime_type = pstr(&p, obj, "mimeType")
-		m.encryption_type = pstr(&p, obj, "encryptionType")
-		if m.encryption_type != "" {
-			m.encryption_key = pstr(&p, obj, "keyId")
-		}
+		m.urls = bts.urls
+		m.codecs = bts.codec
+		m.mime_type = bts.mime_type
+		m.encryption_type = bts.encryption_type
+		m.encryption_key = bts.key_id
 	} else {
 		return {}, make_error(.Unknown_Manifest_Format, "Unknown manifest format", detail = m.manifest_mime_type)
 	}

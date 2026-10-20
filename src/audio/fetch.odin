@@ -33,22 +33,15 @@ STREAM_WINDOW :: 3 << 20 // bytes kept per track, about 17 s of 16/44.1 FLAC, 5 
 KEEP_BEHIND :: 256 << 10 // bytes kept before the read position, for short seeks back
 FETCH_RETRIES :: 5
 
-// Darwin's madvise advice for memory a process gives back and takes again:
-// pages marked reusable leave the process's footprint at once.
-@(private = "file")
-MADV_FREE_REUSABLE :: 7
-@(private = "file")
-MADV_FREE_REUSE :: 8
-
 Stream :: struct {
 	mutex:       sync.Mutex,
 	cond:        sync.Cond, // room in the window, a new request, or stop
 	url:         string, // borrowed from the slot until stream_clear
 	buf:         []u8, // the window, page aligned; file offset o lives at buf[o % len]
-	released:    bool, // buf's pages went back to the system; written again after MADV_FREE_REUSE
+	released:    bool, // buf's pages went back to the system; written again after pages_reuse
 	win_start:   i64, // oldest byte still held
 	win_end:     i64, // one past the newest byte
-	read_pos:    i64, // the decoder's position; bytes before it minus KEEP_BEHIND may go
+	read_pos:    i64, // the decoder's position; bytes before keep_from may go
 	length:      i64, // file size, -1 until a response says
 	gen:         u64, // bumped by stream_restart; a transfer for an older gen stops
 	active:      bool, // has a URL; the fetch thread works on it
@@ -61,16 +54,16 @@ Stream :: struct {
 	http_status: int, // of the last failed response, 0 for transport errors
 	error:       [96]u8,
 	stop:        bool,
-	wake:        ^sync.Atomic_Sema, // the decode thread's, posted when bytes arrive
+	wake:        ^Wake, // the decode thread's, posted when bytes arrive
 	thread:      posix.pthread_t,
 	// Header and seek data, filled by the decode thread once it has read them.
 	header:      Flac_Header,
-	head:        []u8, // the bytes before the first frame, borrowed, like url
+	head:        []u8, // from flac_decoder_head, read before the frames; borrowed, like url
 	has_header:  bool,
 	logger:      runtime.Logger, // stream_init's caller's, for the fetch thread
 }
 
-stream_init :: proc(st: ^Stream, wake: ^sync.Atomic_Sema, window := STREAM_WINDOW) {
+stream_init :: proc(st: ^Stream, wake: ^Wake, window := STREAM_WINDOW) {
 	// Its own mapping, so stream_clear can give the pages back.
 	buf, err := vmem.reserve_and_commit(uint(window))
 	assert(err == nil, "audio: no memory for the stream window")
@@ -160,8 +153,7 @@ stream_clear :: proc(st: ^Stream) {
 stream_clear_locked :: proc(st: ^Stream) {
 	// Nothing in the window is wanted any more: a stop, another track or
 	// none. Its pages stop counting against the app until bytes arrive.
-	if !st.released {
-		posix.posix_madvise(raw_data(st.buf), len(st.buf), transmute(posix.MAdvice)i32(MADV_FREE_REUSABLE))
+	if !st.released && pages_release(st.buf) {
 		st.released = true
 	}
 	st.url = ""
@@ -197,60 +189,61 @@ Read_Result :: enum u8 {
 	Ok,
 	Eof, // fewer bytes than asked: the file ends
 	Failed, // the fetch gave up
-	Interrupted, // interrupt returned true
+	Interrupted, // wait returned true
 }
 
 // stream_read copies len(dst) bytes from offset, waiting for them to
-// arrive. While it waits it calls interrupt, which can handle commands and
-// return true to give up. Moves the read position to the end of what it
-// copied.
-stream_read :: proc(st: ^Stream, offset: i64, dst: []u8, interrupt: proc(data: rawptr) -> bool, data: rawptr) -> (n: int, res: Read_Result) {
+// arrive. It takes them as they come, so dst may be longer than the window.
+// Each time the bytes aren't there yet it calls wait, which sleeps until
+// the stream's wake is posted, can handle commands, and returns true to
+// give up. Moves the read position to the end of what it copied, and n
+// counts those bytes whatever the result.
+stream_read :: proc(st: ^Stream, offset: i64, dst: []u8, wait: proc(data: rawptr) -> bool, data: rawptr) -> (n: int, res: Read_Result) {
 	for {
 		sync.lock(&st.mutex)
-		if st.dash && offset < st.win_start {
+		at := offset + i64(n)
+		if st.dash && at < st.win_start {
 			sync.unlock(&st.mutex)
-			return 0, .Failed
+			return n, .Failed
 		}
-		if !st.dash && (offset < st.win_start || offset > st.win_end) {
+		if !st.dash && (at < st.win_start || at > st.win_end) {
 			// Not held and not next: move the window here.
 			sync.unlock(&st.mutex)
-			stream_restart(st, offset)
+			stream_restart(st, at)
 			continue
 		}
-		want := i64(len(dst))
+		want := i64(len(dst) - n)
 		if st.length >= 0 {
-			want = clamp(st.length - offset, 0, want)
+			want = clamp(st.length - at, 0, want)
 		}
-		have := st.win_end - offset
-		if have >= want {
-			cap := i64(len(st.buf))
-			for i in 0 ..< want {
-				dst[i] = st.buf[(offset + i) % cap]
-			}
-			st.read_pos = offset + want
+		k := clamp(st.win_end - at, 0, want)
+		ring_read(st.buf, at, dst[n:][:k])
+		n += int(k)
+		at += k
+		if k == want {
+			st.read_pos = at
 			sync.cond_broadcast(&st.cond)
 			sync.unlock(&st.mutex)
-			if want < i64(len(dst)) {
-				return int(want), .Eof
+			if n < len(dst) {
+				return n, .Eof
 			}
-			return int(want), .Ok
+			return n, .Ok
 		}
 		// The fetcher may be waiting for room that only moving read_pos
 		// frees. A DASH read can be ahead of what has arrived, when it skips
 		// a box; bytes before it may go as they arrive.
-		if pos := min(offset, st.win_end); st.read_pos != pos {
+		if pos := min(at, st.win_end); st.read_pos != pos {
 			st.read_pos = pos
 			sync.cond_broadcast(&st.cond)
 		}
 		failed := st.failed
 		sync.unlock(&st.mutex)
 		if failed {
-			return 0, .Failed
+			return n, .Failed
 		}
-		if interrupt != nil && interrupt(data) {
-			return 0, .Interrupted
+		if wait(data) {
+			return n, .Interrupted
 		}
-		sync.atomic_sema_wait_with_timeout(st.wake, 100 * time.Millisecond)
 	}
 }
 
@@ -352,6 +345,7 @@ fetch_main :: proc "c" (arg: rawptr) -> rawptr {
 		ok := code == .E_OK && (t.status == 200 || t.status == 206 || (t.status == 416 && !st.dash))
 		if t.status == 416 && st.length < 0 && !st.dash {
 			st.length = st.win_end
+			wake_post(st.wake)
 		}
 		if ok && st.dash {
 			// A whole segment: on to the next. After the last the length is known.
@@ -363,7 +357,7 @@ fetch_main :: proc "c" (arg: rawptr) -> rawptr {
 			}
 			if st.seg_next == len(st.seg_urls) {
 				st.length = st.win_end
-				sync.atomic_sema_post(st.wake)
+				wake_post(st.wake)
 			}
 		} else if ok && st.length >= 0 && st.win_end >= st.length {
 			failures = 0
@@ -386,7 +380,7 @@ fetch_main :: proc "c" (arg: rawptr) -> rawptr {
 				log.warnf("audio: fetch failed at byte %d: %s", start, msg)
 				st.failed = true
 				sync.unlock(&st.mutex)
-				sync.atomic_sema_post(st.wake)
+				wake_post(st.wake)
 				continue
 			}
 			// Back off before trying again, unless a new request comes in.
@@ -399,13 +393,37 @@ fetch_main :: proc "c" (arg: rawptr) -> rawptr {
 	return nil
 }
 
-// window_full says the fetcher must wait for the decoder: the window holds
-// STREAM_WINDOW bytes and none of them are far enough behind the reader to
-// drop. Caller holds the mutex.
+// window_full says the fetcher must wait for the decoder: the window is
+// full and none of its bytes are far enough behind the reader to drop.
+// Caller holds the mutex.
 @(private = "file")
 window_full :: proc(st: ^Stream) -> bool {
-	keep_from := max(st.win_start, st.read_pos - KEEP_BEHIND)
-	return st.win_end - keep_from >= i64(len(st.buf))
+	return st.win_end - keep_from(st) >= i64(len(st.buf))
+}
+
+// ring_read copies the bytes from file offset at into dst, which is no
+// longer than buf.
+@(private = "file")
+ring_read :: proc(buf: []u8, at: i64, dst: []u8) {
+	k := copy(dst, buf[at % i64(len(buf)):])
+	copy(dst[k:], buf)
+}
+
+// ring_write copies src into buf from file offset at. src is no longer than
+// buf, or its head would be overwritten by its own tail.
+@(private = "file")
+ring_write :: proc(buf: []u8, at: i64, src: []u8) {
+	k := copy(buf[at % i64(len(buf)):], src)
+	copy(buf, src[k:])
+}
+
+// keep_from is the oldest byte the window must still hold: KEEP_BEHIND
+// before the reader, or less in a small window, which must keep most of
+// itself for the bytes ahead. Caller holds the mutex.
+@(private = "file")
+keep_from :: proc(st: ^Stream) -> i64 {
+	behind := min(KEEP_BEHIND, i64(len(st.buf)) / 4)
+	return max(st.win_start, st.read_pos - behind)
 }
 
 @(private = "file")
@@ -467,6 +485,7 @@ header_callback :: proc "c" (buffer: [^]byte, size: c.size_t, nitems: c.size_t, 
 				sync.guard(&st.mutex)
 				if st.gen == t.gen {
 					st.length = total
+					wake_post(st.wake)
 				}
 			}
 		}
@@ -475,6 +494,7 @@ header_callback :: proc "c" (buffer: [^]byte, size: c.size_t, nitems: c.size_t, 
 			sync.guard(&st.mutex)
 			if st.gen == t.gen {
 				st.length = total
+				wake_post(st.wake)
 			}
 			// A 200 to a range request sends the file from the start.
 			t.skip = t.pos
@@ -500,8 +520,7 @@ write_callback :: proc "c" (buffer: [^]byte, size: c.size_t, nitems: c.size_t, u
 	}
 	sync.lock(&st.mutex)
 	defer sync.unlock(&st.mutex)
-	if st.released {
-		posix.posix_madvise(raw_data(st.buf), len(st.buf), transmute(posix.MAdvice)i32(MADV_FREE_REUSE))
+	if st.released && pages_reuse(st.buf) {
 		st.released = false
 	}
 	cap := i64(len(st.buf))
@@ -514,17 +533,14 @@ write_callback :: proc "c" (buffer: [^]byte, size: c.size_t, nitems: c.size_t, u
 			sync.cond_wait(&st.cond, &st.mutex)
 			continue
 		}
-		keep_from := max(st.win_start, st.read_pos - KEEP_BEHIND)
-		room := cap - (st.win_end - keep_from)
+		room := cap - (st.win_end - keep_from(st))
 		k := min(room, i64(len(data)))
-		for i in 0 ..< k {
-			st.buf[(st.win_end + i) % cap] = data[i]
-		}
+		ring_write(st.buf, st.win_end, data[:k])
 		st.win_end += k
 		st.win_start = max(st.win_start, st.win_end - cap)
 		t.pos = st.win_end
 		data = data[k:]
-		sync.atomic_sema_post(st.wake)
+		wake_post(st.wake)
 	}
 	return c.size_t(n)
 }

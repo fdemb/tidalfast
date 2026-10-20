@@ -24,6 +24,7 @@ import "core:log"
 import "core:math"
 import "core:mem"
 import "core:sync"
+import "core:time"
 import vk "vendor:vulkan"
 
 import "../platform"
@@ -38,6 +39,7 @@ foreign vulkan {
 MAX_SWAPCHAIN_IMAGES :: 8
 MAX_DEAD :: 512 // textures freed in one frame before they wait for the GPU instead
 STAGING_START :: 4 << 20
+MAX_WRITES :: 64 // images one upload holds as transfer destinations
 
 VERTEX_SPIRV :: #load("../../build/shaders/rect.vert.spv")
 FRAGMENT_SPIRV :: #load("../../build/shaders/rect.frag.spv")
@@ -48,22 +50,40 @@ Gpu_Frame :: struct {
 	uploading:      bool, // upload has commands recorded since begin
 	fence:          vk.Fence,
 	ready:          bool, // the fence was waited for since the last submit
+	// Time spent waiting for the GPU to free the slot, until begin_frame
+	// reports it. A flush_slot after begin_frame shows up FRAMES_IN_FLIGHT
+	// frames late, when the slot next begins.
+	wait_ms:        f32,
 	acquired:       vk.Semaphore,
 	instances:      Gpu_Buffer,
 	set:            vk.DescriptorSet, // the instance buffer and samplers
 	staging:        Gpu_Buffer,
 	staging_used:   int,
+	writes:         [MAX_WRITES]Image_Write,
+	write_count:    int,
 	dead:           [MAX_DEAD]Gpu_Texture,
 	dead_count:     int,
 	dead_buffers:   [8]Gpu_Buffer, // staging buffers outgrown this frame
 	dead_buffer_count: int,
+	capture:        Gpu_Buffer, // the frame's pixels for TIDALFAST_CAPTURE, until end_frame writes them out
+}
+
+// An image the slot's upload commands hold as a transfer destination until
+// end_writes hands it back to the shaders, so the writes to it between
+// share one pair of barriers.
+Image_Write :: struct {
+	image:         vk.Image,
+	levels:        u32,
+	width, height: i32,
+	written:       [4]i32, // x0 y0 x1 y1 written since the last barrier
 }
 
 Gpu_Buffer :: struct {
-	buffer: vk.Buffer,
-	memory: vk.DeviceMemory,
-	mapped: [^]u8,
-	size:   int,
+	buffer:    vk.Buffer,
+	memory:    vk.DeviceMemory,
+	mapped:    [^]u8,
+	size:      int, // what the buffer was made with, all a copy may use
+	allocated: int, // bytes of memory behind it, which can be more
 }
 
 // Not yet: push_backdrop draws its tint, and the app keeps the player bar
@@ -81,6 +101,7 @@ Gpu :: struct {
 	format:           vk.Format,
 	swapchain:        vk.SwapchainKHR,
 	extent:           vk.Extent2D,
+	requested:        vk.Extent2D, // the size asked of make_swapchain, before it clamps; zero makes it again
 	image_count:      u32,
 	images:           [MAX_SWAPCHAIN_IMAGES]vk.Image,
 	views:            [MAX_SWAPCHAIN_IMAGES]vk.ImageView,
@@ -114,9 +135,7 @@ Gpu_Texture :: struct {
 init :: proc(r: ^Renderer, surface: rawptr) -> (ok: bool) {
 	g := &r.gpu
 	defer if !ok {
-		path := r.capture_path
-		destroy(r)
-		r.capture_path = path
+		release(r)
 	}
 	ws := (^platform.Wayland_Surface)(surface)
 	if ws == nil || ws.display == nil || ws.surface == nil {
@@ -265,6 +284,15 @@ reload :: proc(r: ^Renderer) -> bool {
 }
 
 destroy :: proc(r: ^Renderer) {
+	release(r)
+	r^ = {}
+}
+
+// release frees the GPU objects, so g.device is nil and the renderer draws
+// nothing. It keeps the frame's counts, batches and clips, which a failed
+// submit can leave halfway, and the capture path the shell set. Each slot's
+// generation moves on, as in texture_destroy, so no old handle matches.
+release :: proc(r: ^Renderer) {
 	g := &r.gpu
 	if g.device != nil {
 		vk.DeviceWaitIdle(g.device)
@@ -272,6 +300,7 @@ destroy :: proc(r: ^Renderer) {
 			free_dead(r, &f)
 			free_buffer(g, &f.instances)
 			free_buffer(g, &f.staging)
+			free_buffer(g, &f.capture)
 			vk.DestroyFence(g.device, f.fence, nil)
 			vk.DestroySemaphore(g.device, f.acquired, nil)
 		}
@@ -300,7 +329,12 @@ destroy :: proc(r: ^Renderer) {
 		}
 		vk.DestroyInstance(g.instance, nil)
 	}
-	r^ = {}
+	r.gpu = {}
+	for &slot in r.textures {
+		slot = {generation = slot.generation + 1}
+	}
+	r.instances = nil
+	r.capacity = {}
 }
 
 // gpu_allocated is the device memory the renderer holds, in bytes. Safe
@@ -632,7 +666,8 @@ new_buffer :: proc(g: ^Gpu, size: int, usage: vk.BufferUsageFlags) -> (b: Gpu_Bu
 		vk.DestroyBuffer(g.device, b.buffer, nil)
 		return {}, false
 	}
-	b.size = int(req.size)
+	b.size = size
+	b.allocated = int(req.size)
 	vk.BindBufferMemory(g.device, b.buffer, b.memory, 0)
 	p: rawptr
 	vk.MapMemory(g.device, b.memory, 0, vk.DeviceSize(vk.WHOLE_SIZE), {}, &p)
@@ -644,7 +679,7 @@ new_buffer :: proc(g: ^Gpu, size: int, usage: vk.BufferUsageFlags) -> (b: Gpu_Bu
 free_buffer :: proc(g: ^Gpu, b: ^Gpu_Buffer) {
 	if b.buffer != 0 {
 		vk.DestroyBuffer(g.device, b.buffer, nil)
-		free_memory(g, b.memory, b.size)
+		free_memory(g, b.memory, b.allocated)
 	}
 	b^ = {}
 }
@@ -661,13 +696,34 @@ slot_ready :: proc(r: ^Renderer) -> ^Gpu_Frame {
 	if f.ready {
 		return f
 	}
+	wait := time.tick_now()
 	vk.WaitForFences(g.device, 1, &f.fence, true, max(u64))
+	f.wait_ms += f32(time.duration_milliseconds(time.tick_since(wait)))
 	f.ready = true
 	free_dead(r, f)
-	f.staging_used = 0
 	return f
 }
 
+// flush_slot runs the uploads recorded so far and waits for the GPU to
+// finish everything, so what waits in the slot can go now instead of
+// after the next frame. For when the slot runs out of room to keep it.
+// nil if the submit failed and the renderer stopped.
+@(private)
+flush_slot :: proc(r: ^Renderer) -> ^Gpu_Frame {
+	f := slot_ready(r)
+	if !submit_uploads(r, f) {
+		return nil
+	}
+	wait := time.tick_now()
+	vk.DeviceWaitIdle(r.gpu.device)
+	f.wait_ms += f32(time.duration_milliseconds(time.tick_since(wait)))
+	f.ready = true
+	free_dead(r, f)
+	return f
+}
+
+// free_dead frees what waited for the GPU to finish with the slot and
+// empties its staging buffer.
 @(private)
 free_dead :: proc(r: ^Renderer, f: ^Gpu_Frame) {
 	g := &r.gpu
@@ -679,6 +735,20 @@ free_dead :: proc(r: ^Renderer, f: ^Gpu_Frame) {
 		free_buffer(g, &b)
 	}
 	f.dead_buffer_count = 0
+	f.staging_used = 0
+}
+
+// end_uploads finishes the slot's upload commands, or returns false if
+// there are none.
+@(private)
+end_uploads :: proc(f: ^Gpu_Frame) -> bool {
+	if !f.uploading {
+		return false
+	}
+	end_writes(f)
+	vk.EndCommandBuffer(f.upload)
+	f.uploading = false
+	return true
 }
 
 // upload_cmd returns the slot's upload command buffer, begun.
@@ -698,12 +768,20 @@ upload_cmd :: proc(r: ^Renderer) -> vk.CommandBuffer {
 
 // stage copies bytes into the slot's staging buffer and returns their
 // offset, growing the buffer if it's full. A buffer that copies recorded
-// this frame still read waits with the slot's dead.
+// this frame still read waits with the slot's dead, or if there's no room
+// for it there, flush_slot runs those copies first.
 @(private)
 stage :: proc(r: ^Renderer, bytes: []byte) -> (buffer: vk.Buffer, offset: int, ok: bool) {
 	g := &r.gpu
 	f := slot_ready(r)
 	at := mem.align_forward_int(f.staging_used, 16)
+	if at + len(bytes) > f.staging.size && f.staging_used > 0 && f.dead_buffer_count == len(f.dead_buffers) {
+		f = flush_slot(r)
+		if f == nil {
+			return 0, 0, false
+		}
+		at = 0
+	}
 	if at + len(bytes) > f.staging.size {
 		size := max(STAGING_START, 2 * f.staging.size, len(bytes))
 		next, made := new_buffer(g, size, {.TRANSFER_SRC})
@@ -713,12 +791,9 @@ stage :: proc(r: ^Renderer, bytes: []byte) -> (buffer: vk.Buffer, offset: int, o
 		if f.staging.buffer != 0 {
 			if f.staging_used == 0 {
 				free_buffer(g, &f.staging)
-			} else if f.dead_buffer_count < len(f.dead_buffers) {
+			} else {
 				f.dead_buffers[f.dead_buffer_count] = f.staging
 				f.dead_buffer_count += 1
-			} else {
-				vk.DeviceWaitIdle(g.device)
-				free_buffer(g, &f.staging)
 			}
 		}
 		f.staging = next
@@ -842,8 +917,10 @@ gpu_texture_free :: proc(r: ^Renderer, t: Gpu_Texture) {
 	}
 	f := slot_ready(r)
 	if f.dead_count == MAX_DEAD {
-		vk.DeviceWaitIdle(r.gpu.device)
-		free_dead(r, f)
+		f = flush_slot(r)
+		if f == nil {
+			return
+		}
 	}
 	f.dead[f.dead_count] = t
 	f.dead_count += 1
@@ -865,7 +942,8 @@ free_texture_now :: proc(g: ^Gpu, t: Gpu_Texture) {
 }
 
 // gpu_texture_write queues a copy of the pixels into the texture ahead of
-// the next frame, then the mips if it has them.
+// the next frame. The mips, if it has them, are made again once the
+// upload's writes to it end.
 @(private)
 gpu_texture_write :: proc(r: ^Renderer, slot: ^Texture_Slot, pixels: []byte, x, y, w, h, bpp: int) {
 	if r.gpu.device == nil {
@@ -873,31 +951,86 @@ gpu_texture_write :: proc(r: ^Renderer, slot: ^Texture_Slot, pixels: []byte, x, 
 	}
 	buffer, offset, ok := stage(r, pixels[:w * h * bpp])
 	if !ok {
-		log.error("render: out of staging memory")
+		// A failed flush in stage released the renderer and logged it.
+		if r.gpu.device != nil {
+			log.error("render: out of staging memory")
+		}
 		return
 	}
-	t := slot.gpu
 	cmd := upload_cmd(r)
-	image_barrier(cmd, t.image, .SHADER_READ_ONLY_OPTIMAL, .TRANSFER_DST_OPTIMAL, 0, t.levels, {.FRAGMENT_SHADER}, {.TRANSFER}, {.SHADER_READ}, {.TRANSFER_WRITE})
+	target := write_target(r, slot)
+	if write_region(&target.written, {i32(x), i32(y), i32(x + w), i32(y + h)}) {
+		image_barrier(cmd, target.image, .TRANSFER_DST_OPTIMAL, .TRANSFER_DST_OPTIMAL, 0, 1, {.TRANSFER}, {.TRANSFER}, {.TRANSFER_WRITE}, {.TRANSFER_WRITE})
+	}
 	region := vk.BufferImageCopy {
 		bufferOffset     = vk.DeviceSize(offset),
 		imageSubresource = {{.COLOR}, 0, 0, 1},
 		imageOffset      = {i32(x), i32(y), 0},
 		imageExtent      = {u32(w), u32(h), 1},
 	}
-	vk.CmdCopyBufferToImage(cmd, buffer, t.image, .TRANSFER_DST_OPTIMAL, 1, &region)
-	if t.levels > 1 {
-		generate_mips(cmd, t, int(slot.width), int(slot.height))
+	vk.CmdCopyBufferToImage(cmd, buffer, target.image, .TRANSFER_DST_OPTIMAL, 1, &region)
+}
+
+// write_region adds region to the texels written since the last barrier
+// and returns whether it overlaps the box around them, when the copy has
+// to wait for the earlier ones. Copies to disjoint regions need no
+// barrier between them.
+write_region :: proc(written: ^[4]i32, region: [4]i32) -> (overlaps: bool) {
+	w := written^
+	overlaps = region.x < w.z && w.x < region.z && region.y < w.w && w.y < region.w
+	if overlaps || w.x >= w.z || w.y >= w.w {
+		written^ = region
 	} else {
-		image_barrier(cmd, t.image, .TRANSFER_DST_OPTIMAL, .SHADER_READ_ONLY_OPTIMAL, 0, 1, {.TRANSFER}, {.FRAGMENT_SHADER}, {.TRANSFER_WRITE}, {.SHADER_READ})
+		written^ = {min(w.x, region.x), min(w.y, region.y), max(w.z, region.z), max(w.w, region.w)}
+	}
+	return
+}
+
+// write_target returns the upload's write to the texture, first moving its
+// image to a transfer destination if the upload hasn't yet.
+@(private)
+write_target :: proc(r: ^Renderer, slot: ^Texture_Slot) -> ^Image_Write {
+	cmd := upload_cmd(r)
+	f := slot_ready(r)
+	t := slot.gpu
+	for &w in f.writes[:f.write_count] {
+		if w.image == t.image {
+			return &w
+		}
+	}
+	if f.write_count == MAX_WRITES {
+		end_writes(f)
+	}
+	image_barrier(cmd, t.image, .SHADER_READ_ONLY_OPTIMAL, .TRANSFER_DST_OPTIMAL, 0, t.levels, {.FRAGMENT_SHADER}, {.TRANSFER}, {.SHADER_READ}, {.TRANSFER_WRITE})
+	f.writes[f.write_count] = {image = t.image, levels = t.levels, width = slot.width, height = slot.height}
+	f.write_count += 1
+	return &f.writes[f.write_count - 1]
+}
+
+// end_writes hands every image the upload writes back to the shaders,
+// making its mips first if it has them.
+@(private)
+end_writes :: proc(f: ^Gpu_Frame) {
+	for w in f.writes[:f.write_count] {
+		end_write(f.upload, w)
+	}
+	f.write_count = 0
+}
+
+@(private)
+end_write :: proc(cmd: vk.CommandBuffer, w: Image_Write) {
+	if w.levels > 1 {
+		generate_mips(cmd, w)
+	} else {
+		image_barrier(cmd, w.image, .TRANSFER_DST_OPTIMAL, .SHADER_READ_ONLY_OPTIMAL, 0, 1, {.TRANSFER}, {.FRAGMENT_SHADER}, {.TRANSFER_WRITE}, {.SHADER_READ})
 	}
 }
 
-// generate_mips blits each level from the one above. Level 0 comes in as
-// a transfer destination; every level leaves ready to sample.
+// generate_mips blits each level from the one above. Every level comes in
+// as a transfer destination and leaves ready to sample.
 @(private)
-generate_mips :: proc(cmd: vk.CommandBuffer, t: Gpu_Texture, width, height: int) {
-	w, h := i32(width), i32(height)
+generate_mips :: proc(cmd: vk.CommandBuffer, t: Image_Write) {
+	w, h := t.width, t.height
 	for level in 1 ..< t.levels {
 		image_barrier(cmd, t.image, .TRANSFER_DST_OPTIMAL, .TRANSFER_SRC_OPTIMAL, level - 1, 1, {.TRANSFER}, {.TRANSFER}, {.TRANSFER_WRITE}, {.TRANSFER_READ})
 		nw, nh := max(w / 2, 1), max(h / 2, 1)
@@ -921,6 +1054,17 @@ gpu_texture_copy :: proc(r: ^Renderer, from, to: ^Texture_Slot, w, h: int) {
 	}
 	cmd := upload_cmd(r)
 	src, dst := from.gpu.image, to.gpu.image
+	// Both images must be ready to sample, as the barriers below expect.
+	f := slot_ready(r)
+	for i := 0; i < f.write_count; {
+		if write := f.writes[i]; write.image == src || write.image == dst {
+			end_write(cmd, write)
+			f.write_count -= 1
+			f.writes[i] = f.writes[f.write_count]
+		} else {
+			i += 1
+		}
+	}
 	image_barrier(cmd, src, .SHADER_READ_ONLY_OPTIMAL, .TRANSFER_SRC_OPTIMAL, 0, 1, {.FRAGMENT_SHADER}, {.TRANSFER}, {.SHADER_READ}, {.TRANSFER_READ})
 	image_barrier(cmd, dst, .SHADER_READ_ONLY_OPTIMAL, .TRANSFER_DST_OPTIMAL, 0, 1, {.FRAGMENT_SHADER}, {.TRANSFER}, {.SHADER_READ}, {.TRANSFER_WRITE})
 	region := vk.ImageCopy {
@@ -943,6 +1087,9 @@ gpu_frame_begin :: proc(r: ^Renderer) -> [^]Instance {
 		return nil
 	}
 	f := slot_ready(r)
+	// The wait may have come earlier, from a texture call between frames.
+	r.slot_wait_ms, f.wait_ms = f.wait_ms, 0
+	r.drawable_wait_ms = 0
 	if f.instances.buffer == 0 {
 		set_instance_buffer(r, f, INITIAL_INSTANCES)
 	}
@@ -1073,6 +1220,7 @@ make_swapchain :: proc(r: ^Renderer, width, height: u32) -> bool {
 		return false
 	}
 	g.extent = extent
+	g.requested = {width, height}
 	n: u32
 	vk.GetSwapchainImagesKHR(g.device, g.swapchain, &n, nil)
 	n = min(n, MAX_SWAPCHAIN_IMAGES)
@@ -1119,7 +1267,7 @@ end_frame :: proc(r: ^Renderer) {
 	want := vk.Extent2D{u32(math.round(r.width * r.scale)), u32(math.round(r.height * r.scale))}
 	image := max(u32)
 	if g.pipeline != 0 && want.width > 0 && want.height > 0 {
-		if g.swapchain == 0 || g.extent != want {
+		if swapchain_stale(g, want) {
 			make_swapchain(r, want.width, want.height)
 		}
 		image = acquire(r, f, want)
@@ -1177,26 +1325,21 @@ end_frame :: proc(r: ^Renderer) {
 	}
 	vk.CmdEndRenderPass(cmd)
 
-	// Present can clear g.extent, so the capture keeps its own size.
-	capture: Gpu_Buffer
-	capture_size := g.extent
 	if r.capture_path != "" && g.can_capture {
-		capture = record_capture(r, cmd, image)
+		f.capture = record_capture(r, cmd, image)
 	}
 	vk.EndCommandBuffer(cmd)
 
 	buffers: [2]vk.CommandBuffer
 	n: u32
-	if f.uploading {
-		vk.EndCommandBuffer(f.upload)
-		f.uploading = false
+	if end_uploads(f) {
 		buffers[n] = f.upload
 		n += 1
 	}
 	buffers[n] = cmd
 	n += 1
 	wait_stage := vk.PipelineStageFlags{.COLOR_ATTACHMENT_OUTPUT}
-	submit := vk.SubmitInfo {
+	info := vk.SubmitInfo {
 		sType                = .SUBMIT_INFO,
 		waitSemaphoreCount   = 1,
 		pWaitSemaphores      = &f.acquired,
@@ -1206,9 +1349,9 @@ end_frame :: proc(r: ^Renderer) {
 		signalSemaphoreCount = 1,
 		pSignalSemaphores    = &g.rendered[image],
 	}
-	vk.ResetFences(g.device, 1, &f.fence)
-	vk.QueueSubmit(g.queue, 1, &submit, f.fence)
-	f.ready = false
+	if !submit(r, f, &info) {
+		return
+	}
 	present := vk.PresentInfoKHR {
 		sType              = .PRESENT_INFO_KHR,
 		waitSemaphoreCount = 1,
@@ -1218,22 +1361,30 @@ end_frame :: proc(r: ^Renderer) {
 		pImageIndices      = &image,
 	}
 	if res := vk.QueuePresentKHR(g.queue, &present); res == .ERROR_OUT_OF_DATE_KHR || res == .SUBOPTIMAL_KHR {
-		g.extent = {} // made again next frame
+		g.requested = {} // made again next frame
 	}
 	r.stats = {draw_calls, r.instance_count}
 
-	if capture.buffer != 0 {
+	if f.capture.buffer != 0 {
 		vk.WaitForFences(g.device, 1, &f.fence, true, max(u64))
-		w, h := uint(capture_size.width), uint(capture_size.height)
-		pixels := capture.mapped[:w * h * 4]
+		w, h := uint(g.extent.width), uint(g.extent.height)
+		pixels := f.capture.mapped[:w * h * 4]
 		if g.format == .R8G8B8A8_SRGB {
 			for i := 0; i < len(pixels); i += 4 {
 				pixels[i], pixels[i + 2] = pixels[i + 2], pixels[i]
 			}
 		}
 		write_tga(r.capture_path, pixels, w, h)
-		free_buffer(g, &capture)
+		free_buffer(g, &f.capture)
 	}
+}
+
+// swapchain_stale says whether the swapchain has to be made again for a
+// window of want pixels. It compares with the size last asked for, not the
+// extent the surface clamped it to, so a clamped size doesn't remake it on
+// every frame.
+swapchain_stale :: proc(g: ^Gpu, want: vk.Extent2D) -> bool {
+	return g.swapchain == 0 || g.requested != want
 }
 
 // acquire gets the next swapchain image, making the swapchain again if
@@ -1246,7 +1397,9 @@ acquire :: proc(r: ^Renderer, f: ^Gpu_Frame, want: vk.Extent2D) -> u32 {
 			return max(u32)
 		}
 		image: u32
+		wait := time.tick_now()
 		res := vk.AcquireNextImageKHR(g.device, g.swapchain, u64(1e9), f.acquired, 0, &image)
+		r.drawable_wait_ms += f32(time.duration_milliseconds(time.tick_since(wait)))
 		#partial switch res {
 		case .SUCCESS, .SUBOPTIMAL_KHR:
 			return image
@@ -1260,23 +1413,36 @@ acquire :: proc(r: ^Renderer, f: ^Gpu_Frame, want: vk.Extent2D) -> u32 {
 	return max(u32)
 }
 
-// submit_uploads runs the slot's uploads on a frame that draws nothing.
+// submit_uploads runs the slot's uploads on their own, on a frame that draws
+// nothing or when flush_slot needs them done. False if the renderer stopped.
 @(private)
-submit_uploads :: proc(r: ^Renderer, f: ^Gpu_Frame) {
-	if !f.uploading {
-		return
+submit_uploads :: proc(r: ^Renderer, f: ^Gpu_Frame) -> bool {
+	if !end_uploads(f) {
+		return true
 	}
-	g := &r.gpu
-	vk.EndCommandBuffer(f.upload)
-	f.uploading = false
-	submit := vk.SubmitInfo {
+	info := vk.SubmitInfo {
 		sType              = .SUBMIT_INFO,
 		commandBufferCount = 1,
 		pCommandBuffers    = &f.upload,
 	}
+	return submit(r, f, &info)
+}
+
+// submit queues the slot's command buffers to signal its fence. If the
+// queue refuses them, the fence never signals, the acquire semaphore and
+// the image stay pending and the uploads the texture caches count on are
+// lost, so the renderer stops and draws nothing from then on.
+@(private)
+submit :: proc(r: ^Renderer, f: ^Gpu_Frame, info: ^vk.SubmitInfo) -> bool {
+	g := &r.gpu
 	vk.ResetFences(g.device, 1, &f.fence)
-	vk.QueueSubmit(g.queue, 1, &submit, f.fence)
+	if res := vk.QueueSubmit(g.queue, 1, info, f.fence); res != .SUCCESS {
+		log.errorf("render: vkQueueSubmit failed, drawing nothing from now on: %v", res)
+		release(r)
+		return false
+	}
 	f.ready = false
+	return true
 }
 
 // record_capture copies the drawn image into a host buffer after the

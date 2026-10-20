@@ -446,14 +446,18 @@ raster_font :: proc(face: ^Face, px_size, size: f32) -> CTFontRef {
 	return sized_font(face, px_size, size if face.native_advances else 0)
 }
 
+// SF Pro's optical size axis changes its advances with the point size, so
+// cached advances are kept per size.
+ADVANCES_BY_SIZE :: true
+
 // native_advance is glyph id's advance in the face's instance at size, in
-// points.
+// em.
 @(private)
 native_advance :: proc(t: ^State, face: int, size: f32, id: u16) -> f32 {
 	glyph := CGGlyph(id)
 	advance: CGSize
 	CTFontGetAdvancesForGlyphs(sized_font(&t.faces[face], size), 0, &glyph, &advance, 1)
-	return f32(advance.width)
+	return f32(advance.width) / size
 }
 
 // coretext_shape shapes sh.runes[start:end], all one direction and one

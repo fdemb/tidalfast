@@ -14,6 +14,7 @@
 // inside one.
 package ui
 
+import "core:slice"
 import "core:unicode"
 import "core:unicode/utf8"
 
@@ -177,27 +178,31 @@ cluster_is_word :: proc(s: string, start: int) -> bool {
 // word_left is where Option-Left goes from p: back over separators, then
 // to the start of the word before them.
 word_left :: proc(s: string, bounds: []int, p: int) -> int {
-	p := p
-	for p > 0 && !cluster_is_word(s, prev_bound(bounds, p)) {
-		p = prev_bound(bounds, p)
+	i, _ := slice.binary_search(bounds, p)
+	for i > 0 && !cluster_is_word(s, bounds[i - 1]) {
+		i -= 1
 	}
-	for p > 0 && cluster_is_word(s, prev_bound(bounds, p)) {
-		p = prev_bound(bounds, p)
+	for i > 0 && cluster_is_word(s, bounds[i - 1]) {
+		i -= 1
 	}
-	return p
+	return bounds[i]
 }
 
 // word_right is where Option-Right goes from p: over separators, then to
 // the end of the word after them.
 word_right :: proc(s: string, bounds: []int, p: int) -> int {
-	p := p
-	for p < len(s) && !cluster_is_word(s, p) {
-		p = next_bound(bounds, p)
+	i, found := slice.binary_search(bounds, p)
+	if !found {
+		i -= 1
 	}
-	for p < len(s) && cluster_is_word(s, p) {
-		p = next_bound(bounds, p)
+	last := len(bounds) - 1
+	for i < last && !cluster_is_word(s, bounds[i]) {
+		i += 1
 	}
-	return p
+	for i < last && cluster_is_word(s, bounds[i]) {
+		i += 1
+	}
+	return bounds[i]
 }
 
 // word_at is the run of word or separator clusters around p, for a
@@ -206,19 +211,20 @@ word_at :: proc(s: string, bounds: []int, p: int) -> (lo, hi: int) {
 	if len(s) == 0 {
 		return 0, 0
 	}
-	at := snap_down(bounds, p)
-	if at >= len(s) {
-		at = prev_bound(bounds, len(s))
+	i, found := slice.binary_search(bounds, p)
+	if !found {
+		i -= 1
 	}
-	word := cluster_is_word(s, at)
-	lo, hi = at, next_bound(bounds, at)
-	for lo > 0 && cluster_is_word(s, prev_bound(bounds, lo)) == word {
-		lo = prev_bound(bounds, lo)
+	i = min(i, len(bounds) - 2)
+	word := cluster_is_word(s, bounds[i])
+	a, z := i, i + 1
+	for a > 0 && cluster_is_word(s, bounds[a - 1]) == word {
+		a -= 1
 	}
-	for hi < len(s) && cluster_is_word(s, hi) == word {
-		hi = next_bound(bounds, hi)
+	for bounds[z] < len(s) && cluster_is_word(s, bounds[z]) == word {
+		z += 1
 	}
-	return
+	return bounds[a], bounds[z]
 }
 
 // Movement

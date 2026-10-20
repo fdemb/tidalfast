@@ -376,19 +376,23 @@ coretext_shape :: proc(t: ^State, face: int, sh: ^Shaping, start, end: int, size
 	return 0
 }
 
-// native_advance is glyph id's advance in the face's instance at size, in
-// points, from FreeType, which applies the instance's HVAR or gvar.
+// A face is one fixed instance, so its advances scale with the size and one
+// cached advance serves every size.
+ADVANCES_BY_SIZE :: false
+
+// native_advance is glyph id's advance in the face's instance, in em, from
+// FreeType, which applies the instance's HVAR or gvar.
 @(private)
 native_advance :: proc(t: ^State, face: int, size: f32, id: u16) -> f32 {
 	f := &t.faces[face]
 	ft := face_ft(&t.atlas, f)
 	units: c.long
 	if ft == nil || FT_Get_Advance(ft, c.uint(id), FT_LOAD_NO_SCALE, &units) != 0 {
-		return default_advance(f, id) * size / f.units_per_em
+		return default_advance(f, id) / f.units_per_em
 	}
 	// Without HVAR it loads the glyph into the slot load_glyph remembers.
 	t.atlas.raster.loaded_face = nil
-	return f32(units) * size / f.units_per_em
+	return f32(units) / f.units_per_em
 }
 
 // face_ft returns the face's FreeType face, making it the first time.

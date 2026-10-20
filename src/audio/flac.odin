@@ -109,8 +109,29 @@ parse_flac_header :: proc(data: []u8, h: ^Flac_Header) -> Parse_Status {
 	if !have_info {
 		return .Invalid
 	}
+	// audio_start must lie inside the file, so a file cut inside its last
+	// block is caught here.
+	if len(data) < pos {
+		return .Need_More
+	}
 	h.audio_start = pos
 	return .Ok
+}
+
+// flac_decoder_head is the header dr_flac gets: "fLaC" and STREAMINFO alone,
+// flagged last, since it needs no other block and a picture can be
+// megabytes. Frames come after it from wherever a seek put us, so the
+// sample count, which dr_flac would count from the first frame it sees,
+// goes to 0 (unknown).
+flac_decoder_head :: proc(data: []u8, h: ^Flac_Header, allocator := context.allocator) -> []u8 {
+	head := make([]u8, 42, allocator)
+	copy(head, "fLaC")
+	head[4], head[7] = 0x80, 34 // last block, type 0 (STREAMINFO), length 34
+	si := head[8:]
+	copy(si, data[h.streaminfo:][:34])
+	si[13] &= 0xf0
+	si[14], si[15], si[16], si[17] = 0, 0, 0, 0
+	return head
 }
 
 be_u64 :: proc(b: []u8) -> u64 {

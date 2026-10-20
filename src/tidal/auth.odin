@@ -34,10 +34,17 @@ default_read_line :: proc(prompt: string, allocator := context.allocator) -> str
 
 // ---- Token handling ----
 
-// token_refresh gets a new access token with refresh_token and stores it.
-// TIDAL may rotate the refresh token; the new one is kept.
-token_refresh :: proc(s: ^Session, refresh_token: string) -> (ok: bool, err: Error) {
-	return refresh_tokens(s, refresh_token, session_epoch(s))
+// token_refresh gets a new access token with auth's refresh token and
+// stores it, if the login auth was copied from (see session_auth) hasn't
+// been cleared since. If it has, it fails with .Cancelled and sends nothing. TIDAL may rotate the refresh
+// token; the new one is kept. It waits for a refresh another thread has
+// under way.
+token_refresh :: proc(s: ^Session, auth: Auth) -> (ok: bool, err: Error) {
+	sync.guard(&s.refresh_mutex)
+	if auth.epoch != session_epoch(s) {
+		return false, make_error(.Cancelled, "Request cancelled")
+	}
+	return refresh_tokens(s, auth.refresh_token, auth.epoch)
 }
 
 // refresh_tokens is token_refresh for the login of auth epoch epoch. If the
@@ -45,9 +52,16 @@ token_refresh :: proc(s: ^Session, refresh_token: string) -> (ok: bool, err: Err
 // the refresh token means the login is gone (.Authentication, see
 // is_refresh_refused). A rate limit, a held back or cancelled request comes
 // back as that, and any other failure, unreachable network included, as
-// .Refresh_Failed, which keeps the tokens.
+// .Refresh_Failed, which keeps the tokens. The caller holds refresh_mutex;
+// the attempt is recorded for refresh_access_token.
 @(private)
 refresh_tokens :: proc(s: ^Session, refresh_token: string, epoch: u64) -> (ok: bool, err: Error) {
+	defer {
+		s.refresh_err = err
+		s.refresh_ended = time.tick_now()
+		s.refresh_epoch = epoch
+		sync.atomic_add(&s.refresh_count, 1)
+	}
 	client_id, client_secret: string
 	{
 		// session_client_enable_hires swaps these under the lock.

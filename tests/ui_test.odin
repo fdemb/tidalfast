@@ -1346,3 +1346,52 @@ scroll_view_inset_end :: proc(t: ^testing.T) {
 	bar := view.last
 	testing.expect(t, bar != nil && bar.rect.h == 150, "the scrollbar stops above the inset")
 }
+
+// Waiting for a tooltip asks for one frame at its deadline instead of
+// drawing every frame until then, and the tooltip fades in once shown.
+@(test)
+test_ui_tooltip_waits_without_frames :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer {
+		delete(u.boxes)
+		delete(u.table)
+		delete(u.hits)
+		free_all(context.temp_allocator)
+	}
+	now := 0.0
+	frame :: proc(u: ^ui.State, now: f64, events: ..platform.Event) -> bool {
+		ui.begin_frame(u, events, nil, nil, 300, 200, now)
+		b := ui.box_make("button", {.Clickable}, ui.px(100), ui.px(40))
+		ui.tooltip(ui.signal(b), "Play")
+		return ui.end_frame()
+	}
+	frame(&u, now)
+	now += 1.0 / 120
+	frame(&u, now, {kind = .Mouse_Move, x = 20, y = 20})
+	hovered := u.hot_since
+
+	settled := false
+	for _ in 0 ..< 200 {
+		now += 1.0 / 120
+		if !frame(&u, now) {
+			settled = true
+			break
+		}
+	}
+	testing.expect(t, settled, "frames stop while the tooltip waits")
+	testing.expect(t, now < hovered + ui.TOOLTIP_DELAY, "before the deadline")
+	testing.expectf(t, abs(f64(ui.wake_after(&u)) - (hovered + ui.TOOLTIP_DELAY - now)) < 0.001, "wakes at the deadline, in %v", ui.wake_after(&u))
+
+	now = hovered + ui.TOOLTIP_DELAY
+	testing.expect(t, frame(&u, now), "the tooltip fades in")
+	faded := false
+	for _ in 0 ..< 200 {
+		now += 1.0 / 120
+		if !frame(&u, now) {
+			faded = true
+			break
+		}
+	}
+	testing.expect(t, faded, "the fade settles")
+}
