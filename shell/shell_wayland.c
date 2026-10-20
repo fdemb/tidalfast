@@ -853,7 +853,6 @@ static bool g_offer_text;
 static int g_receive_fd = -1;
 static uint8_t g_paste[CLIP_MAX]; // the selection's text, as far as it has arrived
 static size_t g_paste_len;
-static bool g_paste_done;
 
 static bool set_nonblocking(int fd) {
   int flags = fcntl(fd, F_GETFL);
@@ -927,14 +926,6 @@ static void set_clipboard(const uint8_t *text, size_t length) {
   g_clip_source = s;
 }
 
-// Until the selection has arrived, it reads as empty.
-static size_t get_clipboard(uint8_t *buffer, size_t capacity) {
-  const uint8_t *text = g_clip_source ? (const uint8_t *)g_clip : g_paste;
-  size_t length = g_clip_source ? g_clip_len : g_paste_done ? g_paste_len : 0;
-  if (buffer && capacity) memcpy(buffer, text, length < capacity ? length : capacity);
-  return length;
-}
-
 static void receive_more(void) {
   if (g_receive_fd < 0) return;
   ssize_t n = 0;
@@ -943,7 +934,26 @@ static void receive_more(void) {
   if (g_paste_len < CLIP_MAX && n < 0 && errno == EAGAIN) return;
   close(g_receive_fd);
   g_receive_fd = -1;
-  g_paste_done = true;
+}
+
+// A paste waits up to 100 ms for a selection that is still arriving, then
+// takes what came.
+static size_t get_clipboard(uint8_t *buffer, size_t capacity) {
+  double deadline = now_seconds() + 0.1;
+  while (!g_clip_source && g_receive_fd >= 0) {
+    int timeout = (int)ceil((deadline - now_seconds()) * 1000);
+    struct pollfd p = {.fd = g_receive_fd, .events = POLLIN};
+    if (timeout > 0 && poll(&p, 1, timeout) > 0) {
+      receive_more();
+    } else {
+      close(g_receive_fd);
+      g_receive_fd = -1;
+    }
+  }
+  const uint8_t *text = g_clip_source ? (const uint8_t *)g_clip : g_paste;
+  size_t length = g_clip_source ? g_clip_len : g_paste_len;
+  if (buffer && capacity) memcpy(buffer, text, length < capacity ? length : capacity);
+  return length;
 }
 
 // The selection may be a password, so it doesn't outlive the focus.
@@ -952,7 +962,6 @@ static void clear_paste(void) {
   g_receive_fd = -1;
   explicit_bzero(g_paste, g_paste_len);
   g_paste_len = 0;
-  g_paste_done = false;
 }
 
 // While our own copy is the selection, get_clipboard reads it directly.
