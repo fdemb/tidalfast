@@ -86,6 +86,20 @@ test_truncate_ltr :: proc(t: ^testing.T) {
 	testing.expect_value(t, width, 8)
 }
 
+// The Linux build's Noto Sans has its weights as named instances, Regular
+// as the default.
+@(test)
+test_fvar_instance :: proc(t: ^testing.T) {
+	noto := #load("../assets/fonts/NotoSans-Variable.ttf")
+	testing.expect_value(t, text.fvar_instance(noto, "wght", 400), 0)
+	testing.expect_value(t, text.fvar_instance(noto, "wght", 500), 2)
+	testing.expect_value(t, text.fvar_instance(noto, "wght", 600), 3)
+	testing.expect_value(t, text.fvar_instance(noto, "wght", 700), 4)
+	testing.expect_value(t, text.fvar_instance(noto, "wght", 450), -1)
+	testing.expect_value(t, text.fvar_instance(noto, "wdth", 100), -1)
+	testing.expect_value(t, text.fvar_instance(noto[:100], "wght", 500), -1)
+}
+
 // A label sized to its text gets its width plus padding, and draws in that
 // less the padding. In f32 that can come back a hair under the width, as
 // it did for "Discovery" in Noto Sans, which then lost its last letters.
@@ -397,18 +411,13 @@ test_shape :: proc(t: ^testing.T) {
 	testing.expect_value(t, state.stats.shaped, 1)
 	bold := text.shape(state, .Bold, 13, "Blue in Green")
 	testing.expect(t, bold.width > a.width, "bold is wider")
-	// The weights can be instances of one variable font, whose default
-	// instance is all kb_text_shape reads. A weight the system lacks, like
-	// Medium with only Debian's fonts-noto-core, gets the one below's font.
+	// The weights are instances of one variable font, SF Pro or Noto Sans,
+	// whose default instance is all kb_text_shape reads.
 	width: f32
-	below := text.Font.Regular
 	for font in ([]text.Font{.Regular, .Medium, .Semibold, .Bold}) {
 		w := text.shape(state, font, 13, "Blue in Green").width
-		if font == .Regular || state.faces[font].name != state.faces[below].name {
-			testing.expectf(t, w > width, "%v is wider than the weight below", font)
-		}
+		testing.expectf(t, w > width, "%v is wider than the weight below", font)
 		width = w
-		below = font
 	}
 
 	arabic := shape_loaded(&sh, .Regular, 13, "عيونك")

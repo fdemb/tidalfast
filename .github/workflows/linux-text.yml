@@ -1,15 +1,15 @@
-# Checks text on Linux with the Noto Sans setups distributions ship: Debian
-# and Ubuntu's fonts-noto-core alone (Regular and Bold only), with
-# fonts-noto-extra (every weight as its own file), and Fedora's variable font
-# whose weights are named instances. Runs the tests, then the app with
-# fake data under a headless Weston on Mesa's software Vulkan, and uploads
-# frames of the library and the text screen.
+# Checks text on Linux, where Noto Sans is built in. The system's Noto Sans
+# is removed, so nothing can come from it; the fallback fonts for other
+# scripts and emoji stay. Runs the tests, then the app with fake data under
+# a headless Weston on Mesa's software Vulkan, and uploads frames of the
+# library and the text screen.
 name: linux-text
 
 on:
   push:
     paths:
       - "src/text/**"
+      - "assets/fonts/**"
       - "tests/text_test.odin"
       - ".github/workflows/linux-text.yml"
   workflow_dispatch:
@@ -21,10 +21,6 @@ jobs:
   linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        noto: [core, extra, variable]
     steps:
       - uses: actions/checkout@v5
       - name: Install packages
@@ -34,22 +30,11 @@ jobs:
             libvulkan-dev glslang-tools libfreetype-dev libfontconfig-dev libcurl4-openssl-dev \
             fonts-noto-core fonts-noto-color-emoji fonts-noto-cjk weston mesa-vulkan-drivers dbus gnome-keyring \
             python3-pil
-          if [ "${{ matrix.noto }}" = extra ]; then sudo apt-get install -y fonts-noto-extra; fi
-      - name: Use Fedora's variable Noto Sans
-        if: matrix.noto == 'variable'
+      - name: Remove the system's Noto Sans
         run: |
-          mkdir -p "$RUNNER_TEMP/vf"
-          docker run --rm -v "$RUNNER_TEMP/vf:/out" fedora:42 sh -c \
-            'dnf -q -y install google-noto-sans-vf-fonts && cp "/usr/share/fonts/google-noto-vf/NotoSans[wght].ttf" /out/'
           sudo rm /usr/share/fonts/truetype/noto/NotoSans-*.ttf
-          sudo mkdir -p /usr/local/share/fonts
-          sudo cp "$RUNNER_TEMP/vf/NotoSans[wght].ttf" /usr/local/share/fonts/
           sudo fc-cache -f
-      - name: Show what fontconfig picks
-        run: |
-          for weight in 80 100 180 200; do
-            fc-match -f '%{file} index=%{index} variable=%{variable} style=%{style}\n' "Noto Sans:weight=$weight:variable=false"
-          done
+          if fc-list | grep -E '/NotoSans-[A-Za-z]+\.ttf'; then exit 1; fi
       - name: Install Odin
         run: |
           mkdir -p "$RUNNER_TEMP/odin"
@@ -84,5 +69,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: frames-${{ matrix.noto }}
+          name: frames
           path: ${{ runner.temp }}/frames

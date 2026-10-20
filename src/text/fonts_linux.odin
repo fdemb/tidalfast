@@ -1,7 +1,7 @@
 package text
 
-// fontconfig and FreeType behind the text code. fontconfig finds Noto Sans
-// at start and fallback fonts on the loader thread; FreeType rasterizes glyphs for the atlas on
+// fontconfig and FreeType behind the text code. The text font is the
+// built-in Noto Sans. fontconfig finds fallback fonts on the loader thread; FreeType rasterizes glyphs for the atlas on
 // the UI thread. Faces load into kb_text_shape on the loader as on macOS,
 // and get their FreeType face on the UI thread the first time a glyph is
 // drawn, so FreeType is only ever used from one thread.
@@ -124,7 +124,6 @@ foreign fontconfig {
 	FcPatternDestroy :: proc(p: FcPattern) ---
 	FcPatternAddCharSet :: proc(p: FcPattern, object: cstring, cs: FcCharSet) -> b32 ---
 	FcPatternAddInteger :: proc(p: FcPattern, object: cstring, i: c.int) -> b32 ---
-	FcPatternAddBool :: proc(p: FcPattern, object: cstring, b: b32) -> b32 ---
 	FcPatternAddString :: proc(p: FcPattern, object: cstring, s: cstring) -> b32 ---
 	FcPatternGetString :: proc(p: FcPattern, object: cstring, n: c.int, s: ^cstring) -> c.int ---
 	FcPatternGetInteger :: proc(p: FcPattern, object: cstring, n: c.int, i: ^c.int) -> c.int ---
@@ -135,7 +134,6 @@ foreign fontconfig {
 	FcCharSetHasChar :: proc(cs: FcCharSet, ucs4: u32) -> b32 ---
 	FcConfigSubstitute :: proc(config: rawptr, p: FcPattern, kind: c.int) -> b32 ---
 	FcDefaultSubstitute :: proc(p: FcPattern) ---
-	FcFontMatch :: proc(config: rawptr, p: FcPattern, result: ^c.int) -> FcPattern ---
 	FcFontSort :: proc(config: rawptr, p: FcPattern, trim: b32, csp: ^FcCharSet, result: ^c.int) -> ^FcFontSet ---
 	FcFontSetDestroy :: proc(s: ^FcFontSet) ---
 }
@@ -182,7 +180,7 @@ raster_destroy :: proc(r: ^Raster) {
 @(private)
 font_ref_release :: proc(ref: Font_Ref) {}
 
-// FC_WEIGHTS are fontconfig's weights for each font.
+// FC_WEIGHTS are fontconfig's weights for each font, for its fallbacks.
 @(private)
 FC_WEIGHTS := [Font]c.int {
 	.Regular   = 80,
@@ -193,61 +191,45 @@ FC_WEIGHTS := [Font]c.int {
 	.Icon_Fill = 200,
 }
 
-// load_system loads Noto Sans at font's weight, or the font fontconfig
-// picks in its place. Weights that are named instances of one variable
-// font share its mapped file and kb_text_shape tables, and get their
-// advances from FreeType.
+// NOTO_SANS is the text font: Noto Sans as one variable font, with
+// Regular, Medium, SemiBold and Bold as named instances. Distributions
+// differ in which Noto Sans weights they install, if any, so it's built in.
+// tools/noto.sh takes it from Noto's release.
+@(private)
+NOTO_SANS := #load("../../assets/fonts/NotoSans-Variable.ttf")
+
+// NOTO_WEIGHTS are the wght of each font's named instance.
+@(private)
+NOTO_WEIGHTS := #partial [Font]f32 {
+	.Regular  = 400,
+	.Medium   = 500,
+	.Semibold = 600,
+	.Bold     = 700,
+}
+
+// load_system loads the built-in Noto Sans at font's weight. The weights
+// share its bytes and kb_text_shape tables, which hold the default
+// instance, so the others get their advances from FreeType, which
+// FT_New_Memory_Face gives the instance.
 @(private)
 load_system :: proc(t: ^State, font: Font) -> bool {
-	pattern := FcPatternCreate()
-	defer FcPatternDestroy(pattern)
-	FcPatternAddString(pattern, "family", "Noto Sans")
-	FcPatternAddInteger(pattern, "weight", FC_WEIGHTS[font])
-	// A variable font's own pattern stands for its default instance; its
-	// named instances aren't variable.
-	FcPatternAddBool(pattern, "variable", false)
-	FcConfigSubstitute(nil, pattern, FC_MATCH_PATTERN)
-	FcDefaultSubstitute(pattern)
-	result: c.int
-	match := FcFontMatch(nil, pattern, &result)
-	if match == nil {
+	instance := fvar_instance(NOTO_SANS, "wght", NOTO_WEIGHTS[font])
+	if instance < 0 {
 		return false
 	}
-	defer FcPatternDestroy(match)
-	file: cstring
-	index: c.int
-	if FcPatternGetString(match, "file", 0, &file) != FC_RESULT_MATCH {
-		return false
-	}
-	FcPatternGetInteger(match, "index", 0, &index)
-	// kb_text_shape reads the default instance, so instances of one file
-	// share a name.
-	name := file_face_name(file, int(index) & 0xffff)
 	face := &t.faces[font]
-	shared := false
-	for &other in t.faces[:int(font)] {
-		if other.name == name {
-			face^ = other
-			face.native = {}
-			face.mapped = false
-			face.blob = nil
-			shared = true
-			break
-		}
-	}
-	if !shared {
-		data, ok := map_file(file)
-		if !ok {
+	if font == .Regular {
+		if !load_embedded(t, font, NOTO_SANS) {
 			return false
 		}
-		if !load_face(face, nil, data, int(index) & 0xffff, true) {
-			posix.munmap(raw_data(data), uint(len(data)))
-			return false
-		}
-		face.name = name
+	} else {
+		face^ = t.faces[Font.Regular]
+		face.native = {}
+		face.blob = nil
+		face.name = hash.fnv64a(transmute([]byte)FONT_NAMES[font])
 	}
-	face.index = int(index)
-	face.native_advances = face.hmetrics > 0 && index >> 16 != 0
+	face.index = instance << 16
+	face.native_advances = instance > 0 && face.hmetrics > 0
 	return true
 }
 
@@ -277,7 +259,11 @@ load_embedded :: proc(t: ^State, font: Font, data: []byte) -> bool {
 }
 
 @(private)
-FONT_NAMES := #partial [Font]string {
+FONT_NAMES := [Font]string {
+	.Regular   = "Noto Sans Regular",
+	.Medium    = "Noto Sans Medium",
+	.Semibold  = "Noto Sans SemiBold",
+	.Bold      = "Noto Sans Bold",
 	.Icon      = "Phosphor Bold",
 	.Icon_Fill = "Phosphor Fill",
 }

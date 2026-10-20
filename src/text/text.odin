@@ -1084,6 +1084,43 @@ default_advance :: proc(face: ^Face, id: u16) -> f32 {
 	return f32(int(face.hmtx[i]) << 8 | int(face.hmtx[i + 1]))
 }
 
+// fvar_instance returns the 1-based number of the first named instance in
+// font file data whose axis tag is at value, 0 if value is the axis's
+// default, or -1 if there's neither. Other axes aren't looked at.
+fvar_instance :: proc(data: []byte, tag: string, value: f32) -> int {
+	be16 :: proc(data: []byte, at: int) -> int {
+		return int(data[at]) << 8 | int(data[at + 1])
+	}
+	fixed :: proc(data: []byte, at: int) -> f32 {
+		return f32(i32(u32(be32(data, at)))) / 65536
+	}
+	fvar := font_table(data, 0, "fvar")
+	if len(fvar) < 16 {
+		return -1
+	}
+	axes, axis_count, axis_size := be16(fvar, 4), be16(fvar, 8), be16(fvar, 10)
+	instance_count, instance_size := be16(fvar, 12), be16(fvar, 14)
+	instances := axes + axis_count * axis_size
+	if instances + instance_count * instance_size > len(fvar) || 4 + 4 * axis_count > instance_size {
+		return -1
+	}
+	for axis in 0 ..< axis_count {
+		record := axes + axis * axis_size
+		if u32(be32(fvar, record)) != table_tag(tag) {
+			continue
+		}
+		if fixed(fvar, record + 8) == value {
+			return 0
+		}
+		for i in 0 ..< instance_count {
+			if fixed(fvar, instances + i * instance_size + 4 + 4 * axis) == value {
+				return i + 1
+			}
+		}
+	}
+	return -1
+}
+
 // font_table returns table tag of face index in the font file data, or nil.
 font_table :: proc(data: []byte, index: int, tag: string) -> []byte {
 	offset := 0

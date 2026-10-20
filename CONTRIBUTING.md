@@ -31,7 +31,7 @@ src/render/     renderer, with Metal (metal_darwin.odin) or Vulkan (vulkan_linux
 src/text/       fonts, shaping (kb_text_shape), rasterizing (CoreText or FreeType), glyph atlas
 src/ui/         box tree, layout, input, animation, menus, tooltips and the text field
 src/kbts/       kb_text_shape 2.21: C source and Odin bindings
-assets/fonts/   the Phosphor icon fonts, cut down by tools/icons.sh, with their MIT licence
+assets/fonts/   the Phosphor icon fonts (tools/icons.sh, MIT) and Noto Sans for Linux (tools/noto.sh, OFL)
 src/tidal/      TIDAL API library, see src/tidal/README.md
 src/audio/      FLAC and DASH streaming, fMP4, decoding, miniaudio and CoreAudio HAL output, the play queue's rules, ReplayGain
 src/jobs/       a thread-safe priority queue for jobs and results
