@@ -208,6 +208,7 @@ refresh_of_a_cleared_login_keeps_the_next_login :: proc(t: ^testing.T) {
 
 	_, err := tidal.token_refresh(s, old)
 	testing.expect(t, tidal.is_error(err, .Cancelled), fmt.tprint(err))
+	testing.expect_value(t, mock_count(&m, "POST /token"), 0)
 	a := tidal.session_auth(s, context.temp_allocator)
 	testing.expect_value(t, a.access_token, "new")
 	testing.expect_value(t, a.refresh_token, "new-refresh")
