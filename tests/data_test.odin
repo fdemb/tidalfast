@@ -394,8 +394,9 @@ cover_decode_premultiplies_gray_alpha :: proc(t: ^testing.T) {
 	}
 }
 
-// A gray PNG whose tRNS chunk makes gray 200 transparent: stb_image counts
-// the tRNS alpha as a channel, so that pixel comes out all zero.
+// A gray PNG whose tRNS chunk makes gray 200 transparent. stb_image counts
+// the tRNS alpha as a channel, so decode premultiplies it and that pixel
+// comes out all zero.
 @(test)
 cover_decode_premultiplies_trns :: proc(t: ^testing.T) {
 	chunk :: proc(png: ^[dynamic]u8, kind: string, data: []u8) {
