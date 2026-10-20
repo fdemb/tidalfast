@@ -62,6 +62,7 @@ Gpu_Frame :: struct {
 	dead_count:     int,
 	dead_buffers:   [8]Gpu_Buffer, // staging buffers outgrown this frame
 	dead_buffer_count: int,
+	capture:        Gpu_Buffer, // the frame's pixels for TIDALFAST_CAPTURE, until end_frame writes them out
 }
 
 // An image the slot's upload commands hold as a transfer destination until
@@ -131,9 +132,7 @@ Gpu_Texture :: struct {
 init :: proc(r: ^Renderer, surface: rawptr) -> (ok: bool) {
 	g := &r.gpu
 	defer if !ok {
-		path := r.capture_path
-		destroy(r)
-		r.capture_path = path
+		stop(r)
 	}
 	ws := (^platform.Wayland_Surface)(surface)
 	if ws == nil || ws.display == nil || ws.surface == nil {
@@ -289,6 +288,7 @@ destroy :: proc(r: ^Renderer) {
 			free_dead(r, &f)
 			free_buffer(g, &f.instances)
 			free_buffer(g, &f.staging)
+			free_buffer(g, &f.capture)
 			vk.DestroyFence(g.device, f.fence, nil)
 			vk.DestroySemaphore(g.device, f.acquired, nil)
 		}
@@ -318,6 +318,15 @@ destroy :: proc(r: ^Renderer) {
 		vk.DestroyInstance(g.instance, nil)
 	}
 	r^ = {}
+}
+
+// stop destroys the renderer after a failure, so g.device is nil and it
+// draws nothing, but keeps the capture path the shell set.
+@(private)
+stop :: proc(r: ^Renderer) {
+	path := r.capture_path
+	destroy(r)
+	r.capture_path = path
 }
 
 // gpu_allocated is the device memory the renderer holds, in bytes. Safe
@@ -690,10 +699,13 @@ slot_ready :: proc(r: ^Renderer) -> ^Gpu_Frame {
 // flush_slot runs the uploads recorded so far and waits for the GPU to
 // finish everything, so what waits in the slot can go now instead of
 // after the next frame. For when the slot runs out of room to keep it.
+// nil if the submit failed and the renderer stopped.
 @(private)
 flush_slot :: proc(r: ^Renderer) -> ^Gpu_Frame {
 	f := slot_ready(r)
-	submit_uploads(r, f)
+	if !submit_uploads(r, f) {
+		return nil
+	}
 	vk.DeviceWaitIdle(r.gpu.device)
 	f.ready = true
 	free_dead(r, f)
@@ -755,6 +767,9 @@ stage :: proc(r: ^Renderer, bytes: []byte) -> (buffer: vk.Buffer, offset: int, o
 	at := mem.align_forward_int(f.staging_used, 16)
 	if at + len(bytes) > f.staging.size && f.staging_used > 0 && f.dead_buffer_count == len(f.dead_buffers) {
 		f = flush_slot(r)
+		if f == nil {
+			return 0, 0, false
+		}
 		at = 0
 	}
 	if at + len(bytes) > f.staging.size {
@@ -893,6 +908,9 @@ gpu_texture_free :: proc(r: ^Renderer, t: Gpu_Texture) {
 	f := slot_ready(r)
 	if f.dead_count == MAX_DEAD {
 		f = flush_slot(r)
+		if f == nil {
+			return
+		}
 	}
 	f.dead[f.dead_count] = t
 	f.dead_count += 1
@@ -1280,9 +1298,8 @@ end_frame :: proc(r: ^Renderer) {
 	}
 	vk.CmdEndRenderPass(cmd)
 
-	capture: Gpu_Buffer
 	if r.capture_path != "" && g.can_capture {
-		capture = record_capture(r, cmd, image)
+		f.capture = record_capture(r, cmd, image)
 	}
 	vk.EndCommandBuffer(cmd)
 
@@ -1306,7 +1323,6 @@ end_frame :: proc(r: ^Renderer) {
 		pSignalSemaphores    = &g.rendered[image],
 	}
 	if !submit(r, f, &info) {
-		free_buffer(g, &capture)
 		return
 	}
 	present := vk.PresentInfoKHR {
@@ -1322,17 +1338,17 @@ end_frame :: proc(r: ^Renderer) {
 	}
 	r.stats = {draw_calls, r.instance_count}
 
-	if capture.buffer != 0 {
+	if f.capture.buffer != 0 {
 		vk.WaitForFences(g.device, 1, &f.fence, true, max(u64))
 		w, h := uint(g.extent.width), uint(g.extent.height)
-		pixels := capture.mapped[:w * h * 4]
+		pixels := f.capture.mapped[:w * h * 4]
 		if g.format == .R8G8B8A8_SRGB {
 			for i := 0; i < len(pixels); i += 4 {
 				pixels[i], pixels[i + 2] = pixels[i + 2], pixels[i]
 			}
 		}
 		write_tga(r.capture_path, pixels, w, h)
-		free_buffer(g, &capture)
+		free_buffer(g, &f.capture)
 	}
 }
 
@@ -1361,29 +1377,31 @@ acquire :: proc(r: ^Renderer, f: ^Gpu_Frame, want: vk.Extent2D) -> u32 {
 }
 
 // submit_uploads runs the slot's uploads on their own, on a frame that draws
-// nothing or when flush_slot needs them done.
+// nothing or when flush_slot needs them done. False if the renderer stopped.
 @(private)
-submit_uploads :: proc(r: ^Renderer, f: ^Gpu_Frame) {
+submit_uploads :: proc(r: ^Renderer, f: ^Gpu_Frame) -> bool {
 	if !end_uploads(f) {
-		return
+		return true
 	}
 	info := vk.SubmitInfo {
 		sType              = .SUBMIT_INFO,
 		commandBufferCount = 1,
 		pCommandBuffers    = &f.upload,
 	}
-	submit(r, f, &info)
+	return submit(r, f, &info)
 }
 
 // submit queues the slot's command buffers to signal its fence. If the
-// queue refuses them, nothing will signal the fence, so the slot stays
-// ready and slot_ready doesn't wait on it.
+// queue refuses them, the fence never signals, the acquire semaphore and
+// the image stay pending and the uploads the texture caches count on are
+// lost, so the renderer stops and draws nothing from then on.
 @(private)
 submit :: proc(r: ^Renderer, f: ^Gpu_Frame, info: ^vk.SubmitInfo) -> bool {
 	g := &r.gpu
 	vk.ResetFences(g.device, 1, &f.fence)
 	if res := vk.QueueSubmit(g.queue, 1, info, f.fence); res != .SUCCESS {
-		log.errorf("render: vkQueueSubmit failed: %v", res)
+		log.errorf("render: vkQueueSubmit failed, drawing nothing from now on: %v", res)
+		stop(r)
 		return false
 	}
 	f.ready = false
