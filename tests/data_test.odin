@@ -472,7 +472,9 @@ every_job :: proc(_: ^Test_Job, _: rawptr) -> bool {return true}
 // 20 ms, runs wake and waits up to 2 s for the work to return. On a timeout
 // it fails and stops the queue to free the thread, so a lost wakeup fails
 // the test instead of hanging it. A thread that ignores the stop as well
-// ends the test and is left running with sh, so sh is static.
+// ends the test and is left running with sh, so sh is static and the
+// thread comes from the heap rather than the test's allocator, which the
+// test frees when it ends.
 @(private = "file")
 blocks_until :: proc(t: ^testing.T, sh: ^Wait_Shared, wake: proc(sh: ^Wait_Shared), loc := #caller_location) {
 	finished_within :: proc(sh: ^Wait_Shared, d: time.Duration) -> bool {
@@ -486,6 +488,7 @@ blocks_until :: proc(t: ^testing.T, sh: ^Wait_Shared, wake: proc(sh: ^Wait_Share
 		return true
 	}
 	sync.atomic_store(&sh.finished, false)
+	context.allocator = runtime.heap_allocator()
 	worker := thread.create_and_start_with_poly_data(sh, proc(sh: ^Wait_Shared) {
 		sh.work(sh)
 		sync.atomic_store(&sh.finished, true)
