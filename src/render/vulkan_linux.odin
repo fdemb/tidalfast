@@ -24,6 +24,7 @@ import "core:log"
 import "core:math"
 import "core:mem"
 import "core:sync"
+import "core:time"
 import vk "vendor:vulkan"
 
 import "../platform"
@@ -49,6 +50,7 @@ Gpu_Frame :: struct {
 	uploading:      bool, // upload has commands recorded since begin
 	fence:          vk.Fence,
 	ready:          bool, // the fence was waited for since the last submit
+	wait_ms:        f32, // how long that wait took, until begin_frame reports it
 	acquired:       vk.Semaphore,
 	instances:      Gpu_Buffer,
 	set:            vk.DescriptorSet, // the instance buffer and samplers
@@ -677,7 +679,9 @@ slot_ready :: proc(r: ^Renderer) -> ^Gpu_Frame {
 	if f.ready {
 		return f
 	}
+	wait := time.tick_now()
 	vk.WaitForFences(g.device, 1, &f.fence, true, max(u64))
+	f.wait_ms = f32(time.duration_milliseconds(time.tick_since(wait)))
 	f.ready = true
 	free_dead(r, f)
 	return f
@@ -1036,6 +1040,9 @@ gpu_frame_begin :: proc(r: ^Renderer) -> [^]Instance {
 		return nil
 	}
 	f := slot_ready(r)
+	// The wait may have come earlier, from a texture call between frames.
+	r.slot_wait_ms, f.wait_ms = f.wait_ms, 0
+	r.drawable_wait_ms = 0
 	if f.instances.buffer == 0 {
 		set_instance_buffer(r, f, INITIAL_INSTANCES)
 	}
@@ -1216,7 +1223,9 @@ end_frame :: proc(r: ^Renderer) {
 		if g.swapchain == 0 || g.requested != want {
 			make_swapchain(r, want.width, want.height)
 		}
+		wait := time.tick_now()
 		image = acquire(r, f, want)
+		r.drawable_wait_ms = f32(time.duration_milliseconds(time.tick_since(wait)))
 	}
 	if image == max(u32) {
 		submit_uploads(r, f)
