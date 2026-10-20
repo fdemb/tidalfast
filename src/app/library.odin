@@ -88,6 +88,15 @@ Library :: struct {
 	top_offset:    f32, // how far it was scrolled past
 	anchor_row:    int, // scroll this row to the top, -1 for none; see rows_moved
 	anchor_offset: f32,
+	songs:         Songs_Total, // list_songs's sum, for the header
+}
+
+// Songs_Total is the open list's length in seconds, and the list_gen,
+// count, loaded rows and moves it was summed at: any change to the rows
+// changes one of them.
+Songs_Total :: struct {
+	key:     [4]u64,
+	seconds: int,
 }
 
 Status :: enum u8 {

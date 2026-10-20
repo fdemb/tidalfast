@@ -139,3 +139,42 @@ album_ends_in_more_by_its_artist :: proc(t: ^testing.T) {
 	}
 	testing.expect(t, cards > 0, "the shelf has cards")
 }
+
+@(private = "file")
+timed_rows :: proc(seconds: ..int) -> []app.Row {
+	rows := make([]app.Row, len(seconds), context.temp_allocator)
+	for &r, i in rows {
+		r.id = i64(i + 1)
+		r.title = fmt.tprint(i)
+		r.seconds = seconds[i]
+	}
+	return rows
+}
+
+// The header says how many songs the list has and how long they play, and
+// keeps up as rows come, go and another list opens, without reading every
+// row on every frame it's drawn.
+@(test)
+list_songs_follows_the_list :: proc(t: ^testing.T) {
+	s := new(app.State)
+	defer free(s)
+	d := &s.data
+	defer app.view_close(d)
+	app.view_open(d, .Playlist, "pl", "pl", "", 3)
+	v := &d.view
+	app.view_add_rows(v, 0, 100, timed_rows(60, 120, 180))
+	testing.expect_value(t, app.list_songs(s, .Playlist), "3 songs, 6 min 0 sec")
+	testing.expect(t, app.view_edit(v, true, {id = 9, seconds = 30}))
+	testing.expect_value(t, app.list_songs(s, .Playlist), "4 songs, 6 min 30 sec")
+	testing.expect(t, app.view_edit(v, false, {id = 2}))
+	testing.expect_value(t, app.list_songs(s, .Playlist), "3 songs, 4 min 30 sec")
+
+	app.view_open(d, .Playlist, "pl2", "pl2", "", 3)
+	app.view_add_rows(v, 0, 100, timed_rows(3600, 60, 60))
+	testing.expect_value(t, app.list_songs(s, .Playlist), "3 songs, 1 hr 2 min")
+
+	// Nothing in the app changes a loaded row's length in place, so a
+	// header that still reads 1 hr 2 min didn't sum the rows again.
+	v.rows[0].seconds = 0
+	testing.expect_value(t, app.list_songs(s, .Playlist), "3 songs, 1 hr 2 min")
+}

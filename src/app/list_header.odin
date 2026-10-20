@@ -233,7 +233,8 @@ draw_list_meta :: proc(s: ^State, kind: List_Kind, artist: ^Artist_Page) {
 }
 
 // list_songs is how many songs the open list has and how long they play
-// for, or how far it has loaded.
+// for, or how far it has loaded. The rows are summed again only when the
+// list changes, not on every frame the header is drawn.
 list_songs :: proc(s: ^State, kind: List_Kind) -> string {
 	if !s.data.fake {
 		v := &s.data.view
@@ -245,14 +246,19 @@ list_songs :: proc(s: ^State, kind: List_Kind) -> string {
 		}
 	}
 	n := view_count(s)
-	total := 0
-	for i in 0 ..< n {
-		if row := view_row(s, i); row != nil {
-			total += row.seconds
+	v := &s.data.view
+	total := &s.library.songs
+	key := [4]u64{list_gen(s), u64(n), u64(v.loaded_rows), u64(v.moved)}
+	if key != total.key {
+		total^ = {key = key}
+		for i in 0 ..< n {
+			if row := view_row(s, i); row != nil {
+				total.seconds += row.seconds
+			}
 		}
 	}
 	songs := "1 song" if n == 1 else fmt.tprintf("%d songs", n)
-	return fmt.tprintf("%s, %s", songs, list_duration(total))
+	return fmt.tprintf("%s, %s", songs, list_duration(total.seconds))
 }
 
 MONTH_NAMES := [12]string{"January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"}
