@@ -89,6 +89,7 @@ Playback :: struct {
 	entries:         []audio.Queue_Entry,
 	order:           []int, // the items in play order, see queue_reorder
 	loaded:          int, // rows loaded when the snapshot was taken
+	moved:           u32, // the list's moved then
 	list_key:        u64, // list_key of the list the queue came from
 	queue_gen:       u32, // goes up each time a new list replaces the queue
 	fake:            bool,
@@ -270,6 +271,7 @@ queue_snapshot :: proc(s: ^State, v: ^Track_View) {
 	pb.fake = s.data.fake
 	s.data.queue_view = v.gen
 	pb.loaded = v.loaded_rows
+	pb.moved = v.moved
 	for i in 0 ..< n {
 		row := view_row(s, i) if s.data.fake else list_row(v, i)
 		if row == nil {
@@ -279,6 +281,36 @@ queue_snapshot :: proc(s: ^State, v: ^Track_View) {
 		pb.items[i].row = fake_row_index(s, i)
 		if pb.fake {
 			pb.entries[i].id = -i64(i + 1)
+		}
+	}
+}
+
+// queue_follow brings the queue up to date with v, the list it was
+// snapshot from, as its pages arrive: the rows that came since are copied
+// in. Rows that moved take a new snapshot.
+@(private = "file")
+queue_follow :: proc(s: ^State, v: ^Track_View) {
+	pb := &s.playback
+	if v.moved != pb.moved || !pb.has_arena {
+		queue_snapshot(s, v)
+		return
+	}
+	a := vmem.arena_allocator(&pb.arena)
+	if n := v.count; n != len(pb.items) {
+		items := make([]Queue_Item, n, a)
+		entries := make([]audio.Queue_Entry, n, a)
+		copy(items, pb.items)
+		copy(entries, pb.entries)
+		pb.items, pb.entries = items, entries
+		pb.order = make([]int, n, a)
+	}
+	pb.loaded = v.loaded_rows
+	for &e, i in pb.entries {
+		if e.id != 0 {
+			continue
+		}
+		if row := list_row(v, i); row != nil {
+			queue_fill(pb, i, row, a)
 		}
 	}
 }
@@ -834,7 +866,7 @@ playback_update :: proc(s: ^State, events: []platform.Event) {
 	if v := queue_list(d); !pb.fake && pb.index >= 0 && v != nil && pb.loaded != v.loaded_rows {
 		index := pb.index
 		played := order_played(s)
-		queue_snapshot(s, v)
+		queue_follow(s, v)
 		pb.index = queue_find(pb, pb.cur.track, index)
 		pb.cur.item = pb.index
 		if pb.next.serial != 0 {

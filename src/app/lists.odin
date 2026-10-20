@@ -623,6 +623,7 @@ view_edit :: proc(v: ^Track_View, add: bool, row: Row) -> bool {
 		slice.fill(v.loaded[:n + 1], true)
 		v.count = n + 1
 		v.loaded_rows = n + 1
+		v.moved += 1
 		v.hint += 1
 		v.longest = max(v.longest, row.seconds)
 		return true
@@ -641,6 +642,7 @@ view_edit :: proc(v: ^Track_View, add: bool, row: Row) -> bool {
 	v.loaded[n - 1] = false
 	v.count = n - 1
 	v.loaded_rows -= 1
+	v.moved += 1
 	v.hint = max(v.hint - 1, 0)
 	return true
 }

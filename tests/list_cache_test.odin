@@ -1201,3 +1201,49 @@ refused_drop_of_a_liked_row :: proc(t: ^testing.T) {
 	app.handle_result(s, &res, 0)
 	testing.expect(t, app.liked_has(d, 700))
 }
+
+// A long list the queue follows comes in page by page, and each page costs
+// the queue only its own rows. Before this every page copied the whole
+// queue again.
+@(test)
+queue_takes_pages_as_they_come :: proc(t: ^testing.T) {
+	N :: 30000
+	s := cache_state()
+	defer cache_state_free(s)
+	s.playback.player = audio.create(no_wake, 0, null_output = true)
+	defer app.playback_shutdown(s)
+	d := &s.data
+	sidebar(s, updated = 1, count = N)
+	serve(s, rows_of(LIKED_IDS))
+	app.select_playlist(s, 2)
+	rows := rows_of(ids_from(1000, 1000 + N))
+	pages := 0
+	took: time.Duration
+	for {
+		job, ok := jobs.try_pop(&d.queue)
+		if !ok {
+			break
+		}
+		p, tracks := job.payload.(app.Tracks_Job)
+		if !tracks {
+			continue
+		}
+		lo := min(int(p.offset), len(rows))
+		res := app.Result{job = job, payload = app.Tracks_Result{rows = rows[lo:min(lo + int(p.limit), len(rows))], total = len(rows)}}
+		app.handle_result(s, &res, 0)
+		pages += 1
+		if pages == 1 {
+			app.playback_play_row(s, 0)
+		}
+		start := time.tick_now()
+		app.playback_update(s, nil)
+		took += time.tick_since(start)
+	}
+	testing.expect(t, pages > 200, "the list came in many pages")
+	testing.expectf(t, took < time.Second, "%v for %d pages", took, pages)
+	if testing.expect_value(t, len(s.playback.entries), N) {
+		testing.expect_value(t, s.playback.entries[N - 1].id, 1000 + N - 1)
+		testing.expect_value(t, s.playback.items[N - 1].title, rows[N - 1].title)
+	}
+	testing.expect_value(t, s.playback.index, 0)
+}

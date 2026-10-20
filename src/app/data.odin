@@ -133,6 +133,7 @@ Track_View :: struct {
 	rows:        []Row, // in space
 	loaded:      []bool, // in space
 	loaded_rows: int,
+	moved:       u32, // goes up when loaded rows move to other indices
 	count:       int, // rows shown, loaded or not
 	next_offset: int, // in TIDAL's offsets, which count the gaps
 	in_flight:   int,
@@ -1484,6 +1485,7 @@ view_close_gap :: proc(v: ^Track_View, offset, row, limit, got: int) {
 		copy(v.loaded[to:], v.loaded[from:used])
 	}
 	v.count = max(v.count - missing, to)
+	v.moved += 1
 	for i in v.count ..< used {
 		v.loaded[i] = false
 	}
