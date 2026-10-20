@@ -74,6 +74,7 @@ atlas_pages_grow_and_keep_their_glyphs :: proc(t: ^testing.T) {
 	text.draw(s, r, .Regular, 20, {0, 0}, render.WHITE, "A")
 	a := &s.atlas
 	testing.expect_value(t, a.page_count, 1)
+	testing.expect_value(t, text.atlas_pages(s), 1)
 	testing.expect_value(t, a.pages[0].size, text.PAGE_SIZE >> text.PAGE_START_SHIFT)
 	glyph: text.Atlas_Entry
 	for e in a.entries {

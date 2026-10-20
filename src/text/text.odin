@@ -312,9 +312,16 @@ begin_frame :: proc(t: ^State, r: ^render.Renderer) {
 	}
 	atlas_begin_frame(&t.atlas, r)
 	t.stats.runs = t.run_count
+	t.stats.pages = atlas_pages(t)
+}
+
+// atlas_pages counts the glyph pages in use now.
+atlas_pages :: proc(t: ^State) -> int {
+	n := 0
 	for page in t.atlas.pages[:t.atlas.page_count] {
-		t.stats.pages += int(page.size > 0)
+		n += int(page.size > 0)
 	}
+	return n
 }
 
 // shape returns the shaped run for s, from the cache when it can.
