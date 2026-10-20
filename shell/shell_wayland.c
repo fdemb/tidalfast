@@ -828,25 +828,57 @@ static void set_text_input(const Text_Input *ti) {
 
 // Clipboard
 //
-// The selection is offered as UTF-8 text. Reading another client's goes
-// through a pipe it writes to; reading our own is answered from the copy.
+// The selection is offered as UTF-8 text. Another client's is read once,
+// when it becomes the selection, through a pipe the main loop polls, and
+// pastes copy from what arrived; ours is answered from our copy. Transfers
+// both ways run in the main loop and never block it.
+
+#define CLIP_MAX (64 << 10) // the app's CLIPBOARD_MAX
+#define CLIP_SENDS 4
+
+typedef struct {
+  int fd; // -1 for a free slot
+  char *data;
+  size_t length, done;
+} Clip_Send;
 
 static char *g_clip; // what we offer, or NULL
 static size_t g_clip_len;
 static struct wl_data_source *g_clip_source;
+static Clip_Send g_sends[CLIP_SENDS] = {{.fd = -1}, {.fd = -1}, {.fd = -1}, {.fd = -1}};
 static struct wl_data_offer *g_offer; // the current selection, from another client
 static bool g_offer_text;
+static int g_receive_fd = -1;
+static uint8_t g_paste[CLIP_MAX]; // the selection's text, as far as it has arrived
+static size_t g_paste_len;
+static bool g_paste_done;
 
 static void source_target(void *data, struct wl_data_source *s, const char *mime) {}
 
+static void send_more(Clip_Send *t) {
+  if (t->fd < 0) return;
+  ssize_t n = 0;
+  while (t->done < t->length && (n = write(t->fd, t->data + t->done, t->length - t->done)) > 0) t->done += (size_t)n;
+  if (t->done < t->length && n < 0 && errno == EAGAIN) return;
+  close(t->fd);
+  free(t->data);
+  *t = (Clip_Send){.fd = -1};
+}
+
+// Each send keeps its own copy, since a new selection frees ours.
 static void source_send(void *data, struct wl_data_source *s, const char *mime, int32_t fd) {
-  size_t done = 0;
-  while (done < g_clip_len) {
-    ssize_t n = write(fd, g_clip + done, g_clip_len - done);
-    if (n <= 0) break;
-    done += (size_t)n;
+  Clip_Send *t = NULL;
+  for (int i = 0; i < CLIP_SENDS && !t; i++)
+    if (g_sends[i].fd < 0) t = &g_sends[i];
+  if (!t || fcntl(fd, F_SETFL, O_NONBLOCK) != 0 || !(t->data = malloc(g_clip_len + 1))) {
+    close(fd);
+    return;
   }
-  close(fd);
+  memcpy(t->data, g_clip, g_clip_len);
+  t->fd = fd;
+  t->length = g_clip_len;
+  t->done = 0;
+  send_more(t);
 }
 
 static void source_cancelled(void *data, struct wl_data_source *s) {
@@ -880,31 +912,34 @@ static void set_clipboard(const uint8_t *text, size_t length) {
   g_clip_source = s;
 }
 
-// get_clipboard reads the whole selection each time it's asked: once for
-// the length and again for the bytes, as the app does.
+// Until the selection has arrived, it reads as empty.
 static size_t get_clipboard(uint8_t *buffer, size_t capacity) {
-  if (g_clip_source) {
-    if (buffer && capacity) memcpy(buffer, g_clip, g_clip_len < capacity ? g_clip_len : capacity);
-    return g_clip_len;
-  }
-  if (!g_offer || !g_offer_text) return 0;
+  const uint8_t *text = g_clip_source ? (const uint8_t *)g_clip : g_paste;
+  size_t length = g_clip_source ? g_clip_len : g_paste_done ? g_paste_len : 0;
+  if (buffer && capacity) memcpy(buffer, text, length < capacity ? length : capacity);
+  return length;
+}
+
+static void receive_more(void) {
+  if (g_receive_fd < 0) return;
+  ssize_t n;
+  while ((n = read(g_receive_fd, g_paste + g_paste_len, CLIP_MAX - g_paste_len)) > 0) g_paste_len += (size_t)n;
+  if (n < 0 && errno == EAGAIN) return;
+  close(g_receive_fd);
+  g_receive_fd = -1;
+  g_paste_done = true;
+}
+
+static void receive_selection(void) {
+  if (g_receive_fd >= 0) close(g_receive_fd);
+  g_receive_fd = -1;
+  g_paste_len = 0;
+  g_paste_done = false;
   int fds[2];
-  if (pipe2(fds, O_CLOEXEC) != 0) return 0;
+  if (!g_offer || !g_offer_text || pipe2(fds, O_CLOEXEC | O_NONBLOCK) != 0) return;
   wl_data_offer_receive(g_offer, "text/plain;charset=utf-8", fds[1]);
   close(fds[1]);
-  wl_display_flush(g_display);
-  size_t total = 0;
-  uint8_t chunk[4096];
-  for (;;) {
-    struct pollfd p = {.fd = fds[0], .events = POLLIN};
-    if (poll(&p, 1, 1000) <= 0) break;
-    ssize_t n = read(fds[0], chunk, sizeof chunk);
-    if (n <= 0) break;
-    if (buffer && total < capacity) memcpy(buffer + total, chunk, (size_t)n < capacity - total ? (size_t)n : capacity - total);
-    total += (size_t)n;
-  }
-  close(fds[0]);
-  return total;
+  g_receive_fd = fds[0];
 }
 
 static void offer_offer(void *data, struct wl_data_offer *offer, const char *mime) {
@@ -924,6 +959,7 @@ static void device_selection(void *data, struct wl_data_device *d, struct wl_dat
   if (g_offer && g_offer != offer) wl_data_offer_destroy(g_offer);
   g_offer = offer;
   g_offer_text = offer && g_new_offer_text;
+  receive_selection();
 }
 
 static void device_enter(void *data, struct wl_data_device *d, uint32_t serial, struct wl_surface *s, wl_fixed_t x,
@@ -1905,8 +1941,8 @@ static bool connect_wayland(void) {
 }
 
 static void main_loop(void) {
-  struct pollfd fds[8];
-  enum { FD_WAYLAND, FD_REDRAW, FD_WAKE, FD_REPEAT, FD_MOMENTUM, FD_TEST, FD_SIGNAL, FD_INOTIFY };
+  enum { FD_WAYLAND, FD_REDRAW, FD_WAKE, FD_REPEAT, FD_MOMENTUM, FD_TEST, FD_SIGNAL, FD_INOTIFY, FD_RECEIVE, FD_SEND, FD_COUNT = FD_SEND + CLIP_SENDS };
+  struct pollfd fds[FD_COUNT];
   int wl_fd = wl_display_get_fd(g_display);
   while (!g_quit) {
     while (wl_display_prepare_read(g_display) != 0)
@@ -1925,10 +1961,11 @@ static void main_loop(void) {
       timeout = deadline == 0 ? 0 : (int)ceil((deadline - now_seconds()) * 1000);
       if (timeout < 0) timeout = 0;
     }
-    int fd_list[8] = {wl_fd, g_redraw_fd, g_wake_fd, g_repeat_fd, g_momentum_fd, g_test_fd, g_signal_fd, g_inotify_fd};
-    for (int i = 0; i < 8; i++) fds[i] = (struct pollfd){.fd = fd_list[i], .events = POLLIN};
+    int fd_list[FD_SEND] = {wl_fd, g_redraw_fd, g_wake_fd, g_repeat_fd, g_momentum_fd, g_test_fd, g_signal_fd, g_inotify_fd, g_receive_fd};
+    for (int i = 0; i < FD_SEND; i++) fds[i] = (struct pollfd){.fd = fd_list[i], .events = POLLIN};
+    for (int i = 0; i < CLIP_SENDS; i++) fds[FD_SEND + i] = (struct pollfd){.fd = g_sends[i].fd, .events = POLLOUT};
     if (unflushed) fds[FD_WAYLAND].events |= POLLOUT;
-    int n = poll(fds, 8, timeout);
+    int n = poll(fds, FD_COUNT, timeout);
     if (n > 0 && (fds[FD_WAYLAND].revents & POLLIN)) {
       if (wl_display_read_events(g_display) < 0) goto lost;
     } else {
@@ -1963,6 +2000,9 @@ static void main_loop(void) {
       }
       reload_if_changed();
     }
+    if (fds[FD_RECEIVE].revents) receive_more();
+    for (int i = 0; i < CLIP_SENDS; i++)
+      if (fds[FD_SEND + i].revents) send_more(&g_sends[i]);
     // A burst of events becomes one frame. A redraw waits for the pending
     // frame callback, or its deadline.
     if (atomic_load(&g_needs_redraw) && g_configured && frame_deadline() == 0) draw_frame();
