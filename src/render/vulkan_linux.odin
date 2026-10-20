@@ -978,6 +978,7 @@ write_region :: proc(written: ^[4]i32, region: [4]i32) -> (overlaps: bool) {
 // image to a transfer destination if the upload hasn't yet.
 @(private)
 write_target :: proc(r: ^Renderer, slot: ^Texture_Slot) -> ^Image_Write {
+	cmd := upload_cmd(r)
 	f := slot_ready(r)
 	t := slot.gpu
 	for &w in f.writes[:f.write_count] {
@@ -988,7 +989,7 @@ write_target :: proc(r: ^Renderer, slot: ^Texture_Slot) -> ^Image_Write {
 	if f.write_count == MAX_WRITES {
 		end_writes(f)
 	}
-	image_barrier(f.upload, t.image, .SHADER_READ_ONLY_OPTIMAL, .TRANSFER_DST_OPTIMAL, 0, t.levels, {.FRAGMENT_SHADER}, {.TRANSFER}, {.SHADER_READ}, {.TRANSFER_WRITE})
+	image_barrier(cmd, t.image, .SHADER_READ_ONLY_OPTIMAL, .TRANSFER_DST_OPTIMAL, 0, t.levels, {.FRAGMENT_SHADER}, {.TRANSFER}, {.SHADER_READ}, {.TRANSFER_WRITE})
 	f.writes[f.write_count] = {image = t.image, levels = t.levels, width = slot.width, height = slot.height}
 	f.write_count += 1
 	return &f.writes[f.write_count - 1]
