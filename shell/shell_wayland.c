@@ -846,10 +846,12 @@ typedef struct {
 static char *g_clip; // what we offer, or NULL
 static size_t g_clip_len;
 static struct wl_data_source *g_clip_source;
+static char g_own_mime[48]; // marks the offers that carry our own copy
 static Clip_Send g_sends[CLIP_SENDS] = {{.fd = -1}, {.fd = -1}, {.fd = -1}, {.fd = -1}};
 static uint64_t g_send_count;
-static struct wl_data_offer *g_offer; // the current selection, from another client
+static struct wl_data_offer *g_offer; // the current selection
 static bool g_offer_text;
+static bool g_selection_ours;
 static int g_receive_fd = -1;
 static uint8_t g_paste[CLIP_MAX]; // the selection's text, as far as it has arrived
 static size_t g_paste_len;
@@ -922,8 +924,10 @@ static void set_clipboard(const uint8_t *text, size_t length) {
   wl_data_source_offer(s, "text/plain;charset=utf-8");
   wl_data_source_offer(s, "text/plain");
   wl_data_source_offer(s, "UTF8_STRING");
+  wl_data_source_offer(s, g_own_mime);
   wl_data_device_set_selection(g_data_device, s, g_serial);
   g_clip_source = s;
+  g_selection_ours = true;
 }
 
 static void receive_more(void) {
@@ -940,7 +944,7 @@ static void receive_more(void) {
 // takes what came.
 static size_t get_clipboard(uint8_t *buffer, size_t capacity) {
   double deadline = now_seconds() + 0.1;
-  while (!g_clip_source && g_receive_fd >= 0) {
+  while (!g_selection_ours && g_receive_fd >= 0) {
     int timeout = (int)ceil((deadline - now_seconds()) * 1000);
     struct pollfd p = {.fd = g_receive_fd, .events = POLLIN};
     if (timeout > 0 && poll(&p, 1, timeout) > 0) {
@@ -950,9 +954,9 @@ static size_t get_clipboard(uint8_t *buffer, size_t capacity) {
       g_receive_fd = -1;
     }
   }
-  const uint8_t *text = g_clip_source ? (const uint8_t *)g_clip : g_paste;
-  size_t length = g_clip_source ? g_clip_len : g_paste_len;
-  if (buffer && capacity) memcpy(buffer, text, length < capacity ? length : capacity);
+  const uint8_t *text = g_selection_ours ? (const uint8_t *)g_clip : g_paste;
+  size_t length = g_selection_ours ? g_clip_len : g_paste_len;
+  if (buffer && capacity && length) memcpy(buffer, text, length < capacity ? length : capacity);
   return length;
 }
 
@@ -968,7 +972,7 @@ static void clear_paste(void) {
 static void receive_selection(void) {
   clear_paste();
   int fds[2];
-  if (g_clip_source || !g_offer || !g_offer_text || pipe2(fds, O_CLOEXEC) != 0) return;
+  if (g_selection_ours || !g_offer || !g_offer_text || pipe2(fds, O_CLOEXEC) != 0) return;
   // The write end goes to the source client, which may expect it to block.
   wl_data_offer_receive(g_offer, "text/plain;charset=utf-8", fds[1]);
   close(fds[1]);
@@ -979,23 +983,30 @@ static void receive_selection(void) {
   g_receive_fd = fds[0];
 }
 
+typedef struct {
+  bool text, ours;
+} Offer_Mimes;
+
 static void offer_offer(void *data, struct wl_data_offer *offer, const char *mime) {
-  if (!strcmp(mime, "text/plain;charset=utf-8")) *(bool *)data = true;
+  Offer_Mimes *m = data;
+  if (!strcmp(mime, "text/plain;charset=utf-8")) m->text = true;
+  if (!strcmp(mime, g_own_mime)) m->ours = true;
 }
 
 static const struct wl_data_offer_listener g_offer_listener = {.offer = offer_offer};
 
-static bool g_new_offer_text;
+static Offer_Mimes g_new_offer;
 
 static void device_data_offer(void *data, struct wl_data_device *d, struct wl_data_offer *offer) {
-  g_new_offer_text = false;
-  wl_data_offer_add_listener(offer, &g_offer_listener, &g_new_offer_text);
+  g_new_offer = (Offer_Mimes){0};
+  wl_data_offer_add_listener(offer, &g_offer_listener, &g_new_offer);
 }
 
 static void device_selection(void *data, struct wl_data_device *d, struct wl_data_offer *offer) {
   if (g_offer && g_offer != offer) wl_data_offer_destroy(g_offer);
   g_offer = offer;
-  g_offer_text = offer && g_new_offer_text;
+  g_offer_text = offer && g_new_offer.text;
+  g_selection_ours = offer && g_new_offer.ours;
   receive_selection();
 }
 
@@ -2084,6 +2095,7 @@ int main(int argc, char **argv) {
   g_signal_fd = signalfd(-1, &quit_signals, SFD_NONBLOCK | SFD_CLOEXEC);
   // A clipboard reader that closes its end early mustn't kill the app.
   signal(SIGPIPE, SIG_IGN);
+  snprintf(g_own_mime, sizeof g_own_mime, "application/x-tidalfast-%d", getpid());
 
   g_redraw_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
   g_wake_fd = new_timer();
