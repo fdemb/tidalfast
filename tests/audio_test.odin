@@ -644,3 +644,31 @@ paused_read_does_not_poll :: proc(t: ^testing.T) {
 	}
 	testing.expect_value(t, audio.status(p).state, audio.Play_State.Playing)
 }
+
+// stream_clear gives the window's pages back. On Linux they read as zeros
+// after that, which shows the advice took.
+@(test)
+stream_clear_releases_the_window :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	file := make([]u8, 256 << 10, context.temp_allocator)
+	slice.fill(file, 0xa5)
+	m.files["/a.flac"] = file
+
+	wake: audio.Wake
+	st := new(audio.Stream, context.temp_allocator)
+	audio.stream_init(st, &wake)
+	defer audio.stream_destroy(st)
+	audio.stream_open(st, fmt.tprintf("%sa.flac", m.base_url))
+	for i := 0; i < 300 && !audio.stream_done(st); i += 1 {
+		time.sleep(10 * time.Millisecond)
+	}
+	testing.expect(t, audio.stream_done(st), "the file arrived")
+	testing.expect(t, !st.released, "the window holds the file")
+	audio.stream_clear(st)
+	testing.expect(t, st.released, "the window is released")
+	when ODIN_OS == .Linux {
+		testing.expect_value(t, slice.count(st.buf[:len(file)], 0), len(file))
+	}
+}

@@ -33,19 +33,12 @@ STREAM_WINDOW :: 3 << 20 // bytes kept per track, about 17 s of 16/44.1 FLAC, 5 
 KEEP_BEHIND :: 256 << 10 // bytes kept before the read position, for short seeks back
 FETCH_RETRIES :: 5
 
-// Darwin's madvise advice for memory a process gives back and takes again:
-// pages marked reusable leave the process's footprint at once.
-@(private = "file")
-MADV_FREE_REUSABLE :: 7
-@(private = "file")
-MADV_FREE_REUSE :: 8
-
 Stream :: struct {
 	mutex:       sync.Mutex,
 	cond:        sync.Cond, // room in the window, a new request, or stop
 	url:         string, // borrowed from the slot until stream_clear
 	buf:         []u8, // the window, page aligned; file offset o lives at buf[o % len]
-	released:    bool, // buf's pages went back to the system; written again after MADV_FREE_REUSE
+	released:    bool, // buf's pages went back to the system; written again after pages_reuse
 	win_start:   i64, // oldest byte still held
 	win_end:     i64, // one past the newest byte
 	read_pos:    i64, // the decoder's position; bytes before keep_from may go
@@ -160,8 +153,7 @@ stream_clear :: proc(st: ^Stream) {
 stream_clear_locked :: proc(st: ^Stream) {
 	// Nothing in the window is wanted any more: a stop, another track or
 	// none. Its pages stop counting against the app until bytes arrive.
-	if !st.released {
-		posix.posix_madvise(raw_data(st.buf), len(st.buf), transmute(posix.MAdvice)i32(MADV_FREE_REUSABLE))
+	if !st.released && pages_release(st.buf) {
 		st.released = true
 	}
 	st.url = ""
@@ -526,8 +518,7 @@ write_callback :: proc "c" (buffer: [^]byte, size: c.size_t, nitems: c.size_t, u
 	}
 	sync.lock(&st.mutex)
 	defer sync.unlock(&st.mutex)
-	if st.released {
-		posix.posix_madvise(raw_data(st.buf), len(st.buf), transmute(posix.MAdvice)i32(MADV_FREE_REUSE))
+	if st.released && pages_reuse(st.buf) {
 		st.released = false
 	}
 	cap := i64(len(st.buf))
