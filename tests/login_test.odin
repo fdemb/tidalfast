@@ -411,21 +411,17 @@ clear_auth_drops_a_refresh_in_flight :: proc(t: ^testing.T) {
 	tidal.session_restore(s, {token_type = "Bearer", access_token = "a", refresh_token = "refresh-0", user_id = 123, user_kind = .Logged_In_User})
 	m.token_delay = 500 * time.Millisecond
 
-	Shared :: struct {
-		s:   ^tidal.Session,
-		err: tidal.Error,
-	}
-	sh := Shared {
+	r := Thread_Result {
 		s = s,
 	}
-	worker := thread.create_and_start_with_poly_data(&sh, proc(sh: ^Shared) {
-		_, sh.err = tidal.token_refresh(sh.s, tidal.session_auth(sh.s, context.temp_allocator))
+	worker := thread.create_and_start_with_poly_data(&r, proc(r: ^Thread_Result) {
+		_, r.err = tidal.token_refresh(r.s, tidal.session_auth(r.s, context.temp_allocator))
 	})
-	time.sleep(100 * time.Millisecond)
+	testing.expect(t, wait_for_count(&m, "POST /token", 1), "the refresh reached the mock")
 	tidal.session_clear_auth(s)
 	thread.join(worker)
 	thread.destroy(worker)
-	testing.expect(t, tidal.is_error(sh.err, .Cancelled), fmt.tprint(sh.err))
+	testing.expect(t, tidal.is_error(r.err, .Cancelled), fmt.tprint(r.err))
 	testing.expect_value(t, tidal.session_auth(s, context.temp_allocator).refresh_token, "")
 }
 
