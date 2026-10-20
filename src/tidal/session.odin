@@ -35,6 +35,12 @@ Session :: struct {
 
 	mutex:                sync.Mutex,
 	refresh_mutex:        sync.Mutex,
+	// The last token refresh, written under refresh_mutex. refresh_count
+	// goes up by one per attempt and is read atomically, so a request can
+	// tell whether one finished after it started.
+	refresh_count:        u64,
+	refresh_err:          Error,
+	refresh_ended:        time.Tick,
 
 	backoff_mutex:        sync.Mutex,
 	backoff_until:        time.Tick,

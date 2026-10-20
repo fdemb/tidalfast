@@ -45,9 +45,15 @@ token_refresh :: proc(s: ^Session, refresh_token: string) -> (ok: bool, err: Err
 // the refresh token means the login is gone (.Authentication, see
 // is_refresh_refused). A rate limit, a held back or cancelled request comes
 // back as that, and any other failure, unreachable network included, as
-// .Refresh_Failed, which keeps the tokens.
+// .Refresh_Failed, which keeps the tokens. The caller holds refresh_mutex;
+// the attempt is recorded for refresh_access_token.
 @(private)
 refresh_tokens :: proc(s: ^Session, refresh_token: string, epoch: u64) -> (ok: bool, err: Error) {
+	defer {
+		s.refresh_err = err
+		s.refresh_ended = time.tick_now()
+		sync.atomic_add(&s.refresh_count, 1)
+	}
 	client_id, client_secret: string
 	{
 		// session_client_enable_hires swaps these under the lock.

@@ -15,6 +15,9 @@ RATE_LIMIT_BACKOFF :: 60
 ABUSE_BACKOFF :: 30 * 60
 // Refresh the access token this long before it expires, so requests don't race the expiry.
 TOKEN_EXPIRY_MARGIN :: 60 * time.Second
+// How long a failed token refresh answers the requests that waited for it,
+// instead of each trying again.
+REFRESH_FAILURE_SHARED :: 5 * time.Second
 
 Param :: struct {
 	key:   string,
@@ -134,9 +137,11 @@ body_prefix :: proc(resp: Http_Response, n: int) -> string {
 // the same refresh token. TIDAL rotates refresh tokens, so every POST after
 // the first would use a token that has just been invalidated. stale is the
 // access token the caller's request was sent with; if the session holds a
-// different one by now, another thread already refreshed.
+// different one by now, another thread already refreshed. since is the
+// session's refresh_count when the request started: an attempt that failed
+// after it, within REFRESH_FAILURE_SHARED, is the caller's failure too.
 @(private)
-refresh_access_token :: proc(s: ^Session, stale: string) -> (refreshed: bool, err: Error) {
+refresh_access_token :: proc(s: ^Session, stale: string, since: u64) -> (refreshed: bool, err: Error) {
 	sync.guard(&s.refresh_mutex)
 	current, refresh: string
 	epoch: u64
@@ -151,6 +156,9 @@ refresh_access_token :: proc(s: ^Session, stale: string) -> (refreshed: bool, er
 	}
 	if refresh == "" {
 		return false, nil
+	}
+	if s.refresh_count != since && s.refresh_err != nil && time.tick_since(s.refresh_ended) < REFRESH_FAILURE_SHARED {
+		return false, s.refresh_err
 	}
 	return refresh_tokens(s, refresh, epoch)
 }
@@ -200,6 +208,7 @@ basic_request :: proc(s: ^Session, r: Request, allocator := context.allocator) -
 	check_backoff(s) or_return
 	tmp := context.temp_allocator
 
+	refresh_since := sync.atomic_load(&s.refresh_count)
 	auth := session_auth(s, tmp)
 	params := make([dynamic]Param, 0, len(r.params) + 3, tmp)
 	if auth.session_id != "" {
@@ -232,7 +241,7 @@ basic_request :: proc(s: ^Session, r: Request, allocator := context.allocator) -
 	early_refresh: Error
 	if access_token_expired(auth) {
 		log.debug("The access token is about to expire, trying to refresh it.")
-		if _, rerr := refresh_access_token(s, auth.access_token); rerr != nil {
+		if _, rerr := refresh_access_token(s, auth.access_token, refresh_since); rerr != nil {
 			// Don't fail the request: the token may still be accepted, and if it
 			// isn't, the expired-token handling below reports the failure.
 			log.warnf("Proactive access token refresh failed: %s", error_summary(rerr, tmp))
@@ -262,7 +271,7 @@ basic_request :: proc(s: ^Session, r: Request, allocator := context.allocator) -
 		}
 		if strings.has_prefix(user_message, "The token has expired.") {
 			log.debug("The access token has expired, trying to refresh it.")
-			refreshed, rerr := refresh_access_token(s, sent_token)
+			refreshed, rerr := refresh_access_token(s, sent_token, refresh_since)
 			if rerr != nil {
 				return resp, rerr
 			}

@@ -123,6 +123,41 @@ refresh_keeps_tokens_unless_refused :: proc(t: ^testing.T) {
 	testing.expect(t, tidal.is_error(err, .Refresh_Failed), fmt.tprint(err))
 }
 
+// Requests that waited for a refresh that failed get its failure instead of
+// each sending the refresh again, and a request refreshes once even when
+// TIDAL then says its token expired. A request that starts later tries again.
+@(test)
+failed_refresh_is_shared_with_waiting_requests :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := oauth_session(&m)
+	defer tidal.session_destroy(s)
+	expired := time.time_add(time.now(), -time.Minute)
+	tidal.session_restore(s, {token_type = "Bearer", access_token = "old", refresh_token = "refresh-0", expiry_time = expired, user_id = 123, user_kind = .Logged_In_User})
+	m.token_status = 503
+	m.token_delay = 300 * time.Millisecond
+	m.answers["/expired"] = {401, `{"status":401,"userMessage":"The token has expired."}`}
+
+	workers: [3]^thread.Thread
+	for &w in workers {
+		w = thread.create_and_start_with_poly_data(s, proc(s: ^tidal.Session) {
+			_, err := tidal.request(s, {method = .GET, path = "expired"}, context.temp_allocator)
+			assert(tidal.is_error(err, .Refresh_Failed))
+		})
+	}
+	for w in workers {
+		thread.join(w)
+		thread.destroy(w)
+	}
+	testing.expect_value(t, mock_count(&m, "POST /token"), 1)
+	testing.expect_value(t, mock_count(&m, "GET /expired"), 3)
+
+	_, err := tidal.request(s, {method = .GET, path = "expired"}, context.temp_allocator)
+	testing.expect(t, tidal.is_error(err, .Refresh_Failed), fmt.tprint(err))
+	testing.expect_value(t, mock_count(&m, "POST /token"), 2)
+}
+
 // The token expired and the refresh timed out, then TIDAL answers the
 // request with a plain 401. The refresh failure comes back, not the 401,
 // so the login stays.
