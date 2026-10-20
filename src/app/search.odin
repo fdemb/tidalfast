@@ -345,17 +345,23 @@ found_clone :: proc(f: Found_Lists, a: runtime.Allocator) -> Found_Lists {
 	clone :: proc(list: []Found, a: runtime.Allocator) -> []Found {
 		out := make([]Found, len(list), a)
 		for x, i in list {
-			out[i] = x
-			out[i].uuid = strings.clone(x.uuid, a)
-			out[i].name = strings.clone(x.name, a)
-			out[i].subtitle = strings.clone(x.subtitle, a)
-			out[i].image = strings.clone(x.image, a)
-			out[i].artist = strings.clone(x.artist, a)
-			out[i].artists = slice.clone(x.artists, a)
+			out[i] = found_copy(x, a)
 		}
 		return out
 	}
 	return {clone(f.albums, a), clone(f.artists, a), clone(f.playlists, a)}
+}
+
+// found_copy is f with its strings and artists copied into a.
+found_copy :: proc(f: Found, a: runtime.Allocator) -> Found {
+	out := f
+	out.uuid = strings.clone(f.uuid, a)
+	out.name = strings.clone(f.name, a)
+	out.subtitle = strings.clone(f.subtitle, a)
+	out.image = strings.clone(f.image, a)
+	out.artist = strings.clone(f.artist, a)
+	out.artists = slice.clone(f.artists, a)
+	return out
 }
 
 // browse_begin resets the table's selection for a list that isn't a
@@ -625,8 +631,8 @@ draw_found_list :: proc(s: ^State) {
 // and a playlist's is its sidebar entry.
 @(private = "file")
 open_found :: proc(s: ^State, tab: Search_Tab, f: Found) {
-	if s.data.fake && tab == .Playlists {
-		pending_set(s, Playlist_Place{index = int(f.id)})
+	if tab == .Playlists {
+		open_playlist(s, f)
 		return
 	}
 	p := List_Place {
@@ -642,14 +648,21 @@ open_found :: proc(s: ^State, tab: Search_Tab, f: Found) {
 		p.source = .Artist
 		p.id = small(fmt.tprint(f.id))
 		p.hint = 0
-	case .Playlists:
-		p.source = .Playlist
-		p.id = small(f.uuid)
 	}
 	if s.data.fake {
 		p.index = int(f.id)
 	}
 	pending_set(s, p)
+}
+
+// open_playlist opens a found playlist once the frame is done. The fake
+// data's id is its sidebar entry.
+open_playlist :: proc(s: ^State, f: Found) {
+	if s.data.fake {
+		pending_set(s, Playlist_Place{index = int(f.id)})
+		return
+	}
+	pending_set(s, List_Place{source = .Playlist, id = small(f.uuid), name = small(f.name), image = small(f.image), hint = f.tracks})
 }
 
 // view_cover is the cover the list header shows, if any.

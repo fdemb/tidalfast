@@ -94,6 +94,7 @@ Job_Payload :: union {
 	Follow_Job,
 	Launch_Log_Job,
 	Artist_Job,
+	Home_Job,
 }
 
 // Restore_Job reads the tokens from the Keychain into the session.
@@ -245,6 +246,7 @@ Result_Payload :: union {
 	Add_Track_Result,
 	Liked_Ids_Result,
 	Artist_Result,
+	Home_Result,
 }
 
 Restore_Result :: struct {
@@ -514,7 +516,6 @@ result_free :: proc(res: ^Result) {
 // fail records err for a job that sent the login's tokens. An expired
 // session that couldn't be refreshed comes back as a plain 401 from some
 // endpoints, so that ends the login too.
-@(private = "file")
 fail :: proc(res: ^Result, err: tidal.Error) {
 	e, _ := err.?
 	res.err = .Authentication if e.kind == .Http && e.status == 401 else e.kind
@@ -645,6 +646,8 @@ run_job :: proc(d: ^Data, job: Job) -> (res: Result) {
 			return
 		}
 		res.payload = Artist_Result{content}
+	case Home_Job:
+		run_home(s, &res, alloc)
 	case Search_Job:
 		query := p.query
 		found, err := tidal.search(s, small_str(&query), {.Track, .Album, .Artist, .Playlist}, SEARCH_PAGE, 0, alloc)
