@@ -38,6 +38,7 @@ foreign vulkan {
 MAX_SWAPCHAIN_IMAGES :: 8
 MAX_DEAD :: 512 // textures freed in one frame before they wait for the GPU instead
 STAGING_START :: 4 << 20
+MAX_WRITES :: 64 // images one upload holds as transfer destinations
 
 VERTEX_SPIRV :: #load("../../build/shaders/rect.vert.spv")
 FRAGMENT_SPIRV :: #load("../../build/shaders/rect.frag.spv")
@@ -53,10 +54,22 @@ Gpu_Frame :: struct {
 	set:            vk.DescriptorSet, // the instance buffer and samplers
 	staging:        Gpu_Buffer,
 	staging_used:   int,
+	writes:         [MAX_WRITES]Image_Write,
+	write_count:    int,
 	dead:           [MAX_DEAD]Gpu_Texture,
 	dead_count:     int,
 	dead_buffers:   [8]Gpu_Buffer, // staging buffers outgrown this frame
 	dead_buffer_count: int,
+}
+
+// An image the slot's upload commands hold as a transfer destination until
+// end_writes hands it back to the shaders, so the writes to it between
+// share one pair of barriers.
+Image_Write :: struct {
+	image:         vk.Image,
+	levels:        u32,
+	width, height: i32,
+	written:       [4]i32, // x0 y0 x1 y1 written since the last barrier
 }
 
 Gpu_Buffer :: struct {
@@ -698,6 +711,19 @@ free_dead :: proc(r: ^Renderer, f: ^Gpu_Frame) {
 	f.staging_used = 0
 }
 
+// end_uploads finishes the slot's upload commands, or returns false if
+// there are none.
+@(private)
+end_uploads :: proc(f: ^Gpu_Frame) -> bool {
+	if !f.uploading {
+		return false
+	}
+	end_writes(f)
+	vk.EndCommandBuffer(f.upload)
+	f.uploading = false
+	return true
+}
+
 // upload_cmd returns the slot's upload command buffer, begun.
 @(private)
 upload_cmd :: proc(r: ^Renderer) -> vk.CommandBuffer {
@@ -883,7 +909,8 @@ free_texture_now :: proc(g: ^Gpu, t: Gpu_Texture) {
 }
 
 // gpu_texture_write queues a copy of the pixels into the texture ahead of
-// the next frame, then the mips if it has them.
+// the next frame. The mips, if it has them, are made again once the
+// upload's writes to it end.
 @(private)
 gpu_texture_write :: proc(r: ^Renderer, slot: ^Texture_Slot, pixels: []byte, x, y, w, h, bpp: int) {
 	if r.gpu.device == nil {
@@ -894,28 +921,73 @@ gpu_texture_write :: proc(r: ^Renderer, slot: ^Texture_Slot, pixels: []byte, x, 
 		log.error("render: out of staging memory")
 		return
 	}
-	t := slot.gpu
 	cmd := upload_cmd(r)
-	image_barrier(cmd, t.image, .SHADER_READ_ONLY_OPTIMAL, .TRANSFER_DST_OPTIMAL, 0, t.levels, {.FRAGMENT_SHADER}, {.TRANSFER}, {.SHADER_READ}, {.TRANSFER_WRITE})
+	target := write_target(r, slot)
+	if write_region(&target.written, {i32(x), i32(y), i32(x + w), i32(y + h)}) {
+		image_barrier(cmd, target.image, .TRANSFER_DST_OPTIMAL, .TRANSFER_DST_OPTIMAL, 0, 1, {.TRANSFER}, {.TRANSFER}, {.TRANSFER_WRITE}, {.TRANSFER_WRITE})
+	}
 	region := vk.BufferImageCopy {
 		bufferOffset     = vk.DeviceSize(offset),
 		imageSubresource = {{.COLOR}, 0, 0, 1},
 		imageOffset      = {i32(x), i32(y), 0},
 		imageExtent      = {u32(w), u32(h), 1},
 	}
-	vk.CmdCopyBufferToImage(cmd, buffer, t.image, .TRANSFER_DST_OPTIMAL, 1, &region)
-	if t.levels > 1 {
-		generate_mips(cmd, t, int(slot.width), int(slot.height))
-	} else {
-		image_barrier(cmd, t.image, .TRANSFER_DST_OPTIMAL, .SHADER_READ_ONLY_OPTIMAL, 0, 1, {.TRANSFER}, {.FRAGMENT_SHADER}, {.TRANSFER_WRITE}, {.SHADER_READ})
-	}
+	vk.CmdCopyBufferToImage(cmd, buffer, target.image, .TRANSFER_DST_OPTIMAL, 1, &region)
 }
 
-// generate_mips blits each level from the one above. Level 0 comes in as
-// a transfer destination; every level leaves ready to sample.
+// write_region adds region to the texels written since the last barrier
+// and returns whether it overlaps them, when the copy has to wait for the
+// earlier ones. Copies to disjoint regions need no barrier between them.
+write_region :: proc(written: ^[4]i32, region: [4]i32) -> (overlaps: bool) {
+	w := written^
+	overlaps = region.x < w.z && w.x < region.z && region.y < w.w && w.y < region.w
+	if overlaps || w.x >= w.z || w.y >= w.w {
+		written^ = region
+	} else {
+		written^ = {min(w.x, region.x), min(w.y, region.y), max(w.z, region.z), max(w.w, region.w)}
+	}
+	return
+}
+
+// write_target returns the upload's write to the texture, first moving its
+// image to a transfer destination if the upload hasn't yet.
 @(private)
-generate_mips :: proc(cmd: vk.CommandBuffer, t: Gpu_Texture, width, height: int) {
-	w, h := i32(width), i32(height)
+write_target :: proc(r: ^Renderer, slot: ^Texture_Slot) -> ^Image_Write {
+	f := slot_ready(r)
+	t := slot.gpu
+	for &w in f.writes[:f.write_count] {
+		if w.image == t.image {
+			return &w
+		}
+	}
+	if f.write_count == MAX_WRITES {
+		end_writes(f)
+	}
+	image_barrier(f.upload, t.image, .SHADER_READ_ONLY_OPTIMAL, .TRANSFER_DST_OPTIMAL, 0, t.levels, {.FRAGMENT_SHADER}, {.TRANSFER}, {.SHADER_READ}, {.TRANSFER_WRITE})
+	f.writes[f.write_count] = {image = t.image, levels = t.levels, width = slot.width, height = slot.height}
+	f.write_count += 1
+	return &f.writes[f.write_count - 1]
+}
+
+// end_writes hands every image the upload writes back to the shaders,
+// making its mips first if it has them.
+@(private)
+end_writes :: proc(f: ^Gpu_Frame) {
+	for w in f.writes[:f.write_count] {
+		if w.levels > 1 {
+			generate_mips(f.upload, w)
+		} else {
+			image_barrier(f.upload, w.image, .TRANSFER_DST_OPTIMAL, .SHADER_READ_ONLY_OPTIMAL, 0, 1, {.TRANSFER}, {.FRAGMENT_SHADER}, {.TRANSFER_WRITE}, {.SHADER_READ})
+		}
+	}
+	f.write_count = 0
+}
+
+// generate_mips blits each level from the one above. Every level comes in
+// as a transfer destination and leaves ready to sample.
+@(private)
+generate_mips :: proc(cmd: vk.CommandBuffer, t: Image_Write) {
+	w, h := t.width, t.height
 	for level in 1 ..< t.levels {
 		image_barrier(cmd, t.image, .TRANSFER_DST_OPTIMAL, .TRANSFER_SRC_OPTIMAL, level - 1, 1, {.TRANSFER}, {.TRANSFER}, {.TRANSFER_WRITE}, {.TRANSFER_READ})
 		nw, nh := max(w / 2, 1), max(h / 2, 1)
@@ -938,6 +1010,8 @@ gpu_texture_copy :: proc(r: ^Renderer, from, to: ^Texture_Slot, w, h: int) {
 		return
 	}
 	cmd := upload_cmd(r)
+	// Both images must be ready to sample, as the barriers below expect.
+	end_writes(slot_ready(r))
 	src, dst := from.gpu.image, to.gpu.image
 	image_barrier(cmd, src, .SHADER_READ_ONLY_OPTIMAL, .TRANSFER_SRC_OPTIMAL, 0, 1, {.FRAGMENT_SHADER}, {.TRANSFER}, {.SHADER_READ}, {.TRANSFER_READ})
 	image_barrier(cmd, dst, .SHADER_READ_ONLY_OPTIMAL, .TRANSFER_DST_OPTIMAL, 0, 1, {.FRAGMENT_SHADER}, {.TRANSFER}, {.SHADER_READ}, {.TRANSFER_WRITE})
@@ -1205,9 +1279,7 @@ end_frame :: proc(r: ^Renderer) {
 
 	buffers: [2]vk.CommandBuffer
 	n: u32
-	if f.uploading {
-		vk.EndCommandBuffer(f.upload)
-		f.uploading = false
+	if end_uploads(f) {
 		buffers[n] = f.upload
 		n += 1
 	}
@@ -1283,11 +1355,9 @@ acquire :: proc(r: ^Renderer, f: ^Gpu_Frame, want: vk.Extent2D) -> u32 {
 // nothing or when flush_slot needs them done.
 @(private)
 submit_uploads :: proc(r: ^Renderer, f: ^Gpu_Frame) {
-	if !f.uploading {
+	if !end_uploads(f) {
 		return
 	}
-	vk.EndCommandBuffer(f.upload)
-	f.uploading = false
 	info := vk.SubmitInfo {
 		sType              = .SUBMIT_INFO,
 		commandBufferCount = 1,

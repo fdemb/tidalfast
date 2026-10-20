@@ -24,3 +24,16 @@ renderer_without_a_device_draws_nothing :: proc(t: ^testing.T) {
 	testing.expect_value(t, r.instance_count, 0)
 	render.destroy(r)
 }
+
+// Glyphs written to an atlas page in one frame share one pair of barriers,
+// so a copy waits for the ones before it only when their texels overlap.
+@(test)
+only_overlapping_texture_writes_wait :: proc(t: ^testing.T) {
+	written: [4]i32
+	testing.expect(t, !render.write_region(&written, {0, 0, 10, 12}), "first write")
+	testing.expect(t, !render.write_region(&written, {11, 0, 20, 12}), "next on the shelf")
+	testing.expect(t, !render.write_region(&written, {0, 13, 8, 20}), "next shelf down")
+	testing.expect(t, render.write_region(&written, {5, 5, 6, 6}), "inside an earlier write")
+	testing.expect(t, !render.write_region(&written, {0, 0, 5, 5}), "the barrier settled the earlier writes")
+	testing.expect(t, render.write_region(&written, {4, 4, 9, 9}), "overlaps the write after the barrier")
+}
