@@ -850,6 +850,7 @@ static char g_own_mime[48]; // marks the offers that carry our own copy
 static Clip_Send g_sends[CLIP_SENDS] = {{.fd = -1}, {.fd = -1}, {.fd = -1}, {.fd = -1}};
 static uint64_t g_send_count;
 static struct wl_data_offer *g_offer; // the current selection
+static struct wl_data_offer *g_drag_offer; // a drag over the window, never accepted
 static bool g_offer_text;
 static bool g_selection_ours;
 static int g_receive_fd = -1;
@@ -913,10 +914,17 @@ static void source_cancelled(void *data, struct wl_data_source *s) {
   wl_data_source_destroy(s);
 }
 
+static void source_dnd_drop_performed(void *data, struct wl_data_source *s) {}
+static void source_dnd_finished(void *data, struct wl_data_source *s) {}
+static void source_action(void *data, struct wl_data_source *s, uint32_t action) {}
+
 static const struct wl_data_source_listener g_source_listener = {
     .target = source_target,
     .send = source_send,
     .cancelled = source_cancelled,
+    .dnd_drop_performed = source_dnd_drop_performed,
+    .dnd_finished = source_dnd_finished,
+    .action = source_action,
 };
 
 static void set_clipboard(const uint8_t *text, size_t length) {
@@ -1001,7 +1009,14 @@ static void offer_offer(void *data, struct wl_data_offer *offer, const char *mim
   if (!strcmp(mime, g_own_mime)) m->ours = true;
 }
 
-static const struct wl_data_offer_listener g_offer_listener = {.offer = offer_offer};
+static void offer_source_actions(void *data, struct wl_data_offer *offer, uint32_t actions) {}
+static void offer_action(void *data, struct wl_data_offer *offer, uint32_t action) {}
+
+static const struct wl_data_offer_listener g_offer_listener = {
+    .offer = offer_offer,
+    .source_actions = offer_source_actions,
+    .action = offer_action,
+};
 
 static Offer_Mimes g_new_offer;
 
@@ -1018,11 +1033,20 @@ static void device_selection(void *data, struct wl_data_device *d, struct wl_dat
   receive_selection();
 }
 
+static void end_drag(void) {
+  if (g_drag_offer) wl_data_offer_destroy(g_drag_offer);
+  g_drag_offer = NULL;
+}
+
 static void device_enter(void *data, struct wl_data_device *d, uint32_t serial, struct wl_surface *s, wl_fixed_t x,
-                         wl_fixed_t y, struct wl_data_offer *offer) {}
-static void device_leave(void *data, struct wl_data_device *d) {}
+                         wl_fixed_t y, struct wl_data_offer *offer) {
+  end_drag();
+  g_drag_offer = offer;
+}
+
+static void device_leave(void *data, struct wl_data_device *d) { end_drag(); }
 static void device_motion(void *data, struct wl_data_device *d, uint32_t time, wl_fixed_t x, wl_fixed_t y) {}
-static void device_drop(void *data, struct wl_data_device *d) {}
+static void device_drop(void *data, struct wl_data_device *d) { end_drag(); }
 
 static const struct wl_data_device_listener g_device_listener = {
     .data_offer = device_data_offer,
