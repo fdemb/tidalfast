@@ -219,33 +219,102 @@ Login_Link :: struct {
 	expires:     f32,
 }
 
+// Result is a job's answer. err and message say why it failed. arena, when
+// the job made one, owns the strings and rows payload points to.
 Result :: struct {
-	job:         Job,
-	err:         Maybe(tidal.Error_Kind),
-	message:     Small,
-	arena:       ^vmem.Arena, // owns rows, playlists and their strings
-	rows:        []Row, // in space for a list read from disk
-	space:       []u8, // Disk: the list's space, see space_reserve
-	loaded:      []bool, // Disk: in space
-	total:       int, // Tracks: the list's length TIDAL gave with the page, -1 if it didn't
-	playlists:   []Sidebar_Item,
-	liked_count: int,
-	signed_in:   bool, // Restore found tokens
-	link:        Login_Link,
-	pixels:      []u8, // from cover.decode
-	w, h:        int,
-	stream:      tidal.Stream_Info, // strings in arena
-	codec:       Small, // Stream: the manifest's codec, when that's why it failed
-	found:       Found_Lists, // Search: in arena
-	liked_newest: i64, // Playlists: the newest liked track's id
-	hit:         bool, // Disk: the file was there and good
-	version:     List_Version, // Disk: what the list was fetched at
-	fetched:     i64, // Disk: when, unix seconds
-	queue:       Queue_Header, // Disk, Read_Queue: the play queue's place; its rows are in rows
-	added:       bool, // Add_Track: TIDAL added it rather than finding it there
-	liked_ids:   []i64, // Liked_Ids: every liked track's id, sorted
-	followed:    []i64, // Liked_Ids: every followed artist's id, sorted
-	artist:      Artist_Content, // Artist: strings in arena
+	job:     Job,
+	err:     Maybe(tidal.Error_Kind),
+	message: Small,
+	arena:   ^vmem.Arena,
+	payload: Result_Payload, // nil when the job's kind answers nothing more
+}
+
+// Result_Payload is what a job of one kind brings back, besides err.
+Result_Payload :: union {
+	Restore_Result,
+	Login_Link, // Login_Start
+	Login_Wait_Result,
+	Sidebar_Result,
+	Tracks_Result,
+	Image_Result,
+	Stream_Result,
+	Search_Result,
+	List_File_Result,
+	Queue_File_Result,
+	Add_Track_Result,
+	Liked_Ids_Result,
+	Artist_Result,
+}
+
+Restore_Result :: struct {
+	signed_in: bool, // the Keychain had tokens
+}
+
+Login_Wait_Result :: struct {
+	interval: f32, // seconds between polls, as TIDAL last asked
+}
+
+// Sidebar_Result is the sidebar from a Playlists job, or from its file.
+Sidebar_Result :: struct {
+	playlists:    []Sidebar_Item, // in arena
+	liked_count:  int,
+	liked_newest: i64, // the newest liked track's id
+}
+
+Tracks_Result :: struct {
+	rows:  []Row, // in arena
+	total: int, // the list's length TIDAL gave with the page, -1 if it didn't
+}
+
+// Image_Result is a Cover's or an Artwork's pixels, from cover.decode.
+Image_Result :: struct {
+	pixels: []u8,
+	w, h:   int,
+}
+
+Stream_Result :: struct {
+	info:  tidal.Stream_Info, // strings in arena
+	codec: Small, // the manifest's codec, when that's why it failed
+}
+
+Search_Result :: struct {
+	rows:  []Row, // in arena
+	found: Found_Lists, // in arena
+}
+
+// List_File_Result is a list read from its file, there and good. The rows
+// are in space, their strings in arena.
+List_File_Result :: struct {
+	space:   []u8, // see space_reserve
+	rows:    []Row,
+	loaded:  []bool, // in space
+	total:   int,
+	version: List_Version, // what the list was fetched at
+	fetched: i64, // when, unix seconds
+}
+
+// Queue_File_Result is the play queue read from its file, there and good.
+Queue_File_Result :: struct {
+	header: Queue_Header, // the queue's place
+	rows:   []Row, // in arena
+}
+
+// Add_Track_Result is what an add, like or unlike changed. version and row
+// are what TIDAL lists after it, when the second ask got them.
+Add_Track_Result :: struct {
+	added:   bool, // TIDAL added it rather than finding it there
+	version: List_Version,
+	row:     Maybe(Row), // the track as the list now has it, in arena
+}
+
+Liked_Ids_Result :: struct {
+	tracks:  []i64, // every liked track's id, sorted
+	artists: []i64, // every followed artist's id, sorted
+	version: List_Version, // the sidebar's when the job went out
+}
+
+Artist_Result :: struct {
+	content: Artist_Content, // strings in arena
 }
 
 workers_start :: proc(d: ^Data) {
@@ -311,8 +380,9 @@ worker_main :: proc "c" (arg: rawptr) -> rawptr {
 		res := run_job(d, job)
 		free_all(context.temp_allocator)
 		if retry_later(d, res) {
+			again := requeued(job, res)
 			result_free(&res)
-			jobs.requeue(&d.queue, requeued(job, res), ticket)
+			jobs.requeue(&d.queue, again, ticket)
 			continue
 		}
 		if e, failed := res.err.?; failed && e == .Refresh_Failed {
@@ -329,8 +399,9 @@ worker_main :: proc "c" (arg: rawptr) -> rawptr {
 			continue
 		}
 		if !jobs.push_wait(&d.results, res) {
+			again := requeued(job, res)
 			result_free(&res)
-			jobs.requeue(&d.queue, requeued(job, res), ticket)
+			jobs.requeue(&d.queue, again, ticket)
 			continue
 		}
 		job_free(&job)
@@ -437,8 +508,8 @@ requeued :: proc(job: Job, res: Result) -> Job {
 	case Artwork_Job:
 		p.image.remote ||= res.err != nil
 	case Login_Wait_Job:
-		if res.link.interval > 0 {
-			p.interval = res.link.interval
+		if wait, ok := res.payload.(Login_Wait_Result); ok && wait.interval > 0 {
+			p.interval = wait.interval
 			p.not_before = time.tick_add(time.tick_now(), time.Duration(f64(p.interval) * f64(time.Second)))
 		}
 	}
@@ -464,10 +535,13 @@ arena_release :: proc(a: ^vmem.Arena) {
 result_free :: proc(res: ^Result) {
 	arena_release(res.arena)
 	res.arena = nil
-	space_release(res.space)
-	res.space = nil
-	cover.free_pixels(res.pixels)
-	res.pixels = nil
+	#partial switch &p in res.payload {
+	case List_File_Result:
+		space_release(p.space)
+	case Image_Result:
+		cover.free_pixels(p.pixels)
+	}
+	res.payload = nil
 }
 
 // fail records err for a job that sent the login's tokens. An expired
@@ -539,20 +613,20 @@ run_job :: proc(d: ^Data, job: Job) -> (res: Result) {
 			log_stream_error(p.track, "failed", err)
 			fail(&res, err)
 			if e, _ := err.?; e.kind == .Lossy_Stream {
-				res.codec = small(tidal.error_detail(&e))
+				res.payload = Stream_Result{codec = small(tidal.error_detail(&e))}
 			}
 			return
 		}
-		res.stream = info
+		res.payload = Stream_Result{info = info}
 	case Restore_Job:
-		res.signed_in = auth_load(d, &res)
+		res.payload = Restore_Result{auth_load(d, &res)}
 	case Login_Start_Job:
 		link, err := tidal.login_device_start(s, alloc)
 		if err != nil {
 			fail(&res, err)
 			return
 		}
-		res.link = {
+		res.payload = Login_Link {
 			user_code   = small(link.user_code),
 			uri         = small(link.verification_uri),
 			uri_full    = small(link.verification_uri_complete),
@@ -567,13 +641,13 @@ run_job :: proc(d: ^Data, job: Job) -> (res: Result) {
 	case Tracks_Job:
 		tracks: []tidal.Track
 		err: tidal.Error
-		res.total = -1
+		total := -1
 		id := p.id
 		#partial switch p.source {
 		case .Liked:
-			tracks, res.total, err = tidal.favorites_tracks(s, int(p.limit), int(p.offset), .Date, .Descending, alloc)
+			tracks, total, err = tidal.favorites_tracks(s, int(p.limit), int(p.offset), .Date, .Descending, alloc)
 		case .Playlist:
-			tracks, res.total, err = tidal.playlist_tracks(s, small_str(&id), int(p.limit), int(p.offset), allocator = alloc)
+			tracks, total, err = tidal.playlist_tracks(s, small_str(&id), int(p.limit), int(p.offset), allocator = alloc)
 		case:
 			tracks, err = more_tracks(s, p, alloc)
 		}
@@ -581,10 +655,7 @@ run_job :: proc(d: ^Data, job: Job) -> (res: Result) {
 			fail(&res, err)
 			return
 		}
-		res.rows = make([]Row, len(tracks), alloc)
-		for t, i in tracks {
-			res.rows[i] = row_from_track(t, alloc)
-		}
+		res.payload = Tracks_Result{rows_from_tracks(tracks, alloc), total}
 	case Add_Track_Job:
 		run_add_track(s, p, &res, alloc)
 	case Liked_Ids_Job:
@@ -606,7 +677,7 @@ run_job :: proc(d: ^Data, job: Job) -> (res: Result) {
 			fail(&res, err)
 			return
 		}
-		res.artist = content
+		res.payload = Artist_Result{content}
 	case Search_Job:
 		query := p.query
 		found, err := tidal.search(s, small_str(&query), {.Track, .Album, .Artist, .Playlist}, SEARCH_PAGE, 0, alloc)
@@ -614,13 +685,18 @@ run_job :: proc(d: ^Data, job: Job) -> (res: Result) {
 			fail(&res, err)
 			return
 		}
-		res.rows = make([]Row, len(found.tracks), alloc)
-		for t, i in found.tracks {
-			res.rows[i] = row_from_track(t, alloc)
-		}
-		res.found = found_lists(found, alloc)
+		res.payload = Search_Result{rows_from_tracks(found.tracks, alloc), found_lists(found, alloc)}
 	}
 	return
+}
+
+@(private = "file")
+rows_from_tracks :: proc(tracks: []tidal.Track, alloc: mem.Allocator) -> []Row {
+	rows := make([]Row, len(tracks), alloc)
+	for t, i in tracks {
+		rows[i] = row_from_track(t, alloc)
+	}
+	return rows
 }
 
 // run_login_pkce trades the pasted address's code for tokens. If an
@@ -694,7 +770,7 @@ run_login_wait :: proc(d: ^Data, job: Login_Wait_Job, res: ^Result) {
 		expires_in  = left,
 	}
 	err := tidal.login_device_wait(s, &link, until_expiry = !job.once, attempt = attempt)
-	res.link.interval = f32(link.interval)
+	res.payload = Login_Wait_Result{f32(link.interval)}
 	if err != nil {
 		fail_login(res, err)
 	}
@@ -720,9 +796,9 @@ run_playlists :: proc(s: ^tidal.Session, res: ^Result, alloc: mem.Allocator) {
 		fail(res, err)
 		return
 	}
-	res.liked_count = count
+	sidebar := Sidebar_Result{liked_count = count}
 	if len(newest) > 0 {
-		res.liked_newest = newest[0].id
+		sidebar.liked_newest = newest[0].id
 	}
 	items := make([dynamic]Sidebar_Item, 0, 64, alloc)
 	for offset := 0;; offset += PLAYLIST_PAGE {
@@ -742,7 +818,8 @@ run_playlists :: proc(s: ^tidal.Session, res: ^Result, alloc: mem.Allocator) {
 			break
 		}
 	}
-	res.playlists = items[:]
+	sidebar.playlists = items[:]
+	res.payload = sidebar
 }
 
 // run_liked_ids reads every liked track's id and followed artist's in one
@@ -757,15 +834,13 @@ run_liked_ids :: proc(s: ^tidal.Session, job: Liked_Ids_Job, res: ^Result, alloc
 	}
 	slice.sort(ids.tracks)
 	slice.sort(ids.artists)
-	res.liked_ids = slice.unique(ids.tracks)
-	res.followed = slice.unique(ids.artists)
-	res.version = job.version
+	res.payload = Liked_Ids_Result{slice.unique(ids.tracks), slice.unique(ids.artists), job.version}
 }
 
 // run_add_track likes, unlikes or adds a track to the end of a playlist,
 // then asks for the list's version and the track as the list now has it,
 // so the kept copies can take it in place. If that second ask fails, the
-// add still stands and res.rows stays empty.
+// add still stands and the result has no row.
 @(private = "file")
 run_add_track :: proc(s: ^tidal.Session, job: Add_Track_Job, res: ^Result, alloc: mem.Allocator) {
 	track := fmt.tprint(job.track)
@@ -779,23 +854,24 @@ run_add_track :: proc(s: ^tidal.Session, job: Add_Track_Job, res: ^Result, alloc
 			// One track gives the count and the newest, which list_edited
 			// takes; the set holds the truth about the track itself.
 			newest, count, _ := tidal.favorites_tracks(s, 1, 0, .Date, .Descending, context.temp_allocator)
-			res.version = {count = i64(count)}
+			out := Add_Track_Result{version = {count = i64(count)}}
 			if len(newest) > 0 {
-				res.version.newest = newest[0].id
+				out.version.newest = newest[0].id
 			}
+			res.payload = out
 			return
 		}
 		if err := tidal.favorites_add_track(s, {track}); err != nil {
 			fail(res, err)
 			return
 		}
-		res.added = true // add_result tells from the count whether it was there
+		out := Add_Track_Result{added = true} // add_result tells from the count whether it was there
 		newest, count, err := tidal.favorites_tracks(s, 1, 0, .Date, .Descending, alloc)
 		if err == nil && len(newest) == 1 && newest[0].id == job.track {
-			res.version = {count = i64(count), newest = newest[0].id}
-			res.rows = make([]Row, 1, alloc)
-			res.rows[0] = row_from_track(newest[0], alloc)
+			out.version = {count = i64(count), newest = newest[0].id}
+			out.row = row_from_track(newest[0], alloc)
 		}
+		res.payload = out
 		return
 	}
 	pl, err := tidal.playlist_get(s, small_str(&id), context.temp_allocator)
@@ -809,22 +885,21 @@ run_add_track :: proc(s: ^tidal.Session, job: Add_Track_Job, res: ^Result, alloc
 		fail(res, err)
 		return
 	}
-	res.added = len(added) > 0
+	out := Add_Track_Result{added = len(added) > 0}
 	// Without an ETag the playlist wasn't read again after the add, so pl
 	// is as it was before.
-	if !res.added || pl.num_tracks == 0 || pl.etag == "" {
-		return
+	if out.added && pl.num_tracks > 0 && pl.etag != "" {
+		version := List_Version{count = i64(pl.num_tracks)}
+		if t, ok := pl.last_updated.?; ok {
+			version.updated = time.to_unix_nanoseconds(t) / 1e6
+		}
+		last, total, lerr := tidal.playlist_tracks(s, small_str(&id), 1, pl.num_tracks - 1, allocator = alloc)
+		if lerr == nil && total == pl.num_tracks && len(last) == 1 && last[0].id == job.track {
+			out.version = version
+			out.row = row_from_track(last[0], alloc)
+		}
 	}
-	version := List_Version{count = i64(pl.num_tracks)}
-	if t, ok := pl.last_updated.?; ok {
-		version.updated = time.to_unix_nanoseconds(t) / 1e6
-	}
-	last, total, lerr := tidal.playlist_tracks(s, small_str(&id), 1, pl.num_tracks - 1, allocator = alloc)
-	if lerr == nil && total == pl.num_tracks && len(last) == 1 && last[0].id == job.track {
-		res.version = version
-		res.rows = make([]Row, 1, alloc)
-		res.rows[0] = row_from_track(last[0], alloc)
-	}
+	res.payload = out
 }
 
 // fetch_size is the size an image job downloads. Artwork is shown at the
@@ -867,7 +942,7 @@ run_cover :: proc(d: ^Data, job: Image_Job, res: ^Result) {
 	if !cached {
 		cover_write(d, dir, path, body)
 	}
-	res.pixels, res.w, res.h = pixels, w, h
+	res.payload = Image_Result{pixels, w, h}
 }
 
 MONTHS := [12]string{"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"}

@@ -33,8 +33,8 @@ follow_state_free :: proc(s: ^app.State) {
 @(private = "file")
 fetch_lands :: proc(s: ^app.State, followed: ..i64) {
 	res := app.Result {
-		job = {auth = s.data.auth_gen, payload = app.Liked_Ids_Job{}},
-		followed = followed,
+		job     = {auth = s.data.auth_gen, payload = app.Liked_Ids_Job{}},
+		payload = app.Liked_Ids_Result{artists = followed},
 	}
 	app.handle_result(s, &res, 0)
 }

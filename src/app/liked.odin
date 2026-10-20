@@ -61,8 +61,9 @@ liked_ids_result :: proc(d: ^Data, res: ^Result, failed: bool) {
 	}
 	// The whole set goes: a track that came off liked since the set was
 	// taken stays out this way too.
-	ids_replace(&d.liked.ids, res.liked_ids, &d.liked.edits, d.liked.out)
-	d.liked.version = res.version
+	ids, _ := res.payload.(Liked_Ids_Result)
+	ids_replace(&d.liked.ids, ids.tracks, &d.liked.edits, d.liked.out)
+	d.liked.version = ids.version
 }
 
 // liked_clear frees the set, at sign-out and shut down.

@@ -1061,7 +1061,7 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 		if res.message.len > 0 {
 			d.message = res.message
 		}
-		if res.signed_in {
+		if restored, _ := res.payload.(Restore_Result); restored.signed_in {
 			signed_in(d)
 		} else {
 			d.account = .Signed_Out
@@ -1091,9 +1091,10 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 			}
 			return
 		}
+		link, _ := res.payload.(Login_Link)
 		l^ = {
 			card = Login_Code{},
-			code = Code_Polling{link = res.link, deadline = time.tick_add(time.tick_now(), time.Duration(f64(res.link.expires) * f64(time.Second)))},
+			code = Code_Polling{link = link, deadline = time.tick_add(time.tick_now(), time.Duration(f64(link.expires) * f64(time.Second)))},
 			note = l.note,
 		}
 		request_login_poll(d)
@@ -1127,7 +1128,8 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 			d.message = res.message
 			return
 		}
-		sidebar_adopt(s, res, false)
+		sidebar, _ := res.payload.(Sidebar_Result)
+		sidebar_adopt(s, res, sidebar, false)
 		sidebar_save(d)
 	case Disk_Job:
 		disk_result(s, res, p)
@@ -1157,7 +1159,8 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 			v.in_flight -= held_remove_if(d, page_of, &v.gen)
 			return
 		}
-		view_add_rows(v, int(p.offset), int(p.limit), res.rows, res.total)
+		page, _ := res.payload.(Tracks_Result)
+		view_add_rows(v, int(p.offset), int(p.limit), page.rows, page.total)
 		if v.done {
 			v.in_flight -= held_remove_if(d, page_of, &v.gen)
 		}
@@ -1175,7 +1178,8 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 		search_result(s, res, p)
 	case Cover_Job:
 		key := p.key
-		if failed || res.pixels == nil {
+		img, _ := res.payload.(Image_Result)
+		if failed || img.pixels == nil {
 			cover.set_failed(&d.covers, key, now)
 			return
 		}
@@ -1183,7 +1187,7 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 		// entry is gone or every page is in use; failed covers are retried.
 		e := cover.lookup(&d.covers, key)
 		page: ^cover.Page
-		if e != nil && res.w == int(e.px) && res.h == int(e.px) {
+		if e != nil && img.w == int(e.px) && img.h == int(e.px) {
 			e, page = cover.place(&d.covers, key, s.frame_count, now)
 		}
 		if page == nil {
@@ -1196,7 +1200,7 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 			page.texture = render.texture_create(r, side, side, .RGBA8)
 		}
 		src := cover.src(&d.covers, e)
-		render.texture_update(r, page.texture, res.pixels, int(src.x), int(src.y), res.w, res.h, converted = true)
+		render.texture_update(r, page.texture, img.pixels, int(src.x), int(src.y), img.w, img.h, converted = true)
 		d.bench.uploads += 1
 		d.bench.frame_uploads += 1
 	}
@@ -1216,8 +1220,8 @@ login_wait_done :: proc(d: ^Data, res: ^Result, job: Login_Wait_Job, err: tidal.
 		return // the login started over
 	}
 	poll.out = false
-	if res.link.interval > 0 {
-		poll.link.interval = res.link.interval
+	if wait, _ := res.payload.(Login_Wait_Result); wait.interval > 0 {
+		poll.link.interval = wait.interval
 	}
 	if !failed {
 		signed_in(d)

@@ -337,7 +337,7 @@ aac_stream_message :: proc(t: ^testing.T) {
 		job     = job,
 		err     = .Lossy_Stream,
 		message = app.small("Lossy_Stream: Not a FLAC stream (MP4A)"),
-		codec   = app.small("MP4A"),
+		payload = app.Stream_Result{codec = app.small("MP4A")},
 	}
 	app.handle_result(s, &res, 0)
 	testing.expect_value(t, app.small_str(&s.playback.message), AAC_MESSAGE)
@@ -543,8 +543,8 @@ failed_prefetch_is_not_retried :: proc(t: ^testing.T) {
 		return
 	}
 	resolved := app.Result {
-		job = queued[0],
-		stream = {track_id = 1000, quality = "LOSSLESS", codec = "FLAC", url = fmt.tprintf("%sa.flac", m.base_url), sample_rate = 44100, bit_depth = 16, track_peak = 1, album_peak = 1},
+		job     = queued[0],
+		payload = app.Stream_Result{info = {track_id = 1000, quality = "LOSSLESS", codec = "FLAC", url = fmt.tprintf("%sa.flac", m.base_url), sample_rate = 44100, bit_depth = 16, track_peak = 1, album_peak = 1}},
 	}
 	app.handle_result(s, &resolved, 0)
 

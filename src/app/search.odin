@@ -278,14 +278,15 @@ search_result :: proc(s: ^State, res: ^Result, job: Search_Job) {
 		sr.error = res.message
 		return
 	}
+	answer, _ := res.payload.(Search_Result)
 	sr.error = {}
 	found_free(sr)
 	sr.arena = res.arena
 	res.arena = nil
-	sr.found = res.found
+	sr.found = answer.found
 	sr.query = job.query
 	q := small_str(&sr.query)
-	log.infof("search: \"%s\": %d songs, %d albums, %d artists, %d playlists", q, len(res.rows), len(sr.found.albums), len(sr.found.artists), len(sr.found.playlists))
+	log.infof("search: \"%s\": %d songs, %d albums, %d artists, %d playlists", q, len(answer.rows), len(sr.found.albums), len(sr.found.artists), len(sr.found.playlists))
 
 	browse_begin(s)
 	d := &s.data
@@ -298,7 +299,7 @@ search_result :: proc(s: ^State, res: ^Result, job: Search_Job) {
 	if v.has_arena {
 		v.found = found_clone(sr.found, vmem.arena_allocator(&v.arena))
 	}
-	view_add_rows(v, 0, SEARCH_PAGE, res.rows)
+	view_add_rows(v, 0, SEARCH_PAGE, answer.rows)
 	v.next_offset = SEARCH_PAGE
 	view_request_pages(d)
 	list_loaded(d, v)

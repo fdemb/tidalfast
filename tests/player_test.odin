@@ -280,12 +280,7 @@ reload_keeps_a_pending_seek :: proc(t: ^testing.T) {
 restored_player_state :: proc(rows: []app.Row, sample, rate: i64) -> ^app.State {
 	s := fake_player_state(nil)
 	s.data.fake = false
-	res := app.Result {
-		hit   = true,
-		rows  = rows,
-		queue = {index = 0, sample = sample, rate = rate},
-	}
-	app.playback_restore(s, &res)
+	app.playback_restore(s, {header = {index = 0, sample = sample, rate = rate}, rows = rows})
 	return s
 }
 

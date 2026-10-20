@@ -774,8 +774,8 @@ held_login_code_dropped_after_the_pkce_login :: proc(t: ^testing.T) {
 // a worker would.
 answer_login_start :: proc(s: ^app.State, job: app.Job, interval: f32 = 1, expires: f32 = 300) {
 	res := app.Result {
-		job  = job,
-		link = {user_code = app.small("ABCDE"), device_code = app.small("dc"), interval = interval, expires = expires},
+		job     = job,
+		payload = app.Login_Link{user_code = app.small("ABCDE"), device_code = app.small("dc"), interval = interval, expires = expires},
 	}
 	app.handle_result(s, &res, 0)
 }
@@ -989,10 +989,10 @@ held_page_past_the_end_stays_home :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(out), 2)
 	fill_with_covers(d)
 
-	first := app.Result{job = out[0], rows = fake_rows(app.PAGE_FIRST), total = 300}
+	first := app.Result{job = out[0], payload = app.Tracks_Result{rows = fake_rows(app.PAGE_FIRST), total = 300}}
 	app.handle_result(s, &first, 0)
 	testing.expect_value(t, v.in_flight, 2)
-	last := app.Result{job = out[1], rows = fake_rows(120 - app.PAGE_FIRST), total = 120}
+	last := app.Result{job = out[1], payload = app.Tracks_Result{rows = fake_rows(120 - app.PAGE_FIRST), total = 120}}
 	app.handle_result(s, &last, 0)
 
 	free_slots(d, 8)
@@ -1021,16 +1021,16 @@ held_page_keeps_later_pages_back :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(out), 2)
 	fill_with_covers(d)
 
-	first := app.Result{job = out[0], rows = fake_rows(app.PAGE_FIRST), total = 300}
+	first := app.Result{job = out[0], payload = app.Tracks_Result{rows = fake_rows(app.PAGE_FIRST), total = 300}}
 	app.handle_result(s, &first, 0)
 	free_slots(d, 1)
-	second := app.Result{job = out[1], rows = fake_rows(app.PAGE_SIZE), total = 300}
+	second := app.Result{job = out[1], payload = app.Tracks_Result{rows = fake_rows(app.PAGE_SIZE), total = 300}}
 	app.handle_result(s, &second, 0)
 	app.data_retry(d)
 	for _ in 0 ..< 8 {
 		for job in data_jobs(d) {
 			if p, page := job.payload.(app.Tracks_Job); page {
-				res := app.Result{job = job, rows = fake_rows(clamp(300 - int(p.offset), 0, int(p.limit))), total = 300}
+				res := app.Result{job = job, payload = app.Tracks_Result{rows = fake_rows(clamp(300 - int(p.offset), 0, int(p.limit))), total = 300}}
 				app.handle_result(s, &res, 0)
 			}
 		}
@@ -1416,25 +1416,31 @@ add_track_job :: proc(t: ^testing.T) {
 	res, ok := wait_result(d, 5 * time.Second)
 	testing.expect(t, ok)
 	testing.expect_value(t, res.err, nil)
-	testing.expect(t, res.added)
-	testing.expect(t, len(res.rows) == 1 && res.rows[0].id == 33 && res.rows[0].added == "Feb 3, 2026")
-	testing.expect_value(t, res.version.count, 3)
-	testing.expect(t, res.version.updated != 0)
+	added := res.payload.(app.Add_Track_Result) or_else {}
+	testing.expect(t, added.added)
+	row, has_row := added.row.?
+	testing.expect(t, has_row && row.id == 33 && row.added == "Feb 3, 2026")
+	testing.expect_value(t, added.version.count, 3)
+	testing.expect(t, added.version.updated != 0)
 	ids := mock_item_ids(&m, context.temp_allocator)
 	testing.expect(t, len(ids) == 3 && ids[2] == 33)
 	app.result_free(&res)
 
 	app.push_job(d, {payload = app.Add_Track_Job{track = 33, source = .Playlist, id = app.small("pl")}})
 	res, ok = wait_result(d, 5 * time.Second)
-	testing.expect(t, ok && res.err == nil && !res.added && len(res.rows) == 0)
+	added = res.payload.(app.Add_Track_Result) or_else {}
+	_, has_row = added.row.?
+	testing.expect(t, ok && res.err == nil && !added.added && !has_row)
 	testing.expect_value(t, len(mock_item_ids(&m, context.temp_allocator)), 3)
 	app.result_free(&res)
 
 	app.push_job(d, {payload = app.Add_Track_Job{track = 5000, source = .Liked}})
 	res, ok = wait_result(d, 5 * time.Second)
-	testing.expect(t, ok && res.err == nil && res.added)
-	testing.expect(t, len(res.rows) == 1 && res.rows[0].id == 5000)
-	testing.expect_value(t, res.version, app.List_Version{count = MOCK_LIKED + 1, newest = 5000})
+	added = res.payload.(app.Add_Track_Result) or_else {}
+	row, has_row = added.row.?
+	testing.expect(t, ok && res.err == nil && added.added)
+	testing.expect(t, has_row && row.id == 5000)
+	testing.expect_value(t, added.version, app.List_Version{count = MOCK_LIKED + 1, newest = 5000})
 	app.result_free(&res)
 }
 
@@ -1459,8 +1465,10 @@ add_track_stands_when_the_read_after_fails :: proc(t: ^testing.T) {
 	res, ok := wait_result(d, 5 * time.Second)
 	testing.expect(t, ok)
 	testing.expect_value(t, res.err, nil)
-	testing.expect(t, res.added)
-	testing.expect_value(t, len(res.rows), 0)
+	added := res.payload.(app.Add_Track_Result) or_else {}
+	testing.expect(t, added.added)
+	_, has_row := added.row.?
+	testing.expect(t, !has_row)
 	app.result_free(&res)
 }
 
@@ -1505,7 +1513,7 @@ liked_toggle_during_fetch :: proc(t: ^testing.T) {
 	app.liked_toggle(s, 7) // like
 	app.liked_toggle(s, 3) // unlike
 	ids := []i64{3, 5}
-	res := app.Result{liked_ids = ids}
+	res := app.Result{payload = app.Liked_Ids_Result{tracks = ids}}
 	app.liked_ids_result(d, &res, false)
 	testing.expect(t, app.liked_has(d, 7))
 	testing.expect(t, !app.liked_has(d, 3))
@@ -1538,7 +1546,7 @@ liked_refused_during_fetch :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(sent), 2)
 	app.add_result(s, &failed, sent[0].payload.(app.Add_Track_Job))
 	app.add_result(s, &failed, sent[1].payload.(app.Add_Track_Job))
-	res := app.Result{liked_ids = ids}
+	res := app.Result{payload = app.Liked_Ids_Result{tracks = ids}}
 	app.liked_ids_result(d, &res, false)
 	testing.expect(t, !app.liked_has(d, 7))
 	testing.expect(t, app.liked_has(d, 3))
@@ -1578,7 +1586,7 @@ liked_ids_and_unlike :: proc(t: ^testing.T) {
 	res, ok := wait_result(d, 10 * time.Second)
 	testing.expect(t, ok)
 	testing.expect_value(t, res.err, nil)
-	testing.expect_value(t, res.version, app.List_Version{count = MOCK_LIKED, newest = 1})
+	testing.expect_value(t, (res.payload.(app.Liked_Ids_Result) or_else {}).version, app.List_Version{count = MOCK_LIKED, newest = 1})
 	app.handle_result(s, &res, 0)
 	app.result_free(&res)
 	want := MOCK_LIKED - len(MOCK_UNAVAILABLE)
@@ -1597,12 +1605,14 @@ liked_ids_and_unlike :: proc(t: ^testing.T) {
 	res, ok = wait_result(d, 5 * time.Second)
 	testing.expect(t, ok)
 	testing.expect_value(t, res.err, nil)
-	testing.expect_value(t, len(res.rows), 0)
-	testing.expect(t, res.version == app.List_Version{count = MOCK_LIKED - 1, newest = 2})
+	unliked := res.payload.(app.Add_Track_Result) or_else {}
+	_, has_row := unliked.row.?
+	testing.expect(t, !has_row)
+	testing.expect(t, unliked.version == app.List_Version{count = MOCK_LIKED - 1, newest = 2})
 	app.handle_result(s, &res, 0)
 	app.result_free(&res)
 	testing.expect_value(t, d.sidebar.liked_count, MOCK_LIKED - 1)
-	testing.expect(t, d.liked.version == res.version)
+	testing.expect(t, d.liked.version == unliked.version)
 	testing.expect(t, app.liked_has(d, 1))
 
 	// Liked back, it's on the listing again and the count stands.
@@ -1610,9 +1620,11 @@ liked_ids_and_unlike :: proc(t: ^testing.T) {
 	res, ok = wait_result(d, 5 * time.Second)
 	testing.expect(t, ok)
 	testing.expect_value(t, res.err, nil)
-	testing.expect(t, res.added)
-	testing.expect(t, len(res.rows) == 1 && res.rows[0].id == 1)
-	testing.expect_value(t, res.version.count, MOCK_LIKED)
+	liked := res.payload.(app.Add_Track_Result) or_else {}
+	row, listed := liked.row.?
+	testing.expect(t, liked.added)
+	testing.expect(t, listed && row.id == 1)
+	testing.expect_value(t, liked.version.count, MOCK_LIKED)
 	app.handle_result(s, &res, 0)
 	app.result_free(&res)
 	testing.expect_value(t, d.sidebar.liked_count, MOCK_LIKED)
@@ -2099,7 +2111,7 @@ clicks_on_one_liked_heart_hold_one_job :: proc(t: ^testing.T) {
 	}
 	testing.expect(t, !app.liked_has(d, 1), "its unlike is still held")
 	ids := []i64{1}
-	res := app.Result{liked_ids = ids}
+	res := app.Result{payload = app.Liked_Ids_Result{tracks = ids}}
 	app.liked_ids_result(d, &res, false)
 	testing.expect(t, !app.liked_has(d, 1), "the fetch kept the unlike that's out")
 	app.liked_clear(d)
@@ -2154,7 +2166,7 @@ one_heart_change_out_at_a_time :: proc(t: ^testing.T) {
 	sign_in(s)
 	data_jobs(d)
 	took := app.Result {
-		added = true,
+		payload = app.Add_Track_Result{added = true},
 	}
 
 	app.liked_toggle(s, 7)
@@ -2191,7 +2203,7 @@ refused_like_then_unlike :: proc(t: ^testing.T) {
 		err = tidal.Error_Kind.Network,
 	}
 	without := app.Result {
-		liked_ids = []i64{5},
+		payload = app.Liked_Ids_Result{tracks = []i64{5}},
 	}
 
 	app.liked_toggle(s, 7)
@@ -2240,7 +2252,7 @@ like_unlike_like_sends_one :: proc(t: ^testing.T) {
 	sign_in(s)
 	data_jobs(d)
 	took := app.Result {
-		added = true,
+		payload = app.Add_Track_Result{added = true},
 	}
 
 	app.liked_toggle(s, 7)
@@ -2267,7 +2279,7 @@ like_out_when_a_fetch_starts :: proc(t: ^testing.T) {
 	sign_in(s)
 	data_jobs(d)
 	without := app.Result {
-		liked_ids = []i64{5},
+		payload = app.Liked_Ids_Result{tracks = []i64{5}},
 	}
 
 	app.liked_toggle(s, 7)
@@ -2287,7 +2299,7 @@ like_answered_while_a_fetch_is_out :: proc(t: ^testing.T) {
 	sign_in(s)
 	data_jobs(d)
 	without := app.Result {
-		liked_ids = []i64{5},
+		payload = app.Liked_Ids_Result{tracks = []i64{5}},
 	}
 
 	app.liked_toggle(s, 7)

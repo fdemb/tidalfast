@@ -116,9 +116,8 @@ serve :: proc(s: ^app.State, rows: []app.Row) -> int {
 		lo := min(int(p.offset), len(rows))
 		hi := min(lo + int(p.limit), len(rows))
 		res := app.Result {
-			job   = job,
-			rows  = rows[lo:hi],
-			total = len(rows),
+			job     = job,
+			payload = app.Tracks_Result{rows = rows[lo:hi], total = len(rows)},
 		}
 		app.handle_result(s, &res, 0)
 		n += 1
@@ -161,10 +160,8 @@ sidebar :: proc(s: ^app.State, updated: i64, count: int, liked := 3, newest: i64
 	items[0] = {id = "other", name = "Other", tracks = 2, updated = 1}
 	items[1] = {id = "pl", name = "A playlist", tracks = count, updated = updated}
 	res := app.Result {
-		job          = {payload = app.Playlists_Job{}},
-		playlists    = items,
-		liked_count  = liked,
-		liked_newest = newest,
+		job     = {payload = app.Playlists_Job{}},
+		payload = app.Sidebar_Result{playlists = items, liked_count = liked, liked_newest = newest},
 	}
 	app.handle_result(s, &res, 0)
 }
@@ -541,7 +538,7 @@ queue_gets_the_rest_of_a_closed_list :: proc(t: ^testing.T) {
 		if !ok || !tracks || p.offset != 0 {
 			continue
 		}
-		res := app.Result{job = job, rows = rows[:p.limit], total = len(rows)}
+		res := app.Result{job = job, payload = app.Tracks_Result{rows = rows[:p.limit], total = len(rows)}}
 		app.handle_result(s, &res, 0)
 		break
 	}
@@ -588,7 +585,7 @@ queue_file_is_written_once_its_list_loads :: proc(t: ^testing.T) {
 			continue
 		}
 		lo := min(int(p.offset), len(rows))
-		res := app.Result{job = job, rows = rows[lo:min(lo + int(p.limit), len(rows))], total = len(rows)}
+		res := app.Result{job = job, payload = app.Tracks_Result{rows = rows[lo:min(lo + int(p.limit), len(rows))], total = len(rows)}}
 		app.handle_result(s, &res, 0)
 		pages += 1
 		if pages == 1 {
@@ -612,9 +609,10 @@ queue_file_is_written_once_its_list_loads :: proc(t: ^testing.T) {
 	testing.expectf(t, writes > 1 && writes <= 12, "%d queue writes for %d pages", writes, pages)
 	res, _ := app.disk_run(d, {payload = app.Disk_Job{op = .Read_Queue, user = 7}})
 	defer app.result_free(&res)
-	testing.expect(t, res.hit, "the queue's file reads back")
-	if testing.expect_value(t, len(res.rows), 3000) {
-		testing.expect_value(t, res.rows[2999].id, 3999)
+	queue, hit := res.payload.(app.Queue_File_Result)
+	testing.expect(t, hit, "the queue's file reads back")
+	if testing.expect_value(t, len(queue.rows), 3000) {
+		testing.expect_value(t, queue.rows[2999].id, 3999)
 	}
 }
 
@@ -643,10 +641,11 @@ queue_file_written_at_quit_reads_back :: proc(t: ^testing.T) {
 
 	res, _ := app.disk_run(&s.data, {payload = app.Disk_Job{op = .Read_Queue, user = 7}})
 	defer app.result_free(&res)
-	testing.expect(t, res.hit, "the queue's file reads back")
-	testing.expect_value(t, res.queue.index, 7)
-	if testing.expect_value(t, len(res.rows), 300) {
-		testing.expect_value(t, res.rows[299].id, 1299)
+	queue, hit := res.payload.(app.Queue_File_Result)
+	testing.expect(t, hit, "the queue's file reads back")
+	testing.expect_value(t, queue.header.index, 7)
+	if testing.expect_value(t, len(queue.rows), 300) {
+		testing.expect_value(t, queue.rows[299].id, 1299)
 	}
 }
 
@@ -666,7 +665,7 @@ list_loading_for_the_queue_opens_again :: proc(t: ^testing.T) {
 	job, ok := jobs.try_pop(&d.queue)
 	p, tracks := job.payload.(app.Tracks_Job)
 	testing.expect(t, ok && tracks && p.offset == 0)
-	res := app.Result{job = job, rows = rows[:p.limit], total = len(rows)}
+	res := app.Result{job = job, payload = app.Tracks_Result{rows = rows[:p.limit], total = len(rows)}}
 	app.handle_result(s, &res, 0)
 	app.playback_play_row(s, 0)
 
@@ -789,9 +788,7 @@ adding_a_track_updates_the_cache :: proc(t: ^testing.T) {
 	testing.expect(t, ok && add.source == .Playlist && app.small_str(&add.id) == "pl" && add.track == 900)
 	res := app.Result {
 		job     = job,
-		added   = true,
-		rows    = rows_of({900}),
-		version = {updated = 2, count = 4},
+		payload = app.Add_Track_Result{added = true, row = rows_of({900})[0], version = {updated = 2, count = 4}},
 	}
 	app.handle_result(s, &res, 0)
 	testing.expect_value(t, app.status_text(s), "Added Song 900 夜に駆ける to A playlist")
@@ -810,7 +807,7 @@ adding_a_track_updates_the_cache :: proc(t: ^testing.T) {
 	// TIDAL already had it: nothing changes.
 	app.add_to_list(s, 3, 2)
 	job, _ = add_job(s)
-	res = {job = job, added = false}
+	res = {job = job, payload = app.Add_Track_Result{added = false}}
 	app.handle_result(s, &res, 0)
 	testing.expect_value(t, app.status_text(s), "Song 900 夜に駆ける is already in A playlist")
 	testing.expect(t, slice.equal(view_ids(&d.view), []i64{1, 2, 3, 900}))
@@ -820,13 +817,13 @@ adding_a_track_updates_the_cache :: proc(t: ^testing.T) {
 	app.add_to_list(s, 0, 0)
 	job, _ = add_job(s)
 	testing.expect_value(t, job.payload.(app.Add_Track_Job).source, app.Source.Liked)
-	res = {job = job, added = true, rows = rows_of({1}), version = {count = 4, newest = 1}}
+	res = {job = job, payload = app.Add_Track_Result{added = true, row = rows_of({1})[0], version = {count = 4, newest = 1}}}
 	app.handle_result(s, &res, 0)
 	testing.expect_value(t, app.status_text(s), "Added Song 1 夜に駆ける to Liked Songs")
 	testing.expect_value(t, d.sidebar.liked_count, 4)
 	app.add_to_list(s, 0, 0)
 	job, _ = add_job(s)
-	res = {job = job, added = true, rows = rows_of({1}), version = {count = 4, newest = 1}}
+	res = {job = job, payload = app.Add_Track_Result{added = true, row = rows_of({1})[0], version = {count = 4, newest = 1}}}
 	app.handle_result(s, &res, 0)
 	testing.expect_value(t, app.status_text(s), "Song 1 夜に駆ける is already in Liked Songs")
 	app.select_playlist(s, 0)
@@ -848,7 +845,7 @@ adding_a_track_updates_the_cache :: proc(t: ^testing.T) {
 	run_disk(s)
 	app.add_to_list(s, 0, 2)
 	job, _ = add_job(s)
-	res = {job = job, added = true}
+	res = {job = job, payload = app.Add_Track_Result{added = true}}
 	app.handle_result(s, &res, 0)
 	testing.expect_value(t, d.refresh.source, app.Source.Playlist)
 	testing.expect(t, track_jobs(s) > 0)
@@ -929,8 +926,8 @@ added_status_goes_with_the_old_sidebar :: proc(t: ^testing.T) {
 	app.set_status(s, .Added, 0, 2)
 	testing.expect_value(t, app.status_text(s), "Added Song 900 夜に駆ける to A playlist")
 	res := app.Result {
-		job       = {payload = app.Playlists_Job{}},
-		playlists = []app.Sidebar_Item{{id = "other", name = "Other", tracks = 2, updated = 1}},
+		job     = {payload = app.Playlists_Job{}},
+		payload = app.Sidebar_Result{playlists = []app.Sidebar_Item{{id = "other", name = "Other", tracks = 2, updated = 1}}},
 	}
 	app.handle_result(s, &res, 0)
 	testing.expect_value(t, app.status_text(s), "")
@@ -1069,9 +1066,8 @@ old_search_results_are_not_refreshed :: proc(t: ^testing.T) {
 	sidebar(s, updated = 1, count = 3)
 	serve(s, rows_of(LIKED_IDS))
 	res := app.Result {
-		job   = {payload = app.Search_Job{gen = s.search.gen, query = app.small("abc")}},
-		rows  = rows_of({1, 2}),
-		found = {albums = []app.Found{{id = 5, name = "An album"}}},
+		job     = {payload = app.Search_Job{gen = s.search.gen, query = app.small("abc")}},
+		payload = app.Search_Result{rows = rows_of({1, 2}), found = {albums = []app.Found{{id = 5, name = "An album"}}}},
 	}
 	app.handle_result(s, &res, 0)
 	testing.expect_value(t, d.view.source, app.Source.Search)
@@ -1169,7 +1165,7 @@ like_from_a_drop_during_fetch :: proc(t: ^testing.T) {
 	app.add_to_list(s, 0, 0)
 	ids := LIKED_IDS
 	res := app.Result {
-		liked_ids = ids,
+		payload = app.Liked_Ids_Result{tracks = ids},
 	}
 	app.liked_ids_result(d, &res, false)
 	testing.expect(t, app.liked_has(d, 700))

@@ -154,9 +154,8 @@ artist_and_album_links :: proc(t: ^testing.T) {
 	albums := []app.Found{{id = 5, name = "An album", subtitle = "Album · Tyler, The Creator, Kali Uchis"}}
 	albums[0].artist, albums[0].artists = two_artists()
 	res := app.Result {
-		job   = {payload = app.Search_Job{gen = sr.gen, query = app.small("abc")}},
-		rows  = []app.Row{{title = "Found song", artist = "Someone", id = 1}},
-		found = {albums = albums},
+		job     = {payload = app.Search_Job{gen = sr.gen, query = app.small("abc")}},
+		payload = app.Search_Result{rows = []app.Row{{title = "Found song", artist = "Someone", id = 1}}, found = {albums = albums}},
 	}
 	app.handle_result(s, &res, 0)
 	library_frame(t, s, &f)
@@ -286,8 +285,8 @@ sidebar_pick_ends_the_search :: proc(t: ^testing.T) {
 	testing.expect(t, sr.gen != sent)
 	testing.expect_value(t, search_jobs(s), 0)
 	res := app.Result {
-		job  = {payload = app.Search_Job{gen = sent, query = app.small("abc")}},
-		rows = []app.Row{{title = "Late", id = 1}},
+		job     = {payload = app.Search_Job{gen = sent, query = app.small("abc")}},
+		payload = app.Search_Result{rows = []app.Row{{title = "Late", id = 1}}},
 	}
 	app.handle_result(s, &res, 0)
 	testing.expect(t, !app.search_showing(s))
@@ -438,8 +437,8 @@ track_menu_closes_with_its_list :: proc(t: ^testing.T) {
 		r = {title = "Found song", artist = "Other Artist", album = "Other Album", id = i64(100 + i), album_id = 22}
 	}
 	res := app.Result {
-		job  = {payload = app.Search_Job{gen = s.search.gen, query = app.small("found")}},
-		rows = rows,
+		job     = {payload = app.Search_Job{gen = s.search.gen, query = app.small("found")}},
+		payload = app.Search_Result{rows = rows},
 	}
 	app.handle_result(s, &res, 0)
 	library_frame(t, s, &f, press(s, "Go to album"))
@@ -490,9 +489,8 @@ search_results_come_back_from_memory :: proc(t: ^testing.T) {
 	testing.expect_value(t, search_jobs(s), 1)
 	albums := []app.Found{{id = 5, name = "An album", subtitle = "Album · Someone"}}
 	res := app.Result {
-		job   = {payload = app.Search_Job{gen = sr.gen, query = app.small("abc")}},
-		rows  = []app.Row{{title = "Found song", artist = "Someone", id = 1}, {title = "Other song", artist = "Someone", id = 2}},
-		found = {albums = albums},
+		job     = {payload = app.Search_Job{gen = sr.gen, query = app.small("abc")}},
+		payload = app.Search_Result{rows = []app.Row{{title = "Found song", artist = "Someone", id = 1}, {title = "Other song", artist = "Someone", id = 2}}, found = {albums = albums}},
 	}
 	app.handle_result(s, &res, 0)
 	testing.expect(t, s.data.view.done)
@@ -767,9 +765,8 @@ sign_out_forgets_history_and_search :: proc(t: ^testing.T) {
 	library_frame(t, s, &f, type_text(&f, "abc"))
 	library_frame(t, s, &f, key(.Return))
 	res := app.Result {
-		job   = {payload = app.Search_Job{gen = sr.gen, query = app.small("abc")}},
-		rows  = []app.Row{{title = "Found song", artist = "Someone", id = 1}},
-		found = {albums = []app.Found{{id = 5, name = "An album"}}},
+		job     = {payload = app.Search_Job{gen = sr.gen, query = app.small("abc")}},
+		payload = app.Search_Result{rows = []app.Row{{title = "Found song", artist = "Someone", id = 1}}, found = {albums = []app.Found{{id = 5, name = "An album"}}}},
 	}
 	app.handle_result(s, &res, 0)
 	library_frame(t, s, &f)

@@ -89,7 +89,8 @@ followed_ids_result :: proc(d: ^Data, res: ^Result, failed: bool) {
 		clear(&f.edits)
 		return
 	}
-	ids_replace(&f.ids, res.followed, &f.edits, f.out)
+	ids, _ := res.payload.(Liked_Ids_Result)
+	ids_replace(&f.ids, ids.artists, &f.edits, f.out)
 	f.known = true
 }
 
