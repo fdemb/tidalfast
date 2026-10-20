@@ -35,6 +35,7 @@
 #include <sys/eventfd.h>
 #include <sys/inotify.h>
 #include <sys/mman.h>
+#include <sys/random.h>
 #include <sys/signalfd.h>
 #include <sys/stat.h>
 #include <sys/timerfd.h>
@@ -846,7 +847,7 @@ typedef struct {
 static char *g_clip; // what we offer, or NULL
 static size_t g_clip_len;
 static struct wl_data_source *g_clip_source;
-static char g_own_mime[48]; // marks the offers that carry our own copy
+static char g_own_mime[64]; // marks the offers that carry our own copy
 static Clip_Send g_sends[CLIP_SENDS] = {{.fd = -1}, {.fd = -1}, {.fd = -1}, {.fd = -1}};
 static uint64_t g_send_count;
 static struct wl_data_offer *g_offer; // the current selection
@@ -896,7 +897,7 @@ static void source_send(void *data, struct wl_data_source *s, const char *mime, 
     close(fd);
     return;
   }
-  memcpy(t->data, g_clip, g_clip_len);
+  if (g_clip_len) memcpy(t->data, g_clip, g_clip_len);
   t->fd = fd;
   t->length = g_clip_len;
   t->done = 0;
@@ -930,9 +931,11 @@ static const struct wl_data_source_listener g_source_listener = {
 
 static void set_clipboard(const uint8_t *text, size_t length) {
   if (!g_data_manager || !g_data_device) return;
+  char *copy = malloc(length + 1);
+  if (!copy) return;
+  if (length) memcpy(copy, text, length);
   free(g_clip);
-  g_clip = malloc(length);
-  memcpy(g_clip, text, length);
+  g_clip = copy;
   g_clip_len = length;
   struct wl_data_source *s = wl_data_device_manager_create_data_source(g_data_manager);
   wl_data_source_add_listener(s, &g_source_listener, NULL);
@@ -1002,10 +1005,10 @@ static size_t get_clipboard(uint8_t *buffer, size_t capacity) {
 
 typedef struct {
   bool text, ours;
-} Offer_Mimes;
+} Offer_Flags;
 
 static void offer_offer(void *data, struct wl_data_offer *offer, const char *mime) {
-  Offer_Mimes *m = data;
+  Offer_Flags *m = data;
   if (!strcmp(mime, "text/plain;charset=utf-8")) m->text = true;
   if (!strcmp(mime, g_own_mime)) m->ours = true;
 }
@@ -1019,10 +1022,11 @@ static const struct wl_data_offer_listener g_offer_listener = {
     .action = offer_action,
 };
 
-static Offer_Mimes g_new_offer;
+// The protocol sends each selection or enter right after its data_offer.
+static Offer_Flags g_new_offer;
 
 static void device_data_offer(void *data, struct wl_data_device *d, struct wl_data_offer *offer) {
-  g_new_offer = (Offer_Mimes){0};
+  g_new_offer = (Offer_Flags){0};
   wl_data_offer_add_listener(offer, &g_offer_listener, &g_new_offer);
 }
 
@@ -2128,7 +2132,10 @@ int main(int argc, char **argv) {
   g_signal_fd = signalfd(-1, &quit_signals, SFD_NONBLOCK | SFD_CLOEXEC);
   // A clipboard reader that closes its end early mustn't kill the app.
   signal(SIGPIPE, SIG_IGN);
-  snprintf(g_own_mime, sizeof g_own_mime, "application/x-tidalfast-%d", getpid());
+  // The random part tells apart two instances with the same pid in different pid namespaces.
+  uint64_t nonce = 0;
+  getrandom(&nonce, sizeof nonce, 0);
+  snprintf(g_own_mime, sizeof g_own_mime, "application/x-tidalfast-%d-%016llx", getpid(), (unsigned long long)nonce);
 
   g_redraw_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
   g_wake_fd = new_timer();
