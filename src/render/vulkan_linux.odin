@@ -961,8 +961,8 @@ gpu_texture_write :: proc(r: ^Renderer, slot: ^Texture_Slot, pixels: []byte, x, 
 }
 
 // write_region adds region to the texels written since the last barrier
-// and returns whether it overlaps them, when the copy has to wait for the
-// earlier ones. Copies to disjoint regions need no barrier between them.
+// and returns whether it overlaps the box around them, when the copy has
+// to wait for the earlier ones. Copies to disjoint regions need no barrier between them.
 write_region :: proc(written: ^[4]i32, region: [4]i32) -> (overlaps: bool) {
 	w := written^
 	overlaps = region.x < w.z && w.x < region.z && region.y < w.w && w.y < region.w
