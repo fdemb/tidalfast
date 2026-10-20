@@ -109,6 +109,11 @@ parse_flac_header :: proc(data: []u8, h: ^Flac_Header) -> Parse_Status {
 	if !have_info {
 		return .Invalid
 	}
+	// The caller keeps the header's bytes, so the last block must be here
+	// whole too.
+	if len(data) < pos {
+		return .Need_More
+	}
 	h.audio_start = pos
 	return .Ok
 }

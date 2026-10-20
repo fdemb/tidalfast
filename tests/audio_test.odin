@@ -122,6 +122,9 @@ flac_header :: proc(t: ^testing.T) {
 	// The header alone is enough; frames needn't be there.
 	testing.expect_value(t, audio.parse_flac_header(file[:start], h), audio.Parse_Status.Ok)
 	testing.expect_value(t, audio.parse_flac_header(transmute([]u8)string("OggS and more bytes"), h), audio.Parse_Status.Invalid)
+	// Cut inside the last block, PADDING: the first frame's offset is past
+	// the bytes there are, which read_header copies.
+	testing.expect_value(t, audio.parse_flac_header(file[:start - 50], h), audio.Parse_Status.Need_More)
 }
 
 @(test)
