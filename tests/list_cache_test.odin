@@ -1366,25 +1366,33 @@ queue_with_position :: proc(t: ^testing.T, s: ^app.State, place: app.Queue_Posit
 }
 
 // A damaged position file doesn't cost the queue: it reads back at the
-// queue file's own place.
+// queue file's own place. Before this, an index past the queue's end was
+// taken, and the queue came back empty.
 @(test)
 damaged_queue_position_keeps_the_queue :: proc(t: ^testing.T) {
-	dir := cache_dir("queue-damaged-place")
-	defer delete(dir, runtime.heap_allocator())
-	defer os.remove_all(dir)
-	s := cache_state(dir)
-	defer cache_state_free(s)
-	s.playback.player = audio.create(no_wake, 0, null_output = true)
-	defer app.playback_shutdown(s)
-	path := queue_with_position(t, s, {magic = app.QUEUE_POSITION_MAGIC, index = 3, sample = -5, rate = 44100})
+	places := [?]app.Queue_Position {
+		{magic = app.QUEUE_POSITION_MAGIC, index = 3, sample = -5, rate = 44100},
+		{magic = app.QUEUE_POSITION_MAGIC, index = 5000, sample = 0, rate = 44100},
+		{magic = app.QUEUE_POSITION_MAGIC, index = -2, sample = 0, rate = 44100},
+	}
+	for place in places {
+		dir := cache_dir("queue-damaged-place")
+		defer delete(dir, runtime.heap_allocator())
+		defer os.remove_all(dir)
+		s := cache_state(dir)
+		defer cache_state_free(s)
+		s.playback.player = audio.create(no_wake, 0, null_output = true)
+		defer app.playback_shutdown(s)
+		path := queue_with_position(t, s, place)
 
-	res, _ := app.disk_run(&s.data, {payload = app.Disk_Job{op = .Read_Queue, user = 7}})
-	defer app.result_free(&res)
-	queue, hit := res.payload.(app.Queue_File_Result)
-	testing.expect(t, hit, "the queue's file reads back")
-	testing.expect_value(t, queue.header.index, 7)
-	testing.expect_value(t, len(queue.rows), 300)
-	testing.expect(t, os.exists(path), "the queue's file stays")
+		res, _ := app.disk_run(&s.data, {payload = app.Disk_Job{op = .Read_Queue, user = 7}})
+		defer app.result_free(&res)
+		queue, hit := res.payload.(app.Queue_File_Result)
+		testing.expect(t, hit, "the queue's file reads back")
+		testing.expectf(t, queue.header.index == 7, "index %d read back at %d", place.index, queue.header.index)
+		testing.expect_value(t, len(queue.rows), 300)
+		testing.expect(t, os.exists(path), "the queue's file stays")
+	}
 }
 
 // A position file left from an older queue file, with another key, is

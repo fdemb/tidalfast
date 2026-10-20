@@ -991,19 +991,19 @@ queue_read :: proc(res: ^Result, path, position_path: string) {
 	if !ok {
 		return
 	}
-	if place, read := file_read(position_path, context.temp_allocator); read && len(place) == size_of(Queue_Position) && len(data) >= size_of(Queue_Header) {
-		p := (^Queue_Position)(raw_data(place))
-		h := (^Queue_Header)(raw_data(data))
-		if p.magic == QUEUE_POSITION_MAGIC && p.key != 0 && p.key == h.key && queue_place_ok(p.sample, p.rate) {
-			h.index, h.sample, h.rate = p.index, p.sample, p.rate
-		}
-	}
 	out: Queue_File_Result
 	err: File_Error
 	if out.header, out.rows, err = queue_decode(data, a); err != .None {
 		log.warnf("lists: dropping the play queue's file (%v)", err)
 		os.remove(path)
 		return
+	}
+	if place, read := file_read(position_path, context.temp_allocator); read && len(place) == size_of(Queue_Position) {
+		p := (^Queue_Position)(raw_data(place))
+		h := &out.header
+		if p.magic == QUEUE_POSITION_MAGIC && p.key != 0 && p.key == h.key && queue_place_ok(p.sample, p.rate) && p.index >= 0 && int(p.index) < len(out.rows) {
+			h.index, h.sample, h.rate = p.index, p.sample if p.rate != 0 else 0, p.rate
+		}
 	}
 	res.payload = out
 }
