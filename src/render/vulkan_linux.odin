@@ -60,10 +60,11 @@ Gpu_Frame :: struct {
 }
 
 Gpu_Buffer :: struct {
-	buffer: vk.Buffer,
-	memory: vk.DeviceMemory,
-	mapped: [^]u8,
-	size:   int,
+	buffer:    vk.Buffer,
+	memory:    vk.DeviceMemory,
+	mapped:    [^]u8,
+	size:      int, // what the buffer was made with, all a copy may use
+	allocated: int, // bytes of memory behind it, which can be more
 }
 
 // Not yet: push_backdrop draws its tint, and the app keeps the player bar
@@ -632,7 +633,8 @@ new_buffer :: proc(g: ^Gpu, size: int, usage: vk.BufferUsageFlags) -> (b: Gpu_Bu
 		vk.DestroyBuffer(g.device, b.buffer, nil)
 		return {}, false
 	}
-	b.size = int(req.size)
+	b.size = size
+	b.allocated = int(req.size)
 	vk.BindBufferMemory(g.device, b.buffer, b.memory, 0)
 	p: rawptr
 	vk.MapMemory(g.device, b.memory, 0, vk.DeviceSize(vk.WHOLE_SIZE), {}, &p)
@@ -644,7 +646,7 @@ new_buffer :: proc(g: ^Gpu, size: int, usage: vk.BufferUsageFlags) -> (b: Gpu_Bu
 free_buffer :: proc(g: ^Gpu, b: ^Gpu_Buffer) {
 	if b.buffer != 0 {
 		vk.DestroyBuffer(g.device, b.buffer, nil)
-		free_memory(g, b.memory, b.size)
+		free_memory(g, b.memory, b.allocated)
 	}
 	b^ = {}
 }
