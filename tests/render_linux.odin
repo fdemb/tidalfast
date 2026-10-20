@@ -27,6 +27,27 @@ renderer_without_a_device_draws_nothing :: proc(t: ^testing.T) {
 	render.destroy(r)
 }
 
+// A failed submit releases the GPU objects partway through a frame, as when
+// a glyph upload runs out of staging room. The rest of the frame keeps its
+// clips and draws nothing.
+@(test)
+renderer_released_mid_frame_draws_nothing :: proc(t: ^testing.T) {
+	r := new(render.Renderer, context.temp_allocator)
+	render.begin_frame(r, 800, 600, 2, {0, 0, 0, 1})
+	instances := make([]render.Instance, 64, context.temp_allocator)
+	r.instances = raw_data(instances)
+	r.capacity[r.slot] = len(instances)
+	render.push_clip(r, {0, 0, 100, 100})
+	render.push_rect(r, {0, 0, 10, 10}, {1, 1, 1, 1})
+	render.release(r)
+	render.push_shadow(r, {0, 0, 10, 10}, 4, 8)
+	render.push_clip(r, {10, 10, 50, 50})
+	render.pop_clip(r)
+	render.end_frame(r)
+	testing.expect(t, r.instances == nil, "instances point into freed memory")
+	testing.expect_value(t, r.instance_count, 1)
+}
+
 // Glyphs written to an atlas page in one frame share one pair of barriers,
 // so a copy waits for the ones before it only when their texels overlap.
 @(test)
