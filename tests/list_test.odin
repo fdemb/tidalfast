@@ -223,7 +223,7 @@ Fonts :: struct {
 	r:       render.Renderer,
 }
 
-// fonts_init loads Inter for measuring. Nothing is drawn.
+// fonts_init loads the system font for measuring. Nothing is drawn.
 fonts_init :: proc(f: ^Fonts) -> bool {
 	f.backing = make([]byte, 64 << 20)
 	mem.arena_init(&f.arena, f.backing)

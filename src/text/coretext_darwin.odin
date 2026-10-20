@@ -65,6 +65,8 @@ CG_BITMAP_BGRA_PREMULTIPLIED :: 2 | 2 << 12 // kCGImageAlphaPremultipliedFirst |
 CT_FONT_ITALIC_TRAIT :: 1 << 0
 CT_FONT_BOLD_TRAIT :: 1 << 1
 CT_FONT_COLOR_GLYPHS_TRAIT :: 1 << 13
+CT_FONT_UI_FONT_SYSTEM :: 2
+CF_NUMBER_CGFLOAT_TYPE :: 16
 
 @(default_calling_convention = "c")
 foreign CoreFoundation {
@@ -75,6 +77,7 @@ foreign CoreFoundation {
 
 	CFRelease :: proc(cf: CFTypeRef) ---
 	CFRetain :: proc(cf: CFTypeRef) -> CFTypeRef ---
+	CFNumberCreate :: proc(allocator: rawptr, type: CFIndex, value: rawptr) -> CFTypeRef ---
 	CFEqual :: proc(a, b: CFTypeRef) -> bool ---
 	CFDataCreate :: proc(allocator: rawptr, bytes: [^]u8, length: CFIndex) -> CFDataRef ---
 	CFDataCreateWithBytesNoCopy :: proc(allocator: rawptr, bytes: [^]u8, length: CFIndex, bytes_deallocator: rawptr) -> CFDataRef ---
@@ -118,6 +121,9 @@ foreign CoreText {
 	kCTFontURLAttribute:  CFStringRef
 	kCTFontAttributeName: CFStringRef
 	kCTFontCharacterSetAttribute: CFStringRef
+	kCTFontTraitsAttribute: CFStringRef
+	kCTFontWeightTrait: CFStringRef
+	kCTFontOpticalSizeAttribute: CFStringRef
 
 	CTFontManagerCreateFontDescriptorFromData :: proc(data: CFDataRef) -> CTFontDescriptorRef ---
 	CTFontDescriptorCreateWithAttributes :: proc(attributes: CFDictionaryRef) -> CTFontDescriptorRef ---
@@ -125,6 +131,7 @@ foreign CoreText {
 	CTFontCollectionCreateMatchingFontDescriptors :: proc(collection: CFTypeRef) -> CFArrayRef ---
 	CTFontCreateWithFontDescriptor :: proc(descriptor: CTFontDescriptorRef, size: CGFloat, transform: rawptr) -> CTFontRef ---
 	CTFontCreateCopyWithAttributes :: proc(font: CTFontRef, size: CGFloat, transform: rawptr, attributes: CTFontDescriptorRef) -> CTFontRef ---
+	CTFontCreateUIFontForLanguage :: proc(type: u32, size: CGFloat, language: CFStringRef) -> CTFontRef ---
 	CTFontCreateForString :: proc(current: CTFontRef, s: CFStringRef, range: CFRange) -> CTFontRef ---
 	CTFontCopyAttribute :: proc(font: CTFontRef, attribute: CFStringRef) -> CFTypeRef ---
 	CTFontCopyPostScriptName :: proc(font: CTFontRef) -> CFStringRef ---
@@ -133,6 +140,7 @@ foreign CoreText {
 	CTFontGetUnitsPerEm :: proc(font: CTFontRef) -> u32 ---
 	CTFontGetAscent :: proc(font: CTFontRef) -> CGFloat ---
 	CTFontGetDescent :: proc(font: CTFontRef) -> CGFloat ---
+	CTFontGetAdvancesForGlyphs :: proc(font: CTFontRef, orientation: u32, glyphs: [^]CGGlyph, advances: [^]CGSize, count: CFIndex) -> f64 ---
 	CTFontGetBoundingRectsForGlyphs :: proc(font: CTFontRef, orientation: u32, glyphs: [^]CGGlyph, rects: [^]CGRect, count: CFIndex) -> CGRect ---
 	CTFontDrawGlyphs :: proc(font: CTFontRef, glyphs: [^]CGGlyph, positions: [^]CGPoint, count: uint, ctx: CGContextRef) ---
 	CTLineCreateWithAttributedString :: proc(s: CFAttributedStringRef) -> CTLineRef ---
@@ -158,12 +166,6 @@ cf_release :: proc(ref: CFTypeRef) {
 	if ref != nil {
 		CFRelease(ref)
 	}
-}
-
-// table_tag packs a four letter OpenType table tag the way CTFontCopyTable
-// wants it.
-table_tag :: proc(s: string) -> u32 {
-	return u32(s[0]) << 24 | u32(s[1]) << 16 | u32(s[2]) << 8 | u32(s[3])
 }
 
 font_has_table :: proc(font: CTFontRef, tag: string) -> bool {

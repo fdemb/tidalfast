@@ -32,13 +32,14 @@ test_cache_keys :: proc(t: ^testing.T) {
 	testing.expect(t, text.run_key("Blue in Green ", .Regular, 13) != a)
 	testing.expect(t, text.run_key("", .Regular, 13) != 0)
 
-	g := text.glyph_key(0, 0, 26, 0)
+	g := text.glyph_key(0, 0, 26, 13, 0)
 	testing.expect(t, g != 0)
-	testing.expect(t, text.glyph_key(0, 0, 26, 1) != g)
-	testing.expect(t, text.glyph_key(1, 0, 26, 0) != g)
-	testing.expect(t, text.glyph_key(0, 1, 26, 0) != g)
-	testing.expect(t, text.glyph_key(0, 0, 26.25, 0) != g)
-	testing.expect_value(t, text.glyph_key(0, 0, 26.01, 0), g) // quarter pixel steps
+	testing.expect(t, text.glyph_key(0, 0, 26, 13, 1) != g)
+	testing.expect(t, text.glyph_key(1, 0, 26, 13, 0) != g)
+	testing.expect(t, text.glyph_key(0, 1, 26, 13, 0) != g)
+	testing.expect(t, text.glyph_key(0, 0, 26.25, 13, 0) != g)
+	testing.expect(t, text.glyph_key(0, 0, 26, 26, 0) != g) // 26 px at 1x
+	testing.expect_value(t, text.glyph_key(0, 0, 26.01, 13, 0), g) // quarter pixel steps
 }
 
 // glyphs makes a run of n glyphs, each 10 wide, with spaces at the given
@@ -313,8 +314,9 @@ test_shape_direction :: proc(t: ^testing.T) {
 }
 
 // Truncating at every width keeps or drops whole clusters, in both
-// directions and from both shapers (Hebrew and Latin marks through
-// kb_text_shape, Arabic with harakat and emoji sequences through CoreText).
+// directions and from both shapers (Hebrew, Latin marks and, under SF Pro,
+// Arabic with harakat through kb_text_shape; emoji sequences through
+// CoreText).
 @(test)
 test_shape_truncate_clusters :: proc(t: ^testing.T) {
 	s: Shaper
@@ -381,6 +383,14 @@ test_shape :: proc(t: ^testing.T) {
 	testing.expect_value(t, state.stats.shaped, 1)
 	bold := text.shape(state, .Bold, 13, "Blue in Green")
 	testing.expect(t, bold.width > a.width, "bold is wider")
+	// The weights can be instances of one variable font, whose default
+	// instance is all kb_text_shape reads.
+	width: f32
+	for font in ([]text.Font{.Regular, .Medium, .Semibold, .Bold}) {
+		w := text.shape(state, font, 13, "Blue in Green").width
+		testing.expectf(t, w > width, "%v is wider than the weight below", font)
+		width = w
+	}
 
 	arabic := shape_loaded(&sh, .Regular, 13, "عيونك")
 	testing.expect(t, arabic.rtl)
@@ -524,17 +534,17 @@ test_fallback_cache_limit :: proc(t: ^testing.T) {
 
 // A default ignorable a font doesn't map, like U+FE0F in Noto Color Emoji,
 // doesn't stop the font covering the cluster: the shaper hides it anyway.
-// Inter has no U+180B, a Mongolian variation selector.
+// The system font has no U+180B, a Mongolian variation selector.
 @(test)
 test_coverage_skips_default_ignorables :: proc(t: ^testing.T) {
 	s: Shaper
 	context.allocator = shaper_init(&s)
 	defer shaper_destroy(&s)
 
-	inter := &s.state.faces[text.Font.Regular].kb
-	testing.expect(t, kbts.CodepointToGlyphId(inter, 0x180b) == 0, "Inter has no U+180B")
+	font := &s.state.faces[text.Font.Regular].kb
+	testing.expect(t, kbts.CodepointToGlyphId(font, 0x180b) == 0, "the font has no U+180B")
 	test: kbts.font_coverage_test
-	kbts.FontCoverageTestBegin(&test, inter)
+	kbts.FontCoverageTestBegin(&test, font)
 	kbts.FontCoverageTestCodepoint(&test, 'a')
 	kbts.FontCoverageTestCodepoint(&test, 0x180b)
 	testing.expect(t, bool(kbts.FontCoverageTestEnd(&test)), "a + U+180B is covered")

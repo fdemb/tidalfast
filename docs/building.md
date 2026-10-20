@@ -16,7 +16,7 @@ On macOS it needs macOS 14 or later, Odin and the Xcode command line tools; [lin
 
 - Hangul. `kbts__HangulSyllableInfo` tested `Codepoint == 0xAC00` where it meant `>=`, so U+AC00 (가) was the only precomposed syllable it recognized. That one was split into jamo and never put back together: the syllable's jamo were treated as not composable, so 가 came out as two jamo glyphs twice as wide. Every other syllable was passed through untouched. On top of that, every glyph the Hangul pass made had codepoint index 0. Now all of U+AC00 to U+D7A3 is recognized, a syllable's own jamo always recompose, and the new glyphs keep the syllable's index and config. Apple SD Gothic Neo's Hangul now matches CoreText's glyph for glyph.
 - Inserted glyphs. The dotted circle added before a stray mark and the nikhahit split off Thai and Lao sara am got index 0. They now take the index of the character they're inserted for.
-- Font coverage. `kbts_FontCoverageTestCodepoint` asked the font for a glyph for every codepoint of a cluster, default ignorables included, so a font that doesn't map U+FE0F didn't cover 🏳️‍🌈 or 1️⃣ and the cluster went to Inter as missing glyphs. Noto Color Emoji is such a font. The shaper hides default ignorables anyway, so the test now skips them.
+- Font coverage. `kbts_FontCoverageTestCodepoint` asked the font for a glyph for every codepoint of a cluster, default ignorables included, so a font that doesn't map U+FE0F didn't cover 🏳️‍🌈 or 1️⃣ and the cluster went to the main font as missing glyphs. Noto Color Emoji is such a font. The shaper hides default ignorables anyway, so the test now skips them.
 
 ## Packaging
 
