@@ -86,6 +86,7 @@ FALLBACK_CAPACITY :: 4096 // to start with; it doubles when three quarters full
 RUN_CAPACITY :: 8192 // slots; the cache holds at most half that
 GLYPH_POOL :: 1 << 18
 SHAPER_MEMORY :: 8 << 20
+ADVANCE_CAPACITY :: 4096 // slots; cleared when three quarters full
 // A cached run nobody drew for this many frames is dropped at the next sweep.
 EVICT_AFTER :: 600
 SWEEP_EVERY :: 256
@@ -163,6 +164,12 @@ Fallback :: struct {
 NO_FACE :: -1
 PENDING :: -2 // asked the loader
 
+// A cached native_advance, by face, glyph and, if ADVANCES_BY_SIZE, size.
+Advance :: struct {
+	key: u64, // 0 is empty
+	em:  f32,
+}
+
 Stats :: struct {
 	shaped:     int, // runs shaped this frame (cache misses)
 	rasterized: int, // glyphs rasterized this frame
@@ -190,6 +197,8 @@ State :: struct {
 	// asked yet, 1 yes, 2 no. kb_text_shape's cmap lookup is slow enough
 	// (about half a microsecond) to matter once per character.
 	coverage:        [Font][]u8,
+	advances:        []Advance,
+	advance_count:   int,
 
 	shaper_memory:   []byte,
 	shaper:          ^kbts.shape_context,
@@ -224,6 +233,7 @@ init :: proc(t: ^State, wake: proc "c" () = nil) -> bool {
 		c = make([]u8, 0x10000 / 4)
 	}
 	t.runs = make([]Run, RUN_CAPACITY)
+	t.advances = make([]Advance, ADVANCE_CAPACITY)
 	t.pool = make([]Glyph, GLYPH_POOL)
 	t.shaper_memory = make([]byte, SHAPER_MEMORY)
 	t.shaper = kbts.PlaceShapeContextFixedMemory(t.shaper_memory)
@@ -575,7 +585,7 @@ kb_shape_once :: proc(t: ^State, font: Font, size: f32, sh: ^Shaping, stack: Fon
 			advance := f32(g.AdvanceX) * scale
 			// A mark's zero advance stays zero.
 			if native && g.AdvanceX != 0 {
-				advance += native_advance(t, face, size, g.Id) - default_advance(&t.faces[face], g.Id) * scale
+				advance += cached_advance(t, face, size, g.Id) - default_advance(&t.faces[face], g.Id) * scale
 			}
 			glyph := Glyph {
 				pen     = x,
@@ -1147,6 +1157,33 @@ default_advance :: proc(face: ^Face, id: u16) -> f32 {
 		return 0
 	}
 	return f32(int(face.hmtx[i]) << 8 | int(face.hmtx[i + 1]))
+}
+
+// cached_advance is native_advance in points, from the advances cache when
+// it can.
+@(private)
+cached_advance :: proc(t: ^State, face: int, size: f32, id: u16) -> f32 {
+	key := 1 << 63 | u64(face) << 48 | u64(id) << 32
+	when ADVANCES_BY_SIZE {
+		key |= u64(transmute(u32)size)
+	}
+	mask := len(t.advances) - 1
+	slot := int(mix64(key)) & mask
+	for t.advances[slot].key != 0 {
+		if t.advances[slot].key == key {
+			return t.advances[slot].em * size
+		}
+		slot = (slot + 1) & mask
+	}
+	if t.advance_count >= len(t.advances) * 3 / 4 {
+		mem.zero_slice(t.advances)
+		t.advance_count = 0
+		slot = int(mix64(key)) & mask
+	}
+	em := native_advance(t, face, size, id)
+	t.advances[slot] = {key, em}
+	t.advance_count += 1
+	return em * size
 }
 
 // fvar_instance returns the 1-based number of the first named instance in
