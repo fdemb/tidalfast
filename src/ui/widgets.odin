@@ -438,15 +438,15 @@ menu_separator :: proc() {
 }
 
 // tooltip shows label next to the mouse once sig's box has been hovered
-// for TOOLTIP_DELAY. Until then it keeps frames coming so it can appear
-// without input.
+// for TOOLTIP_DELAY. Until then it asks for a frame at the deadline so it
+// can appear without input.
 tooltip :: proc(sig: Signal, label: string) {
 	u := ctx
 	if !sig.hovering || u.input.buttons != {} || (u.menu != 0 && u.menu_open) {
 		return
 	}
-	if u.time - u.hot_since < TOOLTIP_DELAY {
-		u.animating = true
+	if shows := u.hot_since + TOOLTIP_DELAY; u.time < shows {
+		wake_at(shows)
 		return
 	}
 	push_parent(u.floating_root)
