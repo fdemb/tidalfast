@@ -311,10 +311,10 @@ Stream :: struct {
 	manifest_hash:        string,
 	manifest:             string, // base64
 	asset_presentation:   string,
-	album_replay_gain:    f64,
-	album_peak_amplitude: f64,
-	track_replay_gain:    f64,
-	track_peak_amplitude: f64,
+	album_replay_gain:    f64, // dB, 0 when TIDAL sends none
+	album_peak_amplitude: f64, // linear, 1.0 when TIDAL sends none
+	track_replay_gain:    f64, // dB, 0 when TIDAL sends none
+	track_peak_amplitude: f64, // linear, 1.0 when TIDAL sends none
 	bit_depth:            int,
 	sample_rate:          int,
 }
