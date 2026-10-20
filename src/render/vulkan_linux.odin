@@ -947,7 +947,9 @@ gpu_texture_write :: proc(r: ^Renderer, slot: ^Texture_Slot, pixels: []byte, x, 
 	}
 	buffer, offset, ok := stage(r, pixels[:w * h * bpp])
 	if !ok {
-		log.error("render: out of staging memory")
+		if r.gpu.device != nil {
+			log.error("render: out of staging memory")
+		}
 		return
 	}
 	cmd := upload_cmd(r)
