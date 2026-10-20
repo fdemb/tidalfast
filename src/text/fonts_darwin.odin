@@ -456,14 +456,15 @@ native_advance :: proc(t: ^State, face: int, size: f32, id: u16) -> f32 {
 	return f32(advance.width)
 }
 
-// coretext_shape shapes runes[start:end], all one direction and one
-// script, with CoreText in face at size, and appends the glyphs in visual
-// order with their codepoint indices. Glyphs CoreText takes from a font
+// coretext_shape shapes sh.runes[start:end], all one direction and one
+// script, with CoreText in face at size, and appends the glyphs to sh in
+// visual order. Glyphs CoreText takes from a font
 // still loading are left blank (ID 0) and set pending. Returns the width in
 // points.
 @(private)
-coretext_shape :: proc(t: ^State, face: int, runes: []rune, start, end: int, size: f32, out: ^[dynamic]Glyph, cps: ^[dynamic]int, pending: ^bool) -> f32 {
+coretext_shape :: proc(t: ^State, face: int, sh: ^Shaping, start, end: int, size: f32, pending: ^bool) -> f32 {
 	font := sized_font(&t.faces[face], size)
+	runes := sh.runes
 	str := CFStringCreateWithBytes(nil, ([^]u8)(raw_data(runes[start:])), (end - start) * 4, CF_STRING_ENCODING_UTF32LE, false)
 	defer cf_release(str)
 	keys := [1]rawptr{kCTFontAttributeName}
@@ -522,8 +523,7 @@ coretext_shape :: proc(t: ^State, face: int, runes: []rune, start, end: int, siz
 	}
 	slice.stable_sort_by(placed[:], proc(a, b: Placed) -> bool {return a.glyph.pen < b.glyph.pen})
 	for p in placed {
-		append(out, p.glyph)
-		append(cps, p.cp)
+		shaping_append(sh, p.glyph, p.cp)
 	}
 	return width
 }

@@ -40,6 +40,7 @@ import "core:hash"
 import "core:mem"
 import "core:slice"
 import "core:unicode"
+import "core:unicode/utf8"
 
 import "../kbts"
 
@@ -422,26 +423,67 @@ Piece :: struct {
 	width:      f32,
 }
 
+// Shaping is shape_uncached's scratch, in the temp allocator: the string's
+// codepoints, the glyphs shaped so far with each one's codepoint index, and
+// the pieces that index into both. glyphs and cps only change together
+// (shaping_append, peel, flip), so cps[i] is always glyphs[i]'s codepoint.
+@(private)
+Shaping :: struct {
+	runes:  []rune,
+	glyphs: [dynamic]Glyph,
+	cps:    [dynamic]int,
+	pieces: [dynamic]Piece,
+}
+
+@(private)
+shaping_append :: proc(sh: ^Shaping, g: Glyph, cp: int) {
+	append(&sh.glyphs, g)
+	append(&sh.cps, cp)
+}
+
+// Font_Stack is the fallback faces a string needs on top of its font, and
+// whether colour faces go above the rest for an emoji in it.
+@(private)
+Font_Stack :: struct {
+	needed:      bit_set[0 ..< MAX_FACES],
+	color_emoji: bool,
+}
+
 @(private)
 shape_uncached :: proc(t: ^State, font: Font, size: f32, s: string) -> Run {
+	primary := &t.faces[font]
+	run := Run {
+		size       = size,
+		font       = font,
+		ascent     = primary.ascent * size,
+		descent    = primary.descent * size,
+		generation = t.generation,
+	}
 	// kb_text_shape crashes on no codepoints.
 	if len(s) == 0 {
-		face := &t.faces[font]
-		return {size = size, font = font, ascent = face.ascent * size, descent = face.descent * size, generation = t.generation}
+		return run
 	}
-	runes := make([dynamic]rune, 0, len(s), context.temp_allocator)
-	for r in s {
-		append(&runes, r)
-	}
+	sh := Shaping{runes = utf8.string_to_runes(s, context.temp_allocator)}
+	sh.glyphs.allocator = context.temp_allocator
+	sh.cps.allocator = context.temp_allocator
+	sh.pieces.allocator = context.temp_allocator
+	stack: Font_Stack
+	stack, run.pending = font_stack(t, font, sh.runes)
+	run.rtl = paragraph_is_rtl(sh.runes)
+	kb_shape(t, font, size, &sh, stack, run.rtl)
+	coretext_reshape(t, size, &sh, &run.pending)
+	order := bidi_reorder(t, &sh, run.rtl)
+	run.glyphs, run.width = place_pieces(&sh, order)
+	return run
+}
 
-	// Find fallback faces for whatever the font doesn't have. Only the ones
-	// this string needs go on the font stack: kb_text_shape is slower with
-	// more fonts to choose from. Characters whose font is still loading get
-	// the font's missing glyph, which draw_run leaves blank.
-	primary := &t.faces[font]
-	needed: bit_set[0 ..< MAX_FACES]
-	pending := false
-	color_emoji := false
+// font_stack finds fallback faces for whatever the font doesn't have. Only
+// the ones this string needs go on the font stack: kb_text_shape is slower
+// with more fonts to choose from. Characters whose font is still loading
+// get the font's missing glyph, which draw_run leaves blank, and set
+// pending.
+@(private)
+font_stack :: proc(t: ^State, font: Font, runes: []rune) -> (stack: Font_Stack, pending: bool) {
 	for r in runes {
 		if has_codepoint(t, font, r) || ignorable(r) {
 			continue
@@ -451,159 +493,169 @@ shape_uncached :: proc(t: ^State, font: Font, size: f32, s: string) -> Run {
 			face = fallback_face(t, font, r)
 		}
 		if face >= 0 {
-			needed += {face}
-			color_emoji ||= t.faces[face].color && emoji_presentation(r)
+			stack.needed += {face}
+			stack.color_emoji ||= t.faces[face].color && emoji_presentation(r)
 		} else if face == PENDING {
 			pending = true
 		}
 	}
+	return
+}
 
-	paragraph_rtl := paragraph_is_rtl(runes[:])
-	ctx := t.shaper
-	pieces: [dynamic]Piece
-	pieces.allocator = context.temp_allocator
-	glyphs: [dynamic]Glyph
-	glyphs.allocator = context.temp_allocator
-	cps: [dynamic]int // each glyph's codepoint index
-	cps.allocator = context.temp_allocator
+// kb_shape shapes sh.runes with kb_text_shape into pieces, each running up
+// to the next one's first codepoint. If the context runs out of memory or
+// meets a bad font it starts over and tries once more; a second failure
+// leaves whatever was shaped.
+@(private)
+kb_shape :: proc(t: ^State, font: Font, size: f32, sh: ^Shaping, stack: Font_Stack, paragraph_rtl: bool) {
 	for _ in 0 ..< 2 {
-		clear(&pieces)
-		clear(&glyphs)
-		clear(&cps)
-		// The top of the stack wins: the primary font, then the fallbacks,
-		// earliest found highest. kb_text_shape takes the first font that
-		// has a character, so with an emoji in colour the colour faces go
-		// above the rest, or a symbol font found for Hebrew or Arabic would
-		// draw it in black and white.
-		pushed := 1
-		for pass in 0 ..< 2 {
-			for i := t.fallback_counts[font] - 1; i >= 0; i -= 1 {
-				face := int(t.fallbacks[font][i])
-				on_top := color_emoji && t.faces[face].color
-				if face in needed && on_top == (pass == 1) {
-					_ = kbts.ShapePushFont(ctx, &t.faces[face].kb)
-					pushed += 1
-				}
-			}
-		}
-		_ = kbts.ShapePushFont(ctx, &primary.kb)
-		kbts.ShapeBegin(ctx, .KBTS_DIRECTION_RTL if paragraph_rtl else .KBTS_DIRECTION_LTR, .DONT_KNOW)
-		kbts.ShapeUtf32(ctx, runes[:])
-		kbts.ShapeEnd(ctx)
-		for {
-			run, ok := kbts.ShapeRun(ctx)
-			if !ok {
-				break
-			}
-			face := face_of(t, run.Font)
-			native := t.faces[face].native_advances
-			piece := Piece{face = face, rtl = run.Direction == .KBTS_DIRECTION_RTL, first = len(glyphs)}
-			scale := size / t.faces[face].units_per_em
-			x: f32
-			for g in kbts.GlyphIteratorNext(&run.Glyphs) {
-				advance := f32(g.AdvanceX) * scale
-				// A mark's zero advance stays zero.
-				if native && g.AdvanceX != 0 {
-					advance += native_advance(t, face, size, g.Id) - default_advance(&t.faces[face], g.Id) * scale
-				}
-				append(&glyphs, Glyph{
-					pen = x,
-					advance = advance,
-					offset = {f32(g.OffsetX) * scale, -f32(g.OffsetY) * scale},
-					id = g.Id,
-					face = u8(face),
-					space = g.Codepoint == ' ' || g.Codepoint == 0xa0 || g.Codepoint == 0x3000,
-				})
-				// With the context API this is always the codepoint index.
-				append(&cps, clamp(int(g.UserIdOrCodepointIndex), 0, len(runes) - 1))
-				x += advance
-			}
-			piece.count = len(glyphs) - piece.first
-			piece.width = x
-			if piece.count > 0 {
-				piece.start = slice.min(cps[piece.first:])
-				append(&pieces, piece)
-			}
-		}
-		for _ in 0 ..< pushed {
-			_ = kbts.ShapePopFont(ctx)
-		}
-		if kbts.ShapeError(ctx) == .NONE {
+		if kb_shape_once(t, font, size, sh, stack, paragraph_rtl) {
 			break
 		}
-		// Out of memory or a bad font. Start the context over and try once
-		// more; a second failure leaves whatever was shaped.
 		t.shaper = kbts.PlaceShapeContextFixedMemory(t.shaper_memory)
-		ctx = t.shaper
 	}
-	// Each piece runs up to the next one's first codepoint.
+	pieces := sh.pieces[:]
 	for &piece, i in pieces {
-		piece.end = max(pieces[i + 1].start if i + 1 < len(pieces) else len(runes), piece.start)
+		piece.end = max(pieces[i + 1].start if i + 1 < len(pieces) else len(sh.runes), piece.start)
 	}
+}
 
-	// Pieces in morx-only fonts get reshaped by CoreText.
-	for &piece in pieces {
+// kb_shape_once is one try of kb_shape, from empty. It returns false if
+// kb_text_shape reported an error.
+@(private)
+kb_shape_once :: proc(t: ^State, font: Font, size: f32, sh: ^Shaping, stack: Font_Stack, paragraph_rtl: bool) -> bool {
+	clear(&sh.pieces)
+	clear(&sh.glyphs)
+	clear(&sh.cps)
+	ctx := t.shaper
+	// The top of the stack wins: the primary font, then the fallbacks,
+	// earliest found highest. kb_text_shape takes the first font that has a
+	// character, so with an emoji in colour the colour faces go above the
+	// rest, or a symbol font found for Hebrew or Arabic would draw it in
+	// black and white.
+	pushed := 1
+	for pass in 0 ..< 2 {
+		for i := t.fallback_counts[font] - 1; i >= 0; i -= 1 {
+			face := int(t.fallbacks[font][i])
+			on_top := stack.color_emoji && t.faces[face].color
+			if face in stack.needed && on_top == (pass == 1) {
+				_ = kbts.ShapePushFont(ctx, &t.faces[face].kb)
+				pushed += 1
+			}
+		}
+	}
+	_ = kbts.ShapePushFont(ctx, &t.faces[font].kb)
+	kbts.ShapeBegin(ctx, .KBTS_DIRECTION_RTL if paragraph_rtl else .KBTS_DIRECTION_LTR, .DONT_KNOW)
+	kbts.ShapeUtf32(ctx, sh.runes)
+	kbts.ShapeEnd(ctx)
+	for {
+		run, ok := kbts.ShapeRun(ctx)
+		if !ok {
+			break
+		}
+		face := face_of(t, run.Font)
+		native := t.faces[face].native_advances
+		piece := Piece{face = face, rtl = run.Direction == .KBTS_DIRECTION_RTL, first = len(sh.glyphs)}
+		scale := size / t.faces[face].units_per_em
+		x: f32
+		for g in kbts.GlyphIteratorNext(&run.Glyphs) {
+			advance := f32(g.AdvanceX) * scale
+			// A mark's zero advance stays zero.
+			if native && g.AdvanceX != 0 {
+				advance += native_advance(t, face, size, g.Id) - default_advance(&t.faces[face], g.Id) * scale
+			}
+			glyph := Glyph {
+				pen     = x,
+				advance = advance,
+				offset  = {f32(g.OffsetX) * scale, -f32(g.OffsetY) * scale},
+				id      = g.Id,
+				face    = u8(face),
+				space   = g.Codepoint == ' ' || g.Codepoint == 0xa0 || g.Codepoint == 0x3000,
+			}
+			// With the context API this is always the codepoint index.
+			shaping_append(sh, glyph, clamp(int(g.UserIdOrCodepointIndex), 0, len(sh.runes) - 1))
+			x += advance
+		}
+		piece.count = len(sh.glyphs) - piece.first
+		piece.width = x
+		if piece.count > 0 {
+			piece.start = slice.min(sh.cps[piece.first:])
+			append(&sh.pieces, piece)
+		}
+	}
+	for _ in 0 ..< pushed {
+		_ = kbts.ShapePopFont(ctx)
+	}
+	return kbts.ShapeError(ctx) == .NONE
+}
+
+// coretext_reshape has CoreText shape the pieces in morx-only fonts again.
+// Their new glyphs go at the end, and the pieces point there.
+@(private)
+coretext_reshape :: proc(t: ^State, size: f32, sh: ^Shaping, pending: ^bool) {
+	for &piece in sh.pieces {
 		if !t.faces[piece.face].coretext_shaping || piece.end <= piece.start {
 			continue
 		}
-		piece.first = len(glyphs)
-		piece.width = coretext_shape(t, piece.face, runes[:], piece.start, piece.end, size, &glyphs, &cps, &pending)
-		piece.count = len(glyphs) - piece.first
+		piece.first = len(sh.glyphs)
+		piece.width = coretext_shape(t, piece.face, sh, piece.start, piece.end, size, pending)
+		piece.count = len(sh.glyphs) - piece.first
 	}
+}
 
-	// kb_text_shape gives each run a direction but resolves neutrals at the
-	// end of the text and brackets around text of the other direction
-	// wrongly, and has no embedding levels. So spaces and brackets at the
-	// ends of runs become runs of their own, and resolve_levels redoes the
-	// neutral and number rules over whole runs.
-	peel(t, &pieces, &glyphs, &cps, runes[:])
-	kinds := make([]Bidi_Kind, len(pieces), context.temp_allocator)
-	rtl := make([]bool, len(pieces), context.temp_allocator)
-	brackets := make([]rune, len(pieces), context.temp_allocator)
-	for piece, i in pieces {
+// bidi_reorder settles each piece's direction and returns the pieces in
+// visual order. kb_text_shape gives each run a direction but resolves
+// neutrals at the end of the text and brackets around text of the other
+// direction wrongly, and has no embedding levels. So spaces and brackets at
+// the ends of runs become runs of their own, and resolve_levels redoes the
+// neutral and number rules over whole runs.
+@(private)
+bidi_reorder :: proc(t: ^State, sh: ^Shaping, paragraph_rtl: bool) -> []int {
+	peel(t, sh)
+	n := len(sh.pieces)
+	kinds := make([]Bidi_Kind, n, context.temp_allocator)
+	rtl := make([]bool, n, context.temp_allocator)
+	brackets := make([]rune, n, context.temp_allocator)
+	for piece, i in sh.pieces {
+		runes := sh.runes[piece.start:piece.end]
 		strong_rtl: bool
-		kinds[i], strong_rtl = bidi_kind(runes[piece.start:piece.end])
+		kinds[i], strong_rtl = bidi_kind(runes)
 		rtl[i] = strong_rtl if kinds[i] == .Strong else piece.rtl
-		if piece.end - piece.start == 1 && mirror(runes[piece.start]) != runes[piece.start] {
-			brackets[i] = runes[piece.start]
+		if len(runes) == 1 && mirror(runes[0]) != runes[0] {
+			brackets[i] = runes[0]
 		}
 	}
-	levels := make([]u8, len(pieces), context.temp_allocator)
+	levels := make([]u8, n, context.temp_allocator)
 	resolve_levels(kinds, rtl, brackets, paragraph_rtl, levels)
-	for &piece, i in pieces {
+	for &piece, i in sh.pieces {
 		if rtl[i] != piece.rtl {
 			piece.rtl = rtl[i]
-			flip(t, &piece, glyphs[:], cps[:], runes[:])
+			flip(t, &piece, sh)
 		}
 	}
-	order := make([]int, len(pieces), context.temp_allocator)
+	order := make([]int, n, context.temp_allocator)
 	visual_order(levels, order)
+	return order
+}
 
-	clusters := grapheme_starts(runes[:])
-	out := make([]Glyph, len(glyphs), context.temp_allocator)
+// place_pieces lays the pieces out left to right in order, and gives each
+// glyph its grapheme cluster.
+@(private)
+place_pieces :: proc(sh: ^Shaping, order: []int) -> (glyphs: []Glyph, width: f32) {
+	clusters := grapheme_starts(sh.runes)
+	out := make([]Glyph, len(sh.glyphs), context.temp_allocator)
 	n := 0
-	x: f32
 	for i in order {
-		piece := pieces[i]
-		for g, j in glyphs[piece.first:][:piece.count] {
+		piece := sh.pieces[i]
+		for g, j in sh.glyphs[piece.first:][:piece.count] {
 			out[n] = g
-			out[n].pen += x
-			out[n].cluster = u32(clusters[cps[piece.first + j]])
+			out[n].pen += width
+			out[n].cluster = u32(clusters[sh.cps[piece.first + j]])
 			n += 1
 		}
-		x += piece.width
+		width += piece.width
 	}
-	return {
-		glyphs = out[:n],
-		width = x,
-		ascent = primary.ascent * size,
-		descent = primary.descent * size,
-		size = size,
-		font = font,
-		rtl = paragraph_rtl,
-		pending = pending,
-		generation = t.generation,
-	}
+	return out[:n], width
 }
 
 // paragraph_is_rtl applies rules P2 and P3 of the Unicode bidi algorithm:
@@ -705,16 +757,16 @@ pictographic :: proc(r: rune) -> bool {
 // peel splits spaces and brackets at either logical end of a run into
 // one-glyph runs of their own, as long as each is a glyph to itself.
 @(private)
-peel :: proc(t: ^State, pieces: ^[dynamic]Piece, glyphs: ^[dynamic]Glyph, cps: ^[dynamic]int, runes: []rune) {
+peel :: proc(t: ^State, sh: ^Shaping) {
 	peelable :: proc(r: rune) -> bool {
 		return r == ' ' || r == 0xa0 || mirror(r) != r
 	}
 	// split moves the glyph at visual index g out of p into a new piece.
-	split :: proc(p: ^Piece, glyphs: ^[dynamic]Glyph, cps: ^[dynamic]int, g: int) -> Piece {
-		glyph := glyphs[g]
-		cp := cps[g]
+	split :: proc(p: ^Piece, sh: ^Shaping, g: int) -> Piece {
+		glyph := sh.glyphs[g]
+		cp := sh.cps[g]
 		if g == p.first {
-			for &other in glyphs[p.first + 1:][:p.count - 1] {
+			for &other in sh.glyphs[p.first + 1:][:p.count - 1] {
 				other.pen -= glyph.advance
 			}
 			p.first += 1
@@ -722,9 +774,8 @@ peel :: proc(t: ^State, pieces: ^[dynamic]Piece, glyphs: ^[dynamic]Glyph, cps: ^
 		p.count -= 1
 		p.width -= glyph.advance
 		glyph.pen = 0
-		append(glyphs, glyph)
-		append(cps, cp)
-		return {face = p.face, rtl = p.rtl, start = cp, end = cp + 1, first = len(glyphs) - 1, count = 1, width = glyph.advance}
+		shaping_append(sh, glyph, cp)
+		return {face = p.face, rtl = p.rtl, start = cp, end = cp + 1, first = len(sh.glyphs) - 1, count = 1, width = glyph.advance}
 	}
 	// edge returns the visual index of the glyph for codepoint cp if it is
 	// at the visual end where logical `first` or last lands and no other
@@ -736,25 +787,26 @@ peel :: proc(t: ^State, pieces: ^[dynamic]Piece, glyphs: ^[dynamic]Glyph, cps: ^
 		return g, cps[g] == cp && cps[inner] != cp
 	}
 
+	pieces, runes := &sh.pieces, sh.runes
 	for i := 0; i < len(pieces); i += 1 {
 		if t.faces[pieces[i].face].coretext_shaping {
 			continue
 		}
 		for pieces[i].count > 1 && pieces[i].end - pieces[i].start > 1 && peelable(runes[pieces[i].end - 1]) {
-			g, ok := edge(pieces[i], cps[:], pieces[i].end - 1, false)
+			g, ok := edge(pieces[i], sh.cps[:], pieces[i].end - 1, false)
 			if !ok {
 				break
 			}
-			piece := split(&pieces[i], glyphs, cps, g)
+			piece := split(&pieces[i], sh, g)
 			pieces[i].end -= 1
 			inject_at(pieces, i + 1, piece)
 		}
 		for pieces[i].count > 1 && pieces[i].end - pieces[i].start > 1 && peelable(runes[pieces[i].start]) {
-			g, ok := edge(pieces[i], cps[:], pieces[i].start, true)
+			g, ok := edge(pieces[i], sh.cps[:], pieces[i].start, true)
 			if !ok {
 				break
 			}
-			piece := split(&pieces[i], glyphs, cps, g)
+			piece := split(&pieces[i], sh, g)
 			pieces[i].start += 1
 			inject_at(pieces, i, piece)
 			i += 1
@@ -766,16 +818,16 @@ peel :: proc(t: ^State, pieces: ^[dynamic]Piece, glyphs: ^[dynamic]Glyph, cps: ^
 // and swaps brackets for their mirror images or back. Other glyphs keep
 // their IDs: CoreText may have merged an emoji sequence into one.
 @(private)
-flip :: proc(t: ^State, piece: ^Piece, glyphs: []Glyph, cps: []int, runes: []rune) {
-	gs := glyphs[piece.first:][:piece.count]
-	cs := cps[piece.first:][:piece.count]
+flip :: proc(t: ^State, piece: ^Piece, sh: ^Shaping) {
+	gs := sh.glyphs[piece.first:][:piece.count]
+	cs := sh.cps[piece.first:][:piece.count]
 	slice.reverse(gs)
 	slice.reverse(cs)
 	x: f32
 	for &g, i in gs {
 		g.pen = x
 		x += g.advance
-		r := runes[cs[i]]
+		r := sh.runes[cs[i]]
 		if mirror(r) == r {
 			continue
 		}

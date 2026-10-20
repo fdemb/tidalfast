@@ -372,7 +372,7 @@ known_or_load :: proc(l: ^Loader, path: cstring, index: int, need: rune, res: ^L
 
 // coretext_shape never runs on Linux: no face has coretext_shaping set.
 @(private)
-coretext_shape :: proc(t: ^State, face: int, runes: []rune, start, end: int, size: f32, out: ^[dynamic]Glyph, cps: ^[dynamic]int, pending: ^bool) -> f32 {
+coretext_shape :: proc(t: ^State, face: int, sh: ^Shaping, start, end: int, size: f32, pending: ^bool) -> f32 {
 	return 0
 }
 
