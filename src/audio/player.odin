@@ -25,8 +25,8 @@ package audio
 //
 // A DASH track (TIDAL's hi-res) arrives as fragmented MP4 segments. The
 // fetch thread downloads them in order into the same kind of window, and
-// the decoder sees the FLAC stream inside: "fLaC" and the metadata blocks
-// from the initialization segment, then the frames from each fragment
+// the decoder sees the FLAC stream inside: "fLaC" and STREAMINFO from the
+// initialization segment, then the frames from each fragment
 // (fmp4.odin). A seek starts again at the segment holding the target.
 //
 // Output goes through miniaudio, which plays at whatever rate the device
@@ -141,16 +141,46 @@ device_reason :: proc(d: ^Device_Info) -> string {
 	return string(d.reason[:d.reason_len])
 }
 
+// Wake is what the decode thread sleeps on. Posts coalesce: while one is
+// pending, more add nothing, so a burst of news wakes the thread once and
+// not once per post.
+Wake :: struct {
+	sema:    sync.Atomic_Sema,
+	pending: bool,
+}
+
+wake_post :: proc "contextless" (w: ^Wake) {
+	if !sync.atomic_exchange(&w.pending, true) {
+		sync.atomic_sema_post(&w.sema)
+	}
+}
+
+// wake_wait sleeps until a post. A post after it returns wakes the next
+// wait, so news posted after the caller last looked is never lost. One
+// return can stand for many posts of different news, so the caller must
+// look at all the state it waits on again before it waits again.
+wake_wait :: proc "contextless" (w: ^Wake) {
+	sync.atomic_sema_wait(&w.sema)
+	sync.atomic_store(&w.pending, false)
+}
+
+// wake_wait_for is wake_wait for at most d.
+wake_wait_for :: proc(w: ^Wake, d: time.Duration) {
+	assert(d > 0)
+	sync.atomic_sema_wait_with_timeout(&w.sema, d)
+	sync.atomic_store(&w.pending, false)
+}
+
 // Device_Watch is where the CoreAudio listeners leave their news for the
-// decode thread, and the semaphore the decode thread sleeps on. A listener
+// decode thread, and what the decode thread sleeps on. A listener
 // may still be running after it's removed, so it touches nothing but the
 // watch, and the watch is never freed. Clearing a pointer to the Player
 // before removal wouldn't do: a listener that loaded it just before could
 // still post to the freed Player. Once the player is destroyed nobody
-// waits on the semaphore, and a late post to it does nothing.
+// waits on the wake, and a late post to it does nothing.
 @(private)
 Device_Watch :: struct {
-	sema:            sync.Atomic_Sema, // the decode thread's wake-up: commands, fetch threads, listeners
+	wake:            Wake, // the decode thread's: commands, fetch threads, listeners
 	device_changed:  bool, // the HAL device's alive state changed (atomic)
 	default_changed: bool, // the system's default output changed (atomic)
 	lost_for_test:   bool, // simulate_device_loss (atomic)
@@ -197,7 +227,7 @@ Slot :: struct {
 @(private)
 Dash_Demux :: struct {
 	starts:      []i64, // each media segment's first sample, in the source's timescale; in track
-	init:        Mp4_Init, // flac_head is in stream.head instead
+	init:        Mp4_Init, // stream.head is made from flac_head
 	pos:         i64, // the next box header
 	moof:        i64, // where the current fragment's moof starts
 	covered:     i64, // where its samples end
@@ -341,7 +371,7 @@ create :: proc(wake_ui: proc "c" (), volume: f32, capture_path := "", window := 
 		assert(terr == nil, "audio: no memory for a track")
 		sl.dash.samples = slice.into_dynamic(make([]Mp4_Sample, MP4_MAX_SAMPLES, a))
 		sl.dash.box = make([]u8, MP4_MAX_BOX, a)
-		stream_init(&sl.stream, &p.watch.sema, max(window, 64 << 10))
+		stream_init(&sl.stream, &p.watch.wake, max(window, 64 << 10))
 	}
 	posix.pthread_create(&p.thread, nil, decode_main, p)
 	return p
@@ -357,7 +387,7 @@ destroy :: proc(p: ^Player) {
 	p.cmd.quit = true
 	sync.unlock(&p.cmd_mutex)
 	sync.atomic_store(&p.cmd_pending, true)
-	sync.atomic_sema_post(&p.watch.sema)
+	wake_post(&p.watch.wake)
 	posix.pthread_join(p.thread)
 	if !p.null_output {
 		unlisten(SYSTEM_OBJECT, PROP_DEFAULT_OUTPUT, device_listener, p.watch)
@@ -443,7 +473,7 @@ when ODIN_TEST {
 	// device had gone away, as the alive listener would.
 	simulate_device_loss :: proc(p: ^Player) {
 		sync.atomic_store(&p.watch.lost_for_test, true)
-		sync.atomic_sema_post(&p.watch.sema)
+		wake_post(&p.watch.wake)
 	}
 
 	// listener_watch is what CoreAudio hands p's listeners, kept after p
@@ -525,7 +555,7 @@ seek_latency :: proc(p: ^Player) -> (id: u32, d: time.Duration, ok: bool) {
 @(private = "file")
 post :: proc(p: ^Player) {
 	sync.atomic_store(&p.cmd_pending, true)
-	sync.atomic_sema_post(&p.watch.sema)
+	wake_post(&p.watch.wake)
 }
 
 // Source_Copy is a Source whose URL and segments are in block.
@@ -619,9 +649,9 @@ decode_main :: proc "c" (arg: rawptr) -> rawptr {
 				left := f64(ring_buffered(&p.pcm)) / f64(p.device_rate)
 				wait = min(wait, time.Duration(left * f64(time.Second)) + time.Millisecond)
 			}
-			sync.atomic_sema_wait_with_timeout(&p.watch.sema, wait)
+			wake_wait_for(&p.watch.wake, wait)
 		} else {
-			sync.atomic_sema_wait(&p.watch.sema)
+			wake_wait(&p.watch.wake)
 		}
 	}
 	device_close(p, restore = true)
@@ -833,7 +863,7 @@ device_listener :: proc "c" (id: Audio_Object_ID, count: u32, addresses: [^]Prop
 			sync.atomic_store(&w.device_changed, true)
 		}
 	}
-	sync.atomic_sema_post(&w.sema)
+	wake_post(&w.wake)
 	return 0
 }
 
@@ -1259,8 +1289,8 @@ slot_open_dash :: proc(p: ^Player, sl: ^Slot) -> bool {
 }
 
 // read_init reads the initialization segment at the start of a freshly
-// opened DASH stream and keeps "fLaC" and the metadata blocks from its dfLa
-// as the slot's header.
+// opened DASH stream and keeps "fLaC" and STREAMINFO from its dfLa as the
+// slot's header.
 @(private = "file")
 read_init :: proc(p: ^Player, sl: ^Slot) -> bool {
 	st := &sl.stream
@@ -1268,7 +1298,7 @@ read_init :: proc(p: ^Player, sl: ^Slot) -> bool {
 	buf := make([dynamic]u8, 0, 16 << 10, context.temp_allocator)
 	chunk: [4096]u8
 	for {
-		n, res := stream_read(st, i64(len(buf)), chunk[:], interrupt, p)
+		n, res := stream_read(st, i64(len(buf)), chunk[:], wait_for_bytes, p)
 		append(&buf, ..chunk[:n])
 		#partial switch res {
 		case .Interrupted:
@@ -1287,12 +1317,7 @@ read_init :: proc(p: ^Player, sl: ^Slot) -> bool {
 				slot_fail(p, sl, 0, "the FLAC header in the MP4 is broken")
 				return false
 			}
-			// As in read_header: the decoder mustn't stop at a sample count
-			// counted from wherever it starts.
-			s := st.header.streaminfo
-			head[s + 13] &= 0xf0
-			head[s + 14], head[s + 15], head[s + 16], head[s + 17] = 0, 0, 0, 0
-			st.head = head
+			st.head = flac_decoder_head(head, &st.header, vmem.arena_allocator(&sl.track))
 			st.has_header = true
 			dm.init = init
 			dm.pos = i64(used)
@@ -1321,7 +1346,7 @@ demux_read :: proc(p: ^Player, sl: ^Slot, dst: []u8) -> (n: int, res: Read_Resul
 		if dm.sample < len(dm.samples) {
 			smp := dm.samples[dm.sample]
 			want := min(i64(len(dst) - n), i64(smp.size) - dm.consumed)
-			got, r := stream_read(st, dm.moof + smp.offset + dm.consumed, dst[n:n + int(want)], interrupt, p)
+			got, r := stream_read(st, dm.moof + smp.offset + dm.consumed, dst[n:n + int(want)], wait_for_bytes, p)
 			n += got
 			dm.consumed += i64(got)
 			dm.fpos += i64(got)
@@ -1351,7 +1376,7 @@ demux_read :: proc(p: ^Player, sl: ^Slot, dst: []u8) -> (n: int, res: Read_Resul
 				return n, .Failed
 			}
 			moof := dm.box[:size]
-			got, rr := stream_read(st, dm.pos, moof, interrupt, p)
+			got, rr := stream_read(st, dm.pos, moof, wait_for_bytes, p)
 			if rr != .Ok {
 				return n, rr
 			}
@@ -1421,7 +1446,7 @@ demux_read :: proc(p: ^Player, sl: ^Slot, dst: []u8) -> (n: int, res: Read_Resul
 @(private = "file")
 read_box_header :: proc(p: ^Player, sl: ^Slot, offset: i64) -> (box: Mp4_Box, res: Read_Result) {
 	hdr: [16]u8
-	got, r := stream_read(&sl.stream, offset, hdr[:8], interrupt, p)
+	got, r := stream_read(&sl.stream, offset, hdr[:8], wait_for_bytes, p)
 	if r == .Eof || (r == .Ok && got < 8) {
 		return {}, .Eof
 	}
@@ -1430,7 +1455,7 @@ read_box_header :: proc(p: ^Player, sl: ^Slot, offset: i64) -> (box: Mp4_Box, re
 	}
 	b, bst := mp4_box_header(hdr[:8])
 	if bst == .Need_More {
-		got, r = stream_read(&sl.stream, offset + 8, hdr[8:16], interrupt, p)
+		got, r = stream_read(&sl.stream, offset + 8, hdr[8:16], wait_for_bytes, p)
 		if r != .Ok {
 			return {}, .Eof if r == .Eof else r
 		}
@@ -1475,6 +1500,11 @@ slot_close :: proc(sl: ^Slot) {
 	sl.interrupted = false
 }
 
+// FLAC_HEADER_MAX is the most read_header buffers. Cover art makes headers
+// megabytes long; a bigger one isn't worth holding in memory to play.
+@(private = "file")
+FLAC_HEADER_MAX :: 16 << 20
+
 // read_header reads the metadata blocks from the start of the file.
 @(private = "file")
 read_header :: proc(p: ^Player, sl: ^Slot) -> bool {
@@ -1482,7 +1512,7 @@ read_header :: proc(p: ^Player, sl: ^Slot) -> bool {
 	buf := make([dynamic]u8, 0, 64 << 10, context.temp_allocator)
 	chunk: [16 << 10]u8
 	for {
-		n, res := stream_read(st, i64(len(buf)), chunk[:], interrupt, p)
+		n, res := stream_read(st, i64(len(buf)), chunk[:], wait_for_bytes, p)
 		append(&buf, ..chunk[:n])
 		#partial switch res {
 		case .Interrupted:
@@ -1494,16 +1524,7 @@ read_header :: proc(p: ^Player, sl: ^Slot) -> bool {
 		}
 		switch parse_flac_header(buf[:], &st.header) {
 		case .Ok:
-			h := &st.header
-			// The decoder sees the header and then frames from wherever a
-			// seek put us. It must not stop at the file's sample count
-			// counted from the first frame it sees, so that goes to 0
-			// (unknown) in its copy.
-			st.head = make([]u8, h.audio_start, vmem.arena_allocator(&sl.track))
-			copy(st.head, buf[:h.audio_start])
-			s := h.streaminfo
-			st.head[s + 13] &= 0xf0
-			st.head[s + 14], st.head[s + 15], st.head[s + 16], st.head[s + 17] = 0, 0, 0, 0
+			st.head = flac_decoder_head(buf[:], &st.header, vmem.arena_allocator(&sl.track))
 			st.has_header = true
 			return true
 		case .Invalid:
@@ -1512,6 +1533,10 @@ read_header :: proc(p: ^Player, sl: ^Slot) -> bool {
 		case .Need_More:
 			if res == .Eof {
 				slot_fail(p, sl, 0, "the file ends inside its header")
+				return false
+			}
+			if len(buf) >= FLAC_HEADER_MAX {
+				slot_fail(p, sl, 0, "the FLAC header is too big")
 				return false
 			}
 		}
@@ -1544,7 +1569,7 @@ find_start :: proc(p: ^Player, sl: ^Slot, target: i64) -> (offset, sample: i64, 
 		found := false
 		for len(buf) < 1 << 20 {
 			chunk: [16 << 10]u8
-			n, res := stream_read(st, guess + i64(len(buf)), chunk[:], interrupt, p)
+			n, res := stream_read(st, guess + i64(len(buf)), chunk[:], wait_for_bytes, p)
 			append(&buf, ..chunk[:n])
 			if res == .Interrupted {
 				return 0, 0, false
@@ -1575,12 +1600,18 @@ find_start :: proc(p: ^Player, sl: ^Slot, target: i64) -> (offset, sample: i64, 
 	return b.lo_offset, b.lo_sample, true
 }
 
-// interrupt runs while a read waits for bytes: light commands go through,
-// a heavy one makes the read give up.
+// wait_for_bytes runs while a read waits for bytes: light commands go
+// through, a heavy one makes the read give up. Then it sleeps until a post
+// with no timeout: the fetch thread posts every change a read looks at, so
+// a paused track waiting on a stalled server costs no CPU.
 @(private = "file")
-interrupt :: proc(data: rawptr) -> bool {
+wait_for_bytes :: proc(data: rawptr) -> bool {
 	p := (^Player)(data)
-	return run_commands(p, .Light) == .Heavy_Waiting
+	if run_commands(p, .Light) == .Heavy_Waiting {
+		return true
+	}
+	wake_wait(&p.watch.wake)
+	return false
 }
 
 // dr_flac's view of a slot: the header, then the file from frame_off on.
@@ -1627,7 +1658,7 @@ vread :: proc "c" (dec: ^ma.decoder, out: rawptr, n: c.size_t, read: ^c.size_t) 
 			}
 		}
 	} else if done < len(dst) {
-		got, res := stream_read(st, sl.frame_off + sl.vpos - head, dst[done:], interrupt, sl.player)
+		got, res := stream_read(st, sl.frame_off + sl.vpos - head, dst[done:], wait_for_bytes, sl.player)
 		done += got
 		sl.vpos += i64(got)
 		#partial switch res {

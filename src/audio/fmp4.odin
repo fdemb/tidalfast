@@ -288,6 +288,9 @@ parse_mp4_moof :: proc(moof: []u8, init: ^Mp4_Init, samples: ^[dynamic]Mp4_Sampl
 		if !has_tfhd || len(tfhd) < 8 {
 			return refuse(samples, first, "a traf without a tfhd")
 		}
+		if tfhd[0] != 0 {
+			return refuse(samples, first, "an unknown tfhd version")
+		}
 		flags := be32(tfhd) & 0xffffff
 		track_id := be32(tfhd[4:])
 		if init.track_id != 0 && track_id != init.track_id {
@@ -328,11 +331,14 @@ parse_mp4_moof :: proc(moof: []u8, init: ^Mp4_Init, samples: ^[dynamic]Mp4_Sampl
 			default_size = be32(tfhd[p:])
 			p += 4
 		}
-		if tfdt, ok := find_box(traf, mp4_fourcc("tfdt")); ok && len(tfdt) >= 8 {
-			if tfdt[0] == 1 && len(tfdt) >= 12 {
+		if tfdt, ok := find_box(traf, mp4_fourcc("tfdt")); ok {
+			switch {
+			case len(tfdt) >= 12 && tfdt[0] == 1:
 				frag.base_time = be_u64(tfdt[4:])
-			} else {
+			case len(tfdt) >= 8 && tfdt[0] == 0:
 				frag.base_time = u64(be32(tfdt[4:]))
+			case:
+				return refuse(samples, first, "tfdt is too short or an unknown version")
 			}
 			frag.has_base_time = true
 		}
@@ -348,6 +354,9 @@ parse_mp4_moof :: proc(moof: []u8, init: ^Mp4_Init, samples: ^[dynamic]Mp4_Sampl
 			}
 			if len(trun) < 8 {
 				return refuse(samples, first, "trun is too short")
+			}
+			if trun[0] > 1 {
+				return refuse(samples, first, "an unknown trun version")
 			}
 			tflags := be32(trun) & 0xffffff
 			count := i64(be32(trun[4:]))
