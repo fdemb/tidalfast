@@ -126,11 +126,13 @@ http_send :: proc(
 	if code == .E_ABORTED_BY_CALLBACK {
 		log.debugf("%v %s cancelled after %.0f ms", method, url_for_log(url), ms)
 		delete(sink)
+		delete(capture.etag, allocator)
 		return {}, make_error(.Cancelled, "Request cancelled")
 	}
 	if code != .E_OK {
 		log.debugf("%v %s failed after %.0f ms: %s", method, url_for_log(url), ms, curl.easy_strerror(code))
 		delete(sink)
+		delete(capture.etag, allocator)
 		return {}, make_error(.Network, "HTTP request failed", detail = string(curl.easy_strerror(code)))
 	}
 
@@ -194,6 +196,7 @@ header_callback :: proc "c" (buffer: [^]byte, size: c.size_t, nitems: c.size_t, 
 
 	// A new status line starts a new header block (redirects, 100 Continue).
 	if strings.has_prefix(line, "HTTP/") {
+		delete(capture.etag, capture.allocator)
 		capture.etag = ""
 		capture.retry_after = -1
 		return c.size_t(n)
@@ -205,6 +208,7 @@ header_callback :: proc "c" (buffer: [^]byte, size: c.size_t, nitems: c.size_t, 
 	name := strings.trim_space(line[:colon])
 	value := strings.trim_space(line[colon + 1:])
 	if strings.equal_fold(name, "etag") {
+		delete(capture.etag, capture.allocator)
 		capture.etag = strings.clone(value, capture.allocator)
 	} else if strings.equal_fold(name, "retry-after") {
 		v, ok := strconv.parse_int(value, 10)

@@ -2,6 +2,7 @@ package tidal
 
 import "core:encoding/json"
 import "core:fmt"
+import vmem "core:mem/virtual"
 import "core:slice"
 import "core:strconv"
 import "core:strings"
@@ -303,14 +304,14 @@ user_playlist_add_by_isrc :: proc(
 	err: Error,
 ) {
 	scratch_begin(allocator)
-	tracks, terr := tracks_by_isrc(s, isrc, context.temp_allocator)
-	if is_error(terr, .Object_Not_Found) || (terr == nil && len(tracks) == 0) {
+	track, terr := track_by_isrc(s, isrc, context.temp_allocator)
+	if is_error(terr, .Object_Not_Found) {
 		return false, nil
 	}
 	if terr != nil {
 		return false, terr
 	}
-	track_id := tracks[0].id
+	track_id := track.id
 	added := user_playlist_add(s, pl, {fmt.tprint(track_id)}, allow_duplicates, position, allocator = allocator) or_return
 	return slice.contains(added, track_id), nil
 }
@@ -326,14 +327,12 @@ playlist_item_ids :: proc(s: ^Session, playlist_id: string) -> (ids: []i64, err:
 	}
 	bodies := fetch_pages(s, r, count) or_return
 	defer free_bodies(bodies)
+	scratch: vmem.Arena
+	defer vmem.arena_destroy(&scratch)
 
 	out := make([dynamic]i64, 0, count, context.temp_allocator)
-	for body in bodies {
-		v, jerr := json.parse(body, .JSON, true, context.temp_allocator)
-		obj, ok := v.(json.Object)
-		if jerr != nil || !ok {
-			return nil, make_error(.Bad_Response, "Expected a JSON object", detail = string(body))
-		}
+	for &body in bodies {
+		obj := next_page_json(&body, &scratch) or_return
 		items, _ := jarr(obj, "items")
 		for item in items {
 			entry, _ := item.(json.Object)
@@ -349,10 +348,10 @@ playlist_item_ids :: proc(s: ^Session, playlist_id: string) -> (ids: []i64, err:
 // Positions of the items whose id is in media_ids.
 @(private = "file")
 item_indices :: proc(s: ^Session, pl: ^Playlist, media_ids: []string) -> (indices: []int, err: Error) {
-	wanted := make([dynamic]i64, 0, len(media_ids), context.temp_allocator)
+	wanted := make(map[i64]struct{}, len(media_ids), context.temp_allocator)
 	for m in media_ids {
 		if id, ok := strconv.parse_i64(strings.trim_space(m)); ok {
-			append(&wanted, id)
+			wanted[id] = {}
 		}
 	}
 	if len(wanted) == 0 {
@@ -361,7 +360,7 @@ item_indices :: proc(s: ^Session, pl: ^Playlist, media_ids: []string) -> (indice
 	ids := playlist_item_ids(s, pl.id) or_return
 	out := make([dynamic]int, 0, len(wanted), context.temp_allocator)
 	for id, i in ids {
-		if slice.contains(wanted[:], id) {
+		if id in wanted {
 			append(&out, i)
 		}
 	}

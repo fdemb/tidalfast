@@ -21,6 +21,7 @@ Mock_Item :: struct {
 	id:   i64,
 }
 
+// A redirect's body (301, 302, 303, 307 or 308) is its Location.
 Mock_Answer :: struct {
 	status: int,
 	body:   string,
@@ -261,6 +262,11 @@ mock_handle :: proc(m: ^Mock, client: net.TCP_Socket) {
 	status, body, out_etag := mock_route(m, req, target)
 	// A 429 always asks for one second.
 	extra := "Retry-After: 1\r\n" if status == 429 else ""
+	switch status {
+	case 301, 302, 303, 307, 308:
+		extra = fmt.tprintf("Location: %s\r\n", body)
+		body = ""
+	}
 	resp := fmt.tprintf(
 		"HTTP/1.1 %d X\r\nContent-Type: application/json\r\nContent-Length: %d\r\nETag: %s\r\n%sConnection: close\r\n\r\n%s",
 		status,

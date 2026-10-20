@@ -349,7 +349,7 @@ pkce_login_against_mock :: proc(t: ^testing.T) {
 	testing.expect(t, tidal.session_is_pkce(s))
 
 	// A refresh goes out with the same client.
-	_, rerr := tidal.token_refresh(s, a.refresh_token)
+	_, rerr := tidal.token_refresh(s, a)
 	testing.expect_value(t, rerr, nil)
 	testing.expect_value(t, m.token_form["client_id"], "6BDSRdpK9hqEBTgU")
 
