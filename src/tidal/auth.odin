@@ -54,6 +54,7 @@ refresh_tokens :: proc(s: ^Session, refresh_token: string, epoch: u64) -> (ok: b
 	defer {
 		s.refresh_err = err
 		s.refresh_ended = time.tick_now()
+		s.refresh_epoch = epoch
 		sync.atomic_add(&s.refresh_count, 1)
 	}
 	client_id, client_secret: string

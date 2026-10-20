@@ -158,6 +158,52 @@ failed_refresh_is_shared_with_waiting_requests :: proc(t: ^testing.T) {
 	testing.expect_value(t, mock_count(&m, "POST /token"), 2)
 }
 
+// A refresh of a login that was cleared fails, and the next login's request
+// that waited for it refreshes on its own instead of taking that failure.
+@(test)
+failed_refresh_of_a_cleared_login_is_not_shared :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := oauth_session(&m)
+	defer tidal.session_destroy(s)
+	expired := time.time_add(time.now(), -time.Minute)
+	tidal.session_restore(s, {token_type = "Bearer", access_token = "old", refresh_token = "refresh-0", expiry_time = expired, user_id = 123, user_kind = .Logged_In_User})
+	m.token_delay = 300 * time.Millisecond
+
+	Old_Refresh :: struct {
+		s:   ^tidal.Session,
+		err: tidal.Error,
+	}
+	old := Old_Refresh {
+		s = s,
+	}
+	refresh := thread.create_and_start_with_poly_data(&old, proc(old: ^Old_Refresh) {
+		_, old.err = tidal.token_refresh(old.s, "refresh-0")
+	})
+	testing.expect(t, wait_for_count(&m, "POST /token", 1), "the old login's refresh reached the mock")
+	tidal.session_clear_auth(s)
+	tidal.session_restore(s, {token_type = "Bearer", access_token = "new", refresh_token = "new-refresh", expiry_time = expired, user_id = 456, user_kind = .Logged_In_User})
+	_, err := tidal.request(s, {method = .GET, path = "echo"}, context.temp_allocator)
+	thread.join(refresh)
+	thread.destroy(refresh)
+	testing.expect(t, tidal.is_error(old.err, .Cancelled), fmt.tprint(old.err))
+	testing.expect_value(t, err, nil)
+	testing.expect_value(t, mock_count(&m, "POST /token"), 2)
+}
+
+@(private = "file")
+wait_for_count :: proc(m: ^Mock, prefix: string, n: int) -> bool {
+	deadline := time.tick_add(time.tick_now(), 2 * time.Second)
+	for mock_count(m, prefix) != n {
+		if time.tick_diff(time.tick_now(), deadline) <= 0 {
+			return false
+		}
+		time.sleep(time.Millisecond)
+	}
+	return true
+}
+
 // token_refresh and a request's refresh take turns, so the request uses the
 // new token instead of sending the old refresh token again.
 @(test)

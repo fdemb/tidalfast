@@ -138,8 +138,9 @@ body_prefix :: proc(resp: Http_Response, n: int) -> string {
 // the first would use a token that has just been invalidated. stale is the
 // access token the caller's request was sent with; if the session holds a
 // different one by now, another thread already refreshed. since is the
-// session's refresh_count when the request started: an attempt that failed
-// after it, within REFRESH_FAILURE_SHARED, is the caller's failure too.
+// session's refresh_count when the request started: an attempt for the same
+// login that failed after it, within REFRESH_FAILURE_SHARED, is the caller's
+// failure too.
 @(private)
 refresh_access_token :: proc(s: ^Session, stale: string, since: u64) -> (refreshed: bool, err: Error) {
 	sync.guard(&s.refresh_mutex)
@@ -157,7 +158,7 @@ refresh_access_token :: proc(s: ^Session, stale: string, since: u64) -> (refresh
 	if refresh == "" {
 		return false, nil
 	}
-	if s.refresh_count != since && s.refresh_err != nil && time.tick_since(s.refresh_ended) < REFRESH_FAILURE_SHARED {
+	if s.refresh_count != since && s.refresh_epoch == epoch && s.refresh_err != nil && time.tick_since(s.refresh_ended) < REFRESH_FAILURE_SHARED {
 		return false, s.refresh_err
 	}
 	return refresh_tokens(s, refresh, epoch)
