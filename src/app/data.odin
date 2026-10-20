@@ -698,7 +698,7 @@ hold_job :: proc(d: ^Data, job: Job, priority: u8) {
 // wait behind a flag or are sent one at a time each ask for one thing, and
 // an Artwork asks for its track's serial. A Stream's serial and a page's
 // offset are never asked for twice, and every add is its own. Only one
-// follow change per artist is out, see Follow_Out.
+// follow change per artist is out, see Toggle_Out.
 @(private = "file")
 same_request :: proc(held, job: Job) -> bool {
 	#partial switch p in job.payload {
