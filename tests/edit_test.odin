@@ -621,6 +621,10 @@ test_text_field_click_after_escape :: proc(t: ^testing.T) {
 	testing.expect(t, sig.focused, "the click took the focus back")
 	sig = frame(&u, f, &now)
 	testing.expect(t, sig.focused, "and kept it")
+
+	frame(&u, f, &now, {kind = .Key_Down, key = .Escape}, {kind = .Mouse_Down, x = 50, y = 15, button = .Left, click_count = 1}, {kind = .Mouse_Up, x = 50, y = 15, button = .Left}, {kind = .Mouse_Down, x = 250, y = 100, button = .Left, click_count = 1}, {kind = .Mouse_Up, x = 250, y = 100, button = .Left})
+	sig = frame(&u, f, &now)
+	testing.expect(t, !sig.focused, "a click away after that took the focus")
 }
 
 // Word movement and double-click words land where a scan over every

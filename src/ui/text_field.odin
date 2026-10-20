@@ -70,9 +70,6 @@ text_field :: proc(id: string, f: ^Text_Field, placeholder: string, width, heigh
 			if e.op != .Focus && e.op != .Press {
 				continue
 			}
-			if u.focus == 0 {
-				u.focus = b.key
-			}
 			live = true
 		}
 		switch e.op {
@@ -83,7 +80,7 @@ text_field :: proc(id: string, f: ^Text_Field, placeholder: string, width, heigh
 		case .Blur:
 			field_unmark(f)
 		case .Key:
-			used, gave_up := field_key(u, f, b.key, e.key, &sig)
+			used, gave_up := field_key(u, f, e.key, &sig)
 			if used {
 				take_key(e.key.code, e.key.modifiers)
 			}
@@ -125,6 +122,9 @@ text_field :: proc(id: string, f: ^Text_Field, placeholder: string, width, heigh
 			}
 		}
 		f.blink_start = u.time
+	}
+	if !live && u.focus == b.key {
+		u.focus = 0
 	}
 	// Escape may have given up the focus.
 	focused = b.key != 0 && u.focus == b.key
@@ -233,7 +233,7 @@ focus_text_field :: proc(b: ^Box, f: ^Text_Field) {
 // whether it gave up the focus. On macOS Control-A and Control-E also go
 // to the line's ends (CONTROL_LINE_KEYS).
 @(private)
-field_key :: proc(u: ^State, f: ^Text_Field, key: Key, k: Key_Press, sig: ^Field_Signal) -> (used, gave_up: bool) {
+field_key :: proc(u: ^State, f: ^Text_Field, k: Key_Press, sig: ^Field_Signal) -> (used, gave_up: bool) {
 	shift := .Shift in k.modifiers
 	base := k.modifiers - {.Shift}
 	#partial switch k.code {
@@ -322,9 +322,6 @@ field_key :: proc(u: ^State, f: ^Text_Field, key: Key, k: Key_Press, sig: ^Field
 		if f.len > 0 || f.marked {
 			field_clear(f)
 		} else {
-			if u.focus == key {
-				u.focus = 0
-			}
 			sig.cancelled = true
 			gave_up = true
 		}
