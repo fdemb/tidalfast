@@ -24,6 +24,8 @@ bold dots-three e1fe
 bold share-network e408
 bold plus e3d4
 bold check e182
+bold house e2c2
+fill house e2c2
 "
 
 for weight in fill bold; do
