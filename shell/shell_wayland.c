@@ -937,9 +937,10 @@ static size_t get_clipboard(uint8_t *buffer, size_t capacity) {
 
 static void receive_more(void) {
   if (g_receive_fd < 0) return;
-  ssize_t n;
-  while ((n = read(g_receive_fd, g_paste + g_paste_len, CLIP_MAX - g_paste_len)) > 0) g_paste_len += (size_t)n;
-  if (n < 0 && errno == EAGAIN) return;
+  ssize_t n = 0;
+  while (g_paste_len < CLIP_MAX && (n = read(g_receive_fd, g_paste + g_paste_len, CLIP_MAX - g_paste_len)) > 0)
+    g_paste_len += (size_t)n;
+  if (g_paste_len < CLIP_MAX && n < 0 && errno == EAGAIN) return;
   close(g_receive_fd);
   g_receive_fd = -1;
   g_paste_done = true;
