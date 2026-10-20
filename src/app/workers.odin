@@ -273,6 +273,7 @@ Tracks_Result :: struct {
 Image_Result :: struct {
 	pixels: []u8,
 	w, h:   int,
+	tint:   [3]u8, // see cover.tint
 }
 
 Stream_Result :: struct {
@@ -900,7 +901,7 @@ run_cover :: proc(d: ^Data, job: Image_Job, res: ^Result) {
 		}
 	}
 	defer delete(body, heap)
-	pixels, w, h, ok := cover.decode(body, int(job.size))
+	pixels, w, h, tint, ok := cover.decode(body, int(job.size))
 	if !ok {
 		if cached {
 			os.remove(path)
@@ -912,7 +913,7 @@ run_cover :: proc(d: ^Data, job: Image_Job, res: ^Result) {
 	if !cached {
 		cover_write(d, dir, path, body)
 	}
-	res.payload = Image_Result{pixels, w, h}
+	res.payload = Image_Result{pixels, w, h, tint}
 }
 
 MONTHS := [12]string{"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"}
