@@ -517,8 +517,10 @@ callback_never_wakes_the_decoder :: proc(t: ^testing.T) {
 	before := sync.atomic_load(&p.watch.wake.sema.count)
 	time.sleep(time.Duration(audio.RING_FRAMES / 2 * i64(time.Second) / 44100)) // half the ring
 	after := sync.atomic_load(&p.watch.wake.sema.count)
+	pending := sync.atomic_load(&p.watch.wake.pending)
 	sync.unlock(&p.cmd_mutex)
 	testing.expect_value(t, after, before)
+	testing.expect(t, !pending, "no wake is pending")
 	testing.expect(t, wait_audible(p, 1))
 	testing.expect_value(t, audio.status(p).underruns, underruns)
 }
