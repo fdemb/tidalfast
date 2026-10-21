@@ -22,6 +22,29 @@ A box built with an ID string is keyed by an FNV-1a hash of the string, seeded w
 
 Each box has a size per axis: `px(n)`, `text_size(pad)` (the label's width or line height plus `pad`), `pct(f)` of the nearest ancestor with a size of its own, or `children_sum()`. `fill()` is `pct(1, 0)`. Each size has a strictness: how much of it the box keeps when its parent has too little room. `layout.odin` runs Fleury's five passes per axis: standalone sizes (pixels, text), upwards-dependent (percentages, skipping ancestors sized by their children), downwards-dependent (children sums), violations, then positions. The violations pass runs from the root down, and before it solves a box's children it takes their percentages again from the box's final size. Without that, a `fill()` inside a `fill()` that its parent shrank kept the outer one's first size, and a strict `pct(f, 1)` inside it, like the progress bar's fill, came out as a share of the whole window. When the children along a box's child axis don't fit, each gives up `size * (1 - strictness)` in proportion until the overflow is gone. Across the axis a child larger than its parent is cut to fit. Scroll views allow overflow on their scroll axis and skip that step. A box's `gutter` comes off its width before its children get any; a docked scrollbar uses it. A box with `Floating_X`/`Floating_Y` sits at `fixed_pos` outside the flow. So a row of `px(44)`, `fill()` and `px(56)` gives the middle box whatever is left.
 
+## Styles
+
+A box takes its look from style stacks, after raddebugger's (`src/ui/stacks.odin`): its font, font size, text colour, alignment and padding, background, border, hover and press colours, corner radius, and flags added to the ones it's built with. `box_make` reads the top of the stack. A scope pushes a copy of the top with one value changed until the end of the enclosing block, and `set_next_*` sets a value for the next box built only, whatever the stack holds.
+
+```odin
+{
+	ui.text_style(.Regular, 13, SECONDARY)
+	ui.radius(6)
+	ui.set_next_background(SURFACE)
+	ui.row("##row", {.Draw_Background})
+	ui.label("Artist")
+}
+```
+
+Use them this way:
+
+- A style that several boxes in a subtree share goes in one scope, as the transport buttons' `radius(18)` and the track row's `radius(6)` do.
+- `set_next_*` goes right before a box that the next call builds first: `box_make`, `label`, `row`, `column`, `button`, `text_field`. A helper that builds a column around its box, or may build nothing, takes its look as parameters instead, as `icon_button` and `cell` do. A `set_next` there would land on the wrong box, or on none. Open or close no scope, `floating()` or `menu()` between a `set_next` and its box.
+- A box's own style field is written after it's built only when the value comes from that box's state, such as `hot_t`, or right under an `if` that tests the box, such as a drop hovering it. `test_app_styles_go_through_the_stacks` fails on any other write.
+- Widgets whose look belongs to the UI (menus, menu items, tooltips, scrollbars) set it with `set_next_*`. `floating()` and `menu()` start from the default style, so a menu or a tooltip looks the same wherever the code builds it. A `button`, a `link` and a `text_field` take theirs from the stacks; a text field's border is the accent while it has the focus.
+
+Opacity, positions and sizes aren't stacks. Opacity already multiplies everything inside a box, so a stacked value would multiply again at every level, and sizes are `box_make`'s arguments. `begin_frame` empties the stacks. A frame that leaves a scope open or a `set_next` unused, or opens or closes a scope between a `set_next` and its box, logs an error once, which fails any test that draws it.
+
 ## Input
 
 `process_events` folds the frame's events into `Input` and walks them in order. The hit list from the last layout holds every keyed box that is clickable, focusable or scrolls, with its clipped rect, in drawing order. The hot box is the last clickable one under the mouse, so children beat parents and the floating layer beats everything. A press makes the hot box active for that button and clicks it. A box with `Click_On_Release` clicks on a release over it instead, so a drag can start from it without the click firing. The links in the track table have it, since a drag from them drags the row. While the left button is held only the active box can be hot. `ui.signal(box)` reports hovering, held, pressed, released, clicked, double-clicked (from the shell's click count), right-clicked (on mouse down, as macOS menus do, control-click included), dragging (past 4 pt, until the release) with the drag delta, and scroll. `Signal.mouse` is the current mouse while held and where the button came up when released, and the drag delta runs to the release too. A press and release in one frame, which happens when the events arrive between two frames, still reports both, so sliders and handles act on `held || released` with `Signal.mouse` rather than on `held` alone. `Input` keeps where each button last went down and came up.

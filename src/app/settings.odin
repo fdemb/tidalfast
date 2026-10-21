@@ -261,8 +261,8 @@ draw_output_button :: proc(s: ^State) {
 			ui.menu_separator()
 		}
 		ui.text_style(.Regular, 11, DIM)
-		note := ui.label(output_description(s), ui.fill(), ui.px(26))
-		note.text_pad = 14
+		ui.set_next_text_pad(14)
+		ui.label(output_description(s), ui.fill(), ui.px(26))
 	}
 }
 
@@ -272,12 +272,12 @@ output_pill :: proc(s: ^State, label: string, color: render.Color) {
 	ui.column("", {}, ui.px(OUTPUT_W), ui.fill())
 	ui.spacer(ui.fill())
 	ui.text_style(.Semibold, 11, color)
+	ui.set_next_text_align(.Center)
+	ui.set_next_background({})
+	ui.set_next_border_color(color)
+	ui.set_next_hover_color({1, 1, 1, 0.08})
+	ui.set_next_radius(12)
 	b := ui.box_make(fmt.tprintf("%s###output", label), {.Clickable, .Focusable, .Draw_Background, .Draw_Border, .Draw_Hot_Effects, .Draw_Active_Effects, .Draw_Text}, ui.fill(), ui.px(24))
-	b.text_align = .Center
-	b.background = {}
-	b.border_color = color
-	b.hover_color = {1, 1, 1, 0.08}
-	b.radius = 12
 	sig := ui.signal(b)
 	if sig.clicked {
 		ui.open_menu("output_menu", {b.rect.x, b.rect.y - 8})
@@ -307,9 +307,9 @@ output_description :: proc(s: ^State) -> string {
 // draw_settings_button is the sidebar's button for the settings menu.
 draw_settings_button :: proc(s: ^State) {
 	ui.text_style(.Regular, 12, SECONDARY)
+	ui.set_next_text_pad(10)
+	ui.set_next_radius(6)
 	b := ui.box_make("Settings###settings", {.Clickable, .Focusable, .Draw_Text, .Draw_Hot_Effects, .Draw_Active_Effects}, ui.text_size(), ui.px(26))
-	b.text_pad = 10
-	b.radius = 6
 	ui.accessible(b, .Button, "Settings")
 	if ui.signal(b).clicked {
 		ui.open_menu("settings_menu", {b.rect.x, b.rect.y + b.rect.h + 4})
@@ -317,8 +317,8 @@ draw_settings_button :: proc(s: ^State) {
 
 	if ui.menu("settings_menu") {
 		ui.text_style(.Regular, 11, DIM)
+		ui.set_next_text_pad(14)
 		heading := ui.label("Scrollbars", ui.fill(), ui.px(24))
-		heading.text_pad = 14
 		ui.text_style(.Regular, 13, TEXT)
 		for mode in ui.Scrollbars {
 			on := s.settings.scrollbars == mode
@@ -332,8 +332,8 @@ draw_settings_button :: proc(s: ^State) {
 		}
 		if render.BACKDROPS {
 			ui.text_style(.Regular, 11, DIM)
+			ui.set_next_text_pad(14)
 			heading = ui.label("Player bar", ui.fill(), ui.px(24))
-			heading.text_pad = 14
 			ui.text_style(.Regular, 13, TEXT)
 			for mode in Player_Bar {
 				on := s.settings.bar == mode

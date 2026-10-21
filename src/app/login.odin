@@ -26,8 +26,8 @@ LOGIN_W :: 460
 LOGIN_H :: 430
 
 draw_login :: proc(s: ^State) {
+	ui.set_next_background(WINDOW_BG)
 	bg := ui.box_make("", {.Draw_Background}, ui.fill(), ui.fill())
-	bg.background = WINDOW_BG
 	bg.child_axis = .Y
 	ui.parent(bg)
 	if s.titlebar_h > 0 {
@@ -38,10 +38,10 @@ draw_login :: proc(s: ^State) {
 		ui.row("", {}, ui.fill(), ui.px(LOGIN_H))
 		ui.spacer(ui.fill())
 		{
-			card := ui.column("login", {.Draw_Background, .Draw_Border}, ui.px(LOGIN_W), ui.fill())
-			card.background = PANEL
-			card.border_color = OUTLINE
-			card.radius = 12
+			ui.set_next_background(PANEL)
+			ui.set_next_border_color(OUTLINE)
+			ui.set_next_radius(12)
+			ui.column("login", {.Draw_Background, .Draw_Border}, ui.px(LOGIN_W), ui.fill())
 			login_card(s)
 		}
 		ui.spacer(ui.fill())
@@ -52,9 +52,9 @@ draw_login :: proc(s: ^State) {
 @(private = "file")
 line :: proc(str: string, font: text.Font, size, height: f32, color: render.Color) -> ^ui.Box {
 	ui.text_style(font, size, color)
+	ui.set_next_text_align(.Center)
+	ui.set_next_text_pad(24)
 	b := ui.label(str, ui.fill(), ui.px(height))
-	b.text_align = .Center
-	b.text_pad = 24
 	ui.accessible(b, .Static_Text, str)
 	return b
 }
@@ -83,15 +83,15 @@ login_card :: proc(s: ^State) {
 }
 
 pill_button :: proc(id, label: string, width: f32, background, color: render.Color) -> bool {
+	ui.set_next_background(background)
+	ui.set_next_hover_color({1, 1, 1, 0.2})
+	ui.set_next_active_color({0, 0, 0, 0.15})
+	ui.set_next_radius(20)
 	b := ui.row(id, {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects, .Draw_Active_Effects}, ui.px(width), ui.fill())
-	b.background = background
-	b.hover_color = {1, 1, 1, 0.2}
-	b.active_color = {0, 0, 0, 0.15}
-	b.radius = 20
 	ui.accessible(b, .Button, label)
 	ui.text_style(.Semibold, 14, color)
-	caption := ui.label(label, ui.fill(), ui.fill())
-	caption.text_align = .Center
+	ui.set_next_text_align(.Center)
+	ui.label(label, ui.fill(), ui.fill())
 	return ui.signal(b).clicked
 }
 
@@ -133,9 +133,10 @@ pkce_card :: proc(s: ^State) {
 		ui.spacer(ui.px(24))
 		l.field.limit = PKCE_REDIRECT_MAX
 		ui.text_style(.Regular, 13, TEXT)
+		ui.set_next_background(SURFACE)
+		ui.set_next_border_color(OUTLINE)
+		ui.set_next_radius(6)
 		sig := ui.text_field("pkce_url", &l.field, "Paste the address here", ui.fill(), ui.px(36))
-		sig.box.background = SURFACE
-		sig.box.border_color = ACCENT if sig.focused else OUTLINE
 		if l.focus_field {
 			ui.focus_text_field(sig.box, &l.field)
 			l.focus_field = false
@@ -223,8 +224,8 @@ draw_login_notice :: proc(s: ^State) {
 		return
 	}
 	d := &s.data
-	bar := ui.row("login_notice", {.Draw_Background}, ui.fill(), ui.px(48))
-	bar.background = SURFACE
+	ui.set_next_background(SURFACE)
+	ui.row("login_notice", {.Draw_Background}, ui.fill(), ui.px(48))
 	ui.spacer(ui.px(16))
 	ui.text_style(.Regular, 13, TEXT)
 	msg := ui.label("This login can only stream AAC. Log in again for lossless.", ui.fill(), ui.fill())

@@ -39,10 +39,9 @@ LIST_ROWS :: Row_Colors {
 	selected_hover = {0x28 / 255.0, 0x28 / 255.0, 0x28 / 255.0, 1},
 }
 
-// row_highlight sets b's background and hover colour from colors.
-row_highlight :: proc(b: ^ui.Box, colors: Row_Colors, selected: bool) {
-	b.background = colors.selected if selected else {}
-	b.hover_color = colors.selected_hover if selected else colors.hover
+row_highlight :: proc(colors: Row_Colors, selected: bool) {
+	ui.set_next_background(colors.selected if selected else {})
+	ui.set_next_hover_color(colors.selected_hover if selected else colors.hover)
 }
 OUTLINE :: render.Color{0x2c / 255.0, 0x2c / 255.0, 0x2c / 255.0, 1}
 TEXT :: render.Color{0xf3 / 255.0, 0xf3 / 255.0, 0xf3 / 255.0, 1}
@@ -212,8 +211,8 @@ draw_library :: proc(s: ^State, w, h: f32) {
 	lib.sidebar_w = clamp(lib.sidebar_w, SIDEBAR_MIN, sidebar_limit(w))
 	lib.drop_target = -1
 
+	ui.set_next_background(WINDOW_BG)
 	bg := ui.box_make("", {.Draw_Background}, ui.fill(), ui.fill())
-	bg.background = WINDOW_BG
 	bg.child_axis = .Y
 	ui.parent(bg)
 	{
@@ -291,9 +290,9 @@ history_button :: proc(id, name: string, enabled: bool) -> ui.Signal {
 		flags += {.Disabled}
 	}
 	ui.text_style(.Icon, 16, TEXT if enabled else DIM)
+	ui.set_next_text_align(.Center)
+	ui.set_next_radius(12)
 	b := ui.box_make(id, flags, ui.px(24), ui.px(24))
-	b.text_align = .Center
-	b.radius = 12
 	ui.accessible(b, .Button, name)
 	ui.spacer(ui.fill())
 	return ui.signal(b)
@@ -301,8 +300,8 @@ history_button :: proc(id, name: string, enabled: bool) -> ui.Signal {
 
 draw_sidebar :: proc(s: ^State) {
 	lib := &s.library
-	side := ui.column("sidebar", {.Draw_Background, .Clip}, ui.px(lib.sidebar_w), ui.fill())
-	side.background = PANEL
+	ui.set_next_background(PANEL)
+	ui.column("sidebar", {.Draw_Background, .Clip}, ui.px(lib.sidebar_w), ui.fill())
 	draw_history_buttons(s)
 	draw_home_entry(s)
 	{
@@ -327,14 +326,14 @@ draw_sidebar :: proc(s: ^State) {
 		rows := ui.virtual_rows(list, sidebar_count(s), PLAYLIST_ROW_H)
 		for i in rows.first ..< rows.last {
 			entry := sidebar_entry(s, i)
-			item := ui.row(fmt.tprintf("##playlist%d", i), {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects, .Draw_Border}, ui.fill(), ui.px(PLAYLIST_ROW_H))
-			item.radius = 6
 			current := lib.playlist == i && !s.search.browsing && !home_showing(s)
-			row_highlight(item, SIDEBAR_ROWS, current)
+			ui.set_next_radius(6)
+			row_highlight(SIDEBAR_ROWS, current)
+			item := ui.row(fmt.tprintf("##playlist%d", i), {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects, .Draw_Border}, ui.fill(), ui.px(PLAYLIST_ROW_H))
 			ui.accessible(item, .Row, fmt.tprintf("%s, %s", entry.name, entry.subtitle), selected = current)
 			if ui.drop_hover(item) {
-				lib.drop_target = i
 				item.border_color = ACCENT
+				lib.drop_target = i
 			}
 			if track, ok := ui.dropped(item); ok {
 				add_to_list(s, int(track), i)
@@ -378,11 +377,10 @@ draw_sidebar_handle :: proc(s: ^State, window_w: f32) {
 		lib.sidebar_w = clamp(lib.drag_from_w + sig.drag_delta.x, SIDEBAR_MIN, sidebar_limit(window_w))
 	}
 	// The sidebar's background runs up to the line.
-	side := ui.box_make("", {.Draw_Background}, ui.px(2), ui.fill())
-	side.background = PANEL
-	line := ui.box_make("", {.Draw_Background}, ui.px(1), ui.fill())
-	t := max(handle.hot_t, handle.active_t)
-	line.background = mix(OUTLINE, ACCENT, t)
+	ui.set_next_background(PANEL)
+	ui.box_make("", {.Draw_Background}, ui.px(2), ui.fill())
+	ui.set_next_background(mix(OUTLINE, ACCENT, max(handle.hot_t, handle.active_t)))
+	ui.box_make("", {.Draw_Background}, ui.px(1), ui.fill())
 }
 
 draw_main_view :: proc(s: ^State, main_w: f32) {
@@ -514,33 +512,24 @@ table_header :: proc(cols: Track_Columns, pinned := false) {
 		ui.row("", {}, ui.fill(), ui.px(HEADER_H))
 		ui.text_style(.Regular, 12, SECONDARY)
 		ui.spacer(ui.px(LIST_PAD + 8))
-		num := ui.label("#", ui.px(cols.number), ui.fill())
-		num.text_align = .Center
+		ui.set_next_text_align(.Center)
+		ui.label("#", ui.px(cols.number), ui.fill())
 		ui.spacer(ui.px(cols.cover))
 		ui.label("Title", ui.fill(), ui.fill())
-		header_cell("Album", cols.album, .Left)
-		header_cell("Date added", cols.added, .Left)
+		cell("Album", cols.album, .Left)
+		cell("Date added", cols.added, .Left)
 		if cols.heart > 0 {
 			ui.spacer(ui.px(cols.heart))
 		}
-		header_cell("Time", cols.duration, .Right)
+		cell("Time", cols.duration, .Right)
 		ui.spacer(ui.px(cols.more + 8 + LIST_PAD))
 	}
 	ui.row("", {}, ui.fill(), ui.px(1))
 	inset: f32 = 0 if pinned else LIST_PAD
 	ui.spacer(ui.px(inset))
-	line := ui.box_make("", {.Draw_Background}, ui.fill(), ui.fill())
-	line.background = OUTLINE
+	ui.set_next_background(OUTLINE)
+	ui.box_make("", {.Draw_Background}, ui.fill(), ui.fill())
 	ui.spacer(ui.px(inset))
-}
-
-header_cell :: proc(label: string, width: f32, align: ui.Align) {
-	if width <= 0 {
-		return
-	}
-	b := ui.label(label, ui.px(width), ui.fill())
-	b.text_pad = CELL_PAD
-	b.text_align = align
 }
 
 // table_keys moves the selection among the first count rows with the
@@ -590,10 +579,10 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 		return
 	}
 	s.measure.rows += 1
-	row := ui.row(fmt.tprintf("##track%d", i), {.Clickable, .Draw_Background, .Draw_Hot_Effects}, ui.fill(), ui.px(TRACK_ROW_H))
-	row.radius = 6
+	ui.radius(6)
 	selected := lib.selected == i
-	row_highlight(row, LIST_ROWS, selected)
+	row_highlight(LIST_ROWS, selected)
+	row := ui.row(fmt.tprintf("##track%d", i), {.Clickable, .Draw_Background, .Draw_Hot_Effects}, ui.fill(), ui.px(TRACK_ROW_H))
 	ui.accessible(row, .Row, fmt.tprintf("%s, %s, %s", track.title, track.artist, track.album), selected = selected)
 	sig := ui.signal(row)
 	if sig.pressed || sig.right_clicked {
@@ -615,8 +604,8 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 	ui.spacer(ui.px(8))
 	{
 		ui.text_style(.Regular, 14, ACCENT if current else SECONDARY)
-		num := ui.label(fmt.tprint(i + 1), ui.px(cols.number), ui.fill())
-		num.text_align = .Center
+		ui.set_next_text_align(.Center)
+		ui.label(fmt.tprint(i + 1), ui.px(cols.number), ui.fill())
 		if cols.cover > 0 {
 			cover_art(s, .Album, track.cover, u32(i) * 2654435761 >> 7, 40, ui.px(cols.cover))
 		}
@@ -624,14 +613,15 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 	{
 		ui.column("", {}, ui.fill(), ui.fill())
 		ui.spacer(ui.px(9))
+		ui.set_next_text_pad(4)
+		ui.set_next_font(.Medium)
+		ui.set_next_font_size(14)
+		ui.set_next_text_color(ACCENT if current else TEXT)
 		title := ui.label(track.title, ui.fill(), ui.px(20))
-		title.text_pad = 4
-		title.font = .Medium
-		title.font_size = 14
-		title.text_color = ACCENT if current else TEXT
 		ui.accessible(title, .Static_Text, track.title)
 		ui.text_style(.Regular, 13, SECONDARY)
-		if k, link := artist_links(s, track.artist, track.artists, 4, ui.px(18), {.Click_On_Release}); row_link(s, i, link) {
+		ui.flags({.Click_On_Release})
+		if k, link := artist_links(s, track.artist, track.artists, 4, ui.px(18)); row_link(s, i, link) {
 			go_to_artist(s, i, k)
 		}
 	}
@@ -639,7 +629,9 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 	if cols.album > 0 {
 		ui.row("", {}, ui.px(cols.album), ui.fill())
 		ui.spacer(ui.px(CELL_PAD - 4))
-		if row_link(s, i, text_link(s, track.album, "###album", track.album_id != 0, ui.fill(), 4, {.Click_On_Release})) {
+		ui.flags({.Click_On_Release})
+		ui.text_pad(4)
+		if row_link(s, i, text_link(s, track.album, "###album", track.album_id != 0, ui.fill())) {
 			go_to_album(s, i)
 		}
 	}
@@ -667,16 +659,16 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 // in: the square is the click and hover area. hot is its opacity, so 0
 // hides it while it still clicks. Returns the button's box for anything
 // anchored to it, such as a menu. flags adds to the button's, such as
-// Focusable for one outside a row.
-icon_button :: proc(id, icon: string, font: text.Font, name: string, color: render.Color, hot: f32, side: f32, flags: ui.Box_Flags = {}) -> (^ui.Box, ui.Signal) {
+// Focusable for one outside a row. Its corners, background and hover colour
+// come from the style stacks.
+icon_button :: proc(id, icon: string, font: text.Font, name: string, color: render.Color, hot: f32, side: f32, flags: ui.Box_Flags = {}, size: f32 = 16) -> (^ui.Box, ui.Signal) {
 	ui.column("", {}, ui.px(side), ui.fill())
 	ui.spacer(ui.fill())
+	ui.set_next_text_align(.Center)
+	ui.set_next_font(font)
+	ui.set_next_font_size(size)
+	ui.set_next_text_color(color)
 	b := ui.box_make(fmt.tprintf("%s###%s", icon, id), {.Clickable, .Draw_Text, .Draw_Hot_Effects} + flags, ui.px(side), ui.px(side))
-	b.text_align = .Center
-	b.font = font
-	b.font_size = 16
-	b.text_color = color
-	b.radius = 6
 	b.opacity = hot
 	ui.accessible(b, .Button, name)
 	ui.spacer(ui.fill())
@@ -720,14 +712,13 @@ row_link :: proc(s: ^State, i: int, sig: ui.Signal) -> bool {
 // text_link is a link to an album or an artist when it has an id to open
 // (the fake data goes by name), and plain text when it hasn't. It goes
 // inside a row of its own, since it's only as wide as its text.
-text_link :: proc(s: ^State, label, id: string, has_id: bool, height: ui.Size, pad: f32, flags: ui.Box_Flags = {}) -> ui.Signal {
+text_link :: proc(s: ^State, label, id: string, has_id: bool, height: ui.Size) -> ui.Signal {
 	if !has_id && !s.data.fake {
 		b := ui.label(label, ui.fill(), height)
-		b.text_pad = pad
 		ui.accessible(b, .Static_Text, label)
 		return {}
 	}
-	return ui.link(fmt.tprintf("%s%s", label, id), TEXT, height, pad, flags)
+	return ui.link(fmt.tprintf("%s%s", label, id), TEXT, height)
 }
 
 // artist_links shows the artists in joined, each a link to its top tracks,
@@ -737,9 +728,11 @@ text_link :: proc(s: ^State, label, id: string, has_id: bool, height: ui.Size, p
 // left out. That goes by the box's width from the last layout, and the box
 // clips, so in the frame after a resize nothing is drawn past it. sig is
 // the signal of the link that was clicked, pressed or dragged, and k says
-// which artist it is.
-artist_links :: proc(s: ^State, joined: string, refs: []Artist_Ref, pad: f32, height := ui.Size{}, flags: ui.Box_Flags = {}) -> (k: int, sig: ui.Signal) {
+// which artist it is. pad is the room left and right of the names.
+artist_links :: proc(s: ^State, joined: string, refs: []Artist_Ref, pad: f32, height := ui.Size{}) -> (k: int, sig: ui.Signal) {
 	box := ui.row("###artists", {.Clip}, ui.fill(), height if height.kind != .Null else ui.fill())
+	// The widths below leave out padding.
+	ui.text_pad(0)
 	ui.spacer(ui.px(pad))
 	room := box.rect.w - 2 * pad if box.rect.w > 0 else max(f32)
 	x: f32
@@ -754,7 +747,7 @@ artist_links :: proc(s: ^State, joined: string, refs: []Artist_Ref, pad: f32, he
 		}
 		b: ^ui.Box
 		if linked {
-			link := ui.link(fmt.tprintf("%s###artist%d", name, j), TEXT, ui.fill(), flags = flags)
+			link := ui.link(fmt.tprintf("%s###artist%d", name, j), TEXT, ui.fill())
 			b = link.box
 			if link.clicked || link.pressed || link.right_clicked || link.dragging {
 				k, sig = j, link
@@ -779,14 +772,14 @@ loading_row :: proc(i: int, cols: Track_Columns) {
 	ui.row(fmt.tprintf("##track%d", i), {}, ui.fill(), ui.px(TRACK_ROW_H))
 	ui.spacer(ui.px(8))
 	ui.text_style(.Regular, 14, DIM)
-	num := ui.label(fmt.tprint(i + 1), ui.px(cols.number), ui.fill())
-	num.text_align = .Center
+	ui.set_next_text_align(.Center)
+	ui.label(fmt.tprint(i + 1), ui.px(cols.number), ui.fill())
 	bar :: proc(w, h: f32, cell: ui.Size, color: render.Color) {
 		ui.column("", {}, cell, ui.fill())
 		ui.spacer(ui.fill())
-		b := ui.box_make("", {.Draw_Background}, ui.px(w), ui.px(h))
-		b.background = color
-		b.radius = 4
+		ui.set_next_background(color)
+		ui.set_next_radius(4)
+		ui.box_make("", {.Draw_Background}, ui.px(w), ui.px(h))
 		ui.spacer(ui.fill())
 	}
 	if cols.cover > 0 {
@@ -800,10 +793,9 @@ cell :: proc(s: string, width: f32, align: ui.Align) -> ^ui.Box {
 	if width <= 0 {
 		return nil
 	}
-	b := ui.label(s, ui.px(width), ui.fill())
-	b.text_pad = CELL_PAD
-	b.text_align = align
-	return b
+	ui.set_next_text_pad(CELL_PAD)
+	ui.set_next_text_align(align)
+	return ui.label(s, ui.px(width), ui.fill())
 }
 
 CELL_PAD :: 12
@@ -895,31 +887,30 @@ draw_drag_ghost :: proc(s: ^State) {
 		return
 	}
 	ui.floating()
+	ui.set_next_background(SURFACE_ACTIVE)
+	ui.set_next_border_color(ACCENT if lib.drop_target >= 0 else OUTLINE)
+	ui.set_next_radius(6)
 	ghost := ui.row("drag_ghost", {.Floating_X, .Floating_Y, .Draw_Background, .Draw_Shadow, .Draw_Border}, ui.px(260), ui.px(40))
 	ghost.fixed_pos = ui.mouse() + {12, 10}
-	ghost.background = SURFACE_ACTIVE
-	ghost.border_color = ACCENT if lib.drop_target >= 0 else OUTLINE
-	ghost.radius = 6
 	ghost.opacity = 0.95
 	ui.text_style(.Medium, 13, TEXT)
 	row := view_row(s, int(track))
-	b := ui.label(row.title if row != nil else "", ui.fill(), ui.fill())
-	b.text_pad = 12
+	ui.set_next_text_pad(12)
+	ui.label(row.title if row != nil else "", ui.fill(), ui.fill())
 }
 
 draw_player_bar :: proc(s: ^State, w, h: f32) {
+	ui.set_next_background(BAR_TINT if s.bar_over_content else PANEL)
 	bar := ui.column("player", {.Draw_Background}, ui.px(w), ui.px(PLAYER_BAR_H))
-	bar.background = PANEL
 	if s.bar_over_content {
 		// Over the bottom of the views, blurring them. Clickable so a press
 		// on it doesn't reach the row under it.
 		bar.flags += {.Draw_Backdrop, .Clickable, .Click_Shield, .Floating_X, .Floating_Y}
 		bar.fixed_pos = {0, h - PLAYER_BAR_H - status_bar_h(s)}
-		bar.background = BAR_TINT
 		bar.backdrop = {blur = BAR_BLUR, saturation = BAR_SATURATION}
 	}
-	line := ui.box_make("", {.Draw_Background}, ui.fill(), ui.px(1))
-	line.background = OUTLINE
+	ui.set_next_background(OUTLINE)
+	ui.box_make("", {.Draw_Background}, ui.fill(), ui.px(1))
 	ui.row("", {}, ui.fill(), ui.fill())
 	side := clamp(w * 0.3, 200, 420)
 	// Below about 670 pt the title gives up room before the progress bar.
@@ -942,7 +933,7 @@ draw_player_bar :: proc(s: ^State, w, h: f32) {
 			ui.accessible(ui.label(title, ui.fill(), ui.px(20)), .Static_Text, title)
 		} else {
 			ui.row("", {}, ui.fill(), ui.px(20))
-			if text_link(s, title, "###album", item.album_id != 0, ui.fill(), 0).clicked {
+			if text_link(s, title, "###album", item.album_id != 0, ui.fill()).clicked {
 				open_album(s, item.album_id, item.album, item.cover, item.row)
 			}
 			ui.spacer(ui.px(4))
@@ -954,6 +945,7 @@ draw_player_bar :: proc(s: ^State, w, h: f32) {
 				playing = pb.entries[pb.index].id
 			}
 			liked := liked_has(&s.data, playing)
+			ui.radius(6)
 			if heart_button("heart_bar", liked, "Unlike" if liked else "Like", SECONDARY, 1, 20).clicked {
 				liked_toggle(s, playing)
 				ui.data_changed()
@@ -988,6 +980,8 @@ draw_player_bar :: proc(s: ^State, w, h: f32) {
 		ui.spacer(ui.px(14))
 		{
 			ui.row("", {}, ui.fill(), ui.px(36))
+			ui.text_align(.Center)
+			ui.radius(18)
 			ui.spacer(ui.fill())
 			shuffle := s.settings.shuffle
 			shuffle_sig := toggle_button("shuffle", text.ICON_SHUFFLE, "Shuffle", "On" if shuffle else "Off", shuffle)
@@ -1037,19 +1031,18 @@ draw_player_bar :: proc(s: ^State, w, h: f32) {
 			// takes what's left.
 			ui.row("", {}, ui.fill(), ui.px(16))
 			ui.text_style(.Regular, 11, DIM)
+			ui.text_pad(TIME_PAD)
 			duration := playback_duration(s)
 			position := playback_position(s)
 			longest := clock(max(duration, position))
-			at := ui.label(clock(position), ui.px(ui.counter_width(.Regular, 11, longest) + 2 * TIME_PAD), ui.fill())
-			at.text_align = .Right
-			at.text_pad = TIME_PAD
+			ui.set_next_text_align(.Right)
+			ui.label(clock(position), ui.px(ui.counter_width(.Regular, 11, longest) + 2 * TIME_PAD), ui.fill())
 			draw_progress(s, position, duration, item != nil)
 			left := "0:00"
 			if item != nil {
 				left = fmt.tprintf("-%s", clock(max(duration - position, 0)))
 			}
-			end := ui.label(left, ui.px(ui.counter_width(.Regular, 11, fmt.tprintf("-%s", longest)) + 2 * TIME_PAD), ui.fill())
-			end.text_pad = TIME_PAD
+			ui.label(left, ui.px(ui.counter_width(.Regular, 11, fmt.tprintf("-%s", longest)) + 2 * TIME_PAD), ui.fill())
 		}
 	}
 
@@ -1107,23 +1100,20 @@ draw_progress :: proc(s: ^State, position, duration: f64, active: bool) {
 	}
 	frac := progress_fraction(playback_position(s), duration)
 	ui.spacer(ui.px(6))
-	track := ui.row("", {.Draw_Background}, ui.fill(), ui.px(4))
-	track.background = SURFACE_ACTIVE
-	track.radius = 2
-	level := ui.box_make("", {.Draw_Background}, ui.pct(frac, 1), ui.fill())
-	level.background = mix(SECONDARY, ACCENT, max(slider.hot_t, slider.active_t))
-	level.radius = 2
+	ui.radius(2)
+	ui.set_next_background(SURFACE_ACTIVE)
+	ui.row("", {.Draw_Background}, ui.fill(), ui.px(4))
+	ui.set_next_background(mix(SECONDARY, ACCENT, max(slider.hot_t, slider.active_t)))
+	ui.box_make("", {.Draw_Background}, ui.pct(frac, 1), ui.fill())
 }
 
 play_button :: proc(playing: bool) -> ui.Signal {
 	ui.text_style(.Icon_Fill, 18, PANEL)
 	id := text.ICON_PAUSE + "###play" if playing else text.ICON_PLAY + "###play"
+	ui.set_next_background(TEXT)
+	ui.set_next_hover_color({1, 1, 1, 0.5})
+	ui.set_next_active_color({0, 0, 0, 0.15})
 	b := ui.box_make(id, {.Clickable, .Focusable, .Draw_Background, .Draw_Text, .Draw_Hot_Effects, .Draw_Active_Effects}, ui.px(36), ui.px(36))
-	b.text_align = .Center
-	b.background = TEXT
-	b.radius = 18
-	b.hover_color = {1, 1, 1, 0.5}
-	b.active_color = {0, 0, 0, 0.15}
 	ui.accessible(b, .Button, "Pause" if playing else "Play")
 	return ui.signal(b)
 }
@@ -1132,8 +1122,6 @@ skip_button :: proc(id: string, forward: bool) -> ui.Signal {
 	ui.text_style(.Icon_Fill, 18, SECONDARY)
 	icon := text.ICON_SKIP_FORWARD if forward else text.ICON_SKIP_BACK
 	b := ui.box_make(fmt.tprintf("%s###%s", icon, id), {.Clickable, .Focusable, .Draw_Text, .Draw_Hot_Effects, .Draw_Active_Effects}, ui.px(36), ui.px(36))
-	b.text_align = .Center
-	b.radius = 18
 	ui.accessible(b, .Button, "Next" if forward else "Previous")
 	return ui.signal(b)
 }
@@ -1142,8 +1130,6 @@ skip_button :: proc(id: string, forward: bool) -> ui.Signal {
 toggle_button :: proc(id, icon, name, value: string, on: bool) -> ui.Signal {
 	ui.text_style(.Icon, 18, ACCENT if on else SECONDARY)
 	b := ui.box_make(fmt.tprintf("%s###%s", icon, id), {.Clickable, .Focusable, .Draw_Text, .Draw_Hot_Effects, .Draw_Active_Effects}, ui.px(36), ui.px(36))
-	b.text_align = .Center
-	b.radius = 18
 	ui.accessible(b, .Button, name, value)
 	return ui.signal(b)
 }
@@ -1159,12 +1145,11 @@ draw_volume :: proc(s: ^State, width: f32) {
 	}
 	ui.spacer(ui.fill())
 	{
-		track := ui.row("", {.Draw_Background}, ui.fill(), ui.px(4))
-		track.background = SURFACE_ACTIVE
-		track.radius = 2
-		level := ui.box_make("", {.Draw_Background}, ui.pct(s.settings.volume, 1), ui.fill())
-		level.background = mix(SECONDARY, ACCENT, max(slider.hot_t, slider.active_t))
-		level.radius = 2
+		ui.radius(2)
+		ui.set_next_background(SURFACE_ACTIVE)
+		ui.row("", {.Draw_Background}, ui.fill(), ui.px(4))
+		ui.set_next_background(mix(SECONDARY, ACCENT, max(slider.hot_t, slider.active_t)))
+		ui.box_make("", {.Draw_Background}, ui.pct(s.settings.volume, 1), ui.fill())
 	}
 	ui.spacer(ui.fill())
 }
@@ -1509,8 +1494,8 @@ status_bar_h :: proc(s: ^State) -> f32 {
 // draw_status_bar is the line under the player bar that TIDALFAST_STATUS_BAR
 // turns on, for agents that read the window instead of watching it.
 draw_status_bar :: proc(s: ^State) {
-	bar := ui.row("status_bar", {.Draw_Background}, ui.fill(), ui.px(STATUS_BAR_H))
-	bar.background = WINDOW_BG
+	ui.set_next_background(WINDOW_BG)
+	ui.row("status_bar", {.Draw_Background}, ui.fill(), ui.px(STATUS_BAR_H))
 	ui.spacer(ui.px(SIDEBAR_INDENT))
 	ui.text_style(.Regular, 12, SECONDARY)
 	line := ui.label(status_bar_text(s), ui.fill(), ui.fill())

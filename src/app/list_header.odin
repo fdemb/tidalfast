@@ -146,8 +146,8 @@ draw_list_hero :: proc(s: ^State, h: List_Header, kind: List_Kind, art: Hero_Art
 	ui.row("", {}, ui.fill(), ui.px(art.side))
 	ui.spacer(ui.px(LIST_PAD + 8))
 	{
+		ui.set_next_radius(art.side / 2 if art.kind == .Artist else 4)
 		frame := ui.box_make("", {.Draw_Shadow}, ui.px(art.side), ui.px(art.side))
-		frame.radius = art.side / 2 if art.kind == .Artist else 4
 		ui.parent(frame)
 		cover_art(s, art.kind, art.id, art.seed, art.side, ui.fill(), frame.radius)
 	}
@@ -263,8 +263,8 @@ draw_list_actions :: proc(s: ^State, kind: List_Kind, h: List_Header) {
 		ui.spacer(ui.fill())
 	}
 	ui.spacer(ui.px(8))
+	ui.radius(20)
 	more, more_sig := icon_button("list_more", text.ICON_DOTS_THREE, .Icon, fmt.tprintf("More options for %s", title), TEXT, 1, 40, {.Focusable})
-	more.radius = 20
 	if more_sig.clicked {
 		ui.open_menu("list_menu", {more.rect.x, more.rect.y + more.rect.h})
 	}
@@ -301,15 +301,15 @@ list_play_button :: proc(s: ^State, id: string, side: f32) {
 		flags += {.Disabled}
 	}
 	icon := text.ICON_PAUSE if playing else text.ICON_PLAY
+	ui.set_next_font(.Icon_Fill)
+	ui.set_next_font_size(math.round(side * 0.4))
+	ui.set_next_text_color(WINDOW_BG)
+	ui.set_next_text_align(.Center)
+	ui.set_next_background(TEXT)
+	ui.set_next_radius(side / 2)
+	ui.set_next_hover_color(SECONDARY)
+	ui.set_next_active_color({0, 0, 0, 0.15})
 	b := ui.box_make(fmt.tprintf("%s###%s", icon, id), flags, ui.px(side), ui.px(side))
-	b.font = .Icon_Fill
-	b.font_size = math.round(side * 0.4)
-	b.text_color = WINDOW_BG
-	b.text_align = .Center
-	b.background = TEXT
-	b.radius = side / 2
-	b.hover_color = SECONDARY
-	b.active_color = {0, 0, 0, 0.15}
 	b.opacity = 1 if enabled else 0.5
 	ui.accessible(b, .Button, fmt.tprintf("%s %s", "Pause" if playing else "Play", view_title(s)))
 	ui.spacer(ui.fill())
@@ -384,9 +384,8 @@ draw_pinned_header :: proc(s: ^State, list: ^ui.Box, h: List_Header, cols: Track
 	pin := ui.column("pinned", flags, ui.fill(), ui.children_sum())
 	pin.fixed_pos = {0, list.view_off.y}
 	if h.bar > 0 {
-		bar := ui.column("", {.Draw_Background}, ui.fill(), ui.px(h.bar))
-		bar.background = PANEL
-		bar.background.a = c.bar
+		ui.set_next_background({PANEL.r, PANEL.g, PANEL.b, c.bar})
+		ui.column("", {.Draw_Background}, ui.fill(), ui.px(h.bar))
 		if c.content > 0 {
 			row := ui.row("", {}, ui.fill(), ui.px(COMPACT_H))
 			row.opacity = c.content
@@ -402,8 +401,8 @@ draw_pinned_header :: proc(s: ^State, list: ^ui.Box, h: List_Header, cols: Track
 		}
 	}
 	if c.pinned {
-		headings := ui.column("", {.Draw_Background}, ui.fill(), ui.children_sum())
-		headings.background = PANEL
+		ui.set_next_background(PANEL)
+		ui.column("", {.Draw_Background}, ui.fill(), ui.children_sum())
 		table_header(cols, pinned = true)
 	}
 }

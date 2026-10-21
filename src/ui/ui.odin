@@ -120,7 +120,6 @@ Box :: struct {
 Build :: struct {
 	parent, first, last, next: ^Box,
 	child_count:               int,
-	flags:                     Box_Flags,
 	pref_size:                 [Axis]Size,
 	child_axis:                Axis,
 	fixed_pos:                 [2]f32, // relative to the parent
@@ -130,18 +129,9 @@ Build :: struct {
 	inset_end:                 f32, // a scroll view's bottom under something drawn over it, see scroll_view
 	id:                        string, // as given; must live until end_frame
 	label:                     string, // the part of id before "##"
-	font:                      text.Font,
-	font_size:                 f32,
-	text_color:                render.Color,
-	text_align:                Align,
-	text_pad:                  f32, // left and right of the label
-	background:                render.Color,
+	using style:               Style,
 	backdrop:                  Backdrop, // with Draw_Backdrop, background tints it
 	gradient:                  render.Color, // bottom colour of the background, when its alpha isn't 0
-	border_color:              render.Color,
-	hover_color:               render.Color,
-	active_color:              render.Color,
-	radius:                    f32,
 	texture:                   render.Texture, // drawn over the background, rounded by radius
 	texture_src:               render.Rect, // texels of texture to draw; zero for all of it
 	opacity:                   f32, // multiplies the box and everything inside it
@@ -228,11 +218,6 @@ Shortcut :: struct {
 	target: Key,
 }
 
-Stack :: struct($T: typeid) {
-	items: [STACK_DEPTH]T,
-	count: int,
-}
-
 State :: struct {
 	boxes:          []Box, // the pool keyed boxes come from
 	boxes_used:     int,
@@ -254,9 +239,8 @@ State :: struct {
 	root:           ^Box,
 	floating_root:  ^Box,
 	parents:        Stack(^Box),
-	font:           text.Font,
-	font_size:      f32,
-	text_color:     render.Color,
+	styles:         Styles,
+	style_leaks:    int,
 
 	input:          Input,
 	hot:            Key,
@@ -339,9 +323,6 @@ init :: proc(u: ^State) {
 	u.boxes = make([]Box, MAX_BOXES)
 	u.table = make([]^Box, BOX_TABLE)
 	u.hits = make([]Hit, MAX_BOXES)
-	u.font = .Regular
-	u.font_size = 13
-	u.text_color = {1, 1, 1, 1}
 }
 
 // Sizes
@@ -443,6 +424,12 @@ begin_frame :: proc(u: ^State, events: []platform.Event, r: ^render.Renderer, t:
 	u.shortcut_count = 0
 
 	u.parents.count = 0
+	if !styles_clear(&u.styles) {
+		u.style_leaks += 1
+		if u.style_leaks == 1 {
+			log.error("ui: a frame left a style scope open or a set_next unused, or opened or closed a scope between a set_next and its box")
+		}
+	}
 	u.root = new(Box, context.temp_allocator)
 	u.root.pref_size = {.X = px(width), .Y = px(height)}
 	u.root.child_axis = .Y
@@ -1158,13 +1145,9 @@ box_make :: proc(id: string, flags: Box_Flags = {}, width: Size = {}, height: Si
 	b.flags = flags
 	b.id = id
 	b.label = label_from_string(id)
-	b.font = u.font
-	b.font_size = u.font_size
-	b.text_color = u.text_color
-	b.hover_color = {1, 1, 1, 0.06}
-	b.active_color = {1, 1, 1, 0.06}
 	b.opacity = 1
-	is_text := .Draw_Text in flags && b.label != ""
+	style_take(&u.styles, b)
+	is_text := .Draw_Text in b.flags && b.label != ""
 	b.pref_size[.X] = width if width.kind != .Null else (text_size() if is_text else children_sum())
 	b.pref_size[.Y] = height if height.kind != .Null else (text_size() if is_text else children_sum())
 	if parent != nil {
@@ -1177,7 +1160,7 @@ box_make :: proc(id: string, flags: Box_Flags = {}, width: Size = {}, height: Si
 		b.active_t = approach(u, b.active_t, 1 if u.active[.Left] == b.key else 0, rate, 0.002)
 		b.focus_t = approach(u, b.focus_t, 1 if u.focus == b.key && u.focus_visible else 0, rate, 0.002)
 	}
-	if .View_Scroll in flags && b.key != 0 {
+	if .View_Scroll in b.flags && b.key != 0 {
 		scroll_box(u, b)
 		b.built_size = {b.rect.w, b.rect.h}
 	}
@@ -1276,20 +1259,9 @@ signal :: proc(b: ^Box) -> (s: Signal) {
 
 // Parents and scopes
 
-push_parent :: proc(b: ^Box) {
-	u := ctx
-	if u.parents.count < STACK_DEPTH {
-		u.parents.items[u.parents.count] = b
-	}
-	u.parents.count += 1
-}
+push_parent :: proc(b: ^Box) {push(&ctx.parents, b)}
 
-pop_parent :: proc() {
-	u := ctx
-	if u.parents.count > 0 {
-		u.parents.count -= 1
-	}
-}
+pop_parent :: proc() {pop(&ctx.parents)}
 
 top_parent :: proc() -> ^Box {
 	u := ctx
@@ -1327,28 +1299,6 @@ column :: proc(id: string = "", flags: Box_Flags = {}, width: Size = {}, height:
 	b.child_axis = .Y
 	push_parent(b)
 	return b
-}
-
-Text_Style :: struct {
-	font:  text.Font,
-	size:  f32,
-	color: render.Color,
-}
-
-@(private)
-restore_text_style :: proc(old: Text_Style) {
-	u := ctx
-	u.font, u.font_size, u.text_color = old.font, old.size, old.color
-}
-
-// text_style sets the font, size and colour of boxes built until the end
-// of the scope.
-@(deferred_out = restore_text_style)
-text_style :: proc(font: text.Font, size: f32, color: render.Color) -> Text_Style {
-	u := ctx
-	old := Text_Style{u.font, u.font_size, u.text_color}
-	u.font, u.font_size, u.text_color = font, size, color
-	return old
 }
 
 // Queries for the app

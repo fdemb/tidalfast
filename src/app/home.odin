@@ -155,17 +155,17 @@ draw_home_entry :: proc(s: ^State) {
 	ui.row("", {}, ui.fill(), ui.px(40))
 	ui.spacer(ui.px(SIDEBAR_PAD))
 	{
+		ui.set_next_radius(6)
+		row_highlight(SIDEBAR_ROWS, current)
 		b := ui.row("##home", {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects}, ui.fill(), ui.fill())
-		b.radius = 6
-		row_highlight(b, SIDEBAR_ROWS, current)
 		ui.accessible(b, .Button, "Home", selected = current)
 		if ui.signal(b).clicked {
 			pending_set(s, Home_Place{})
 		}
 		ui.spacer(ui.px(ROW_PAD))
 		ui.text_style(.Icon_Fill if current else .Icon, 20, TEXT)
-		icon := ui.label(text.ICON_HOUSE_FILL if current else text.ICON_HOUSE, ui.px(40), ui.fill())
-		icon.text_align = .Center
+		ui.set_next_text_align(.Center)
+		ui.label(text.ICON_HOUSE_FILL if current else text.ICON_HOUSE, ui.px(40), ui.fill())
 		ui.spacer(ui.px(12))
 		ui.text_style(.Semibold, 15, TEXT)
 		ui.label("Home", ui.fill(), ui.fill())
@@ -276,10 +276,10 @@ draw_shortcuts :: proc(s: ^State, width: f32) {
 @(private = "file")
 shortcut :: proc(s: ^State, i: int, width: f32) -> ui.Signal {
 	entry := sidebar_entry(s, i)
+	ui.set_next_radius(6)
+	ui.set_next_background(SURFACE)
+	ui.set_next_hover_color(SURFACE_ACTIVE)
 	b := ui.row(fmt.tprintf("##shortcut%d", i), {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects, .Clip}, ui.px(width), ui.px(SHORTCUT_H))
-	b.radius = 6
-	b.background = SURFACE
-	b.hover_color = SURFACE_ACTIVE
 	ui.accessible(b, .Button, entry.name)
 	cover_art(s, .Playlist, entry.image, entry.seed, SHORTCUT_H, ui.px(SHORTCUT_H), 6)
 	ui.spacer(ui.px(14))
