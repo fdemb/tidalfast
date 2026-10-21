@@ -22,8 +22,8 @@ cover_art :: proc(s: ^State, kind: cover.Kind, id: string, seed: u32, size: f32,
 	ui.spacer(ui.fill())
 	{
 		ui.row("", {}, ui.fill(), ui.px(size))
+		ui.set_next_radius(radius)
 		b := ui.box_make("", {.Draw_Background}, ui.px(size), ui.px(size))
-		b.radius = radius
 		if id == "" {
 			hue := f32(seed % 997) / 997
 			b.background = hsv(hue, 0.55, 0.75)
@@ -34,10 +34,10 @@ cover_art :: proc(s: ^State, kind: cover.Kind, id: string, seed: u32, size: f32,
 			measure_count_cover(s, e != nil && e.state == .Ready)
 			if e != nil && e.state == .Ready {
 				ui.parent(b)
+				ui.set_next_radius(b.radius)
 				img := ui.box_make("", {}, ui.fill(), ui.fill())
 				img.texture = cover.texture(&s.data.covers, e)
 				img.texture_src = cover.src(&s.data.covers, e)
-				img.radius = b.radius
 				img.opacity = cover.alpha(e, s.ui.time)
 				if img.opacity < 1 {
 					ui.request_frame()

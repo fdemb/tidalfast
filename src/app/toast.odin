@@ -94,12 +94,12 @@ draw_toast :: proc(s: ^State, w, bottom: f32) {
 	label := small_str(&toast.text)
 	ui.text_style(.Medium, 13, TEXT)
 	width := min(ui.text_width(.Medium, 13, label) + 32, TOAST_MAX_W, w - 32)
+	ui.set_next_text_pad(16)
+	ui.set_next_background(TOAST_BG)
+	ui.set_next_border_color(TOAST_BORDER)
+	ui.set_next_radius(8)
 	b := ui.box_make("###toast", {.Floating_X, .Floating_Y, .Clickable, .Draw_Background, .Draw_Border, .Draw_Shadow, .Draw_Text}, ui.px(width), ui.px(44))
 	b.label = label
-	b.text_pad = 16
-	b.background = TOAST_BG
-	b.border_color = TOAST_BORDER
-	b.radius = 8
 	b.open_t = ui.approach(&s.ui, b.open_t, 1 if shown else 0, 1 - math.exp(-s.ui.dt * 20), 0.01)
 	b.opacity = b.open_t
 	b.fixed_pos = {math.floor((w - width) / 2), bottom - TOAST_GAP - 44 + (1 - b.open_t) * 8}

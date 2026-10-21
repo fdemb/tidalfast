@@ -32,16 +32,20 @@ Field_Layout :: struct {
 // when clicked; with the focus it takes typing and the input method's
 // marked text from the shell, the editing keys, the clipboard and undo, and
 // draws the caret, which blinks with a timer while the window has the
-// keyboard. The text scrolls sideways to keep the caret in view.
+// keyboard. The text scrolls sideways to keep the caret in view. Its
+// background, border and corners come from the style stacks; with the focus
+// its border is the accent.
 text_field :: proc(id: string, f: ^Text_Field, placeholder: string, width, height: Size) -> (sig: Field_Signal) {
 	u := ctx
+	set_next_text_pad(FIELD_PAD)
 	b := box_make(id, {.Clickable, .Focusable, .Text_Input, .Draw_Background, .Draw_Border, .Clip}, width, height)
-	b.text_pad = FIELD_PAD
-	b.radius = 6
 	s := signal(b)
 	sig.box = b
 	focused := b.key != 0 && u.focus == b.key
 	sig.focused = focused
+	if focused {
+		b.border_color = ACCENT
+	}
 	old := clone_temp(field_text(f))
 	font, size := b.font, b.font_size
 

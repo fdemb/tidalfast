@@ -50,10 +50,10 @@ text_button :: proc(id, name: string) -> ui.Signal {
 	ui.column("", {}, ui.children_sum(), ui.fill())
 	ui.spacer(ui.fill())
 	ui.text_style(.Semibold, 13, SECONDARY)
+	ui.set_next_text_pad(8)
+	ui.set_next_text_align(.Center)
+	ui.set_next_radius(6)
 	b := ui.box_make(id, {.Clickable, .Focusable, .Draw_Text}, ui.text_size(16), ui.px(28))
-	b.text_pad = 8
-	b.text_align = .Center
-	b.radius = 6
 	b.text_color = mix(SECONDARY, TEXT, b.hot_t)
 	ui.accessible(b, .Button, name)
 	ui.spacer(ui.fill())
@@ -143,8 +143,8 @@ card_cover :: proc(source: Source) -> cover.Kind {
 // it's an empty box of the same size with the same name.
 @(private = "file")
 card :: proc(s: ^State, i: int, f: Found, kind: cover.Kind, filled: bool) -> ui.Signal {
+	ui.set_next_radius(8)
 	b := ui.column(fmt.tprintf("##card%d", i), {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects}, ui.px(CARD_W), ui.px(CARD_H))
-	b.radius = 8
 	row_highlight(b, LIST_ROWS, false)
 	ui.accessible(b, .Button, f.name if f.subtitle == "" else fmt.tprintf("%s, %s", f.name, f.subtitle))
 	if !filled {
@@ -159,11 +159,11 @@ card :: proc(s: ^State, i: int, f: Found, kind: cover.Kind, filled: bool) -> ui.
 	}
 	ui.spacer(ui.px(10))
 	ui.text_style(.Medium, 14, TEXT)
+	ui.set_next_text_pad(CARD_PAD)
 	title := ui.label(f.name, ui.fill(), ui.px(20))
-	title.text_pad = CARD_PAD
 	ui.text_style(.Regular, 12, SECONDARY)
+	ui.set_next_text_pad(CARD_PAD)
 	sub := ui.label(f.subtitle, ui.fill(), ui.px(18))
-	sub.text_pad = CARD_PAD
 	if round {
 		title.text_align = .Center
 		sub.text_align = .Center

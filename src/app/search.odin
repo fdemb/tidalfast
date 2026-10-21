@@ -124,9 +124,10 @@ draw_search_field :: proc(s: ^State) {
 		ui.row("", {}, ui.fill(), ui.px(32))
 		ui.spacer(ui.px(SIDEBAR_INDENT - ui.FIELD_PAD))
 		ui.text_style(.Regular, 13, TEXT)
+		ui.set_next_background(SURFACE)
+		ui.set_next_border_color(OUTLINE)
+		ui.set_next_radius(6)
 		sig := ui.text_field("search", &sr.field, "Search", ui.fill(), ui.px(32))
-		sig.box.background = SURFACE
-		sig.box.border_color = ACCENT if sig.focused else OUTLINE
 		ui.focus_shortcut(sig.box, .F, {ui.PRIMARY})
 		ui.focus_shortcut(sig.box, .L, {ui.PRIMARY})
 		ui.spacer(ui.px(SIDEBAR_INDENT - ui.FIELD_PAD))
@@ -516,12 +517,14 @@ draw_search_tabs :: proc(s: ^State) -> (songs: bool) {
 	{
 		ui.row("search_tabs", {}, ui.fill(), ui.px(30))
 		ui.spacer(ui.px(LIST_PAD))
+		ui.text_pad(10)
+		ui.text_align(.Center)
+		ui.radius(15)
 		for tab in Search_Tab {
 			ui.text_style(.Medium, 13, TEXT if sr.tab == tab else SECONDARY)
+			ui.set_next_background(SURFACE_ACTIVE if sr.tab == tab else {})
 			label := fmt.tprintf("%s  %d###tab%d", names[tab], counts[tab], int(tab))
 			sig := ui.button(label, ui.text_size(12), ui.fill())
-			sig.box.background = SURFACE_ACTIVE if sr.tab == tab else {}
-			sig.box.radius = 15
 			if sig.clicked {
 				sr.tab = tab
 			}
@@ -592,8 +595,8 @@ draw_found_list :: proc(s: ^State) {
 	rows := ui.virtual_rows(list, n, TRACK_ROW_H)
 	for i in rows.first ..< rows.last {
 		f := found_at(s, tab, i)
+		ui.set_next_radius(6)
 		row := ui.row(fmt.tprintf("##found%d", i), {.Clickable, .Draw_Background, .Draw_Hot_Effects}, ui.fill(), ui.px(TRACK_ROW_H))
-		row.radius = 6
 		row_highlight(row, LIST_ROWS, false)
 		ui.accessible(row, .Row, fmt.tprintf("%s, %s", f.name, f.subtitle))
 		if ui.signal(row).clicked {
@@ -606,20 +609,20 @@ draw_found_list :: proc(s: ^State) {
 		ui.column("", {}, ui.fill(), ui.fill())
 		ui.spacer(ui.px(9))
 		ui.text_style(.Medium, 14, TEXT)
-		title := ui.label(f.name, ui.fill(), ui.px(20))
-		title.text_pad = 4
+		ui.set_next_text_pad(4)
+		ui.label(f.name, ui.fill(), ui.px(20))
 		ui.text_style(.Regular, 13, SECONDARY)
 		if tab == .Albums && f.artist != "" {
 			ui.row("", {}, ui.fill(), ui.px(18))
-			prefix := ui.label("Album ·", ui.text_size(), ui.fill())
-			prefix.text_pad = 4
+			ui.set_next_text_pad(4)
+			ui.label("Album ·", ui.text_size(), ui.fill())
 			// The fake data's album id is the row it's found at.
 			if k, sig := artist_links(s, f.artist, f.artists, 0); sig.clicked {
 				open_artist_of(s, f.artist, f.artists, k, int(f.id))
 			}
 		} else {
-			sub := ui.label(f.subtitle, ui.fill(), ui.px(18))
-			sub.text_pad = 4
+			ui.set_next_text_pad(4)
+			ui.label(f.subtitle, ui.fill(), ui.px(18))
 		}
 	}
 }

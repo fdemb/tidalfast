@@ -227,9 +227,9 @@ shelf_placeholder :: proc(title: string, width: f32) {
 		{
 			ui.row("", {}, ui.fill(), ui.px(CARD_SIZE))
 			ui.spacer(ui.px(CARD_PAD))
-			b := ui.box_make("", {.Draw_Background}, ui.px(CARD_SIZE), ui.px(CARD_SIZE))
-			b.background = SURFACE
-			b.radius = 6
+			ui.set_next_background(SURFACE)
+			ui.set_next_radius(6)
+			ui.box_make("", {.Draw_Background}, ui.px(CARD_SIZE), ui.px(CARD_SIZE))
 		}
 		ui.spacer(ui.px(CARD_GAP))
 	}
@@ -425,17 +425,17 @@ pill :: proc(id, icon, label: string, light, enabled: bool, name := "") -> ui.Si
 	if !enabled {
 		flags += {.Disabled}
 	}
+	ui.set_next_radius(20)
+	ui.set_next_background(TEXT if light else SURFACE)
+	ui.set_next_hover_color(SECONDARY if light else SURFACE_ACTIVE)
 	b := ui.row(id, flags, ui.children_sum(), ui.px(40))
-	b.radius = 20
-	b.background = TEXT if light else SURFACE
-	b.hover_color = SECONDARY if light else SURFACE_ACTIVE
 	b.opacity = 1 if enabled else 0.5
 	ui.accessible(b, .Button, name if name != "" else label)
 	fg := WINDOW_BG if light else TEXT
 	ui.spacer(ui.px(18))
 	ui.text_style(.Icon_Fill if light else .Icon, 16, fg)
-	glyph := ui.label(icon, ui.px(18), ui.fill())
-	glyph.text_align = .Center
+	ui.set_next_text_align(.Center)
+	ui.label(icon, ui.px(18), ui.fill())
 	ui.spacer(ui.px(8))
 	ui.text_style(.Semibold, 14, fg)
 	ui.label(label, ui.text_size(), ui.fill())

@@ -91,9 +91,6 @@ spacer :: proc(size: Size) -> ^Box {
 
 button :: proc(id: string, width: Size = {}, height: Size = {}) -> Signal {
 	b := box_make(id, {.Clickable, .Focusable, .Draw_Background, .Draw_Text, .Draw_Hot_Effects, .Draw_Active_Effects}, width, height)
-	b.text_pad = 10
-	b.text_align = .Center
-	b.radius = 6
 	accessible(b, .Button, b.label)
 	return signal(b)
 }
@@ -101,10 +98,9 @@ button :: proc(id: string, width: Size = {}, height: Size = {}) -> Signal {
 // link is text that does something when clicked, underlined while the
 // mouse is over it. It's as wide as its text and gives way to an ellipsis
 // when there's less room, so only the text takes the click. The text goes
-// from the text style's colour to hot_color as it lights.
-link :: proc(id: string, hot_color: render.Color, height: Size = {}, pad: f32 = 0, flags: Box_Flags = {}) -> Signal {
-	b := box_make(id, {.Clickable, .Draw_Text, .Draw_Hot_Underline} + flags, text_size(0, 0), height)
-	b.text_pad = pad
+// from the text colour to hot_color as it lights.
+link :: proc(id: string, hot_color: render.Color, height: Size = {}) -> Signal {
+	b := box_make(id, {.Clickable, .Draw_Text, .Draw_Hot_Underline}, text_size(0, 0), height)
 	b.text_color += (hot_color - b.text_color) * b.hot_t
 	accessible(b, .Button, b.label)
 	return signal(b)
@@ -258,15 +254,17 @@ scrollbar :: proc(view: ^Box) {
 	if view.bar_t > 0 {
 		flags += {.Clickable}
 	}
+	set_next_flags({})
 	bar := box_make("###scrollbar", flags, px(SCROLLBAR_TRACK), px(view.rect.h - view.inset_end))
 	bar.fixed_pos = {view.rect.w - SCROLLBAR_TRACK, view.view_off.y}
 	bar.opacity = view.bar_t
 	push_parent(bar)
 	defer pop_parent()
+	set_next_flags({})
+	set_next_background({1, 1, 1, 0.22 + 0.2 * max(bar.hot_t, bar.active_t)})
+	set_next_radius(SCROLLBAR_W / 2)
 	thumb := box_make("", {.Floating_X, .Floating_Y, .Draw_Background}, px(SCROLLBAR_W), px(t.h))
 	thumb.fixed_pos = {SCROLLBAR_INSET, t.y}
-	thumb.background = {1, 1, 1, 0.22 + 0.2 * max(bar.hot_t, bar.active_t)}
-	thumb.radius = SCROLLBAR_W / 2
 }
 
 Virtual_Rows :: struct {
@@ -318,10 +316,18 @@ scroll_to :: proc(view: ^Box, y0, y1: f32) {
 // floating makes the floating layer the parent until the end of the scope.
 // It is laid out and drawn after the main tree, ignores every clip in it
 // and comes first for input. Its boxes need Floating_X and Floating_Y and
-// a fixed_pos in window coordinates.
-@(deferred_none = pop_parent)
+// a fixed_pos in window coordinates. The flags of the scopes around it
+// don't reach it.
+@(deferred_none = floating_end)
 floating :: proc() {
 	push_parent(ctx.floating_root)
+	push(&ctx.styles.flags, Box_Flags{})
+}
+
+@(private)
+floating_end :: proc() {
+	pop(&ctx.styles.flags)
+	pop_parent()
 }
 
 // Menus. One context menu is open at a time. open_menu opens it at pos;
@@ -365,7 +371,7 @@ menu_end :: proc(open: bool) {
 	if open {
 		spacer(px(6))
 		pop_parent()
-		pop_parent()
+		floating_end()
 	}
 }
 
@@ -378,11 +384,15 @@ menu :: proc(id: string, width: f32 = 220) -> bool {
 		return false
 	}
 	push_parent(u.floating_root)
+	push(&u.styles.flags, Box_Flags{})
 	// A menu fading out takes no input.
 	flags := Box_Flags{.Clickable, .Draw_Background, .Draw_Border, .Draw_Shadow, .Floating_X, .Floating_Y}
 	if !u.menu_open {
 		flags += {.Disabled}
 	}
+	set_next_background(MENU_BACKGROUND)
+	set_next_border_color(MENU_BORDER)
+	set_next_radius(8)
 	b := box_make(id, flags, px(width), children_sum())
 	b.child_axis = .Y
 	accessible(b, .Menu, "")
@@ -390,7 +400,7 @@ menu :: proc(id: string, width: f32 = 220) -> bool {
 	u.menu_built = true
 	if !u.menu_open && b.open_t == 0 {
 		u.menu = 0
-		pop_parent()
+		floating_end()
 		return false
 	}
 	// Keep it in the window, above the mouse if there's no room below.
@@ -402,9 +412,6 @@ menu :: proc(id: string, width: f32 = 220) -> bool {
 	pos.y = max(pos.y, 8)
 	b.fixed_pos = pos + {0, (1 - b.open_t) * -6}
 	b.opacity = b.open_t
-	b.background = MENU_BACKGROUND
-	b.border_color = MENU_BORDER
-	b.radius = 8
 	push_parent(b)
 	spacer(px(6))
 	return true
@@ -416,9 +423,9 @@ menu_item :: proc(id: string) -> Signal {
 	if !u.menu_open {
 		flags += {.Disabled}
 	}
+	set_next_text_pad(14)
+	set_next_hover_color({1, 1, 1, 0.08})
 	b := box_make(id, flags, fill(), px(30))
-	b.text_pad = 14
-	b.hover_color = {1, 1, 1, 0.08}
 	accessible(b, .Menu_Item, b.label)
 	if u.menu_focus_new && u.menu_open && b.key != 0 {
 		u.menu_focus_new = false
@@ -434,8 +441,8 @@ menu_item :: proc(id: string) -> Signal {
 
 menu_separator :: proc() {
 	spacer(px(4))
-	b := box_make("", {.Draw_Background}, fill(), px(1))
-	b.background = MENU_BORDER
+	set_next_background(MENU_BORDER)
+	box_make("", {.Draw_Background}, fill(), px(1))
 	spacer(px(4))
 }
 
@@ -451,17 +458,16 @@ tooltip :: proc(sig: Signal, label: string) {
 		wake_at(shows)
 		return
 	}
-	push_parent(u.floating_root)
-	defer pop_parent()
+	floating()
+	set_next_font_size(12)
+	set_next_text_pad(8)
+	set_next_text_color({0.95, 0.95, 0.95, 1})
+	set_next_background(MENU_BACKGROUND)
+	set_next_border_color(MENU_BORDER)
+	set_next_radius(5)
 	b := box_make("###tooltip", {.Floating_X, .Floating_Y, .Draw_Background, .Draw_Border, .Draw_Text})
 	b.label = label
 	b.pref_size = {.X = text_size(), .Y = text_size(10)}
-	b.font_size = 12
-	b.text_pad = 8
-	b.background = MENU_BACKGROUND
-	b.border_color = MENU_BORDER
-	b.text_color = {0.95, 0.95, 0.95, 1}
-	b.radius = 5
 	b.open_t = approach(u, b.open_t, 1, 1 - math.exp(-u.dt * 20), 0.01)
 	b.opacity = b.open_t
 	pos := u.input.mouse + {10, 20}
