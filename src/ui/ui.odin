@@ -120,7 +120,6 @@ Box :: struct {
 Build :: struct {
 	parent, first, last, next: ^Box,
 	child_count:               int,
-	flags:                     Box_Flags,
 	pref_size:                 [Axis]Size,
 	child_axis:                Axis,
 	fixed_pos:                 [2]f32, // relative to the parent
@@ -130,18 +129,9 @@ Build :: struct {
 	inset_end:                 f32, // a scroll view's bottom under something drawn over it, see scroll_view
 	id:                        string, // as given; must live until end_frame
 	label:                     string, // the part of id before "##"
-	font:                      text.Font,
-	font_size:                 f32,
-	text_color:                render.Color,
-	text_align:                Align,
-	text_pad:                  f32, // left and right of the label
-	background:                render.Color,
+	using style:               Style,
 	backdrop:                  Backdrop, // with Draw_Backdrop, background tints it
 	gradient:                  render.Color, // bottom colour of the background, when its alpha isn't 0
-	border_color:              render.Color,
-	hover_color:               render.Color,
-	active_color:              render.Color,
-	radius:                    f32,
 	texture:                   render.Texture, // drawn over the background, rounded by radius
 	texture_src:               render.Rect, // texels of texture to draw; zero for all of it
 	opacity:                   f32, // multiplies the box and everything inside it
@@ -249,7 +239,7 @@ State :: struct {
 	root:           ^Box,
 	floating_root:  ^Box,
 	parents:        Stack(^Box),
-	styles:         Style_Stacks,
+	styles:         Styles,
 	style_leaks:    int,
 
 	input:          Input,
@@ -1269,20 +1259,9 @@ signal :: proc(b: ^Box) -> (s: Signal) {
 
 // Parents and scopes
 
-push_parent :: proc(b: ^Box) {
-	u := ctx
-	if u.parents.count < STACK_DEPTH {
-		u.parents.items[u.parents.count] = b
-	}
-	u.parents.count += 1
-}
+push_parent :: proc(b: ^Box) {push(&ctx.parents, b)}
 
-pop_parent :: proc() {
-	u := ctx
-	if u.parents.count > 0 {
-		u.parents.count -= 1
-	}
-}
+pop_parent :: proc() {pop(&ctx.parents)}
 
 top_parent :: proc() -> ^Box {
 	u := ctx
