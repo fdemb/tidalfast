@@ -259,3 +259,31 @@ pinned_bar_under_the_titlebar :: proc(t: ^testing.T) {
 	testing.expect(t, !in_drag(s, cx, play.frame[1] + 4), "a press on Play doesn't move the window")
 	testing.expect(t, in_drag(s, view.rect.x + view.rect.w / 2, 10), "the rest of the strip does")
 }
+
+// Another list opens at its top, however far the last one was scrolled.
+@(test)
+another_list_opens_at_the_top :: proc(t: ^testing.T) {
+	arena: mem.Dynamic_Arena
+	mem.dynamic_arena_init(&arena)
+	defer mem.dynamic_arena_destroy(&arena)
+	context.allocator = mem.dynamic_arena_allocator(&arena)
+	s := library_state(true)
+	defer library_state_free(s)
+	f: Frame
+	for _ in 0 ..< 3 {
+		library_frame(t, s, &f)
+	}
+	view, _ := list_view(t, s, app.view_title(s))
+	scroll_to(view, 40)
+	library_frame(t, s, &f)
+	testing.expect_value(t, view.view_off.y, f32(40))
+
+	app.pending_set(s, app.Playlist_Place{index = 2})
+	for _ in 0 ..< 3 {
+		library_frame(t, s, &f)
+	}
+	view, _ = list_view(t, s, app.view_title(s))
+	testing.expect_value(t, s.library.playlist, 2)
+	testing.expect_value(t, view.view_off.y, f32(0))
+	testing.expect_value(t, view.view_off_target.y, f32(0))
+}

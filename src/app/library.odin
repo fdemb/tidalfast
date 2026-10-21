@@ -81,6 +81,7 @@ Library :: struct {
 	menu_track:    i64, // row_key of menu_row when the menu opened
 	menu_list:     u64, // list_gen when the menu opened
 	list_gen:      u32, // goes up when a sidebar entry or another list opens
+	scrolled_gen:  u32, // the list_gen the track list's scroll offset is for
 	drop_target:   int, // the playlist under a dragged row this frame, -1 for none
 	status:        Status,
 	status_track:  int,
@@ -449,6 +450,12 @@ draw_track_list :: proc(s: ^State, main_w: f32) {
 	defer draw_list_menu(s, kind)
 
 	list := ui.scroll_view("tracks", ui.fill(), ui.fill(), inset_end = bar_inset(s))
+	// One scroll view shows every list, so its offset belongs to the list
+	// that was open. A refresh keeps list_gen, and the anchor below.
+	if lib.scrolled_gen != lib.list_gen {
+		lib.scrolled_gen = lib.list_gen
+		list.view_off.y, list.view_off_target.y = 0, 0
+	}
 	if s.bench.running && s.bench.ui {
 		list.view_off.y = rows_top + bench_offset(s, list.rect.h)
 		list.view_off_target.y = list.view_off.y
