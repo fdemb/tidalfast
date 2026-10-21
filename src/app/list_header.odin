@@ -344,28 +344,27 @@ list_play_button :: proc(s: ^State, id: string, side: f32) {
 // draw_list_menu is the More button's menu: Play and Shuffle, an album's
 // artist, and the list's link.
 draw_list_menu :: proc(s: ^State, kind: List_Kind) {
-	if !ui.menu("list_menu") {
-		return
-	}
-	ui.text_style(.Regular, 13, TEXT)
-	if ui.menu_item("Play").clicked {
-		pending_set(s, Play_Row{order = .In_Order})
-	}
-	if ui.menu_item("Shuffle").clicked {
-		pending_set(s, Play_Row{order = .Shuffled})
-	}
-	row := view_row(s, 0)
-	if kind == .Album && row != nil && (s.data.fake || first_artist(row.artists) != 0) {
-		ui.menu_separator()
-		if ui.menu_item("Go to artist").clicked {
-			open_artist_of(s, row.artist, row.artists, 0, fake_row_index(s, 0))
+	if ui.menu("list_menu") {
+		ui.text_style(.Regular, 13, TEXT)
+		if ui.menu_item("Play").clicked {
+			pending_set(s, Play_Row{order = .In_Order})
 		}
-	}
-	if link, name := list_link(s); link != "" {
-		ui.menu_separator()
-		if ui.menu_item(name).clicked {
-			ui.copy_to_clipboard(link)
-			set_status(s, .Copied_Page, -1)
+		if ui.menu_item("Shuffle").clicked {
+			pending_set(s, Play_Row{order = .Shuffled})
+		}
+		row := view_row(s, 0)
+		if kind == .Album && row != nil && (s.data.fake || first_artist(row.artists) != 0) {
+			ui.menu_separator()
+			if ui.menu_item("Go to artist").clicked {
+				open_artist_of(s, row.artist, row.artists, 0, fake_row_index(s, 0))
+			}
+		}
+		if link, name := list_link(s); link != "" {
+			ui.menu_separator()
+			if ui.menu_item(name).clicked {
+				ui.copy_to_clipboard(link)
+				set_status(s, .Copied_Page, -1)
+			}
 		}
 	}
 }

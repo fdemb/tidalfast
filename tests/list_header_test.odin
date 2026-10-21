@@ -178,3 +178,42 @@ list_songs_follows_the_list :: proc(t: ^testing.T) {
 	v.rows[0].seconds = 0
 	testing.expect_value(t, app.list_songs(s, .Playlist), "3 songs, 1 hr 2 min")
 }
+
+// The More button's menu opens by the button, with its items inside it.
+@(test)
+list_menu_opens_by_more :: proc(t: ^testing.T) {
+	arena: mem.Dynamic_Arena
+	mem.dynamic_arena_init(&arena)
+	defer mem.dynamic_arena_destroy(&arena)
+	context.allocator = mem.dynamic_arena_allocator(&arena)
+	s := library_state(true)
+	defer library_state_free(s)
+	f: Frame
+	for _ in 0 ..< 3 {
+		library_frame(t, s, &f)
+	}
+	more, ok := exact_node(s, fmt.tprintf("More options for %s", app.view_title(s)), .Button)
+	testing.expect(t, ok, "the hero's More button")
+	library_frame(t, s, &f, {kind = .Access_Press, target = more.id})
+	for _ in 0 ..< 3 {
+		library_frame(t, s, &f)
+	}
+	testing.expect(t, ui.menu_is_open("list_menu"), "More opens the menu")
+	nodes, _ := ui.access_tree(&s.ui)
+	menu := -1
+	for n, i in nodes {
+		if n.role == .Menu {
+			menu = i
+		}
+	}
+	testing.expect(t, menu >= 0, "a menu in the tree")
+	item, found := exact_node(s, "Shuffle", .Menu_Item)
+	testing.expect(t, found, "Shuffle in the menu")
+	if menu < 0 || !found {
+		return
+	}
+	testing.expect_value(t, int(item.parent), menu)
+	m := nodes[menu].frame
+	testing.expect(t, item.frame[1] >= m[1] && item.frame[1] + item.frame[3] <= m[1] + m[3], "Shuffle inside the menu's frame")
+	testing.expect(t, m[1] < more.frame[1] + more.frame[3] + 20, "the menu opens by the button, not at the window's bottom")
+}
