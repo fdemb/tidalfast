@@ -384,9 +384,8 @@ draw_pinned_header :: proc(s: ^State, list: ^ui.Box, h: List_Header, cols: Track
 	pin := ui.column("pinned", flags, ui.fill(), ui.children_sum())
 	pin.fixed_pos = {0, list.view_off.y}
 	if h.bar > 0 {
-		ui.set_next_background(PANEL)
-		bar := ui.column("", {.Draw_Background}, ui.fill(), ui.px(h.bar))
-		bar.background.a = c.bar
+		ui.set_next_background({PANEL.r, PANEL.g, PANEL.b, c.bar})
+		ui.column("", {.Draw_Background}, ui.fill(), ui.px(h.bar))
 		if c.content > 0 {
 			row := ui.row("", {}, ui.fill(), ui.px(COMPACT_H))
 			row.opacity = c.content
