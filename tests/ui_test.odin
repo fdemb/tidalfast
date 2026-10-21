@@ -1571,3 +1571,34 @@ test_ui_floating_layer_ignores_the_style_around_it :: proc(t: ^testing.T) {
 		testing.expect_value(t, item.radius, 0)
 	}
 }
+
+// set_next styles one box; a scope styles every box until the end of its
+// block and then gives back the style from before it.
+@(test)
+test_ui_style_scopes_and_set_next :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	red := render.Color{1, 0, 0, 1}
+	a, b, c, d: ^ui.Box
+	ui.begin_frame(&u, nil, nil, nil, 300, 200, 0)
+	{
+		ui.radius(6)
+		ui.set_next_background(red)
+		a = ui.box_make("a", {.Draw_Background})
+		b = ui.box_make("b", {.Draw_Background})
+		{
+			ui.radius(12)
+			c = ui.box_make("c", {.Draw_Background})
+		}
+	}
+	d = ui.box_make("d", {.Draw_Background})
+	ui.end_frame()
+	testing.expect_value(t, a.background, red)
+	testing.expect_value(t, b.background, render.Color{})
+	testing.expect_value(t, a.radius, 6)
+	testing.expect_value(t, b.radius, 6)
+	testing.expect_value(t, c.radius, 12)
+	testing.expect_value(t, d.radius, 0)
+	testing.expect_value(t, u.style_leaks, 0)
+}
