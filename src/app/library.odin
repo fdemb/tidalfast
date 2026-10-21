@@ -57,6 +57,7 @@ SIDEBAR_DEFAULT :: 250
 MAIN_MIN :: 360 // the sidebar stops growing before the main view gets narrower
 HANDLE_W :: 5
 PLAYER_BAR_H :: 88
+STATUS_BAR_H :: 22
 // The player bar's blur of the views under it.
 BAR_BLUR :: 20
 BAR_SATURATION :: 1.8
@@ -101,7 +102,6 @@ Songs_Total :: struct {
 
 Status :: enum u8 {
 	None,
-	Playing,
 	Added,
 	Copied,
 	Copied_Page, // the link to the open artist, album or playlist
@@ -223,6 +223,9 @@ draw_library :: proc(s: ^State, w, h: f32) {
 	}
 	if !s.blur_reference {
 		draw_player_bar(s, w, h)
+	}
+	if s.status_bar {
+		draw_status_bar(s)
 	}
 	draw_track_menu(s)
 	draw_drag_ghost(s)
@@ -906,7 +909,7 @@ draw_player_bar :: proc(s: ^State, w, h: f32) {
 		// Over the bottom of the views, blurring them. Clickable so a press
 		// on it doesn't reach the row under it.
 		bar.flags += {.Draw_Backdrop, .Clickable, .Floating_X, .Floating_Y}
-		bar.fixed_pos = {0, h - PLAYER_BAR_H}
+		bar.fixed_pos = {0, h - PLAYER_BAR_H - status_bar_h(s)}
 		bar.background = BAR_TINT
 		bar.backdrop = {blur = BAR_BLUR, saturation = BAR_SATURATION}
 	}
@@ -1166,7 +1169,6 @@ play :: proc(s: ^State, i: int) {
 		return
 	}
 	playback_play_row(s, i)
-	set_status(s, .Playing, i)
 }
 
 // row_playable says whether row i of the open list is loaded and can play.
@@ -1226,8 +1228,6 @@ status_text :: proc(s: ^State) -> string {
 	}
 	switch lib.status {
 	case .None:
-	case .Playing:
-		return fmt.tprintf("Playing %s by %s", t.title, t.artist)
 	case .Adding:
 		return fmt.tprintf("Adding %s to %s…", t.title, sidebar_entry(s, lib.status_list).name)
 	case .Added:
@@ -1495,4 +1495,40 @@ history_can_forward :: proc(s: ^State) -> bool {
 
 mix :: proc(a, b: render.Color, t: f32) -> render.Color {
 	return a + (b - a) * t
+}
+
+status_bar_h :: proc(s: ^State) -> f32 {
+	return STATUS_BAR_H if s.status_bar else 0
+}
+
+// draw_status_bar is the line under the player bar that TIDALFAST_STATUS_BAR
+// turns on, for agents that read the window instead of watching it.
+draw_status_bar :: proc(s: ^State) {
+	bar := ui.row("status_bar", {.Draw_Background}, ui.fill(), ui.px(STATUS_BAR_H))
+	bar.background = WINDOW_BG
+	ui.spacer(ui.px(SIDEBAR_INDENT))
+	ui.text_style(.Regular, 12, SECONDARY)
+	line := ui.label(status_bar_text(s), ui.fill(), ui.fill())
+	ui.accessible(line, .Static_Text, line.label)
+	ui.spacer(ui.px(SIDEBAR_INDENT))
+}
+
+// status_bar_text is what's playing, then the status line.
+status_bar_text :: proc(s: ^State) -> string {
+	playing := "Nothing playing"
+	if item := playback_item(s); item != nil {
+		pb := &s.playback
+		state := "Playing"
+		switch {
+		case pb.status.state == .Ended && pb.status.serial == pb.cur.serial:
+			state = "Ended"
+		case pb.paused:
+			state = "Paused"
+		}
+		playing = fmt.tprintf("%s %s by %s", state, item.title, item.artist)
+	}
+	if status := status_text(s); status != "" {
+		return fmt.tprintf("%s · %s", playing, status)
+	}
+	return playing
 }
