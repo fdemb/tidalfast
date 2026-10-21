@@ -1634,6 +1634,8 @@ test_ui_style_leak_is_reported :: proc(t: ^testing.T) {
 	ui.init(&u)
 	defer ui_destroy(&u)
 	errors := 0
+	// testing.expect reports through the logger, so it's put back first.
+	logger := context.logger
 	context.logger = {
 		procedure = proc(data: rawptr, level: log.Level, text: string, options: log.Options, location := #caller_location) {
 			if level >= .Error {
@@ -1653,6 +1655,7 @@ test_ui_style_leak_is_reported :: proc(t: ^testing.T) {
 	ui.end_frame()
 	ui.begin_frame(&u, nil, nil, nil, 300, 200, 0.3)
 	ui.end_frame()
+	context.logger = logger
 	testing.expect_value(t, b.radius, 0)
 	testing.expect_value(t, u.style_leaks, 2)
 	testing.expect_value(t, errors, 1)
