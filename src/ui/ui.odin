@@ -242,6 +242,7 @@ State :: struct {
 	hit_count:      int,
 	drag_rects:     [8]render.Rect, // the Window_Drag boxes, from end_frame
 	drag_count:     int,
+	drag_from:      [8]int, // the hit list's length when each drag rect was found
 
 	frame:          u64,
 	time:           f64,
@@ -976,6 +977,7 @@ end_frame :: proc() -> bool {
 	mismatch := false
 	finish(u, u.root, {0, 0, u.width, u.height}, 0, 0, false, false, &mismatch)
 	finish(u, u.floating_root, {0, 0, u.width, u.height}, 0, 0, true, false, &mismatch)
+	cut_drag_regions(u)
 	if u.focus_reveal {
 		u.focus_reveal = false
 		reveal_focus(u)
@@ -1069,6 +1071,7 @@ finish :: proc(u: ^State, b: ^Box, clip: render.Rect, focus_parent, click_parent
 	}
 	if .Window_Drag in b.flags && u.drag_count < len(u.drag_rects) {
 		u.drag_rects[u.drag_count] = b.clip
+		u.drag_from[u.drag_count] = u.hit_count
 		u.drag_count += 1
 	}
 	inner := rect_intersect(clip, b.rect) if .Clip in b.flags else clip
@@ -1507,6 +1510,62 @@ text_input :: proc(u: ^State) -> (input: platform.Text_Input, changed: bool) {
 	u.text_sent = h
 	u.text_resend = false
 	return
+}
+
+// cut_drag_regions takes the controls drawn over a Window_Drag box out of
+// its rect, so a button under the titlebar gets its press instead of the
+// window moving. A control is clickable and focusable, so a box that is
+// clickable only to stop clicks reaching what's under it, such as a pinned
+// bar, still moves the window. A rect cut into more pieces than drag_rects
+// holds loses the rest, which only makes less of it a drag region.
+@(private)
+cut_drag_regions :: proc(u: ^State) {
+	pieces: [len(u.drag_rects)]render.Rect
+	from: [len(u.drag_rects)]int
+	n := 0
+	for i in 0 ..< u.drag_count {
+		if n < len(pieces) {
+			pieces[n], from[n] = u.drag_rects[i], u.drag_from[i]
+			n += 1
+		}
+	}
+	for i := 0; i < n; {
+		r := pieces[i]
+		cut := false
+		for h in u.hits[from[i]:u.hit_count] {
+			if .Clickable not_in h.flags || .Focusable not_in h.flags {
+				continue
+			}
+			o := rect_intersect(r, h.rect)
+			if o.w <= 0 || o.h <= 0 {
+				continue
+			}
+			// What's left: the bands above and below the control, and
+			// beside it within its height.
+			rest := [4]render.Rect {
+				{r.x, r.y, r.w, o.y - r.y},
+				{r.x, o.y + o.h, r.w, r.y + r.h - (o.y + o.h)},
+				{r.x, o.y, o.x - r.x, o.h},
+				{o.x + o.w, o.y, r.x + r.w - (o.x + o.w), o.h},
+			}
+			f := from[i]
+			pieces[i], from[i] = pieces[n - 1], from[n - 1]
+			n -= 1
+			for p in rest {
+				if p.w > 0 && p.h > 0 && n < len(pieces) {
+					pieces[n], from[n] = p, f
+					n += 1
+				}
+			}
+			cut = true
+			break
+		}
+		if !cut {
+			i += 1
+		}
+	}
+	u.drag_rects = pieces
+	u.drag_count = n
 }
 
 // drag_regions is where a press moves the window, for the shell, valid
