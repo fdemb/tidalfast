@@ -86,6 +86,7 @@ Box_Flag :: enum u32 {
 	Click_On_Release, // clicked on a release over it rather than on the press, for drag sources
 	Window_Drag, // empty titlebar space: a press there moves the window, see drag_regions
 	Draw_Backdrop, // background over a blur of what's under the box, see render.push_backdrop
+	Click_Shield, // clickable only so presses don't reach what's under it; under the titlebar it moves the window, see cut_drag_regions
 }
 Box_Flags :: bit_set[Box_Flag; u32]
 
@@ -1512,60 +1513,65 @@ text_input :: proc(u: ^State) -> (input: platform.Text_Input, changed: bool) {
 	return
 }
 
-// cut_drag_regions takes the controls drawn over a Window_Drag box out of
-// its rect, so a button under the titlebar gets its press instead of the
-// window moving. A control is clickable and focusable, so a box that is
-// clickable only to stop clicks reaching what's under it, such as a pinned
-// bar, still moves the window. A rect cut into more pieces than drag_rects
-// holds loses the rest, which only makes less of it a drag region.
+// cut_drag_regions takes what's drawn over a Window_Drag box out of its
+// rect where it takes clicks, so a button, a link or a scrollbar under the
+// titlebar gets its press instead of the window moving. The topmost
+// clickable box at each point decides, so a row hidden under a pinned bar
+// doesn't count. A Click_Shield, clickable only to stop presses reaching
+// what's under it, leaves its part of the rect moving the window. Past
+// len(drag_rects) pieces the rest is dropped, which only makes less of the
+// rect a drag region.
 @(private)
 cut_drag_regions :: proc(u: ^State) {
-	pieces: [len(u.drag_rects)]render.Rect
-	from: [len(u.drag_rects)]int
-	n := 0
+	out: [len(u.drag_rects)]render.Rect
+	n_out := 0
 	for i in 0 ..< u.drag_count {
-		if n < len(pieces) {
-			pieces[n], from[n] = u.drag_rects[i], u.drag_from[i]
-			n += 1
-		}
-	}
-	for i := 0; i < n; {
-		r := pieces[i]
-		cut := false
-		for h in u.hits[from[i]:u.hit_count] {
-			if .Clickable not_in h.flags || .Focusable not_in h.flags {
+		// The pieces of the rect that no box above them has decided.
+		open: [32]render.Rect
+		open[0] = u.drag_rects[i]
+		n := 1
+		#reverse for h in u.hits[u.drag_from[i]:u.hit_count] {
+			if .Clickable not_in h.flags {
 				continue
 			}
-			o := rect_intersect(r, h.rect)
-			if o.w <= 0 || o.h <= 0 {
-				continue
-			}
-			// What's left: the bands above and below the control, and
-			// beside it within its height.
-			rest := [4]render.Rect {
-				{r.x, r.y, r.w, o.y - r.y},
-				{r.x, o.y + o.h, r.w, r.y + r.h - (o.y + o.h)},
-				{r.x, o.y, o.x - r.x, o.h},
-				{o.x + o.w, o.y, r.x + r.w - (o.x + o.w), o.h},
-			}
-			f := from[i]
-			pieces[i], from[i] = pieces[n - 1], from[n - 1]
-			n -= 1
-			for p in rest {
-				if p.w > 0 && p.h > 0 && n < len(pieces) {
-					pieces[n], from[n] = p, f
-					n += 1
+			for j := 0; j < n; {
+				r := open[j]
+				o := rect_intersect(r, h.rect)
+				if o.w <= 0 || o.h <= 0 {
+					j += 1
+					continue
+				}
+				// r gives way to what's outside h: the bands above and
+				// below it, and beside it within its height.
+				rest := [4]render.Rect {
+					{r.x, r.y, r.w, o.y - r.y},
+					{r.x, o.y + o.h, r.w, r.y + r.h - (o.y + o.h)},
+					{r.x, o.y, o.x - r.x, o.h},
+					{o.x + o.w, o.y, r.x + r.w - (o.x + o.w), o.h},
+				}
+				open[j] = open[n - 1]
+				n -= 1
+				for p in rest {
+					if p.w > 0 && p.h > 0 && n < len(open) {
+						open[n] = p
+						n += 1
+					}
+				}
+				if .Click_Shield in h.flags && n_out < len(out) {
+					out[n_out] = o
+					n_out += 1
 				}
 			}
-			cut = true
-			break
 		}
-		if !cut {
-			i += 1
+		for p in open[:n] {
+			if n_out < len(out) {
+				out[n_out] = p
+				n_out += 1
+			}
 		}
 	}
-	u.drag_rects = pieces
-	u.drag_count = n
+	u.drag_rects = out
+	u.drag_count = n_out
 }
 
 // drag_regions is where a press moves the window, for the shell, valid

@@ -287,3 +287,42 @@ another_list_opens_at_the_top :: proc(t: ^testing.T) {
 	testing.expect_value(t, view.view_off.y, f32(0))
 	testing.expect_value(t, view.view_off_target.y, f32(0))
 }
+
+// The scrollbar is a control too: its thumb, at the top of a long list
+// under the titlebar, scrolls the list rather than moving the window.
+@(test)
+scrollbar_under_the_titlebar :: proc(t: ^testing.T) {
+	arena: mem.Dynamic_Arena
+	mem.dynamic_arena_init(&arena)
+	defer mem.dynamic_arena_destroy(&arena)
+	context.allocator = mem.dynamic_arena_allocator(&arena)
+	s := library_state(true)
+	defer library_state_free(s)
+	f: Frame
+	for _ in 0 ..< 3 {
+		s.titlebar_h = 28
+		library_frame(t, s, &f)
+	}
+	view, _ := list_view(t, s, app.view_title(s))
+	scroll_to(view, 20)
+	for _ in 0 ..< 10 {
+		s.titlebar_h = 28
+		library_frame(t, s, &f)
+	}
+	bar := ui.box_lookup(&s.ui, ui.key_from_string(view.key, "###scrollbar"))
+	testing.expect(t, bar != nil && .Clickable in bar.flags, "the scrollbar shows while the list scrolls")
+	if bar == nil {
+		return
+	}
+	in_drag := proc(s: ^app.State, x, y: f32) -> bool {
+		for r in ui.drag_regions(&s.ui) {
+			if x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h {
+				return true
+			}
+		}
+		return false
+	}
+	testing.expect(t, bar.rect.y < 10, "the scrollbar reaches up under the titlebar")
+	testing.expect(t, !in_drag(s, bar.rect.x + bar.rect.w / 2, 10), "a press on the scrollbar doesn't move the window")
+	testing.expect(t, in_drag(s, view.rect.x + view.rect.w / 2, 10), "the rest of the strip does")
+}

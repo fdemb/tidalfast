@@ -379,7 +379,7 @@ draw_pinned_header :: proc(s: ^State, list: ^ui.Box, h: List_Header, cols: Track
 	// Half faded in it doesn't hide the header under it, so it lets
 	// clicks through to it.
 	if c.bar >= 1 || c.pinned {
-		flags += {.Clickable}
+		flags += {.Clickable, .Click_Shield}
 	}
 	pin := ui.column("pinned", flags, ui.fill(), ui.children_sum())
 	pin.fixed_pos = {0, list.view_off.y}

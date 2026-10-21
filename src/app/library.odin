@@ -913,7 +913,7 @@ draw_player_bar :: proc(s: ^State, w, h: f32) {
 	if s.bar_over_content {
 		// Over the bottom of the views, blurring them. Clickable so a press
 		// on it doesn't reach the row under it.
-		bar.flags += {.Draw_Backdrop, .Clickable, .Floating_X, .Floating_Y}
+		bar.flags += {.Draw_Backdrop, .Clickable, .Click_Shield, .Floating_X, .Floating_Y}
 		bar.fixed_pos = {0, h - PLAYER_BAR_H - status_bar_h(s)}
 		bar.background = BAR_TINT
 		bar.backdrop = {blur = BAR_BLUR, saturation = BAR_SATURATION}
