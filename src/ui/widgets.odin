@@ -321,7 +321,7 @@ scroll_to :: proc(view: ^Box, y0, y1: f32) {
 @(deferred_none = floating_end)
 floating :: proc() {
 	push_parent(ctx.floating_root)
-	push(&ctx.styles.stack, STYLE_DEFAULT)
+	style_push()^ = STYLE_DEFAULT
 }
 
 @(private)
@@ -384,7 +384,7 @@ menu :: proc(id: string, width: f32 = 220) -> bool {
 		return false
 	}
 	push_parent(u.floating_root)
-	push(&u.styles.stack, STYLE_DEFAULT)
+	style_push()^ = STYLE_DEFAULT
 	// A menu fading out takes no input.
 	flags := Box_Flags{.Clickable, .Draw_Background, .Draw_Border, .Draw_Shadow, .Floating_X, .Floating_Y}
 	if !u.menu_open {

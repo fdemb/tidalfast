@@ -39,11 +39,11 @@ A box takes its look from style stacks, after raddebugger's (`src/ui/stacks.odin
 Use them this way:
 
 - A style that several boxes in a subtree share goes in one scope, as the transport buttons' `radius(18)` and the track row's `radius(6)` do.
-- `set_next_*` goes right before a box that the next call builds first: `box_make`, `label`, `row`, `column`, `button`, `text_field`. A helper that builds a column around its box, or may build nothing, takes its look as parameters instead, as `icon_button` and `cell` do. A `set_next` there would land on the wrong box, or on none. Open no scope between a `set_next` and its box.
+- `set_next_*` goes right before a box that the next call builds first: `box_make`, `label`, `row`, `column`, `button`, `text_field`. A helper that builds a column around its box, or may build nothing, takes its look as parameters instead, as `icon_button` and `cell` do. A `set_next` there would land on the wrong box, or on none. Open or close no scope, `floating()` or `menu()` between a `set_next` and its box.
 - A box's own style field is written after it's built only when the value comes from that box's state, such as `hot_t`, or right under an `if` that tests the box, such as a drop hovering it. `test_app_styles_go_through_the_stacks` fails on any other write.
 - Widgets whose look belongs to the UI (menus, menu items, tooltips, scrollbars) set it with `set_next_*`. `floating()` and `menu()` start from the default style, so a menu or a tooltip looks the same wherever the code builds it. A `button`, a `link` and a `text_field` take theirs from the stacks; a text field's border is the accent while it has the focus.
 
-Opacity, positions and sizes aren't stacks. Opacity already multiplies everything inside a box, so a stacked value would multiply again at every level, and sizes are `box_make`'s arguments. `begin_frame` empties the stacks. A frame that leaves a scope open or a `set_next` unused, or opens a scope between a `set_next` and its box, logs an error once, which fails any test that draws it.
+Opacity, positions and sizes aren't stacks. Opacity already multiplies everything inside a box, so a stacked value would multiply again at every level, and sizes are `box_make`'s arguments. `begin_frame` empties the stacks. A frame that leaves a scope open or a `set_next` unused, or opens or closes a scope between a `set_next` and its box, logs an error once, which fails any test that draws it.
 
 ## Input
 

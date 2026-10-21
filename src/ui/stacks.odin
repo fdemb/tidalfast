@@ -14,7 +14,7 @@ package ui
 //
 // A scope pops itself at the end of the enclosing block. A set_next value
 // goes to the next box built and then is gone, whatever the stack holds,
-// so open no scope between a set_next and its box.
+// so open or close no scope between a set_next and its box.
 
 import "../render"
 import "../text"
@@ -53,7 +53,7 @@ Styles :: struct {
 	spill:    Style, // written by scopes past STACK_DEPTH
 	next:     Style, // the next box's style, while has_next
 	has_next: bool,
-	misused:  bool, // a scope was opened between a set_next and its box
+	misused:  bool, // a scope opened or closed between a set_next and its box
 }
 
 @(private)
@@ -120,7 +120,11 @@ styles_clear :: proc(st: ^Styles) -> (balanced: bool) {
 }
 
 @(private)
-pop_style :: proc() {pop(&ctx.styles.stack)}
+pop_style :: proc() {
+	st := &ctx.styles
+	st.misused ||= st.has_next
+	pop(&st.stack)
+}
 
 // Scopes: each sets its style for the boxes built until the end of the
 // enclosing block.
