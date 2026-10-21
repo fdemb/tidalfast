@@ -22,9 +22,10 @@
 // the rest of an artist page. /v2/home/feed/static is the home feed:
 // shelves of albums, playlists and artists, with a shelf of mixes and one
 // of tracks the app leaves out. Artist 1 has 73 albums, so they take two
-// pages of 50; every fifth artist has no biography and gets a 404, as
-// TIDAL answers. YOASOBI's biography is Japanese, without spaces, and ends
-// in a link wider than the page's column.
+// pages of 50; every fifth artist has no biography and every seventh no
+// similar artists, and gets a 404 for it, as TIDAL answers. YOASOBI's
+// biography is Japanese, without spaces, and ends in a link wider than the
+// page's column.
 //
 // The PKCE login: GET /authorize redirects to /android/login/auth with a
 // code, and POST /oauth2/token trades it, with the Android client's id,
@@ -1306,6 +1307,9 @@ artist_response :: proc(path: string, query: map[string]string, offset, limit: i
 		fmt.printfln("mock: artist %d albums (%s), %d from %d", id, filter, count, offset)
 		return json_response(200, strings.to_string(b))
 	case "similar":
+		if id % 7 == 0 {
+			return json_response(404, `{"status":404,"subStatus":2001,"userMessage":"Resource not found"}`)
+		}
 		count := len(ARTISTS) - 1
 		b := list_begin(count, offset, limit)
 		for i in offset ..< min(offset + limit, count) {

@@ -361,9 +361,19 @@ artist_load_appears :: proc(s: ^tidal.Session, id: i64, live: Artist_Live, a: me
 	return album_pages(s, id, .Appears, live, a)
 }
 
+// artist_load_similar is the artists TIDAL says are like this one. It
+// answers 404 for an artist with none, which is an empty shelf, not a
+// failure.
 @(private = "file")
 artist_load_similar :: proc(s: ^tidal.Session, id: i64, live: Artist_Live, a: mem.Allocator) -> (content: Artist_Content, err: tidal.Error) {
-	artists := tidal.artist_similar(s, id, a) or_return
+	artists: []tidal.Artist
+	artists, err = tidal.artist_similar(s, id, a)
+	if e, failed := err.?; failed {
+		if e.kind == .Object_Not_Found {
+			return Artist_Cards{}, nil
+		}
+		return
+	}
 	cards := make([]Found, min(len(artists), ARTIST_CARDS_MAX), a)
 	for &f, i in cards {
 		ar := artists[i]

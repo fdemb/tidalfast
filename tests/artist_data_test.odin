@@ -357,6 +357,28 @@ artist_without_bio :: proc(t: ^testing.T) {
 	testing.expect_value(t, bio_of(page), "")
 }
 
+// TIDAL answers 404 for an artist without similar artists: an empty Fans
+// also like, which the page leaves out, not a part that failed.
+@(test)
+artist_without_similar :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	m.answers["/artists/7/similar"] = {404, `{"status":404,"subStatus":2001,"userMessage":"Resource not found"}`}
+	s := artist_state(&m)
+	defer artist_state_free(s)
+	d := &s.data
+	sign_in(s)
+	data_jobs(d)
+
+	page := visit(s, 7)
+	for job in artist_jobs(d) {
+		run_now(s, job)
+	}
+	testing.expect(t, part_ready(page, .Similar), "no similar artists is an empty shelf")
+	testing.expect_value(t, len(cards_of(page, .Similar)), 0)
+}
+
 // With the fake data a visit fills the page from the fake rows at once,
 // with nothing sent.
 @(test)

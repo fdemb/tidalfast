@@ -320,7 +320,10 @@ request :: proc(s: ^Session, r: Request, allocator := context.allocator) -> (res
 		return
 	}
 	if !http_ok(resp) {
-		log.infof("Request %v %s resulted in HTTP %d", r.method, r.path, resp.status)
+		// TIDAL answers 404 for an artist without a biography or similar
+		// artists, so it's routine; the caller decides what it means.
+		level := log.Level.Debug if resp.status == 404 else log.Level.Info
+		log.logf(level, "Request %v %s resulted in HTTP %d", r.method, r.path, resp.status)
 		return resp, http_error(resp)
 	}
 	return resp, nil
