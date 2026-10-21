@@ -250,7 +250,7 @@ State :: struct {
 	floating_root:  ^Box,
 	parents:        Stack(^Box),
 	styles:         Style_Stacks,
-	style_leaks:    int, // frames that ended with a style scope open or a set_next unused
+	style_leaks:    int,
 
 	input:          Input,
 	hot:            Key,

@@ -39,8 +39,6 @@ LIST_ROWS :: Row_Colors {
 	selected_hover = {0x28 / 255.0, 0x28 / 255.0, 0x28 / 255.0, 1},
 }
 
-// row_highlight sets the next box's background and hover colour from
-// colors.
 row_highlight :: proc(colors: Row_Colors, selected: bool) {
 	ui.set_next_background(colors.selected if selected else {})
 	ui.set_next_hover_color(colors.selected_hover if selected else colors.hover)
@@ -334,8 +332,8 @@ draw_sidebar :: proc(s: ^State) {
 			item := ui.row(fmt.tprintf("##playlist%d", i), {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects, .Draw_Border}, ui.fill(), ui.px(PLAYLIST_ROW_H))
 			ui.accessible(item, .Row, fmt.tprintf("%s, %s", entry.name, entry.subtitle), selected = current)
 			if ui.drop_hover(item) {
-				lib.drop_target = i
 				item.border_color = ACCENT
+				lib.drop_target = i
 			}
 			if track, ok := ui.dropped(item); ok {
 				add_to_list(s, int(track), i)
@@ -590,7 +588,6 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 		return
 	}
 	s.measure.rows += 1
-	// The row, its heart and its more button.
 	ui.radius(6)
 	selected := lib.selected == i
 	row_highlight(LIST_ROWS, selected)
@@ -743,7 +740,7 @@ text_link :: proc(s: ^State, label, id: string, has_id: bool, height: ui.Size) -
 // which artist it is. pad is the room left and right of the names.
 artist_links :: proc(s: ^State, joined: string, refs: []Artist_Ref, pad: f32, height := ui.Size{}) -> (k: int, sig: ui.Signal) {
 	box := ui.row("###artists", {.Clip}, ui.fill(), height if height.kind != .Null else ui.fill())
-	// The widths below are the names' own.
+	// The widths below leave out padding.
 	ui.text_pad(0)
 	ui.spacer(ui.px(pad))
 	room := box.rect.w - 2 * pad if box.rect.w > 0 else max(f32)
@@ -993,7 +990,6 @@ draw_player_bar :: proc(s: ^State, w, h: f32) {
 		ui.spacer(ui.px(14))
 		{
 			ui.row("", {}, ui.fill(), ui.px(36))
-			// Round buttons, 36 pt across.
 			ui.text_align(.Center)
 			ui.radius(18)
 			ui.spacer(ui.fill())

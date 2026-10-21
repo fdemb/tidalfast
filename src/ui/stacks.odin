@@ -14,8 +14,6 @@ package ui
 //
 // A scope pops itself at the end of the enclosing block. A set_next value
 // goes to the next box built and then is gone, whatever the stack holds.
-// Opacity, positions and sizes aren't stacks: opacity already multiplies
-// everything inside a box, and sizes are box_make's arguments.
 
 import "../render"
 import "../text"
@@ -23,7 +21,7 @@ import "../text"
 Stack :: struct($T: typeid) {
 	items:    [STACK_DEPTH]T,
 	count:    int,
-	next:     T, // set_next's value, for the next box only
+	next:     T,
 	has_next: bool,
 }
 
@@ -41,7 +39,6 @@ Style_Stacks :: struct {
 	radius:       Stack(f32),
 }
 
-// What a box gets when nothing is pushed.
 @(private)
 STYLE_DEFAULT :: struct {
 	font:         text.Font,
@@ -89,8 +86,6 @@ set_next :: proc(s: ^Stack($T), v: T) {
 	s.has_next = true
 }
 
-// style_take gives b the style on top of the stacks and uses up the
-// set_next values.
 @(private)
 style_take :: proc(st: ^Style_Stacks, b: ^Box) {
 	b.flags += top(&st.flags, Box_Flags{})
@@ -117,8 +112,6 @@ style_take :: proc(st: ^Style_Stacks, b: ^Box) {
 	st.radius.has_next = false
 }
 
-// styles_clear empties the stacks for a new frame, and reports whether the
-// last frame left a scope open or a set_next value unused.
 @(private)
 styles_clear :: proc(st: ^Style_Stacks) -> (balanced: bool) {
 	balanced = true
@@ -143,8 +136,6 @@ styles_clear :: proc(st: ^Style_Stacks) -> (balanced: bool) {
 	return
 }
 
-// styles_push_defaults starts a scope with the default style, for the
-// floating layer: a menu or a tooltip looks the same wherever it's built.
 @(private)
 styles_push_defaults :: proc(st: ^Style_Stacks) {
 	push(&st.flags, Box_Flags{})
@@ -173,16 +164,6 @@ styles_pop_defaults :: proc(st: ^Style_Stacks) {
 	pop(&st.hover_color)
 	pop(&st.active_color)
 	pop(&st.radius)
-}
-
-// The current style, for widgets that measure text before they build.
-
-current_font :: proc() -> text.Font {
-	return top(&ctx.styles.font, STYLE_DEFAULT.font)
-}
-
-current_font_size :: proc() -> f32 {
-	return top(&ctx.styles.font_size, STYLE_DEFAULT.font_size)
 }
 
 // Scopes: each sets its style for the boxes built until the end of the

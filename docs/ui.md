@@ -28,11 +28,11 @@ A box takes its look from style stacks, after raddebugger's (`src/ui/stacks.odin
 
 ```odin
 {
-	ui.text_style(.Regular, 13, SECONDARY) // font, size and colour, until the end of the block
+	ui.text_style(.Regular, 13, SECONDARY)
 	ui.radius(6)
-	ui.set_next_background(SURFACE)        // only the row
+	ui.set_next_background(SURFACE)
 	ui.row("##row", {.Draw_Background})
-	ui.label("Artist")                     // SECONDARY, like everything else in the block
+	ui.label("Artist")
 }
 ```
 
