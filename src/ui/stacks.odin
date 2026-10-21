@@ -143,6 +143,38 @@ styles_clear :: proc(st: ^Style_Stacks) -> (balanced: bool) {
 	return
 }
 
+// styles_push_defaults starts a scope with the default style, for the
+// floating layer: a menu or a tooltip looks the same wherever it's built.
+@(private)
+styles_push_defaults :: proc(st: ^Style_Stacks) {
+	push(&st.flags, Box_Flags{})
+	push(&st.font, STYLE_DEFAULT.font)
+	push(&st.font_size, STYLE_DEFAULT.font_size)
+	push(&st.text_color, STYLE_DEFAULT.text_color)
+	push(&st.text_align, Align.Left)
+	push(&st.text_pad, f32(0))
+	push(&st.background, render.Color{})
+	push(&st.border_color, render.Color{})
+	push(&st.hover_color, STYLE_DEFAULT.hover_color)
+	push(&st.active_color, STYLE_DEFAULT.active_color)
+	push(&st.radius, f32(0))
+}
+
+@(private)
+styles_pop_defaults :: proc(st: ^Style_Stacks) {
+	pop(&st.flags)
+	pop(&st.font)
+	pop(&st.font_size)
+	pop(&st.text_color)
+	pop(&st.text_align)
+	pop(&st.text_pad)
+	pop(&st.background)
+	pop(&st.border_color)
+	pop(&st.hover_color)
+	pop(&st.active_color)
+	pop(&st.radius)
+}
+
 // The current style, for widgets that measure text before they build.
 
 current_font :: proc() -> text.Font {

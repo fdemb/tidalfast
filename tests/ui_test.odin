@@ -6,6 +6,7 @@ import "core:testing"
 import app "../src/app"
 import "../src/platform"
 import "../src/render"
+import "../src/text"
 import "../src/ui"
 
 @(test)
@@ -1528,4 +1529,45 @@ test_ui_tooltip_waits_without_frames :: proc(t: ^testing.T) {
 		}
 	}
 	testing.expect(t, faded, "the fade settles")
+}
+
+// A tooltip and a menu look the same wherever they're built: the style the
+// code around them set doesn't reach the floating layer.
+@(test)
+test_ui_floating_layer_ignores_the_style_around_it :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	now := 0.0
+	frame :: proc(u: ^ui.State, now: f64, events: ..platform.Event) {
+		ui.begin_frame(u, events, nil, nil, 300, 200, now)
+		ui.text_style(.Semibold, 20, {1, 0, 0, 1})
+		ui.radius(9)
+		b := ui.box_make("button", {.Clickable}, ui.px(100), ui.px(40))
+		ui.tooltip(ui.signal(b), "Play")
+		if ui.menu("menu") {
+			ui.menu_item("Item")
+		}
+		ui.end_frame()
+	}
+	frame(&u, now)
+	now += 1.0 / 120
+	frame(&u, now, {kind = .Mouse_Move, x = 20, y = 20})
+	now += ui.TOOLTIP_DELAY
+	frame(&u, now)
+	tip := ui.box_lookup(&u, ui.key_from_string(0, "###tooltip"))
+	if testing.expect(t, tip != nil, "the tooltip shows") {
+		testing.expect_value(t, tip.font, text.Font.Regular)
+		testing.expect_value(t, tip.font_size, 12)
+	}
+
+	ui.open_menu("menu", {150, 100})
+	now += 1.0 / 120
+	frame(&u, now)
+	item := ui.box_lookup(&u, ui.key_from_string(ui.key_from_string(0, "menu"), "Item"))
+	if testing.expect(t, item != nil, "the menu item shows") {
+		testing.expect_value(t, item.font, text.Font.Regular)
+		testing.expect_value(t, item.font_size, 13)
+		testing.expect_value(t, item.radius, 0)
+	}
 }

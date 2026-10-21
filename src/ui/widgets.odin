@@ -316,17 +316,17 @@ scroll_to :: proc(view: ^Box, y0, y1: f32) {
 // floating makes the floating layer the parent until the end of the scope.
 // It is laid out and drawn after the main tree, ignores every clip in it
 // and comes first for input. Its boxes need Floating_X and Floating_Y and
-// a fixed_pos in window coordinates. The flags of the scopes around it
-// don't reach it.
+// a fixed_pos in window coordinates. It starts from the default style,
+// whatever the scopes around it set.
 @(deferred_none = floating_end)
 floating :: proc() {
 	push_parent(ctx.floating_root)
-	push(&ctx.styles.flags, Box_Flags{})
+	styles_push_defaults(&ctx.styles)
 }
 
 @(private)
 floating_end :: proc() {
-	pop(&ctx.styles.flags)
+	styles_pop_defaults(&ctx.styles)
 	pop_parent()
 }
 
@@ -384,7 +384,7 @@ menu :: proc(id: string, width: f32 = 220) -> bool {
 		return false
 	}
 	push_parent(u.floating_root)
-	push(&u.styles.flags, Box_Flags{})
+	styles_push_defaults(&u.styles)
 	// A menu fading out takes no input.
 	flags := Box_Flags{.Clickable, .Draw_Background, .Draw_Border, .Draw_Shadow, .Floating_X, .Floating_Y}
 	if !u.menu_open {
