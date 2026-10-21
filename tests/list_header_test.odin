@@ -59,7 +59,7 @@ list_header_collapses_over_the_rows :: proc(t: ^testing.T) {
 	testing.expect(t, hero, "the hero's actions at the top")
 
 	main_w := f32(1000 - app.SIDEBAR_DEFAULT - app.HANDLE_W)
-	h := app.list_header(.Playlist, main_w, 0)
+	h := app.list_header(.Playlist, main_w)
 	rows_top := app.header_rows_top(h)
 	view, _ := list_view(t, s, title)
 	scroll_to(view, rows_top + 50 * app.TRACK_ROW_H)
@@ -216,4 +216,46 @@ list_menu_opens_by_more :: proc(t: ^testing.T) {
 	m := nodes[menu].frame
 	testing.expect(t, item.frame[1] >= m[1] && item.frame[1] + item.frame[3] <= m[1] + m[3], "Shuffle inside the menu's frame")
 	testing.expect(t, m[1] < more.frame[1] + more.frame[3] + 20, "the menu opens by the button, not at the window's bottom")
+}
+
+// The header runs under the titlebar with no space kept for it. The strip
+// there still moves the window, but not from the pinned bar's Play.
+@(test)
+pinned_bar_under_the_titlebar :: proc(t: ^testing.T) {
+	arena: mem.Dynamic_Arena
+	mem.dynamic_arena_init(&arena)
+	defer mem.dynamic_arena_destroy(&arena)
+	context.allocator = mem.dynamic_arena_allocator(&arena)
+	s := library_state(true)
+	defer library_state_free(s)
+	s.titlebar_h = 28
+	f: Frame
+	for _ in 0 ..< 3 {
+		library_frame(t, s, &f)
+	}
+	title := app.view_title(s)
+	main_w := f32(1000 - app.SIDEBAR_DEFAULT - app.HANDLE_W)
+	h := app.list_header(.Playlist, main_w)
+	view, _ := list_view(t, s, title)
+	scroll_to(view, app.header_rows_top(h) + 50 * app.TRACK_ROW_H)
+	s.titlebar_h = 28
+	library_frame(t, s, &f)
+	s.titlebar_h = 28
+	library_frame(t, s, &f)
+	testing.expect_value(t, view.rect.y, f32(0))
+
+	in_drag := proc(s: ^app.State, x, y: f32) -> bool {
+		for r in ui.drag_regions(&s.ui) {
+			if x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h {
+				return true
+			}
+		}
+		return false
+	}
+	play, ok := exact_node(s, fmt.tprintf("Play %s", title), .Button)
+	testing.expect(t, ok, "Play in the pinned bar")
+	cx := play.frame[0] + play.frame[2] / 2
+	testing.expect(t, play.frame[1] + 4 < 28, "Play reaches up under the titlebar")
+	testing.expect(t, !in_drag(s, cx, play.frame[1] + 4), "a press on Play doesn't move the window")
+	testing.expect(t, in_drag(s, view.rect.x + view.rect.w / 2, 10), "the rest of the strip does")
 }

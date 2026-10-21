@@ -412,7 +412,7 @@ draw_main_view :: proc(s: ^State, main_w: f32) {
 			return
 		}
 	}
-	draw_track_list(s, main_w, under)
+	draw_track_list(s, main_w)
 }
 
 // draw_search_header is the search results' title and what was found,
@@ -434,14 +434,14 @@ draw_search_header :: proc(s: ^State) {
 // list_header.odin), the column headings, the rows and, for an album, its
 // footer. Row 0 is at the header's rows_top, which the anchor, the
 // benchmarks and the keyboard's scrolling all go by.
-draw_track_list :: proc(s: ^State, main_w, under: f32) {
+draw_track_list :: proc(s: ^State, main_w: f32) {
 	lib := &s.library
 	kind := list_kind(s)
 	cols := track_columns(main_w - 2 * LIST_PAD, kind)
 	// Durations are m:ss however long, so the widest has the longest
 	// track's count of minute digits.
 	cols.duration = max(cols.duration, ui.counter_width(.Regular, 13, fmt.tprintf("%d:00", max(s.data.view.longest / 60, 10))) + 2 * CELL_PAD)
-	h := list_header(kind, main_w, under)
+	h := list_header(kind, main_w)
 	rows_top := header_rows_top(h)
 	n := view_count(s)
 	art := hero_art(s, kind, h)
@@ -501,8 +501,8 @@ draw_track_list :: proc(s: ^State, main_w, under: f32) {
 }
 
 // table_header is the column headings over the rows, and the line under
-// them.
-table_header :: proc(cols: Track_Columns) {
+// them, across the whole view when pinned over it.
+table_header :: proc(cols: Track_Columns, pinned := false) {
 	{
 		ui.row("", {}, ui.fill(), ui.px(HEADER_H))
 		ui.text_style(.Regular, 12, SECONDARY)
@@ -520,10 +520,11 @@ table_header :: proc(cols: Track_Columns) {
 		ui.spacer(ui.px(cols.more + 8 + LIST_PAD))
 	}
 	ui.row("", {}, ui.fill(), ui.px(1))
-	ui.spacer(ui.px(LIST_PAD))
+	inset: f32 = 0 if pinned else LIST_PAD
+	ui.spacer(ui.px(inset))
 	line := ui.box_make("", {.Draw_Background}, ui.fill(), ui.fill())
 	line.background = OUTLINE
-	ui.spacer(ui.px(LIST_PAD))
+	ui.spacer(ui.px(inset))
 }
 
 header_cell :: proc(label: string, width: f32, align: ui.Align) {

@@ -42,18 +42,21 @@ FOOTER_END :: 48
 // List_Header is where the parts of the header sit in the scroll view's
 // content, from the top.
 List_Header :: struct {
-	under:   f32, // the titlebar over the hero's top
-	hero:    f32, // the cover, title and meta line, under included; 0 for search results
+	hero:    f32, // the cover, title and meta line; 0 for search results
 	actions: f32,
-	bar:     f32, // the pinned bar, under included; 0 for none
+	bar:     f32, // the pinned bar; 0 for none
 }
 
-list_header :: proc(kind: List_Kind, main_w, under: f32) -> List_Header {
+// list_header is the header's parts for a main view main_w wide. They run
+// under the titlebar's strip, which only takes the presses that miss their
+// controls (ui.cut_drag_regions), so their padding is the same above and
+// below.
+list_header :: proc(kind: List_Kind, main_w: f32) -> List_Header {
 	if kind == .Search {
 		return {}
 	}
 	side := clamp(main_w * 0.2, HERO_COVER_MIN, HERO_COVER_MAX)
-	return {under = under, hero = under + side + 2 * HERO_PAD, actions = ACTIONS_H, bar = under + COMPACT_H}
+	return {hero = side + 2 * HERO_PAD, actions = ACTIONS_H, bar = COMPACT_H}
 }
 
 // header_table_y is where the column headings are.
@@ -123,7 +126,7 @@ hero_art :: proc(s: ^State, kind: List_Kind, h: List_Header) -> (a: Hero_Art) {
 	sidebar := s.search.fake_source == .None if s.data.fake else !s.search.browsing
 	a.seed = u32(s.library.playlist) * 7919 + 13 if sidebar else hash.fnv32a(transmute([]u8)view_title(s))
 	if h.hero > 0 {
-		a.side = h.hero - h.under - 2 * HERO_PAD
+		a.side = h.hero - 2 * HERO_PAD
 	}
 	return
 }
@@ -139,7 +142,7 @@ LIST_KIND_NAMES := [List_Kind]string {
 // artist is the album's artist's page, for the album's year.
 draw_list_hero :: proc(s: ^State, h: List_Header, kind: List_Kind, art: Hero_Art, artist: ^Artist_Page) {
 	ui.column("hero", {}, ui.fill(), ui.px(h.hero))
-	ui.spacer(ui.px(h.under + HERO_PAD))
+	ui.spacer(ui.px(HERO_PAD))
 	ui.row("", {}, ui.fill(), ui.px(art.side))
 	ui.spacer(ui.px(LIST_PAD + 8))
 	{
@@ -160,7 +163,7 @@ draw_list_hero :: proc(s: ^State, h: List_Header, kind: List_Kind, art: Hero_Art
 	ui.accessible(t, .Static_Text, title)
 	ui.spacer(ui.px(10))
 	draw_list_meta(s, kind, artist)
-	ui.spacer(ui.px(4))
+	ui.spacer(ui.fill())
 }
 
 // draw_list_meta is the line under the hero's title: for an album its
@@ -384,18 +387,12 @@ draw_pinned_header :: proc(s: ^State, list: ^ui.Box, h: List_Header, cols: Track
 		bar := ui.column("", {.Draw_Background}, ui.fill(), ui.px(h.bar))
 		bar.background = PANEL
 		bar.background.a = c.bar
-		ui.spacer(ui.px(h.under))
 		if c.content > 0 {
 			row := ui.row("", {}, ui.fill(), ui.px(COMPACT_H))
 			row.opacity = c.content
 			ui.spacer(ui.px(LIST_PAD + 8))
-			{
-				ui.column("", {}, ui.px(COMPACT_COVER), ui.fill())
-				ui.spacer(ui.fill())
-				radius: f32 = COMPACT_COVER / 2 if art.kind == .Artist else 4
-				cover_art(s, art.kind, art.id, art.seed, COMPACT_COVER, ui.px(COMPACT_COVER), radius)
-				ui.spacer(ui.fill())
-			}
+			radius: f32 = COMPACT_COVER / 2 if art.kind == .Artist else 4
+			cover_art(s, art.kind, art.id, art.seed, COMPACT_COVER, ui.px(COMPACT_COVER), radius)
 			ui.spacer(ui.px(12))
 			ui.text_style(.Semibold, 16, TEXT)
 			ui.label(view_title(s), ui.fill(), ui.fill())
@@ -407,7 +404,7 @@ draw_pinned_header :: proc(s: ^State, list: ^ui.Box, h: List_Header, cols: Track
 	if c.pinned {
 		headings := ui.column("", {.Draw_Background}, ui.fill(), ui.children_sum())
 		headings.background = PANEL
-		table_header(cols)
+		table_header(cols, pinned = true)
 	}
 }
 

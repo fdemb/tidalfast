@@ -222,9 +222,9 @@ test_track_columns :: proc(t: ^testing.T) {
 // results have no bar, so their headings pin at once.
 @(test)
 test_header_collapse :: proc(t: ^testing.T) {
-	h := app.list_header(.Album, 1000, 28)
-	testing.expect_value(t, h.hero, f32(28 + 200 + 2 * app.HERO_PAD))
-	testing.expect_value(t, h.bar, f32(28 + app.COMPACT_H))
+	h := app.list_header(.Album, 1000)
+	testing.expect_value(t, h.hero, f32(200 + 2 * app.HERO_PAD))
+	testing.expect_value(t, h.bar, f32(app.COMPACT_H))
 	table := app.header_table_y(h)
 	testing.expect_value(t, app.header_rows_top(h), table + app.HEADER_H + 1 + app.LIST_PAD_Y)
 
@@ -240,7 +240,7 @@ test_header_collapse :: proc(t: ^testing.T) {
 	past := app.header_collapse(h, table - h.bar + 1)
 	testing.expect(t, past.pinned && past.bar == 1 && past.content == 1, "then the headings pin")
 
-	search := app.list_header(.Search, 1000, 28)
+	search := app.list_header(.Search, 1000)
 	testing.expect_value(t, app.header_rows_top(search), f32(app.HEADER_H + 1 + app.LIST_PAD_Y))
 	testing.expect(t, !app.header_collapse(search, 0).pinned)
 	scrolled := app.header_collapse(search, 1)
