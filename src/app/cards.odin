@@ -63,11 +63,10 @@ text_button :: proc(id, name: string) -> ui.Signal {
 // page_button is a round ‹ or › button that pages a shelf.
 @(private = "file")
 page_button :: proc(id, icon, name: string, enabled: bool) -> ui.Signal {
-	b, sig := icon_button(id, icon, .Icon, name, TEXT if enabled else DIM, 1, 28, {.Focusable, .Draw_Background} if enabled else {.Draw_Background, .Disabled})
-	b.radius = 14
-	b.font_size = 14
-	b.background = SURFACE
-	b.hover_color = SURFACE_ACTIVE
+	ui.radius(14)
+	ui.background(SURFACE)
+	ui.hover_color(SURFACE_ACTIVE)
+	_, sig := icon_button(id, icon, .Icon, name, TEXT if enabled else DIM, 1, 28, {.Focusable, .Draw_Background} if enabled else {.Draw_Background, .Disabled}, size = 14)
 	return sig
 }
 
@@ -144,8 +143,8 @@ card_cover :: proc(source: Source) -> cover.Kind {
 @(private = "file")
 card :: proc(s: ^State, i: int, f: Found, kind: cover.Kind, filled: bool) -> ui.Signal {
 	ui.set_next_radius(8)
+	row_highlight(LIST_ROWS, false)
 	b := ui.column(fmt.tprintf("##card%d", i), {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects}, ui.px(CARD_W), ui.px(CARD_H))
-	row_highlight(b, LIST_ROWS, false)
 	ui.accessible(b, .Button, f.name if f.subtitle == "" else fmt.tprintf("%s, %s", f.name, f.subtitle))
 	if !filled {
 		return ui.signal(b)
@@ -158,16 +157,12 @@ card :: proc(s: ^State, i: int, f: Found, kind: cover.Kind, filled: bool) -> ui.
 		cover_art(s, kind, f.image, hash.fnv32a(transmute([]u8)f.name), CARD_SIZE, ui.px(CARD_SIZE), CARD_SIZE / 2 if round else 6)
 	}
 	ui.spacer(ui.px(10))
+	ui.text_pad(CARD_PAD)
+	ui.text_align(.Center if round else .Left)
 	ui.text_style(.Medium, 14, TEXT)
-	ui.set_next_text_pad(CARD_PAD)
-	title := ui.label(f.name, ui.fill(), ui.px(20))
+	ui.label(f.name, ui.fill(), ui.px(20))
 	ui.text_style(.Regular, 12, SECONDARY)
-	ui.set_next_text_pad(CARD_PAD)
-	sub := ui.label(f.subtitle, ui.fill(), ui.px(18))
-	if round {
-		title.text_align = .Center
-		sub.text_align = .Center
-	}
+	ui.label(f.subtitle, ui.fill(), ui.px(18))
 	return ui.signal(b)
 }
 

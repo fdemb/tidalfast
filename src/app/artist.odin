@@ -390,12 +390,12 @@ hero_background :: proc(s: ^State, page: ^Artist_Page, w, h: f32) {
 	picture := small_str(&page.picture)
 	if s.data.fake || picture == "" {
 		hue := f32(hash.fnv32a(transmute([]u8)small_str(&page.name)) % 997) / 997
+		ui.set_next_background(hsv(hue, 0.45, 0.45))
 		wash := layer(w, h)
-		wash.background = hsv(hue, 0.45, 0.45)
 		wash.gradient = hsv(hue + 0.08, 0.6, 0.12)
 	} else {
-		base := layer(w, h)
-		base.background = PANEL
+		ui.set_next_background(PANEL)
+		layer(w, h)
 		e := cover.want(&s.data.covers, .Artist, picture, HERO_PX, HERO_PX, s.frame_count, PRIORITY_COVER)
 		if e != nil && e.state == .Ready {
 			// The square picture's band as wide as the header, a little
@@ -410,8 +410,8 @@ hero_background :: proc(s: ^State, page: ^Artist_Page, w, h: f32) {
 				ui.request_frame()
 			}
 		}
-		dim := layer(w, h)
-		dim.background = {0, 0, 0, 0.45}
+		ui.set_next_background({0, 0, 0, 0.45})
+		layer(w, h)
 	}
 	fade := layer(w, h * 0.6)
 	fade.fixed_pos = {0, h * 0.4}
@@ -491,9 +491,9 @@ draw_artist_actions :: proc(s: ^State, p: ^List_Place, page: ^Artist_Page) {
 			ui.spacer(ui.fill())
 		}
 		ui.spacer(ui.px(10))
+		ui.radius(20)
 		if !s.data.fake {
-			b, sig := icon_button("artist_share", text.ICON_SHARE_NETWORK, .Icon, "Share", TEXT, 1, 40, {.Focusable})
-			b.radius = 20
+			_, sig := icon_button("artist_share", text.ICON_SHARE_NETWORK, .Icon, "Share", TEXT, 1, 40, {.Focusable})
 			if sig.clicked {
 				ui.copy_to_clipboard(artist_link(page.id))
 				set_status(s, .Copied_Page, -1)
@@ -502,7 +502,6 @@ draw_artist_actions :: proc(s: ^State, p: ^List_Place, page: ^Artist_Page) {
 			ui.spacer(ui.px(4))
 		}
 		more, more_sig := icon_button("artist_more", text.ICON_DOTS_THREE, .Icon, "More", TEXT, 1, 40, {.Focusable})
-		more.radius = 20
 		if more_sig.clicked {
 			ui.open_menu("artist_menu", {more.rect.x, more.rect.y + more.rect.h})
 		}
@@ -574,12 +573,13 @@ draw_artist_grid :: proc(s: ^State, page: ^Artist_Page, part: Artist_Part, conte
 		centred(content_w)
 		ui.spacer(ui.px(24))
 		ui.row("", {}, ui.fill(), ui.px(44))
-		_, back := icon_button("grid_back", text.ICON_CARET_LEFT, .Icon, "Back", TEXT, 1, 36, {.Focusable, .Draw_Background})
-		back.box.radius = 18
-		back.box.background = SURFACE
-		back.box.hover_color = SURFACE_ACTIVE
-		if back.clicked || ui.take_key(.Escape) {
-			pending_set(s, Go_Back{})
+		{
+			ui.radius(18)
+			ui.background(SURFACE)
+			ui.hover_color(SURFACE_ACTIVE)
+			if _, back := icon_button("grid_back", text.ICON_CARET_LEFT, .Icon, "Back", TEXT, 1, 36, {.Focusable, .Draw_Background}); back.clicked || ui.take_key(.Escape) {
+				pending_set(s, Go_Back{})
+			}
 		}
 		ui.spacer(ui.px(14))
 		ui.column("", {}, ui.fill(), ui.fill())

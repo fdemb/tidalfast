@@ -39,10 +39,11 @@ LIST_ROWS :: Row_Colors {
 	selected_hover = {0x28 / 255.0, 0x28 / 255.0, 0x28 / 255.0, 1},
 }
 
-// row_highlight sets b's background and hover colour from colors.
-row_highlight :: proc(b: ^ui.Box, colors: Row_Colors, selected: bool) {
-	b.background = colors.selected if selected else {}
-	b.hover_color = colors.selected_hover if selected else colors.hover
+// row_highlight sets the next box's background and hover colour from
+// colors.
+row_highlight :: proc(colors: Row_Colors, selected: bool) {
+	ui.set_next_background(colors.selected if selected else {})
+	ui.set_next_hover_color(colors.selected_hover if selected else colors.hover)
 }
 OUTLINE :: render.Color{0x2c / 255.0, 0x2c / 255.0, 0x2c / 255.0, 1}
 TEXT :: render.Color{0xf3 / 255.0, 0xf3 / 255.0, 0xf3 / 255.0, 1}
@@ -327,10 +328,10 @@ draw_sidebar :: proc(s: ^State) {
 		rows := ui.virtual_rows(list, sidebar_count(s), PLAYLIST_ROW_H)
 		for i in rows.first ..< rows.last {
 			entry := sidebar_entry(s, i)
-			ui.set_next_radius(6)
-			item := ui.row(fmt.tprintf("##playlist%d", i), {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects, .Draw_Border}, ui.fill(), ui.px(PLAYLIST_ROW_H))
 			current := lib.playlist == i && !s.search.browsing && !home_showing(s)
-			row_highlight(item, SIDEBAR_ROWS, current)
+			ui.set_next_radius(6)
+			row_highlight(SIDEBAR_ROWS, current)
+			item := ui.row(fmt.tprintf("##playlist%d", i), {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects, .Draw_Border}, ui.fill(), ui.px(PLAYLIST_ROW_H))
 			ui.accessible(item, .Row, fmt.tprintf("%s, %s", entry.name, entry.subtitle), selected = current)
 			if ui.drop_hover(item) {
 				lib.drop_target = i
@@ -380,9 +381,8 @@ draw_sidebar_handle :: proc(s: ^State, window_w: f32) {
 	// The sidebar's background runs up to the line.
 	ui.set_next_background(PANEL)
 	ui.box_make("", {.Draw_Background}, ui.px(2), ui.fill())
-	line := ui.box_make("", {.Draw_Background}, ui.px(1), ui.fill())
-	t := max(handle.hot_t, handle.active_t)
-	line.background = mix(OUTLINE, ACCENT, t)
+	ui.set_next_background(mix(OUTLINE, ACCENT, max(handle.hot_t, handle.active_t)))
+	ui.box_make("", {.Draw_Background}, ui.px(1), ui.fill())
 }
 
 draw_main_view :: proc(s: ^State, main_w: f32) {
@@ -590,10 +590,11 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 		return
 	}
 	s.measure.rows += 1
-	ui.set_next_radius(6)
-	row := ui.row(fmt.tprintf("##track%d", i), {.Clickable, .Draw_Background, .Draw_Hot_Effects}, ui.fill(), ui.px(TRACK_ROW_H))
+	// The row, its heart and its more button.
+	ui.radius(6)
 	selected := lib.selected == i
-	row_highlight(row, LIST_ROWS, selected)
+	row_highlight(LIST_ROWS, selected)
+	row := ui.row(fmt.tprintf("##track%d", i), {.Clickable, .Draw_Background, .Draw_Hot_Effects}, ui.fill(), ui.px(TRACK_ROW_H))
 	ui.accessible(row, .Row, fmt.tprintf("%s, %s, %s", track.title, track.artist, track.album), selected = selected)
 	sig := ui.signal(row)
 	if sig.pressed || sig.right_clicked {
@@ -670,15 +671,15 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 // in: the square is the click and hover area. hot is its opacity, so 0
 // hides it while it still clicks. Returns the button's box for anything
 // anchored to it, such as a menu. flags adds to the button's, such as
-// Focusable for one outside a row.
-icon_button :: proc(id, icon: string, font: text.Font, name: string, color: render.Color, hot: f32, side: f32, flags: ui.Box_Flags = {}) -> (^ui.Box, ui.Signal) {
+// Focusable for one outside a row. Its corners, background and hover colour
+// come from the style stacks.
+icon_button :: proc(id, icon: string, font: text.Font, name: string, color: render.Color, hot: f32, side: f32, flags: ui.Box_Flags = {}, size: f32 = 16) -> (^ui.Box, ui.Signal) {
 	ui.column("", {}, ui.px(side), ui.fill())
 	ui.spacer(ui.fill())
 	ui.set_next_text_align(.Center)
 	ui.set_next_font(font)
-	ui.set_next_font_size(16)
+	ui.set_next_font_size(size)
 	ui.set_next_text_color(color)
-	ui.set_next_radius(6)
 	b := ui.box_make(fmt.tprintf("%s###%s", icon, id), {.Clickable, .Draw_Text, .Draw_Hot_Effects} + flags, ui.px(side), ui.px(side))
 	b.opacity = hot
 	ui.accessible(b, .Button, name)
@@ -912,14 +913,13 @@ draw_drag_ghost :: proc(s: ^State) {
 }
 
 draw_player_bar :: proc(s: ^State, w, h: f32) {
-	ui.set_next_background(PANEL)
+	ui.set_next_background(BAR_TINT if s.bar_over_content else PANEL)
 	bar := ui.column("player", {.Draw_Background}, ui.px(w), ui.px(PLAYER_BAR_H))
 	if s.bar_over_content {
 		// Over the bottom of the views, blurring them. Clickable so a press
 		// on it doesn't reach the row under it.
 		bar.flags += {.Draw_Backdrop, .Clickable, .Click_Shield, .Floating_X, .Floating_Y}
 		bar.fixed_pos = {0, h - PLAYER_BAR_H - status_bar_h(s)}
-		bar.background = BAR_TINT
 		bar.backdrop = {blur = BAR_BLUR, saturation = BAR_SATURATION}
 	}
 	ui.set_next_background(OUTLINE)
@@ -958,6 +958,7 @@ draw_player_bar :: proc(s: ^State, w, h: f32) {
 				playing = pb.entries[pb.index].id
 			}
 			liked := liked_has(&s.data, playing)
+			ui.radius(6)
 			if heart_button("heart_bar", liked, "Unlike" if liked else "Like", SECONDARY, 1, 20).clicked {
 				liked_toggle(s, playing)
 				ui.data_changed()

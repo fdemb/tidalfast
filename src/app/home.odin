@@ -156,8 +156,8 @@ draw_home_entry :: proc(s: ^State) {
 	ui.spacer(ui.px(SIDEBAR_PAD))
 	{
 		ui.set_next_radius(6)
+		row_highlight(SIDEBAR_ROWS, current)
 		b := ui.row("##home", {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects}, ui.fill(), ui.fill())
-		row_highlight(b, SIDEBAR_ROWS, current)
 		ui.accessible(b, .Button, "Home", selected = current)
 		if ui.signal(b).clicked {
 			pending_set(s, Home_Place{})

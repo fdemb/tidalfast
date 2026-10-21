@@ -263,8 +263,8 @@ draw_list_actions :: proc(s: ^State, kind: List_Kind, h: List_Header) {
 		ui.spacer(ui.fill())
 	}
 	ui.spacer(ui.px(8))
+	ui.radius(20)
 	more, more_sig := icon_button("list_more", text.ICON_DOTS_THREE, .Icon, fmt.tprintf("More options for %s", title), TEXT, 1, 40, {.Focusable})
-	more.radius = 20
 	if more_sig.clicked {
 		ui.open_menu("list_menu", {more.rect.x, more.rect.y + more.rect.h})
 	}
