@@ -1,6 +1,7 @@
 package tidal_tests
 
 import "core:fmt"
+import "core:log"
 import "core:testing"
 
 import app "../src/app"
@@ -1570,20 +1571,31 @@ test_ui_floating_layer_ignores_the_style_around_it :: proc(t: ^testing.T) {
 		testing.expect_value(t, item.font_size, 13)
 		testing.expect_value(t, item.radius, 0)
 	}
+
+	ui.close_menu()
+	for _ in 0 ..< 100 {
+		now += 1.0 / 60
+		frame(&u, now)
+	}
+	testing.expect(t, !ui.menu_is_open("menu"), "the menu closed")
+	testing.expect_value(t, u.style_leaks, 0)
 }
 
-// set_next styles one box; a scope styles every box until the end of its
-// block and then gives back the style from before it.
+// set_next styles one box, over the scope's value; a scope styles every
+// box until the end of its block and then gives back the style from before
+// it. A flags scope replaces the one around it and adds to the flags a box
+// is built with.
 @(test)
 test_ui_style_scopes_and_set_next :: proc(t: ^testing.T) {
 	u: ui.State
 	ui.init(&u)
 	defer ui_destroy(&u)
 	red := render.Color{1, 0, 0, 1}
-	a, b, c, d: ^ui.Box
+	a, b, c, d, e, f: ^ui.Box
 	ui.begin_frame(&u, nil, nil, nil, 300, 200, 0)
 	{
 		ui.radius(6)
+		ui.set_next_radius(3)
 		ui.set_next_background(red)
 		a = ui.box_make("a", {.Draw_Background})
 		b = ui.box_make("b", {.Draw_Background})
@@ -1591,14 +1603,57 @@ test_ui_style_scopes_and_set_next :: proc(t: ^testing.T) {
 			ui.radius(12)
 			c = ui.box_make("c", {.Draw_Background})
 		}
+		ui.flags({.Draw_Border})
+		{
+			ui.flags({.Clip})
+			ui.set_next_flags({})
+			e = ui.box_make("e", {.Draw_Text})
+			f = ui.box_make("f", {.Draw_Text})
+		}
 	}
 	d = ui.box_make("d", {.Draw_Background})
 	ui.end_frame()
+	ui.begin_frame(&u, nil, nil, nil, 300, 200, 0.1)
+	ui.end_frame()
+	testing.expect_value(t, a.radius, 3)
 	testing.expect_value(t, a.background, red)
-	testing.expect_value(t, b.background, render.Color{})
-	testing.expect_value(t, a.radius, 6)
 	testing.expect_value(t, b.radius, 6)
+	testing.expect_value(t, b.background, render.Color{})
 	testing.expect_value(t, c.radius, 12)
 	testing.expect_value(t, d.radius, 0)
+	testing.expect_value(t, e.flags, ui.Box_Flags{.Draw_Text})
+	testing.expect_value(t, f.flags, ui.Box_Flags{.Draw_Text, .Clip})
 	testing.expect_value(t, u.style_leaks, 0)
+}
+
+// A frame that leaves a set_next unused or a scope open is reported once,
+// when the next frame starts, and the next frame starts clean.
+@(test)
+test_ui_style_leak_is_reported :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	errors := 0
+	context.logger = {
+		procedure = proc(data: rawptr, level: log.Level, text: string, options: log.Options, location := #caller_location) {
+			if level >= .Error {
+				(^int)(data)^ += 1
+			}
+		},
+		data = &errors,
+	}
+	ui.begin_frame(&u, nil, nil, nil, 300, 200, 0)
+	ui.set_next_radius(4)
+	ui.end_frame()
+	ui.begin_frame(&u, nil, nil, nil, 300, 200, 0.1)
+	b := ui.box_make("b", {.Draw_Background})
+	ui.end_frame()
+	ui.begin_frame(&u, nil, nil, nil, 300, 200, 0.2)
+	ui.set_next_text_pad(2)
+	ui.end_frame()
+	ui.begin_frame(&u, nil, nil, nil, 300, 200, 0.3)
+	ui.end_frame()
+	testing.expect_value(t, b.radius, 0)
+	testing.expect_value(t, u.style_leaks, 2)
+	testing.expect_value(t, errors, 1)
 }
