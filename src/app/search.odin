@@ -608,20 +608,18 @@ draw_found_list :: proc(s: ^State) {
 		ui.spacer(ui.px(8))
 		ui.column("", {}, ui.fill(), ui.fill())
 		ui.spacer(ui.px(9))
+		ui.text_pad(4)
 		ui.text_style(.Medium, 14, TEXT)
-		ui.set_next_text_pad(4)
 		ui.label(f.name, ui.fill(), ui.px(20))
 		ui.text_style(.Regular, 13, SECONDARY)
 		if tab == .Albums && f.artist != "" {
 			ui.row("", {}, ui.fill(), ui.px(18))
-			ui.set_next_text_pad(4)
 			ui.label("Album ·", ui.text_size(), ui.fill())
 			// The fake data's album id is the row it's found at.
 			if k, sig := artist_links(s, f.artist, f.artists, 0); sig.clicked {
 				open_artist_of(s, f.artist, f.artists, k, int(f.id))
 			}
 		} else {
-			ui.set_next_text_pad(4)
 			ui.label(f.subtitle, ui.fill(), ui.px(18))
 		}
 	}

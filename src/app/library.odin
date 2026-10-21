@@ -516,12 +516,12 @@ table_header :: proc(cols: Track_Columns, pinned := false) {
 		ui.label("#", ui.px(cols.number), ui.fill())
 		ui.spacer(ui.px(cols.cover))
 		ui.label("Title", ui.fill(), ui.fill())
-		header_cell("Album", cols.album, .Left)
-		header_cell("Date added", cols.added, .Left)
+		cell("Album", cols.album, .Left)
+		cell("Date added", cols.added, .Left)
 		if cols.heart > 0 {
 			ui.spacer(ui.px(cols.heart))
 		}
-		header_cell("Time", cols.duration, .Right)
+		cell("Time", cols.duration, .Right)
 		ui.spacer(ui.px(cols.more + 8 + LIST_PAD))
 	}
 	ui.row("", {}, ui.fill(), ui.px(1))
@@ -530,15 +530,6 @@ table_header :: proc(cols: Track_Columns, pinned := false) {
 	ui.set_next_background(OUTLINE)
 	ui.box_make("", {.Draw_Background}, ui.fill(), ui.fill())
 	ui.spacer(ui.px(inset))
-}
-
-header_cell :: proc(label: string, width: f32, align: ui.Align) {
-	if width <= 0 {
-		return
-	}
-	ui.set_next_text_pad(CELL_PAD)
-	ui.set_next_text_align(align)
-	ui.label(label, ui.px(width), ui.fill())
 }
 
 // table_keys moves the selection among the first count rows with the
@@ -804,8 +795,7 @@ cell :: proc(s: string, width: f32, align: ui.Align) -> ^ui.Box {
 	}
 	ui.set_next_text_pad(CELL_PAD)
 	ui.set_next_text_align(align)
-	b := ui.label(s, ui.px(width), ui.fill())
-	return b
+	return ui.label(s, ui.px(width), ui.fill())
 }
 
 CELL_PAD :: 12
@@ -1041,18 +1031,17 @@ draw_player_bar :: proc(s: ^State, w, h: f32) {
 			// takes what's left.
 			ui.row("", {}, ui.fill(), ui.px(16))
 			ui.text_style(.Regular, 11, DIM)
+			ui.text_pad(TIME_PAD)
 			duration := playback_duration(s)
 			position := playback_position(s)
 			longest := clock(max(duration, position))
 			ui.set_next_text_align(.Right)
-			ui.set_next_text_pad(TIME_PAD)
 			ui.label(clock(position), ui.px(ui.counter_width(.Regular, 11, longest) + 2 * TIME_PAD), ui.fill())
 			draw_progress(s, position, duration, item != nil)
 			left := "0:00"
 			if item != nil {
 				left = fmt.tprintf("-%s", clock(max(duration - position, 0)))
 			}
-			ui.set_next_text_pad(TIME_PAD)
 			ui.label(left, ui.px(ui.counter_width(.Regular, 11, fmt.tprintf("-%s", longest)) + 2 * TIME_PAD), ui.fill())
 		}
 	}
