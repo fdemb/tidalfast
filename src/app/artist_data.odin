@@ -41,6 +41,8 @@ Artist_Part :: enum u8 {
 	Similar,
 }
 
+ARTIST_PARTS :: bit_set[Artist_Part]{.Info, .Bio, .Albums, .Singles, .Appears, .Similar}
+
 Artist_Cache :: struct {
 	pages:    [ARTIST_CACHE]Artist_Page,
 	next_gen: u64,
@@ -205,13 +207,13 @@ artist_live :: proc(live: Artist_Live) -> bool {
 	return sync.atomic_load(&live.cache.live[live.slot]) == live.gen
 }
 
-// artist_want asks for each part of page not asked for yet. Asking again
-// sends nothing more.
-artist_want :: proc(d: ^Data, page: ^Artist_Page) {
+// artist_want asks for each of parts of page not asked for yet. Asking
+// again sends nothing more.
+artist_want :: proc(d: ^Data, page: ^Artist_Page, parts := ARTIST_PARTS) {
 	if d.account != .Signed_In {
 		return
 	}
-	for part in Artist_Part {
+	for part in parts {
 		if page.parts[part] != nil {
 			continue
 		}
@@ -359,9 +361,19 @@ artist_load_appears :: proc(s: ^tidal.Session, id: i64, live: Artist_Live, a: me
 	return album_pages(s, id, .Appears, live, a)
 }
 
+// artist_load_similar is the artists TIDAL says are like this one. It
+// answers 404 for an artist with none, which is an empty shelf, not a
+// failure.
 @(private = "file")
 artist_load_similar :: proc(s: ^tidal.Session, id: i64, live: Artist_Live, a: mem.Allocator) -> (content: Artist_Content, err: tidal.Error) {
-	artists := tidal.artist_similar(s, id, a) or_return
+	artists: []tidal.Artist
+	artists, err = tidal.artist_similar(s, id, a)
+	if e, failed := err.?; failed {
+		if e.kind == .Object_Not_Found {
+			return Artist_Cards{}, nil
+		}
+		return
+	}
 	cards := make([]Found, min(len(artists), ARTIST_CARDS_MAX), a)
 	for &f, i in cards {
 		ar := artists[i]
@@ -423,6 +435,7 @@ album_card :: proc(al: tidal.Album, a: mem.Allocator) -> (f: Found) {
 	if ok {
 		y, _, _ := time.date(date)
 		f.subtitle = fmt.aprintf("%d · %s", y, kind, allocator = a)
+		f.released = time.to_unix_seconds(date)
 	}
 	return
 }
@@ -512,6 +525,14 @@ fake_year :: proc(album: string) -> int {
 	return 1990 + int(hash.fnv32a(transmute([]u8)album) % 35)
 }
 
+// fake_released is a day in the album's fake_year.
+@(private = "file")
+fake_released :: proc(album: string) -> i64 {
+	h := hash.fnv32a(transmute([]u8)album)
+	t, _ := time.components_to_time(fake_year(album), 1 + int(h >> 8) % 12, 1 + int(h >> 16) % 28, 0, 0, 0)
+	return time.to_unix_seconds(t)
+}
+
 // fake_albums is the artist's albums, or its EPs and singles: the fake
 // albums hold the artist's rows about evenly, so the ones under the
 // average count as EPs and singles.
@@ -530,7 +551,7 @@ fake_albums :: proc(rows: []Row, name: string, singles: bool, a: mem.Allocator) 
 		}
 		album := rows[al.row].album
 		kind := "Album" if !singles else ("EP" if al.n * 2 > average else "Single")
-		append(&out, Found{id = i64(al.row), name = album, subtitle = fmt.aprintf("%d · %s", fake_year(album), kind, allocator = a), tracks = al.n})
+		append(&out, Found{id = i64(al.row), name = album, subtitle = fmt.aprintf("%d · %s", fake_year(album), kind, allocator = a), tracks = al.n, released = fake_released(album)})
 	}
 	return out[:]
 }

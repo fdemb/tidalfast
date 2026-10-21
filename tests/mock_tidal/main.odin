@@ -19,10 +19,13 @@
 // and /artists/<id>/toptracks list a dozen made-up tracks. Every fifth
 // made-up track has a second artist. /artists/<id> gives the artist, and
 // /bio, /albums (filter EPSANDSINGLES or COMPILATIONS too) and /similar
-// the rest of an artist page. Artist 1 has 73 albums, so they take two
-// pages of 50; every fifth artist has no biography and gets a 404, as
-// TIDAL answers. YOASOBI's biography is Japanese, without spaces, and ends
-// in a link wider than the page's column.
+// the rest of an artist page. /v2/home/feed/static is the home feed:
+// shelves of albums, playlists and artists, with a shelf of mixes and one
+// of tracks the app leaves out. Artist 1 has 73 albums, so they take two
+// pages of 50; every fifth artist has no biography and every seventh no
+// similar artists, and gets a 404 for it, as TIDAL answers. YOASOBI's
+// biography is Japanese, without spaces, and ends in a link wider than the
+// page's column.
 //
 // The PKCE login: GET /authorize redirects to /android/login/auth with a
 // code, and POST /oauth2/token trades it, with the Android client's id,
@@ -664,6 +667,8 @@ route :: proc(req: ^Request) -> Response {
 		}
 		strings.write_string(&b, "]}")
 		return json_response(200, strings.to_string(b))
+	case path == "/v2/home/feed/static":
+		return home_response()
 	case path == "/search":
 		return search_response(req.query["query"] or_else "", req.query["types"] or_else "", offset, limit)
 	case strings.has_prefix(path, "/albums/") && strings.has_suffix(path, "/tracks"):
@@ -1189,6 +1194,66 @@ hsv :: proc(h, s, v: f32) -> [3]f32 {
 	return out
 }
 
+// home_response is the v2 home feed: shelves of albums, playlists and
+// artists, a shelf of mixes and one of tracks, which the app leaves out.
+home_response :: proc() -> Response {
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_string(&b, `{"items":[`)
+	album :: proc(b: ^strings.Builder, ar, i: int) {
+		id := 10_000 + (ar + 1) * 1000 + i
+		fmt.sbprintf(b, `{{"type":"ALBUM","data":{{"id":%d,"title":%q,"cover":"%s","numberOfTracks":12,"type":"ALBUM","artist":{{"id":%d,"name":%q}},"artists":[{{"id":%d,"name":%q}}]}}}}`,
+			id, album_title(id), image_id(id), ar + 1, ARTISTS[ar], ar + 1, ARTISTS[ar])
+	}
+	module :: proc(b: ^strings.Builder, first: bool, title: string) {
+		if !first {
+			strings.write_byte(b, ',')
+		}
+		fmt.sbprintf(b, `{{"type":"HORIZONTAL_LIST","moduleId":%q,"title":%q,"items":[`, title, title)
+	}
+	module(&b, true, "Recommended albums")
+	for i in 0 ..< 16 {
+		if i > 0 {
+			strings.write_byte(&b, ',')
+		}
+		album(&b, i % len(ARTISTS), i)
+	}
+	strings.write_string(&b, "]}")
+	module(&b, false, "Playlists for you")
+	{
+		sync.guard(&server.mutex)
+		for p in 1 ..< len(PLAYLISTS) {
+			if p > 1 {
+				strings.write_byte(&b, ',')
+			}
+			strings.write_string(&b, `{"type":"PLAYLIST","data":`)
+			write_playlist(&b, p)
+			strings.write_byte(&b, '}')
+		}
+	}
+	strings.write_string(&b, "]}")
+	module(&b, false, "Your mixes")
+	strings.write_string(&b, `{"type":"MIX","data":{"id":"mock-mix-1","title":"My Mix 1","mixType":"DISCOVERY_MIX"}}]}`)
+	module(&b, false, "Artists you might like")
+	for ar in 0 ..< len(ARTISTS) {
+		if ar > 0 {
+			strings.write_byte(&b, ',')
+		}
+		fmt.sbprintf(&b, `{{"type":"ARTIST","data":{{"id":%d,"name":%q,"picture":"%s"}}}}`, ar + 1, ARTISTS[ar], image_id(3000 + ar))
+	}
+	strings.write_string(&b, "]}")
+	strings.write_string(&b, `,{"type":"TRACK_LIST","title":"Recently played","items":[{"type":"TRACK","data":{"id":5000000,"title":"Skipped"}}]}`)
+	module(&b, false, "New albums")
+	for i in 0 ..< 24 {
+		if i > 0 {
+			strings.write_byte(&b, ',')
+		}
+		album(&b, (i * 5) % len(ARTISTS), 100 + i)
+	}
+	strings.write_string(&b, "]}]}")
+	fmt.println("mock: home feed")
+	return json_response(200, strings.to_string(b))
+}
+
 // artist_response serves /artists/<n> and its bio, albums (with filter
 // EPSANDSINGLES or COMPILATIONS) and similar artists. Artist n is
 // ARTISTS[n - 1], as in the tracks.
@@ -1242,6 +1307,9 @@ artist_response :: proc(path: string, query: map[string]string, offset, limit: i
 		fmt.printfln("mock: artist %d albums (%s), %d from %d", id, filter, count, offset)
 		return json_response(200, strings.to_string(b))
 	case "similar":
+		if id % 7 == 0 {
+			return json_response(404, `{"status":404,"subStatus":2001,"userMessage":"Resource not found"}`)
+		}
 		count := len(ARTISTS) - 1
 		b := list_begin(count, offset, limit)
 		for i in offset ..< min(offset + limit, count) {

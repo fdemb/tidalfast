@@ -185,24 +185,72 @@ test_ui_virtual_range :: proc(t: ^testing.T) {
 
 @(test)
 test_track_columns :: proc(t: ^testing.T) {
-	narrow := app.track_columns(560, true)
+	narrow := app.track_columns(560, .Playlist)
 	testing.expect_value(t, narrow.album, f32(0))
 	testing.expect_value(t, narrow.added, f32(0))
-	testing.expect(t, narrow.number > 0 && narrow.duration > 0)
+	testing.expect(t, narrow.number > 0 && narrow.cover > 0 && narrow.duration > 0)
 
-	medium := app.track_columns(561, true)
+	medium := app.track_columns(561, .Playlist)
 	testing.expect_value(t, medium.album, f32(561 * 0.28))
 	testing.expect_value(t, medium.added, f32(0))
 
-	wide := app.track_columns(761, true)
+	wide := app.track_columns(761, .Playlist)
 	testing.expect(t, wide.album > 0)
 	testing.expect_value(t, wide.added, f32(120))
-	testing.expect_value(t, app.track_columns(760, true).added, f32(0))
-	testing.expect_value(t, app.track_columns(2000, true).album, f32(360))
+	testing.expect_value(t, app.track_columns(760, .Playlist).added, f32(0))
+	testing.expect_value(t, app.track_columns(2000, .Playlist).album, f32(360))
 
-	undated := app.track_columns(2000, false)
-	testing.expect_value(t, undated.added, f32(0))
-	testing.expect_value(t, undated.album, f32(360))
+	// Only playlists have dates added.
+	for kind in ([?]app.List_Kind{.Artist, .Search}) {
+		undated := app.track_columns(2000, kind)
+		testing.expect_value(t, undated.added, f32(0))
+		testing.expect_value(t, undated.album, f32(360))
+		testing.expect(t, undated.cover > 0)
+	}
+
+	// Every row of an album is the same album: no cover, no album column.
+	album := app.track_columns(2000, .Album)
+	testing.expect_value(t, album.cover, f32(0))
+	testing.expect_value(t, album.album, f32(0))
+	testing.expect_value(t, album.added, f32(0))
+	testing.expect(t, album.number > 0 && album.heart > 0 && album.duration > 0 && album.more > 0)
+}
+
+// The header collapses as the list scrolls: the pinned bar's background
+// fades in as the hero's bottom reaches it, its Play and title as the
+// actions go under it, and the headings pin as they reach it. Search
+// results have no bar, so their headings pin at once.
+@(test)
+test_header_collapse :: proc(t: ^testing.T) {
+	h := app.list_header(.Album, 1000)
+	testing.expect_value(t, h.hero, f32(200 + 2 * app.HERO_PAD))
+	testing.expect_value(t, h.bar, f32(app.COMPACT_H))
+	table := app.header_table_y(h)
+	testing.expect_value(t, app.header_rows_top(h), table + app.HEADER_H + 1 + app.LIST_PAD_Y)
+
+	top := app.header_collapse(h, 0)
+	testing.expect(t, top.bar == 0 && top.content == 0 && !top.pinned, "nothing at the top")
+	half := app.header_collapse(h, h.hero - h.bar - app.BAR_FADE / 2)
+	testing.expect_value(t, half.bar, f32(0.5))
+	testing.expect_value(t, half.content, f32(0))
+	under := app.header_collapse(h, h.hero - h.bar)
+	testing.expect(t, under.bar == 1 && under.content == 0 && !under.pinned, "the bar is opaque once the hero is under it")
+	at := app.header_collapse(h, table - h.bar)
+	testing.expect(t, at.content == 1 && !at.pinned, "Play and the title show as the headings reach the bar")
+	past := app.header_collapse(h, table - h.bar + 1)
+	testing.expect(t, past.pinned && past.bar == 1 && past.content == 1, "then the headings pin")
+
+	search := app.list_header(.Search, 1000)
+	testing.expect_value(t, app.header_rows_top(search), f32(app.HEADER_H + 1 + app.LIST_PAD_Y))
+	testing.expect(t, !app.header_collapse(search, 0).pinned)
+	scrolled := app.header_collapse(search, 1)
+	testing.expect(t, scrolled.pinned && scrolled.bar == 0 && scrolled.content == 0, "search results pin their headings, with no bar")
+}
+
+@(test)
+test_list_duration :: proc(t: ^testing.T) {
+	testing.expect_value(t, app.list_duration(51 * 60 + 2), "51 min 2 sec")
+	testing.expect_value(t, app.list_duration(3 * 3600 + 20 * 60 + 59), "3 hr 20 min")
 }
 
 // Builds a frame with one clickable box at the top left, the way an app
@@ -388,6 +436,44 @@ settle :: proc(u: ^ui.State, now: ^f64, height: f32, count: int) -> (view: ^ui.B
 	return
 }
 
+// Rows after a 300 pt header that scrolls with them, inside a column of
+// their own: none are built while the header fills the view, and once it
+// has scrolled away they're the ones in view, each where it's drawn.
+@(test)
+test_virtual_rows_after_header :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	now := 0.0
+	frame :: proc(u: ^ui.State, now: ^f64, offset: f32) -> (view: ^ui.Box, rows: ui.Virtual_Rows) {
+		now^ += 1.0 / 120
+		ui.begin_frame(u, nil, nil, nil, 300, 200, now^)
+		{
+			view = ui.scroll_view("view", ui.fill(), ui.fill())
+			view.view_off.y, view.view_off_target.y = offset, offset
+			ui.spacer(ui.px(300))
+			ui.column("rows", {}, ui.fill(), ui.children_sum())
+			rows = ui.virtual_rows(view, 100, 10, 300)
+			for i in rows.first ..< rows.last {
+				ui.box_make(fmt.tprintf("##row%d", i), {.Clickable}, ui.fill(), ui.px(10))
+			}
+		}
+		ui.end_frame()
+		return
+	}
+	frame(&u, &now, 0)
+	_, rows := frame(&u, &now, 0)
+	testing.expect_value(t, rows.last - rows.first, 0)
+	_, rows = frame(&u, &now, 350)
+	testing.expect_value(t, rows.first, 4)
+	testing.expect_value(t, rows.last, 26)
+	frame(&u, &now, 350)
+	view, _ := frame(&u, &now, 350)
+	row := ui.box_lookup(&u, ui.key_from_string(ui.key_from_string(view.key, "rows"), "##row5"))
+	testing.expect(t, row != nil && row.rect.y == view.rect.y, "row 5 at the top of the view")
+	testing.expect_value(t, view.view_bounds.y, f32(300 + 100 * 10))
+}
+
 // A vertical page in a 300 by 200 window: a 20 pt focusable item, then a
 // 50 pt shelf that scrolls sideways through ten 100 pt focusable cards,
 // then 1000 pt of space. right_taken says whether the app got a Right.
@@ -461,6 +547,54 @@ test_ui_focus_reveals_on_both_axes :: proc(t: ^testing.T) {
 	page, shelf, _ = shelf_settle(&u, &now)
 	testing.expect_value(t, page.view_off.y, f32(20))
 	testing.expect_value(t, shelf.view_off.x, 1000 - shelf.rect.w)
+}
+
+// A focusable table of 100 rows after a header, 1000 pt in a 200 pt view,
+// the way the track list builds it. Tab into it keeps the view where it
+// is while the table shows, at the header and in the middle of the rows,
+// and brings its first rows in when it doesn't.
+@(test)
+test_ui_focus_keeps_a_table_taller_than_the_view :: proc(t: ^testing.T) {
+	frame :: proc(u: ^ui.State, now: ^f64, header: f32, offset: Maybe(f32), events: ..platform.Event) -> (view, table: ^ui.Box, animating: bool) {
+		now^ += 1.0 / 120
+		ui.begin_frame(u, events, nil, nil, 300, 200, now^)
+		{
+			view = ui.scroll_view("view", ui.fill(), ui.fill())
+			if y, ok := offset.?; ok {
+				view.view_off.y, view.view_off_target.y = y, y
+			}
+			ui.spacer(ui.px(header))
+			table = ui.column("rows", {.Focusable}, ui.fill(), ui.children_sum())
+			rows := ui.virtual_rows(view, 100, 10, header)
+			for i in rows.first ..< rows.last {
+				ui.box_make(fmt.tprintf("##row%d", i), {.Clickable}, ui.fill(), ui.px(10))
+			}
+		}
+		animating = ui.end_frame()
+		return
+	}
+	Case :: struct {
+		header, start, want: f32,
+	}
+	for c in ([]Case{{150, 0, 0}, {150, 600, 600}, {300, 0, 300}}) {
+		u: ui.State
+		ui.init(&u)
+		defer ui_destroy(&u)
+		now := 0.0
+		frame(&u, &now, c.header, c.start)
+		_, table, _ := frame(&u, &now, c.header, c.start)
+		frame(&u, &now, c.header, nil, {kind = .Key_Down, key = .Tab})
+		testing.expect_value(t, u.focus, table.key)
+		view: ^ui.Box
+		for _ in 0 ..< 300 {
+			animating: bool
+			view, _, animating = frame(&u, &now, c.header, nil)
+			if !animating {
+				break
+			}
+		}
+		testing.expectf(t, view.view_off.y == c.want, "header %v, focus from %v scrolled to %v, want %v", c.header, c.start, view.view_off.y, c.want)
+	}
 }
 
 @(test)

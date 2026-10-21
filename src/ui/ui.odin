@@ -86,6 +86,7 @@ Box_Flag :: enum u32 {
 	Click_On_Release, // clicked on a release over it rather than on the press, for drag sources
 	Window_Drag, // empty titlebar space: a press there moves the window, see drag_regions
 	Draw_Backdrop, // background over a blur of what's under the box, see render.push_backdrop
+	Click_Shield, // clickable only so presses don't reach what's under it; under the titlebar it moves the window, see cut_drag_regions
 }
 Box_Flags :: bit_set[Box_Flag; u32]
 
@@ -242,6 +243,7 @@ State :: struct {
 	hit_count:      int,
 	drag_rects:     [8]render.Rect, // the Window_Drag boxes, from end_frame
 	drag_count:     int,
+	drag_from:      [8]int, // the hit list's length when each drag rect was found
 
 	frame:          u64,
 	time:           f64,
@@ -976,6 +978,7 @@ end_frame :: proc() -> bool {
 	mismatch := false
 	finish(u, u.root, {0, 0, u.width, u.height}, 0, 0, false, false, &mismatch)
 	finish(u, u.floating_root, {0, 0, u.width, u.height}, 0, 0, true, false, &mismatch)
+	cut_drag_regions(u)
 	if u.focus_reveal {
 		u.focus_reveal = false
 		reveal_focus(u)
@@ -1069,6 +1072,7 @@ finish :: proc(u: ^State, b: ^Box, clip: render.Rect, focus_parent, click_parent
 	}
 	if .Window_Drag in b.flags && u.drag_count < len(u.drag_rects) {
 		u.drag_rects[u.drag_count] = b.clip
+		u.drag_from[u.drag_count] = u.hit_count
 		u.drag_count += 1
 	}
 	inner := rect_intersect(clip, b.rect) if .Clip in b.flags else clip
@@ -1106,10 +1110,16 @@ reveal_focus :: proc(u: ^State) {
 			if axis == 1 {
 				view.y -= v.inset_end
 			}
-			if pos[axis] < t {
-				t = pos[axis]
-			} else if pos[axis] + size[axis] > t + view[axis] {
-				t = pos[axis] + size[axis] - view[axis]
+			// A box larger than the view, like a table of rows, keeps the
+			// reader's place while any of it shows, and otherwise brings in
+			// its nearer end.
+			lo, hi := pos[axis], pos[axis] + size[axis]
+			if size[axis] > view[axis] && lo < t + view[axis] && hi > t {
+				continue
+			} else if lo < t {
+				t = max(lo, hi - view[axis])
+			} else if hi > t + view[axis] {
+				t = min(lo, hi - view[axis])
 			}
 			t = clamp(t, 0, max(v.view_bounds[axis] - view[axis], 0))
 			if t != v.view_off_target[axis] {
@@ -1501,6 +1511,67 @@ text_input :: proc(u: ^State) -> (input: platform.Text_Input, changed: bool) {
 	u.text_sent = h
 	u.text_resend = false
 	return
+}
+
+// cut_drag_regions takes what's drawn over a Window_Drag box out of its
+// rect where it takes clicks, so a button, a link or a scrollbar under the
+// titlebar gets its press instead of the window moving. The topmost
+// clickable box at each point decides, so a row hidden under a pinned bar
+// doesn't count. A Click_Shield, clickable only to stop presses reaching
+// what's under it, leaves its part of the rect moving the window. Past
+// len(drag_rects) pieces the rest is dropped, which only makes less of the
+// rect a drag region.
+@(private)
+cut_drag_regions :: proc(u: ^State) {
+	out: [len(u.drag_rects)]render.Rect
+	n_out := 0
+	for i in 0 ..< u.drag_count {
+		// The pieces of the rect that no box above them has decided.
+		open: [32]render.Rect
+		open[0] = u.drag_rects[i]
+		n := 1
+		#reverse for h in u.hits[u.drag_from[i]:u.hit_count] {
+			if .Clickable not_in h.flags {
+				continue
+			}
+			for j := 0; j < n; {
+				r := open[j]
+				o := rect_intersect(r, h.rect)
+				if o.w <= 0 || o.h <= 0 {
+					j += 1
+					continue
+				}
+				// r gives way to what's outside h: the bands above and
+				// below it, and beside it within its height.
+				rest := [4]render.Rect {
+					{r.x, r.y, r.w, o.y - r.y},
+					{r.x, o.y + o.h, r.w, r.y + r.h - (o.y + o.h)},
+					{r.x, o.y, o.x - r.x, o.h},
+					{o.x + o.w, o.y, r.x + r.w - (o.x + o.w), o.h},
+				}
+				open[j] = open[n - 1]
+				n -= 1
+				for p in rest {
+					if p.w > 0 && p.h > 0 && n < len(open) {
+						open[n] = p
+						n += 1
+					}
+				}
+				if .Click_Shield in h.flags && n_out < len(out) {
+					out[n_out] = o
+					n_out += 1
+				}
+			}
+		}
+		for p in open[:n] {
+			if n_out < len(out) {
+				out[n_out] = p
+				n_out += 1
+			}
+		}
+	}
+	u.drag_rects = out
+	u.drag_count = n_out
 }
 
 // drag_regions is where a press moves the window, for the shell, valid

@@ -55,6 +55,7 @@ Found :: struct {
 	tracks:   int,
 	artist:   string, // an album's artists, also in subtitle
 	artists:  []Artist_Ref,
+	released: i64, // unix seconds an album came out, 0 when unknown; artist shelves only
 }
 
 FOUND_COVER := [Search_Tab]cover.Kind {
@@ -345,17 +346,23 @@ found_clone :: proc(f: Found_Lists, a: runtime.Allocator) -> Found_Lists {
 	clone :: proc(list: []Found, a: runtime.Allocator) -> []Found {
 		out := make([]Found, len(list), a)
 		for x, i in list {
-			out[i] = x
-			out[i].uuid = strings.clone(x.uuid, a)
-			out[i].name = strings.clone(x.name, a)
-			out[i].subtitle = strings.clone(x.subtitle, a)
-			out[i].image = strings.clone(x.image, a)
-			out[i].artist = strings.clone(x.artist, a)
-			out[i].artists = slice.clone(x.artists, a)
+			out[i] = found_copy(x, a)
 		}
 		return out
 	}
 	return {clone(f.albums, a), clone(f.artists, a), clone(f.playlists, a)}
+}
+
+// found_copy is f with its strings and artists copied into a.
+found_copy :: proc(f: Found, a: runtime.Allocator) -> Found {
+	out := f
+	out.uuid = strings.clone(f.uuid, a)
+	out.name = strings.clone(f.name, a)
+	out.subtitle = strings.clone(f.subtitle, a)
+	out.image = strings.clone(f.image, a)
+	out.artist = strings.clone(f.artist, a)
+	out.artists = slice.clone(f.artists, a)
+	return out
 }
 
 // browse_begin resets the table's selection for a list that isn't a
@@ -480,12 +487,9 @@ search_showing :: proc(s: ^State) -> bool {
 	return s.search.browsing && s.data.view.source == .Search
 }
 
-// search_status is a line for the header while a search is out or failed.
+// search_status says a search is out while its results aren't showing.
 search_status :: proc(s: ^State) -> string {
 	sr := &s.search
-	if sr.error.len > 0 && search_query(s) != "" {
-		return fmt.tprintf("Search failed: %s", small_str(&sr.error))
-	}
 	if (sr.loading || sr.due > 0) && !search_showing(s) {
 		return fmt.tprintf("Searching for “%s”…", search_query(s))
 	}
@@ -625,8 +629,8 @@ draw_found_list :: proc(s: ^State) {
 // and a playlist's is its sidebar entry.
 @(private = "file")
 open_found :: proc(s: ^State, tab: Search_Tab, f: Found) {
-	if s.data.fake && tab == .Playlists {
-		pending_set(s, Playlist_Place{index = int(f.id)})
+	if tab == .Playlists {
+		open_playlist(s, f)
 		return
 	}
 	p := List_Place {
@@ -642,14 +646,21 @@ open_found :: proc(s: ^State, tab: Search_Tab, f: Found) {
 		p.source = .Artist
 		p.id = small(fmt.tprint(f.id))
 		p.hint = 0
-	case .Playlists:
-		p.source = .Playlist
-		p.id = small(f.uuid)
 	}
 	if s.data.fake {
 		p.index = int(f.id)
 	}
 	pending_set(s, p)
+}
+
+// open_playlist opens a found playlist once the frame is done. The fake
+// data's id is its sidebar entry.
+open_playlist :: proc(s: ^State, f: Found) {
+	if s.data.fake {
+		pending_set(s, Playlist_Place{index = int(f.id)})
+		return
+	}
+	pending_set(s, List_Place{source = .Playlist, id = small(f.uuid), name = small(f.name), image = small(f.image), hint = f.tracks})
 }
 
 // view_cover is the cover the list header shows, if any.

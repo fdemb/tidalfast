@@ -32,7 +32,7 @@ import "../ui"
 
 CLEAR_COLOR :: render.Color{0.063, 0.063, 0.063, 1}
 
-STATE_VERSION :: 27
+STATE_VERSION :: 28
 
 FRAME_HISTORY :: 120
 
@@ -84,6 +84,10 @@ State :: struct {
 	// TIDALFAST_BLUR_REFERENCE: the bar is left out, and the shell blurs
 	// where it goes, to compare the renderer's blur with.
 	blur_reference:   bool,
+	// TIDALFAST_STATUS_BAR: a line under the player bar says what's playing
+	// and the status (status_text). Nothing else shows the status.
+	status_bar:       bool,
+	toast:            Toast,
 	drag_sent:    u64, // hash of the drag regions the shell has
 	titlebar_h:   f32, // this frame's Frame_Input.titlebar_height
 	titlebar_inset: f32,
@@ -420,6 +424,7 @@ start :: proc(s: ^State, shell: ^platform.Shell) {
 	s.log_events = os.get_env("TIDALFAST_LOG_EVENTS", context.temp_allocator) != ""
 	s.log_render = os.get_env("TIDALFAST_LOG_RENDER", context.temp_allocator) != ""
 	s.blur_reference = os.get_env("TIDALFAST_BLUR_REFERENCE", context.temp_allocator) != ""
+	s.status_bar = os.get_env("TIDALFAST_STATUS_BAR", context.temp_allocator) != ""
 
 	// TIDALFAST_SPALL=path writes a spall trace of every frame to path. Only
 	// the fd is used after this; the os.File it came from is dropped so State
