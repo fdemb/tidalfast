@@ -58,7 +58,11 @@ Box flags pick what's drawn, in this order: shadow, background (optionally a ver
 
 ### The status bar
 
-`TIDALFAST_STATUS_BAR=1` adds a 22 pt line under the player bar, for agents that check the app through captures and the accessibility tree. It says whether a track is playing, paused or ended, its title and artist, and then the status (`status_text`: a copied link, an add to a playlist, a list's error, TIDAL's rate limit), as "Playing Song by Someone · Added Song to A playlist", or "Nothing playing". It's a static text in the accessibility tree. The views show neither anywhere else. Without the variable the bar isn't built.
+`TIDALFAST_STATUS_BAR=1` adds a 22 pt line under the player bar, for agents that check the app through captures and the accessibility tree. It says whether a track is playing, paused or ended, its title and artist, and then the status (`status_text`: a copied link, an add to a playlist, a list's error, TIDAL's rate limit), as "Playing Song by Someone · Added Song to A playlist", or "Nothing playing". It's a static text in the accessibility tree. The views show neither anywhere else, except errors, which also get a toast.
+
+### The error toast
+
+An error shows in a toast centred over the bottom of the views, 16 pt above the player bar (`src/app/toast.odin`): TIDAL's rate limit with its countdown, a list that failed to load, a failed search, a failed add to a playlist, and `Data.message` (the sidebar, following, the settings, the Keychain). `current_error` picks the most pressing one, and the status bar's text comes from it too. A toast stays 6 s (`TOAST_SECONDS`), longer while the mouse is on it, and a click dismisses it. An error counts as new when its source or text changes, except the rate limit, whose countdown changes every second. The toast asks for a frame at the time it should hide with `ui.wake_at`, and once a second during a rate limit, so it keeps no frames coming while it waits. Playback errors stay in the player bar under the title. Copied links and successful adds show only in the status bar. Without the variable the bar isn't built.
 
 ### The window on macOS
 

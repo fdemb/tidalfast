@@ -487,12 +487,9 @@ search_showing :: proc(s: ^State) -> bool {
 	return s.search.browsing && s.data.view.source == .Search
 }
 
-// search_status is a line for the header while a search is out or failed.
+// search_status says a search is out while its results aren't showing.
 search_status :: proc(s: ^State) -> string {
 	sr := &s.search
-	if sr.error.len > 0 && search_query(s) != "" {
-		return fmt.tprintf("Search failed: %s", small_str(&sr.error))
-	}
 	if (sr.loading || sr.due > 0) && !search_showing(s) {
 		return fmt.tprintf("Searching for “%s”…", search_query(s))
 	}

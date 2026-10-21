@@ -1610,20 +1610,10 @@ view_subtitle :: proc(s: ^State) -> string {
 
 // data_status is a line for the header: rate limiting, errors, or "".
 data_status :: proc(s: ^State) -> string {
-	d := &s.data
-	if d.fake || d.session == nil {
-		return ""
+	if source, text := current_error(s); source != .None && source != .Add {
+		return text
 	}
-	if wait := tidal.backoff_remaining(d.session); wait > 0 {
-		return fmt.tprintf("TIDAL asked us to slow down. Trying again in %d s.", int(wait + 0.5))
-	}
-	if d.view.error.len > 0 {
-		return small_str(&d.view.error)
-	}
-	if status := search_status(s); status != "" {
-		return status
-	}
-	return small_str(&d.message)
+	return search_status(s)
 }
 
 view_count :: proc(s: ^State) -> int {

@@ -227,6 +227,7 @@ draw_library :: proc(s: ^State, w, h: f32) {
 	if s.status_bar {
 		draw_status_bar(s)
 	}
+	draw_toast(s, w, h - status_bar_h(s) - (0 if s.blur_reference else PLAYER_BAR_H))
 	draw_track_menu(s)
 	draw_drag_ghost(s)
 }
