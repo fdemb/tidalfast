@@ -13,7 +13,8 @@ package ui
 //	ui.box_make("", {.Draw_Background})
 //
 // A scope pops itself at the end of the enclosing block. A set_next value
-// goes to the next box built and then is gone, whatever the stack holds.
+// goes to the next box built and then is gone, whatever the stack holds,
+// so open no scope between a set_next and its box.
 
 import "../render"
 import "../text"
@@ -47,26 +48,12 @@ STYLE_DEFAULT :: Style {
 	active_color = {1, 1, 1, 0.06},
 }
 
-@(private)
-Style_Field :: enum {
-	Flags,
-	Font,
-	Font_Size,
-	Text_Color,
-	Text_Align,
-	Text_Pad,
-	Background,
-	Border_Color,
-	Hover_Color,
-	Active_Color,
-	Radius,
-}
-
 Styles :: struct {
 	stack:    Stack(Style),
 	spill:    Style, // written by scopes past STACK_DEPTH
-	next:     Style,
-	next_set: bit_set[Style_Field],
+	next:     Style, // the next box's style, while has_next
+	has_next: bool,
+	misused:  bool, // a scope was opened between a set_next and its box
 }
 
 @(private)
@@ -96,6 +83,7 @@ style_top :: proc(st: ^Styles) -> Style {
 @(private)
 style_push :: proc() -> ^Style {
 	st := &ctx.styles
+	st.misused ||= st.has_next
 	push(&st.stack, style_top(st))
 	if st.stack.count > STACK_DEPTH {
 		return &st.spill
@@ -103,52 +91,31 @@ style_push :: proc() -> ^Style {
 	return &st.stack.items[st.stack.count - 1]
 }
 
+// style_next starts the next box's style from the top, for set_next_*
+// to change.
 @(private)
-style_next :: proc(f: Style_Field) -> ^Style {
-	ctx.styles.next_set += {f}
-	return &ctx.styles.next
+style_next :: proc() -> ^Style {
+	st := &ctx.styles
+	if !st.has_next {
+		st.next = style_top(st)
+		st.has_next = true
+	}
+	return &st.next
 }
 
 @(private)
 style_take :: proc(st: ^Styles, b: ^Box) {
-	s, n := style_top(st), st.next
-	for f in st.next_set {
-		switch f {
-		case .Flags:
-			s.flags = n.flags
-		case .Font:
-			s.font = n.font
-		case .Font_Size:
-			s.font_size = n.font_size
-		case .Text_Color:
-			s.text_color = n.text_color
-		case .Text_Align:
-			s.text_align = n.text_align
-		case .Text_Pad:
-			s.text_pad = n.text_pad
-		case .Background:
-			s.background = n.background
-		case .Border_Color:
-			s.border_color = n.border_color
-		case .Hover_Color:
-			s.hover_color = n.hover_color
-		case .Active_Color:
-			s.active_color = n.active_color
-		case .Radius:
-			s.radius = n.radius
-		}
-	}
 	flags := b.flags
-	b.style = s
+	b.style = st.next if st.has_next else style_top(st)
 	b.flags += flags
-	st.next_set = {}
+	st.has_next = false
 }
 
 @(private)
 styles_clear :: proc(st: ^Styles) -> (balanced: bool) {
-	balanced = st.stack.count == 0 && st.next_set == {}
+	balanced = st.stack.count == 0 && !st.has_next && !st.misused
 	st.stack.count = 0
-	st.next_set = {}
+	st.has_next, st.misused = false, false
 	return
 }
 
@@ -180,14 +147,14 @@ text_style :: proc(f: text.Font, size: f32, color: render.Color) {
 
 // set_next_*: the style of the next box built, whatever the stack holds.
 
-set_next_flags :: proc(v: Box_Flags) {style_next(.Flags).flags = v}
-set_next_font :: proc(v: text.Font) {style_next(.Font).font = v}
-set_next_font_size :: proc(v: f32) {style_next(.Font_Size).font_size = v}
-set_next_text_color :: proc(v: render.Color) {style_next(.Text_Color).text_color = v}
-set_next_text_align :: proc(v: Align) {style_next(.Text_Align).text_align = v}
-set_next_text_pad :: proc(v: f32) {style_next(.Text_Pad).text_pad = v}
-set_next_background :: proc(v: render.Color) {style_next(.Background).background = v}
-set_next_border_color :: proc(v: render.Color) {style_next(.Border_Color).border_color = v}
-set_next_hover_color :: proc(v: render.Color) {style_next(.Hover_Color).hover_color = v}
-set_next_active_color :: proc(v: render.Color) {style_next(.Active_Color).active_color = v}
-set_next_radius :: proc(v: f32) {style_next(.Radius).radius = v}
+set_next_flags :: proc(v: Box_Flags) {style_next().flags = v}
+set_next_font :: proc(v: text.Font) {style_next().font = v}
+set_next_font_size :: proc(v: f32) {style_next().font_size = v}
+set_next_text_color :: proc(v: render.Color) {style_next().text_color = v}
+set_next_text_align :: proc(v: Align) {style_next().text_align = v}
+set_next_text_pad :: proc(v: f32) {style_next().text_pad = v}
+set_next_background :: proc(v: render.Color) {style_next().background = v}
+set_next_border_color :: proc(v: render.Color) {style_next().border_color = v}
+set_next_hover_color :: proc(v: render.Color) {style_next().hover_color = v}
+set_next_active_color :: proc(v: render.Color) {style_next().active_color = v}
+set_next_radius :: proc(v: f32) {style_next().radius = v}

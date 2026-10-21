@@ -1626,8 +1626,9 @@ test_ui_style_scopes_and_set_next :: proc(t: ^testing.T) {
 	testing.expect_value(t, u.style_leaks, 0)
 }
 
-// A frame that leaves a set_next unused or a scope open is reported once,
-// when the next frame starts, and the next frame starts clean.
+// A frame that leaves a set_next unused, or opens a scope between a
+// set_next and its box, is reported once, when the next frame starts, and
+// the next frame starts clean.
 @(test)
 test_ui_style_leak_is_reported :: proc(t: ^testing.T) {
 	u: ui.State
@@ -1652,6 +1653,10 @@ test_ui_style_leak_is_reported :: proc(t: ^testing.T) {
 	ui.end_frame()
 	ui.begin_frame(&u, nil, nil, nil, 300, 200, 0.2)
 	ui.set_next_text_pad(2)
+	{
+		ui.radius(2)
+		ui.box_make("c", {.Draw_Text})
+	}
 	ui.end_frame()
 	ui.begin_frame(&u, nil, nil, nil, 300, 200, 0.3)
 	ui.end_frame()

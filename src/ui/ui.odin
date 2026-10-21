@@ -427,7 +427,7 @@ begin_frame :: proc(u: ^State, events: []platform.Event, r: ^render.Renderer, t:
 	if !styles_clear(&u.styles) {
 		u.style_leaks += 1
 		if u.style_leaks == 1 {
-			log.error("ui: a frame left a style scope open or a set_next unused")
+			log.error("ui: a frame left a style scope open or a set_next unused, or opened a scope between a set_next and its box")
 		}
 	}
 	u.root = new(Box, context.temp_allocator)
