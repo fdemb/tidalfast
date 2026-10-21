@@ -993,6 +993,9 @@ draw_player_bar :: proc(s: ^State, w, h: f32) {
 		ui.spacer(ui.px(14))
 		{
 			ui.row("", {}, ui.fill(), ui.px(36))
+			// Round buttons, 36 pt across.
+			ui.text_align(.Center)
+			ui.radius(18)
 			ui.spacer(ui.fill())
 			shuffle := s.settings.shuffle
 			shuffle_sig := toggle_button("shuffle", text.ICON_SHUFFLE, "Shuffle", "On" if shuffle else "Off", shuffle)
@@ -1112,20 +1115,17 @@ draw_progress :: proc(s: ^State, position, duration: f64, active: bool) {
 	}
 	frac := progress_fraction(playback_position(s), duration)
 	ui.spacer(ui.px(6))
+	ui.radius(2)
 	ui.set_next_background(SURFACE_ACTIVE)
-	ui.set_next_radius(2)
 	ui.row("", {.Draw_Background}, ui.fill(), ui.px(4))
 	ui.set_next_background(mix(SECONDARY, ACCENT, max(slider.hot_t, slider.active_t)))
-	ui.set_next_radius(2)
 	ui.box_make("", {.Draw_Background}, ui.pct(frac, 1), ui.fill())
 }
 
 play_button :: proc(playing: bool) -> ui.Signal {
 	ui.text_style(.Icon_Fill, 18, PANEL)
 	id := text.ICON_PAUSE + "###play" if playing else text.ICON_PLAY + "###play"
-	ui.set_next_text_align(.Center)
 	ui.set_next_background(TEXT)
-	ui.set_next_radius(18)
 	ui.set_next_hover_color({1, 1, 1, 0.5})
 	ui.set_next_active_color({0, 0, 0, 0.15})
 	b := ui.box_make(id, {.Clickable, .Focusable, .Draw_Background, .Draw_Text, .Draw_Hot_Effects, .Draw_Active_Effects}, ui.px(36), ui.px(36))
@@ -1136,8 +1136,6 @@ play_button :: proc(playing: bool) -> ui.Signal {
 skip_button :: proc(id: string, forward: bool) -> ui.Signal {
 	ui.text_style(.Icon_Fill, 18, SECONDARY)
 	icon := text.ICON_SKIP_FORWARD if forward else text.ICON_SKIP_BACK
-	ui.set_next_text_align(.Center)
-	ui.set_next_radius(18)
 	b := ui.box_make(fmt.tprintf("%s###%s", icon, id), {.Clickable, .Focusable, .Draw_Text, .Draw_Hot_Effects, .Draw_Active_Effects}, ui.px(36), ui.px(36))
 	ui.accessible(b, .Button, "Next" if forward else "Previous")
 	return ui.signal(b)
@@ -1146,8 +1144,6 @@ skip_button :: proc(id: string, forward: bool) -> ui.Signal {
 // toggle_button is a transport button lit while on.
 toggle_button :: proc(id, icon, name, value: string, on: bool) -> ui.Signal {
 	ui.text_style(.Icon, 18, ACCENT if on else SECONDARY)
-	ui.set_next_text_align(.Center)
-	ui.set_next_radius(18)
 	b := ui.box_make(fmt.tprintf("%s###%s", icon, id), {.Clickable, .Focusable, .Draw_Text, .Draw_Hot_Effects, .Draw_Active_Effects}, ui.px(36), ui.px(36))
 	ui.accessible(b, .Button, name, value)
 	return ui.signal(b)
@@ -1164,11 +1160,10 @@ draw_volume :: proc(s: ^State, width: f32) {
 	}
 	ui.spacer(ui.fill())
 	{
+		ui.radius(2)
 		ui.set_next_background(SURFACE_ACTIVE)
-		ui.set_next_radius(2)
 		ui.row("", {.Draw_Background}, ui.fill(), ui.px(4))
 		ui.set_next_background(mix(SECONDARY, ACCENT, max(slider.hot_t, slider.active_t)))
-		ui.set_next_radius(2)
 		ui.box_make("", {.Draw_Background}, ui.pct(s.settings.volume, 1), ui.fill())
 	}
 	ui.spacer(ui.fill())
