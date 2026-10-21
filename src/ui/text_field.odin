@@ -43,7 +43,7 @@ text_field :: proc(id: string, f: ^Text_Field, placeholder: string, width, heigh
 	focused := b.key != 0 && u.focus == b.key
 	sig.focused = focused
 	old := clone_temp(field_text(f))
-	font, size := u.font, u.font_size
+	font, size := b.font, b.font_size
 
 	if focused && !f.had_focus {
 		f.blink_start = u.time

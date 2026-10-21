@@ -228,11 +228,6 @@ Shortcut :: struct {
 	target: Key,
 }
 
-Stack :: struct($T: typeid) {
-	items: [STACK_DEPTH]T,
-	count: int,
-}
-
 State :: struct {
 	boxes:          []Box, // the pool keyed boxes come from
 	boxes_used:     int,
@@ -254,9 +249,8 @@ State :: struct {
 	root:           ^Box,
 	floating_root:  ^Box,
 	parents:        Stack(^Box),
-	font:           text.Font,
-	font_size:      f32,
-	text_color:     render.Color,
+	styles:         Style_Stacks,
+	style_leaks:    int, // frames that ended with a style scope open or a set_next unused
 
 	input:          Input,
 	hot:            Key,
@@ -339,9 +333,6 @@ init :: proc(u: ^State) {
 	u.boxes = make([]Box, MAX_BOXES)
 	u.table = make([]^Box, BOX_TABLE)
 	u.hits = make([]Hit, MAX_BOXES)
-	u.font = .Regular
-	u.font_size = 13
-	u.text_color = {1, 1, 1, 1}
 }
 
 // Sizes
@@ -443,6 +434,10 @@ begin_frame :: proc(u: ^State, events: []platform.Event, r: ^render.Renderer, t:
 	u.shortcut_count = 0
 
 	u.parents.count = 0
+	if !styles_clear(&u.styles) {
+		u.style_leaks += 1
+		log.error("ui: the last frame left a style scope open or a set_next unused")
+	}
 	u.root = new(Box, context.temp_allocator)
 	u.root.pref_size = {.X = px(width), .Y = px(height)}
 	u.root.child_axis = .Y
@@ -1158,13 +1153,9 @@ box_make :: proc(id: string, flags: Box_Flags = {}, width: Size = {}, height: Si
 	b.flags = flags
 	b.id = id
 	b.label = label_from_string(id)
-	b.font = u.font
-	b.font_size = u.font_size
-	b.text_color = u.text_color
-	b.hover_color = {1, 1, 1, 0.06}
-	b.active_color = {1, 1, 1, 0.06}
 	b.opacity = 1
-	is_text := .Draw_Text in flags && b.label != ""
+	style_take(&u.styles, b)
+	is_text := .Draw_Text in b.flags && b.label != ""
 	b.pref_size[.X] = width if width.kind != .Null else (text_size() if is_text else children_sum())
 	b.pref_size[.Y] = height if height.kind != .Null else (text_size() if is_text else children_sum())
 	if parent != nil {
@@ -1177,7 +1168,7 @@ box_make :: proc(id: string, flags: Box_Flags = {}, width: Size = {}, height: Si
 		b.active_t = approach(u, b.active_t, 1 if u.active[.Left] == b.key else 0, rate, 0.002)
 		b.focus_t = approach(u, b.focus_t, 1 if u.focus == b.key && u.focus_visible else 0, rate, 0.002)
 	}
-	if .View_Scroll in flags && b.key != 0 {
+	if .View_Scroll in b.flags && b.key != 0 {
 		scroll_box(u, b)
 		b.built_size = {b.rect.w, b.rect.h}
 	}
@@ -1327,28 +1318,6 @@ column :: proc(id: string = "", flags: Box_Flags = {}, width: Size = {}, height:
 	b.child_axis = .Y
 	push_parent(b)
 	return b
-}
-
-Text_Style :: struct {
-	font:  text.Font,
-	size:  f32,
-	color: render.Color,
-}
-
-@(private)
-restore_text_style :: proc(old: Text_Style) {
-	u := ctx
-	u.font, u.font_size, u.text_color = old.font, old.size, old.color
-}
-
-// text_style sets the font, size and colour of boxes built until the end
-// of the scope.
-@(deferred_out = restore_text_style)
-text_style :: proc(font: text.Font, size: f32, color: render.Color) -> Text_Style {
-	u := ctx
-	old := Text_Style{u.font, u.font_size, u.text_color}
-	u.font, u.font_size, u.text_color = font, size, color
-	return old
 }
 
 // Queries for the app
