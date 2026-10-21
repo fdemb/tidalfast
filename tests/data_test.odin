@@ -212,7 +212,7 @@ cover_decode_premultiplies :: proc(t: ^testing.T) {
 		append(out, ..([^]u8)(data)[:size])
 	}
 	stbi.write_png_to_func(write, &png, 2, 1, 4, &src, 8)
-	pixels, w, h, _, ok := cover.decode(png[:])
+	pixels, w, h, ok := cover.decode(png[:])
 	defer cover.free_pixels(pixels)
 	testing.expect(t, ok)
 	testing.expect_value(t, w, 2)
@@ -236,7 +236,7 @@ cover_decode_scales_to_size :: proc(t: ^testing.T) {
 		append(out, ..([^]u8)(data)[:size])
 	}
 	stbi.write_png_to_func(write, &png, 8, 8, 4, &src, 8 * 4)
-	pixels, w, h, _, ok := cover.decode(png[:], 4)
+	pixels, w, h, ok := cover.decode(png[:], 4)
 	defer cover.free_pixels(pixels)
 	testing.expect(t, ok)
 	testing.expect_value(t, [2]int{w, h}, [2]int{4, 4})
@@ -244,65 +244,6 @@ cover_decode_scales_to_size :: proc(t: ^testing.T) {
 	// Averaged in linear light: half white is 188 in sRGB, not 128.
 	testing.expect(t, pixels[4 * 5] > 170 && pixels[4 * 5] < 205, fmt.tprint(pixels[4 * 5]))
 	testing.expect_value(t, pixels[4 * 5 + 3], 255)
-}
-
-// A cover's tint keeps its colour, even when most of the cover is grey,
-// and is dark enough for white text: a white cover gives a mid grey and a
-// black one stays dark grey, not black.
-@(test)
-cover_tint_from_pixels :: proc(t: ^testing.T) {
-	W :: 32
-	px: [W * W * 4]u8
-	fill :: proc(px: []u8, c: [4]u8) {
-		for i := 0; i < len(px); i += 4 {
-			px[i], px[i + 1], px[i + 2], px[i + 3] = c.r, c.g, c.b, c.a
-		}
-	}
-	value :: proc(c: [3]u8) -> f32 {
-		return f32(max(c.r, c.g, c.b)) / 255
-	}
-	fill(px[:], {255, 255, 255, 255})
-	white := cover.tint(px[:], W, W)
-	testing.expect(t, white.r == white.g && white.g == white.b, "white gives a grey")
-	testing.expect(t, abs(value(white) - cover.TINT_VALUE_MAX) < 0.01, fmt.tprint(white))
-
-	fill(px[:], {0, 0, 0, 255})
-	black := cover.tint(px[:], W, W)
-	testing.expect(t, abs(value(black) - cover.TINT_VALUE_MIN) < 0.01, fmt.tprint(black))
-
-	// A grey cover with a red quarter.
-	fill(px[:], {128, 128, 128, 255})
-	for y in 0 ..< W / 2 {
-		for x in 0 ..< W / 2 {
-			i := (y * W + x) * 4
-			px[i], px[i + 1], px[i + 2] = 230, 20, 30
-		}
-	}
-	red := cover.tint(px[:], W, W)
-	testing.expect(t, red.r > red.g && red.r > red.b, fmt.tprint(red))
-	testing.expect(t, value(red) <= cover.TINT_VALUE_MAX + 0.01, fmt.tprint(red))
-	sat := f32(int(red.r) - int(min(red.g, red.b))) / f32(red.r)
-	testing.expect(t, sat > 0.3 && sat <= cover.TINT_SATURATION + 0.02, fmt.tprint(red, sat))
-}
-
-// decode works the tint out on the worker, from the pixels it decoded.
-@(test)
-cover_decode_tints :: proc(t: ^testing.T) {
-	src: [4 * 4 * 4]u8
-	for i := 0; i < len(src); i += 4 {
-		src[i], src[i + 1], src[i + 2], src[i + 3] = 20, 40, 220, 255
-	}
-	png := make([dynamic]u8, context.temp_allocator)
-	write :: proc "c" (ctx: rawptr, data: rawptr, size: i32) {
-		context = runtime.default_context()
-		out := (^[dynamic]u8)(ctx)
-		append(out, ..([^]u8)(data)[:size])
-	}
-	stbi.write_png_to_func(write, &png, 4, 4, 4, &src, 4 * 4)
-	pixels, _, _, tint, ok := cover.decode(png[:])
-	defer cover.free_pixels(pixels)
-	testing.expect(t, ok)
-	testing.expect(t, tint.b > tint.r && tint.b > tint.g, fmt.tprint(tint))
 }
 
 @(test)
@@ -425,7 +366,7 @@ png_of :: proc(src: []u8, w, h, channels: int) -> []u8 {
 cover_decode_refuses_huge_images :: proc(t: ^testing.T) {
 	w, h := 8192, 2049 // just over 4096 * 4096 pixels
 	png := png_of(make([]u8, w * h, context.temp_allocator), w, h, 1)
-	pixels, _, _, _, ok := cover.decode(png, 80)
+	pixels, _, _, ok := cover.decode(png, 80)
 	defer cover.free_pixels(pixels)
 	testing.expect(t, !ok)
 }
@@ -444,9 +385,9 @@ cover_decode_premultiplies_gray_alpha :: proc(t: ^testing.T) {
 	gray_png := png_of(gray[:], 4, 4, 2)
 	rgba_png := png_of(rgba[:], 4, 4, 4)
 	for px in ([]int{0, 2}) {
-		got, w, h, _, ok := cover.decode(gray_png, px)
+		got, w, h, ok := cover.decode(gray_png, px)
 		defer cover.free_pixels(got)
-		want, _, _, _, _ := cover.decode(rgba_png, px)
+		want, _, _, _ := cover.decode(rgba_png, px)
 		defer cover.free_pixels(want)
 		testing.expect(t, ok)
 		testing.expect_value(t, [2]int{w, h}, [2]int{4, 4} if px == 0 else [2]int{px, px})
@@ -483,7 +424,7 @@ cover_decode_premultiplies_trns :: proc(t: ^testing.T) {
 	chunk(&png, "tRNS", {0, 200})
 	chunk(&png, "IDAT", idat[:])
 	chunk(&png, "IEND", nil)
-	pixels, w, h, _, ok := cover.decode(png[:])
+	pixels, w, h, ok := cover.decode(png[:])
 	defer cover.free_pixels(pixels)
 	testing.expect(t, ok)
 	testing.expect_value(t, [2]int{w, h}, [2]int{2, 1})

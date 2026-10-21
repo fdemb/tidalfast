@@ -419,9 +419,8 @@ hero_background :: proc(s: ^State, page: ^Artist_Page, w, h: f32) {
 }
 
 // pill is a round-ended button with an icon and a label, light for the
-// main action.
-@(private = "file")
-pill :: proc(id, icon, label: string, light, enabled: bool) -> ui.Signal {
+// main action. name is what a screen reader says, label when "".
+pill :: proc(id, icon, label: string, light, enabled: bool, name := "") -> ui.Signal {
 	flags := ui.Box_Flags{.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects}
 	if !enabled {
 		flags += {.Disabled}
@@ -431,7 +430,7 @@ pill :: proc(id, icon, label: string, light, enabled: bool) -> ui.Signal {
 	b.background = TEXT if light else SURFACE
 	b.hover_color = SECONDARY if light else SURFACE_ACTIVE
 	b.opacity = 1 if enabled else 0.5
-	ui.accessible(b, .Button, label)
+	ui.accessible(b, .Button, name if name != "" else label)
 	fg := WINDOW_BG if light else TEXT
 	ui.spacer(ui.px(18))
 	ui.text_style(.Icon_Fill if light else .Icon, 16, fg)

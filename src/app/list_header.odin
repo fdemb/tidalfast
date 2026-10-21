@@ -1,11 +1,11 @@
 package app
 
-// The track list's header, after Spotify's album and playlist pages. It
-// scrolls with the rows, in the same scroll view: the hero (the cover, the
-// kind of list, its title and a line about it) over a wash of the cover's
-// tint, then Play, Shuffle and More, then the column headings. Once Play
-// has scrolled under the top, a bar with Play and the title is pinned
-// there, with a copy of the headings under it. An album ends in a footer:
+// The track list's header, laid out like Spotify's album and playlist
+// pages and drawn like the artist page. It scrolls with the rows, in the
+// same scroll view: the hero (the cover, the kind of list, its title and a
+// line about it), then Play, Shuffle and More, then the column headings.
+// Once Play has scrolled under the top, a bar with the cover, the title and
+// Play is pinned there, with a copy of the headings under it. An album ends in a footer:
 // its release date, its length and more by its artist.
 //
 // Every part has a fixed height (List_Header), so a frame knows where row 0
@@ -20,19 +20,17 @@ import "core:strconv"
 import "core:time"
 
 import "../cover"
-import "../render"
 import "../text"
 import "../ui"
 
 HERO_PAD :: 24 // above and below the hero's cover
 HERO_COVER_MIN :: 160
 HERO_COVER_MAX :: 232
-ACTIONS_H :: 88 // Play, Shuffle and More
-LIST_PLAY :: 56 // the round Play button
+ACTIONS_H :: 72 // Play, Shuffle and More
 COMPACT_H :: 64 // the pinned bar, under the titlebar
-COMPACT_PLAY :: 44
-TITLE_MAX :: 72
-TITLE_MIN :: 28
+COMPACT_COVER :: 40
+COMPACT_PLAY :: 36 // the pinned bar's round Play button
+TITLE_SIZE :: 32
 // Points of scrolling over which the pinned bar's background, then its
 // Play button and title, fade in.
 BAR_FADE :: 48
@@ -97,17 +95,6 @@ header_collapse :: proc(h: List_Header, offset: f32) -> (c: Header_Collapse) {
 	return
 }
 
-// title_size is the hero title's font size: TITLE_MAX, or smaller so it
-// fits width when it's wide at TITLE_MAX, in steps of 4 so resizing the
-// window shapes it at few sizes, and no smaller than TITLE_MIN, below which
-// its end is cut off.
-title_size :: proc(wide, width: f32) -> f32 {
-	if wide <= width || wide <= 0 {
-		return TITLE_MAX
-	}
-	return clamp(math.floor(TITLE_MAX * width / wide / 4) * 4, TITLE_MIN, TITLE_MAX)
-}
-
 // list_duration is a list's length as Spotify writes it: "51 min 2 sec",
 // or "3 hr 20 min" from an hour.
 list_duration :: proc(seconds: int) -> string {
@@ -141,60 +128,37 @@ hero_art :: proc(s: ^State, kind: List_Kind, h: List_Header) -> (a: Hero_Art) {
 	return
 }
 
-// header_tint is the colour the header is washed with: the cover's tint
-// once the cover has come, fading in with it, and before that or without
-// one a colour of the stand-in gradient's hue.
-header_tint :: proc(s: ^State, a: Hero_Art) -> render.Color {
-	hue := f32(a.seed % 997) / 997
-	c := hsv(hue, 0.5, 0.4)
-	if a.side <= 0 {
-		return c
-	}
-	e := cover_want(s, a.kind, a.id, a.side, PRIORITY_COVER)
-	if e == nil || e.state != .Ready {
-		return c
-	}
-	t := cover.alpha(e, s.ui.time)
-	if t < 1 {
-		ui.request_frame()
-	}
-	return mix(c, {f32(e.tint.r) / 255, f32(e.tint.g) / 255, f32(e.tint.b) / 255, 1}, t)
-}
-
 LIST_KIND_NAMES := [List_Kind]string {
-	.Playlist = "Playlist",
-	.Album    = "Album",
-	.Artist   = "Top tracks",
+	.Playlist = "PLAYLIST",
+	.Album    = "ALBUM",
+	.Artist   = "TOP TRACKS",
 	.Search   = "",
 }
 
 // draw_list_hero is the hero, width wide less the scrollbar's gutter.
 // artist is the album's artist's page, for the album's year.
-draw_list_hero :: proc(s: ^State, h: List_Header, kind: List_Kind, art: Hero_Art, tint: render.Color, width: f32, artist: ^Artist_Page) {
-	hero := ui.column("hero", {.Draw_Background}, ui.fill(), ui.px(h.hero))
-	hero.background = tint
-	hero.gradient = mix(tint, WINDOW_BG, 0.45)
+draw_list_hero :: proc(s: ^State, h: List_Header, kind: List_Kind, art: Hero_Art, artist: ^Artist_Page) {
+	ui.column("hero", {}, ui.fill(), ui.px(h.hero))
 	ui.spacer(ui.px(h.under + HERO_PAD))
 	ui.row("", {}, ui.fill(), ui.px(art.side))
 	ui.spacer(ui.px(LIST_PAD + 8))
 	{
 		frame := ui.box_make("", {.Draw_Shadow}, ui.px(art.side), ui.px(art.side))
-		frame.radius = art.side / 2 if art.kind == .Artist else 6
+		frame.radius = art.side / 2 if art.kind == .Artist else 4
 		ui.parent(frame)
 		cover_art(s, art.kind, art.id, art.seed, art.side, ui.fill(), frame.radius)
 	}
 	ui.spacer(ui.px(24))
 	ui.column("", {}, ui.fill(), ui.fill())
 	ui.spacer(ui.fill())
-	ui.text_style(.Medium, 13, TEXT)
-	ui.label(LIST_KIND_NAMES[kind], ui.fill(), ui.px(20))
+	ui.text_style(.Semibold, 11, DIM)
+	ui.label(LIST_KIND_NAMES[kind], ui.fill(), ui.px(18))
+	ui.spacer(ui.px(4))
 	title := view_title(s)
-	room := width - (LIST_PAD + 8) - art.side - 24 - LIST_PAD
-	size := title_size(ui.text_width(.Bold, TITLE_MAX, title), room)
-	ui.text_style(.Bold, size, TEXT)
-	t := ui.label(title, ui.fill(), ui.px(math.ceil(size * 1.25)))
+	ui.text_style(.Bold, TITLE_SIZE, TEXT)
+	t := ui.label(title, ui.fill(), ui.px(TITLE_SIZE * 1.25))
 	ui.accessible(t, .Static_Text, title)
-	ui.spacer(ui.px(8))
+	ui.spacer(ui.px(10))
 	draw_list_meta(s, kind, artist)
 	ui.spacer(ui.px(4))
 }
@@ -269,42 +233,64 @@ release_date :: proc(unix: i64) -> (year: int, date: string) {
 	return y, fmt.tprintf("%s %d, %d", MONTH_NAMES[int(m) - 1], d, y)
 }
 
-// draw_list_actions is Play, Shuffle and More, over the end of the
-// header's wash.
-draw_list_actions :: proc(s: ^State, kind: List_Kind, h: List_Header, tint: render.Color) {
-	row := ui.row("list_actions", {.Draw_Background}, ui.fill(), ui.px(h.actions))
-	row.background = mix(tint, WINDOW_BG, 0.7)
-	row.gradient = WINDOW_BG
+// draw_list_actions is Play, Shuffle and More, as pills like the artist
+// page's.
+draw_list_actions :: proc(s: ^State, kind: List_Kind, h: List_Header) {
+	ui.row("list_actions", {}, ui.fill(), ui.px(h.actions))
 	title := view_title(s)
 	ui.spacer(ui.px(LIST_PAD + 8))
-	list_play_button(s, "list_play", LIST_PLAY)
-	ui.spacer(ui.px(20))
-	shuffle, shuffle_sig := icon_button("list_shuffle", text.ICON_SHUFFLE, .Icon, fmt.tprintf("Shuffle %s", title), TEXT, 1, 44, {.Focusable})
-	shuffle.font_size = 26
-	shuffle.radius = 22
-	shuffle.text_color = mix(SECONDARY, TEXT, shuffle.hot_t)
-	if shuffle_sig.clicked {
-		pending_set(s, Play_Row{order = .Shuffled})
+	{
+		ui.column("", {}, ui.children_sum(), ui.fill())
+		ui.spacer(ui.fill())
+		ours, playing, enabled := list_play_state(s)
+		label := "Pause" if playing else "Play"
+		icon := text.ICON_PAUSE if playing else text.ICON_PLAY
+		if pill("list_play", icon, label, true, enabled, fmt.tprintf("%s %s", label, title)).clicked {
+			list_play(s, ours)
+		}
+		ui.spacer(ui.fill())
 	}
-	ui.tooltip(shuffle_sig, "Shuffle")
+	ui.spacer(ui.px(12))
+	{
+		ui.column("", {}, ui.children_sum(), ui.fill())
+		ui.spacer(ui.fill())
+		if pill("list_shuffle", text.ICON_SHUFFLE, "Shuffle", false, row_playable(s, 0), fmt.tprintf("Shuffle %s", title)).clicked {
+			pending_set(s, Play_Row{order = .Shuffled})
+		}
+		ui.spacer(ui.fill())
+	}
 	ui.spacer(ui.px(8))
-	more, more_sig := icon_button("list_more", text.ICON_DOTS_THREE, .Icon, fmt.tprintf("More options for %s", title), TEXT, 1, 44, {.Focusable})
-	more.font_size = 26
-	more.radius = 22
-	more.text_color = mix(SECONDARY, TEXT, more.hot_t)
+	more, more_sig := icon_button("list_more", text.ICON_DOTS_THREE, .Icon, fmt.tprintf("More options for %s", title), TEXT, 1, 40, {.Focusable})
+	more.radius = 20
 	if more_sig.clicked {
 		ui.open_menu("list_menu", {more.rect.x, more.rect.y + more.rect.h})
 	}
 	ui.tooltip(more_sig, "More")
 }
 
-// list_play_button is the round Play button, side across: Play from the
-// first song, or Pause and Play while a song of this list is playing.
+// list_play_state is whether a song of the open list is what's playing,
+// whether it's playing now, and whether Play can do anything.
+list_play_state :: proc(s: ^State) -> (ours, playing, enabled: bool) {
+	ours = s.library.playing >= 0
+	playing = ours && playback_playing(s)
+	enabled = ours || row_playable(s, 0)
+	return
+}
+
+// list_play plays the open list from the top, or pauses or resumes it
+// while one of its songs is playing.
+list_play :: proc(s: ^State, ours: bool) {
+	if ours {
+		playback_toggle(s)
+		ui.data_changed()
+	} else {
+		pending_set(s, Play_Row{order = .In_Order})
+	}
+}
+
+// list_play_button is the pinned bar's round Play button, side across.
 list_play_button :: proc(s: ^State, id: string, side: f32) {
-	lib := &s.library
-	ours := lib.playing >= 0
-	playing := ours && playback_playing(s)
-	enabled := ours || row_playable(s, 0)
+	ours, playing, enabled := list_play_state(s)
 	ui.column("", {}, ui.px(side), ui.fill())
 	ui.spacer(ui.fill())
 	flags := ui.Box_Flags{.Clickable, .Focusable, .Draw_Background, .Draw_Text, .Draw_Hot_Effects, .Draw_Active_Effects}
@@ -317,21 +303,16 @@ list_play_button :: proc(s: ^State, id: string, side: f32) {
 	b.font_size = math.round(side * 0.4)
 	b.text_color = WINDOW_BG
 	b.text_align = .Center
-	b.background = ACCENT
+	b.background = TEXT
 	b.radius = side / 2
-	b.hover_color = {1, 1, 1, 0.3}
+	b.hover_color = SECONDARY
 	b.active_color = {0, 0, 0, 0.15}
 	b.opacity = 1 if enabled else 0.5
 	ui.accessible(b, .Button, fmt.tprintf("%s %s", "Pause" if playing else "Play", view_title(s)))
 	ui.spacer(ui.fill())
 	sig := ui.signal(b)
 	if sig.clicked {
-		if ours {
-			playback_toggle(s)
-			ui.data_changed()
-		} else {
-			pending_set(s, Play_Row{order = .In_Order})
-		}
+		list_play(s, ours)
 	}
 	ui.tooltip(sig, "Pause" if playing else "Play")
 }
@@ -386,7 +367,7 @@ list_link :: proc(s: ^State) -> (link, name: string) {
 // draw_pinned_header pins the bar and the headings to the top of list,
 // which is the parent, once the header has scrolled under. It's built
 // after the rows, so it's drawn over them and takes the clicks there.
-draw_pinned_header :: proc(s: ^State, list: ^ui.Box, h: List_Header, cols: Track_Columns, tint: render.Color) {
+draw_pinned_header :: proc(s: ^State, list: ^ui.Box, h: List_Header, cols: Track_Columns, art: Hero_Art) {
 	c := header_collapse(h, list.view_off.y)
 	if c.bar <= 0 && !c.pinned {
 		return
@@ -401,18 +382,26 @@ draw_pinned_header :: proc(s: ^State, list: ^ui.Box, h: List_Header, cols: Track
 	pin.fixed_pos = {0, list.view_off.y}
 	if h.bar > 0 {
 		bar := ui.column("", {.Draw_Background}, ui.fill(), ui.px(h.bar))
-		bar.background = mix(tint, WINDOW_BG, 0.3)
+		bar.background = PANEL
 		bar.background.a = c.bar
 		ui.spacer(ui.px(h.under))
 		if c.content > 0 {
 			row := ui.row("", {}, ui.fill(), ui.px(COMPACT_H))
 			row.opacity = c.content
 			ui.spacer(ui.px(LIST_PAD + 8))
-			list_play_button(s, "pinned_play", COMPACT_PLAY)
-			ui.spacer(ui.px(14))
-			ui.text_style(.Bold, 24, TEXT)
+			{
+				ui.column("", {}, ui.px(COMPACT_COVER), ui.fill())
+				ui.spacer(ui.fill())
+				radius: f32 = COMPACT_COVER / 2 if art.kind == .Artist else 4
+				cover_art(s, art.kind, art.id, art.seed, COMPACT_COVER, ui.px(COMPACT_COVER), radius)
+				ui.spacer(ui.fill())
+			}
+			ui.spacer(ui.px(12))
+			ui.text_style(.Semibold, 16, TEXT)
 			ui.label(view_title(s), ui.fill(), ui.fill())
-			ui.spacer(ui.px(LIST_PAD))
+			ui.spacer(ui.px(12))
+			list_play_button(s, "pinned_play", COMPACT_PLAY)
+			ui.spacer(ui.px(LIST_PAD + 8))
 		}
 	}
 	if c.pinned {

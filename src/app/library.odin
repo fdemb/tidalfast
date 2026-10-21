@@ -445,7 +445,6 @@ draw_track_list :: proc(s: ^State, main_w, under: f32) {
 	rows_top := header_rows_top(h)
 	n := view_count(s)
 	art := hero_art(s, kind, h)
-	tint := header_tint(s, art)
 	artist := album_artist_page(s) if kind == .Album else nil
 	defer draw_list_menu(s, kind)
 
@@ -466,8 +465,8 @@ draw_track_list :: proc(s: ^State, main_w, under: f32) {
 	lib.top_offset = list.view_off.y - rows_top - f32(lib.top_row) * TRACK_ROW_H
 
 	if list.view_off.y < header_table_y(h) {
-		draw_list_hero(s, h, kind, art, tint, main_w - list.gutter, artist)
-		draw_list_actions(s, kind, h, tint)
+		draw_list_hero(s, h, kind, art, artist)
+		draw_list_actions(s, kind, h)
 	} else {
 		ui.spacer(ui.px(header_table_y(h)))
 	}
@@ -498,7 +497,7 @@ draw_track_list :: proc(s: ^State, main_w, under: f32) {
 	if kind == .Album {
 		draw_album_footer(s, list, artist, rows_top + f32(n) * TRACK_ROW_H + LIST_PAD_Y, main_w - list.gutter)
 	}
-	draw_pinned_header(s, list, h, cols, tint)
+	draw_pinned_header(s, list, h, cols, art)
 }
 
 // table_header is the column headings over the rows, and the line under

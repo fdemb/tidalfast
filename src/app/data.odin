@@ -1097,7 +1097,6 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 			cover.set_failed(&d.covers, key, now)
 			return
 		}
-		e.tint = img.tint
 		r := &s.renderer
 		if page.texture == 0 {
 			_, side := cover.page_layout(int(page.px))

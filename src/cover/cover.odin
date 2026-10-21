@@ -83,7 +83,6 @@ Entry :: struct {
 	wanted_frame: u64, // last frame something asked for it
 	priority:     u8, // lowest priority asked for in wanted_frame
 	ready_time:   f64, // or when it failed
-	tint:         [3]u8, // Ready: a dark colour from the cover for a header behind it, see tint
 }
 
 // Covers share textures: a page holds a grid of covers of one pixel size,
@@ -386,34 +385,32 @@ alpha :: proc(e: ^Entry, now: f64) -> f32 {
 // With px set it scales the image to px square first, filtering in linear
 // light, so the texture is drawn at exactly its size and needs no mipmaps.
 // The pixels are malloc'd; free them with free_pixels. Safe on any thread.
-// An image over MAX_SOURCE_PIXELS is refused from its header. tint is the
-// image's tint, worked out here so the UI thread never reads pixels.
-decode :: proc(data: []u8, px := 0) -> (pixels: []u8, w, h: int, tint_rgb: [3]u8, ok: bool) {
+// An image over MAX_SOURCE_PIXELS is refused from its header.
+decode :: proc(data: []u8, px := 0) -> (pixels: []u8, w, h: int, ok: bool) {
 	x, y, channels: i32
 	if stbi.info_from_memory(raw_data(data), i32(len(data)), &x, &y, &channels) == 0 || int(x) * int(y) > MAX_SOURCE_PIXELS {
-		return
+		return nil, 0, 0, false
 	}
 	p := stbi.load_from_memory(raw_data(data), i32(len(data)), &x, &y, &channels, 4)
 	if p == nil {
-		return
+		return nil, 0, 0, false
 	}
 	if px > 0 && (x != i32(px) || y != i32(px)) {
 		out := ([^]u8)(libc.malloc(uint(px * px * 4)))
 		if out == nil {
 			stbi.image_free(p)
-			return
+			return nil, 0, 0, false
 		}
 		// Straight alpha in: stb weights the colours by alpha itself.
 		resized := stbi.resize_uint8_srgb(p, x, y, 0, out, i32(px), i32(px), 0, 4, 3, 0) != 0
 		stbi.image_free(p)
 		if !resized {
 			libc.free(out)
-			return
+			return nil, 0, 0, false
 		}
 		p, x, y = out, i32(px), i32(px)
 	}
 	pixels = p[:x * y * 4]
-	tint_rgb = tint(pixels, int(x), int(y))
 	// stb_image gives straight alpha. JPEGs are opaque, so this is only a
 	// scan for them; a PNG with transparency gets premultiplied first.
 	if channels == 2 || channels == 4 {
@@ -427,62 +424,7 @@ decode :: proc(data: []u8, px := 0) -> (pixels: []u8, w, h: int, tint_rgb: [3]u8
 		}
 	}
 	render.convert_premultiplied(pixels)
-	return pixels, int(x), int(y), tint_rgb, true
-}
-
-TINT_GRID :: 16 // samples across and down
-TINT_SATURATION :: 0.6
-TINT_VALUE_MIN :: 0.22
-TINT_VALUE_MAX :: 0.46
-
-// tint is a colour from straight RGBA8 pixels, w by h, for a header that
-// white text sits on: the average of a grid of samples in which vivid,
-// bright pixels count more than grey or dark ones, so a cover's colour
-// isn't lost in its background, then toned down by tint_clamp.
-tint :: proc(pixels: []u8, w, h: int) -> [3]u8 {
-	if w <= 0 || h <= 0 || len(pixels) < w * h * 4 {
-		return {}
-	}
-	sum: [3]f32
-	total: f32
-	for gy in 0 ..< TINT_GRID {
-		for gx in 0 ..< TINT_GRID {
-			x := (2 * gx + 1) * w / (2 * TINT_GRID)
-			y := (2 * gy + 1) * h / (2 * TINT_GRID)
-			i := (y * w + x) * 4
-			c := [3]f32{f32(pixels[i]), f32(pixels[i + 1]), f32(pixels[i + 2])} / 255
-			hi := max(c.r, c.g, c.b)
-			sat := (hi - min(c.r, c.g, c.b)) / max(hi, 1e-3)
-			weight := (0.1 + sat * hi) * f32(pixels[i + 3]) / 255
-			sum += c * weight
-			total += weight
-		}
-	}
-	if total <= 0 {
-		return {}
-	}
-	c := tint_clamp(sum / total)
-	return {u8(c.r * 255 + 0.5), u8(c.g * 255 + 0.5), u8(c.b * 255 + 0.5)}
-}
-
-// tint_clamp keeps c's hue and brings its brightness and saturation into
-// the range where white text on it reads well and it doesn't glare.
-tint_clamp :: proc(c: [3]f32) -> [3]f32 {
-	hi := max(c.r, c.g, c.b)
-	lo := min(c.r, c.g, c.b)
-	sat := (hi - lo) / hi if hi > 0 else 0
-	v := clamp(hi, TINT_VALUE_MIN, TINT_VALUE_MAX)
-	s := min(sat, TINT_SATURATION)
-	if sat <= 0 {
-		return v
-	}
-	// Each channel's distance below the brightest, scaled to the new
-	// saturation and brightness.
-	out: [3]f32
-	for k in 0 ..< 3 {
-		out[k] = v - (hi - c[k]) / (hi - lo) * s * v
-	}
-	return out
+	return pixels, int(x), int(y), true
 }
 
 free_pixels :: proc(pixels: []u8) {

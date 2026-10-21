@@ -248,10 +248,7 @@ test_header_collapse :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_title_size :: proc(t: ^testing.T) {
-	testing.expect_value(t, app.title_size(400, 600), f32(app.TITLE_MAX))
-	testing.expect_value(t, app.title_size(800, 600), f32(52)) // 54 down to a step of 4
-	testing.expect_value(t, app.title_size(8000, 600), f32(app.TITLE_MIN))
+test_list_duration :: proc(t: ^testing.T) {
 	testing.expect_value(t, app.list_duration(51 * 60 + 2), "51 min 2 sec")
 	testing.expect_value(t, app.list_duration(3 * 3600 + 20 * 60 + 59), "3 hr 20 min")
 }
