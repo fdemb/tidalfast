@@ -414,10 +414,10 @@ draw_main_view :: proc(s: ^State, main_w: f32) {
 	draw_track_list(s, main_w, under)
 }
 
-// draw_search_header is the search results' title, what was found and the
-// status line, above the tabs.
+// draw_search_header is the search results' title and what was found,
+// above the tabs.
 draw_search_header :: proc(s: ^State) {
-	ui.row("", {}, ui.fill(), ui.px(124))
+	ui.row("", {}, ui.fill(), ui.px(106))
 	ui.spacer(ui.px(24))
 	ui.column("", {}, ui.fill(), ui.fill())
 	ui.spacer(ui.px(26))
@@ -427,9 +427,6 @@ draw_search_header :: proc(s: ^State) {
 	ui.text_style(.Regular, 13, SECONDARY)
 	subtitle := ui.label(view_subtitle(s), ui.fill(), ui.px(20))
 	ui.accessible(subtitle, .Static_Text, subtitle.label)
-	ui.text_style(.Regular, 12, DIM)
-	status := ui.label(status_text(s), ui.fill(), ui.px(18))
-	ui.accessible(status, .Static_Text, status.label)
 }
 
 // draw_track_list is the open list as one scroll view: its header (see
@@ -1513,7 +1510,7 @@ draw_status_bar :: proc(s: ^State) {
 	ui.spacer(ui.px(SIDEBAR_INDENT))
 }
 
-// status_bar_text is what's playing, then the status line.
+// status_bar_text is what's playing, then the status.
 status_bar_text :: proc(s: ^State) -> string {
 	playing := "Nothing playing"
 	if item := playback_item(s); item != nil {

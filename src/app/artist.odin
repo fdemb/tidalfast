@@ -509,13 +509,6 @@ draw_artist_actions :: proc(s: ^State, p: ^List_Place, page: ^Artist_Page) {
 		}
 		ui.tooltip(more_sig, "More")
 	}
-	{
-		ui.row("", {}, ui.fill(), ui.px(24))
-		ui.spacer(ui.px(CARD_PAD))
-		ui.text_style(.Regular, 12, DIM)
-		status := ui.label(status_text(s), ui.fill(), ui.fill())
-		ui.accessible(status, .Static_Text, status.label)
-	}
 }
 
 @(private = "file")

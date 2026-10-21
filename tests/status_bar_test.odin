@@ -1,6 +1,8 @@
 package tidal_tests
 
+import "core:fmt"
 import "core:mem"
+import "core:strings"
 import "core:testing"
 
 import app "../src/app"
@@ -38,13 +40,19 @@ status_bar_says_whats_playing :: proc(t: ^testing.T) {
 	}
 	_, shown := static_text(s, "Playing Song by Someone")
 	testing.expect(t, !shown, "no status bar unless asked for")
-	testing.expect_value(t, app.status_text(s), "")
+	app.set_status(s, .Copied_Page, -1)
+	library_frame(t, s, &f)
+	// The next frame frees status_text's string.
+	copied := strings.clone(app.status_text(s))
+	testing.expect(t, copied != "", "a status to show")
+	_, shown = static_text(s, copied)
+	testing.expect(t, !shown, "no status line in the views")
 
 	s.status_bar = true
 	for _ in 0 ..< 3 {
 		library_frame(t, s, &f)
 	}
-	line, ok := static_text(s, "Playing Song by Someone")
+	line, ok := static_text(s, fmt.tprintf("Playing Song by Someone · %s", copied))
 	testing.expect(t, ok, "the status bar says what's playing")
 	player := ui.box_lookup(&s.ui, ui.key_from_string(0, "player"))
 	testing.expect(t, player != nil, "the player bar")
@@ -53,6 +61,7 @@ status_bar_says_whats_playing :: proc(t: ^testing.T) {
 	}
 
 	s.playback.paused = true
+	app.set_status(s, .None, -1)
 	library_frame(t, s, &f)
 	_, ok = static_text(s, "Paused Song by Someone")
 	testing.expect(t, ok, "and when it's paused")

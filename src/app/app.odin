@@ -85,7 +85,7 @@ State :: struct {
 	// where it goes, to compare the renderer's blur with.
 	blur_reference:   bool,
 	// TIDALFAST_STATUS_BAR: a line under the player bar says what's playing
-	// and what the status line would.
+	// and the status (status_text). Nothing else shows the status.
 	status_bar:       bool,
 	drag_sent:    u64, // hash of the drag regions the shell has
 	titlebar_h:   f32, // this frame's Frame_Input.titlebar_height

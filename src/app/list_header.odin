@@ -270,7 +270,7 @@ release_date :: proc(unix: i64) -> (year: int, date: string) {
 }
 
 // draw_list_actions is Play, Shuffle and More, over the end of the
-// header's wash, with the status line after them.
+// header's wash.
 draw_list_actions :: proc(s: ^State, kind: List_Kind, h: List_Header, tint: render.Color) {
 	row := ui.row("list_actions", {.Draw_Background}, ui.fill(), ui.px(h.actions))
 	row.background = mix(tint, WINDOW_BG, 0.7)
@@ -296,11 +296,6 @@ draw_list_actions :: proc(s: ^State, kind: List_Kind, h: List_Header, tint: rend
 		ui.open_menu("list_menu", {more.rect.x, more.rect.y + more.rect.h})
 	}
 	ui.tooltip(more_sig, "More")
-	ui.spacer(ui.px(16))
-	ui.text_style(.Regular, 12, DIM)
-	status := ui.label(status_text(s), ui.fill(), ui.fill())
-	ui.accessible(status, .Static_Text, status.label)
-	ui.spacer(ui.px(LIST_PAD))
 }
 
 // list_play_button is the round Play button, side across: Play from the
@@ -417,9 +412,6 @@ draw_pinned_header :: proc(s: ^State, list: ^ui.Box, h: List_Header, cols: Track
 			ui.spacer(ui.px(14))
 			ui.text_style(.Bold, 24, TEXT)
 			ui.label(view_title(s), ui.fill(), ui.fill())
-			// The status line, whose place in the actions is scrolled away.
-			ui.text_style(.Regular, 12, DIM)
-			ui.label(status_text(s), ui.text_size(16), ui.fill())
 			ui.spacer(ui.px(LIST_PAD))
 		}
 	}
