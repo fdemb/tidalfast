@@ -69,6 +69,12 @@ ROW_PAD :: 10 // between a sidebar row's edge and its cover
 SIDEBAR_INDENT :: SIDEBAR_PAD + ROW_PAD // where the covers, the heading and the search text start
 LIST_PAD :: 16 // between the main view's sides and its rows
 LIST_PAD_Y :: 8 // above the first row and below the last
+NAV_PAD :: 8 // between Back and Forward and the main view's left edge, and its top without a titlebar
+NAV_BUTTON_W :: 34
+NAV_BUTTON_H :: 34
+NAV_W :: 2 * NAV_BUTTON_W + 1 // the two and the line between them
+NAV_H :: NAV_BUTTON_H + 2 * NAV_PAD // the room kept for them at the top without a titlebar
+NAV_SHADOW_FADE :: 16 // points of scrolling over which their shadow fades in
 
 Library :: struct {
 	sidebar_w:     f32,
@@ -90,6 +96,7 @@ Library :: struct {
 	anchor_row:    int, // scroll this row to the top, -1 for none; see rows_moved
 	anchor_offset: f32,
 	songs:         Songs_Total, // list_songs's sum, for the header
+	nav_float:     f32, // this frame's shadow under Back and Forward, 0 to 1 (nav_float)
 }
 
 // Songs_Total is the open list's length in seconds, and the list_gen,
@@ -233,41 +240,66 @@ draw_library :: proc(s: ^State, w, h: f32) {
 }
 
 // draw_history_buttons is Back and Forward through the places visited
-// (History), at the top of the sidebar: in the titlebar after the window's
-// buttons when the window has none of its own.
+// (History), a pill over the main view's top left corner, built after the
+// view so it stays on top as the view scrolls under it.
 draw_history_buttons :: proc(s: ^State) {
-	ui.row("", {}, ui.fill(), ui.px(s.titlebar_h if s.titlebar_h > 0 else 32))
-	if s.titlebar_h > 0 {
-		titlebar_space(ui.px(s.titlebar_inset + 12))
-	} else {
-		ui.spacer(ui.px(10))
+	pos := [2]f32{NAV_PAD, (nav_h(s) - NAV_BUTTON_H) / 2}
+	if s.library.nav_float > 0 {
+		// A box of its own, so the shadow fades without the pill.
+		ui.set_next_radius(NAV_BUTTON_H / 2)
+		shadow := ui.box_make("", {.Floating_X, .Floating_Y, .Draw_Shadow}, ui.px(NAV_W), ui.px(NAV_BUTTON_H))
+		shadow.fixed_pos = pos
+		shadow.opacity = s.library.nav_float
 	}
+	ui.set_next_background(SURFACE)
+	ui.set_next_border_color(OUTLINE)
+	ui.set_next_radius(NAV_BUTTON_H / 2)
+	pill := ui.row("history", {.Floating_X, .Floating_Y, .Clickable, .Click_Shield, .Draw_Background, .Draw_Border}, ui.px(NAV_W), ui.px(NAV_BUTTON_H))
+	pill.fixed_pos = pos
 	if history_button(text.ICON_CARET_LEFT + "###back", "Back", history_can_back(s)).clicked {
 		pending_set(s, Go_Back{})
 	}
-	ui.spacer(ui.px(2))
+	history_divider()
 	if history_button(text.ICON_CARET_RIGHT + "###forward", "Forward", history_can_forward(s)).clicked {
 		pending_set(s, Go_Forward{})
 	}
-	if s.titlebar_h > 0 {
-		titlebar_space(ui.fill())
-	}
 }
 
-// hero_under_titlebar is how far the header of the artist page or a track
-// list runs up under the titlebar: all of it, unless the login notice is
-// above it. The search results and an artist's grid keep their headers
-// below it.
-hero_under_titlebar :: proc(s: ^State) -> f32 {
-	if login_notice_shown(s) || search_showing(s) || home_showing(s) {
+// nav_reserve is the room for Back and Forward that the view under them
+// keeps at the top of its scroll view, so that it scrolls under them: all
+// of it on Home, the artist page and a track list. The search results and
+// an artist's grid keep their headers still, and a view under the login
+// notice is clear of them, so the main view keeps the room above those
+// instead.
+nav_reserve :: proc(s: ^State) -> f32 {
+	if login_notice_shown(s) {
 		return 0
 	}
-	if p := artist_place(s); p != nil {
-		if _, grid := p.artist_view.(Artist_Grid); grid {
-			return 0
-		}
+	if home_showing(s) {
+		return nav_h(s)
 	}
-	return s.titlebar_h
+	if p := artist_place(s); p != nil {
+		_, grid := p.artist_view.(Artist_Grid)
+		return 0 if grid else nav_h(s)
+	}
+	return 0 if search_showing(s) else nav_h(s)
+}
+
+// nav_h is the room for Back and Forward at the top of the main view: the
+// titlebar, so they're centred level with the window's buttons, or NAV_H
+// without one.
+nav_h :: proc(s: ^State) -> f32 {
+	return max(s.titlebar_h, NAV_H)
+}
+
+// nav_float sets the shadow under Back and Forward for a view that keeps
+// their room and has scrolled offset points under them, less what covers
+// the view there, such as the track list's pinned bar. Docked at the top
+// of the view or on the bar they cast none.
+nav_float :: proc(s: ^State, offset: f32, covered: f32 = 0) {
+	if nav_reserve(s) > 0 {
+		s.library.nav_float = clamp(offset / NAV_SHADOW_FADE, 0, 1) * (1 - covered)
+	}
 }
 
 // bar_inset is how much of a view that reaches the window's bottom the
@@ -276,25 +308,25 @@ bar_inset :: proc(s: ^State) -> f32 {
 	return PLAYER_BAR_H if s.bar_over_content else 0
 }
 
-// titlebar_space is empty room in a row of the titlebar, which moves the
-// window like the titlebar does.
-titlebar_space :: proc(width: ui.Size) {
-	ui.box_make("", {.Window_Drag}, width, ui.fill())
+// history_divider is the line between Back and Forward.
+history_divider :: proc() {
+	ui.column("", {}, ui.px(1), ui.fill())
+	ui.spacer(ui.fill())
+	ui.set_next_background(SURFACE_ACTIVE)
+	ui.box_make("", {.Draw_Background}, ui.fill(), ui.px(18))
+	ui.spacer(ui.fill())
 }
 
 history_button :: proc(id, name: string, enabled: bool) -> ui.Signal {
-	ui.column("", {}, ui.children_sum(), ui.fill())
-	ui.spacer(ui.fill())
 	flags := ui.Box_Flags{.Clickable, .Focusable, .Draw_Text, .Draw_Hot_Effects, .Draw_Active_Effects}
 	if !enabled {
 		flags += {.Disabled}
 	}
-	ui.text_style(.Icon, 16, TEXT if enabled else DIM)
+	ui.text_style(.Icon, 18, TEXT if enabled else DIM)
 	ui.set_next_text_align(.Center)
-	ui.set_next_radius(12)
-	b := ui.box_make(id, flags, ui.px(24), ui.px(24))
+	ui.set_next_radius(NAV_BUTTON_H / 2)
+	b := ui.box_make(id, flags, ui.px(NAV_BUTTON_W), ui.fill())
 	ui.accessible(b, .Button, name)
-	ui.spacer(ui.fill())
 	return ui.signal(b)
 }
 
@@ -302,7 +334,12 @@ draw_sidebar :: proc(s: ^State) {
 	lib := &s.library
 	ui.set_next_background(PANEL)
 	ui.column("sidebar", {.Draw_Background, .Clip}, ui.px(lib.sidebar_w), ui.fill())
-	draw_history_buttons(s)
+	if s.titlebar_h > 0 {
+		// Under the window's buttons, and moves the window.
+		ui.box_make("", {.Window_Drag}, ui.fill(), ui.px(s.titlebar_h))
+	} else {
+		ui.spacer(ui.px(SIDEBAR_PAD))
+	}
 	draw_home_entry(s)
 	{
 		ui.row("", {}, ui.fill(), ui.px(40))
@@ -384,16 +421,26 @@ draw_sidebar_handle :: proc(s: ^State, window_w: f32) {
 }
 
 draw_main_view :: proc(s: ^State, main_w: f32) {
-	under := hero_under_titlebar(s)
 	ui.column("main", {.Clip}, ui.fill(), ui.fill())
+	// The room for Back and Forward, over the view when it keeps the room
+	// itself. Like a toolbar, it moves the window.
+	under := nav_reserve(s) > 0
 	if s.titlebar_h > 0 {
-		// Over the page's or the list's header, or above the search results.
-		strip := ui.box_make("", {.Window_Drag}, ui.px(main_w), ui.px(s.titlebar_h))
-		if under > 0 {
+		strip := ui.box_make("", {.Window_Drag}, ui.px(main_w), ui.px(nav_h(s)))
+		if under {
 			strip.flags += {.Floating_X, .Floating_Y}
 		}
+	} else if !under {
+		ui.spacer(ui.px(nav_h(s)))
 	}
 	draw_login_notice(s)
+	s.library.nav_float = 0
+	draw_view(s, main_w)
+	draw_history_buttons(s)
+}
+
+// draw_view is what the history's current place shows in the main view.
+draw_view :: proc(s: ^State, main_w: f32) {
 	if home_showing(s) {
 		draw_home(s, main_w)
 		return
@@ -440,7 +487,7 @@ draw_track_list :: proc(s: ^State, main_w: f32) {
 	// Durations are m:ss however long, so the widest has the longest
 	// track's count of minute digits.
 	cols.duration = max(cols.duration, ui.counter_width(.Regular, 13, fmt.tprintf("%d:00", max(s.data.view.longest / 60, 10))) + 2 * CELL_PAD)
-	h := list_header(kind, main_w)
+	h := list_header(kind, main_w, nav_reserve(s))
 	rows_top := header_rows_top(h)
 	n := view_count(s)
 	art := hero_art(s, kind, h)

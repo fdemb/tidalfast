@@ -162,6 +162,7 @@ draw_artist :: proc(s: ^State, p: ^List_Place, main_w: f32) {
 	}
 	view := ui.scroll_view(fmt.tprintf("artist##%d", page.id), ui.fill(), ui.fill(), inset_end = bar_inset(s))
 	ui.accessible(view, .Group, small_str(&page.name))
+	nav_float(s, view.view_off.y)
 	draw_artist_hero(s, page, main_w, content_w)
 	centred(content_w)
 	draw_artist_actions(s, p, page)
@@ -338,7 +339,7 @@ draw_artist_hero :: proc(s: ^State, page: ^Artist_Page, main_w, content_w: f32) 
 	bio := artist_bio(page)
 	lines := artist_bio_lines(s, page, min(content_w, BIO_W) - 2 * CARD_PAD - 48)
 	shown := len(lines) if page.bio.open else min(len(lines), BIO_LINES)
-	hero_h := HERO_H + f32(max(shown - BIO_LINES, 0)) * BIO_LINE_H + hero_under_titlebar(s)
+	hero_h := HERO_H + f32(max(shown - BIO_LINES, 0)) * BIO_LINE_H + nav_reserve(s)
 	ui.column("hero", {.Clip}, ui.fill(), ui.px(hero_h))
 	hero_background(s, page, main_w, hero_h)
 	ui.spacer(ui.fill())
@@ -571,17 +572,12 @@ draw_artist_grid :: proc(s: ^State, page: ^Artist_Page, part: Artist_Part, conte
 	spec := artist_part_spec(part)
 	{
 		centred(content_w)
-		ui.spacer(ui.px(24))
+		ui.spacer(ui.px(8))
 		ui.row("", {}, ui.fill(), ui.px(44))
-		{
-			ui.radius(18)
-			ui.background(SURFACE)
-			ui.hover_color(SURFACE_ACTIVE)
-			if _, back := icon_button("grid_back", text.ICON_CARET_LEFT, .Icon, "Back", TEXT, 1, 36, {.Focusable, .Draw_Background}); back.clicked || ui.take_key(.Escape) {
-				pending_set(s, Go_Back{})
-			}
+		if ui.take_key(.Escape) {
+			pending_set(s, Go_Back{})
 		}
-		ui.spacer(ui.px(14))
+		ui.spacer(ui.px(CARD_PAD))
 		ui.column("", {}, ui.fill(), ui.fill())
 		ui.text_style(.Regular, 12, SECONDARY)
 		ui.label(small_str(&page.name), ui.fill(), ui.px(18))

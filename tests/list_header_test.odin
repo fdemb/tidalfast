@@ -59,7 +59,7 @@ list_header_collapses_over_the_rows :: proc(t: ^testing.T) {
 	testing.expect(t, hero, "the hero's actions at the top")
 
 	main_w := f32(1000 - app.SIDEBAR_DEFAULT - app.HANDLE_W)
-	h := app.list_header(.Playlist, main_w)
+	h := app.list_header(.Playlist, main_w, app.NAV_H)
 	rows_top := app.header_rows_top(h)
 	view, _ := list_view(t, s, title)
 	scroll_to(view, rows_top + 50 * app.TRACK_ROW_H)
@@ -218,8 +218,10 @@ list_menu_opens_by_more :: proc(t: ^testing.T) {
 	testing.expect(t, m[1] < more.frame[1] + more.frame[3] + 20, "the menu opens by the button, not at the window's bottom")
 }
 
-// The header runs under the titlebar with no space kept for it. The strip
-// there still moves the window, but not from the pinned bar's Play.
+// The pinned bar runs under the titlebar, which an empty toolbar makes 52
+// pt tall, with Back and Forward centred in it, level with the window's
+// buttons. The strip there still moves the window, but not from the pinned
+// bar's Play or from Back.
 @(test)
 pinned_bar_under_the_titlebar :: proc(t: ^testing.T) {
 	arena: mem.Dynamic_Arena
@@ -228,21 +230,27 @@ pinned_bar_under_the_titlebar :: proc(t: ^testing.T) {
 	context.allocator = mem.dynamic_arena_allocator(&arena)
 	s := library_state(true)
 	defer library_state_free(s)
-	s.titlebar_h = 28
+	s.titlebar_h = 52
 	f: Frame
+	for _ in 0 ..< 3 {
+		library_frame(t, s, &f)
+	}
+	// Another list, so Back takes presses.
+	app.pending_set(s, app.Playlist_Place{index = 2})
 	for _ in 0 ..< 3 {
 		library_frame(t, s, &f)
 	}
 	title := app.view_title(s)
 	main_w := f32(1000 - app.SIDEBAR_DEFAULT - app.HANDLE_W)
-	h := app.list_header(.Playlist, main_w)
+	h := app.list_header(.Playlist, main_w, 52)
+	testing.expect_value(t, h.bar, f32(52))
 	view, _ := list_view(t, s, title)
 	scroll_to(view, app.header_rows_top(h) + 50 * app.TRACK_ROW_H)
-	s.titlebar_h = 28
 	library_frame(t, s, &f)
-	s.titlebar_h = 28
 	library_frame(t, s, &f)
 	testing.expect_value(t, view.rect.y, f32(0))
+	back, _ := exact_node(s, "Back", .Button)
+	testing.expect_value(t, back.frame[1] + back.frame[3] / 2, f32(26))
 
 	in_drag := proc(s: ^app.State, x, y: f32) -> bool {
 		for r in ui.drag_regions(&s.ui) {
@@ -255,9 +263,56 @@ pinned_bar_under_the_titlebar :: proc(t: ^testing.T) {
 	play, ok := exact_node(s, fmt.tprintf("Play %s", title), .Button)
 	testing.expect(t, ok, "Play in the pinned bar")
 	cx := play.frame[0] + play.frame[2] / 2
-	testing.expect(t, play.frame[1] + 4 < 28, "Play reaches up under the titlebar")
+	testing.expect(t, play.frame[1] + 4 < 52, "Play reaches up under the titlebar")
 	testing.expect(t, !in_drag(s, cx, play.frame[1] + 4), "a press on Play doesn't move the window")
+	testing.expect(t, !in_drag(s, back.frame[0] + back.frame[2] / 2, 26), "nor one on Back")
 	testing.expect(t, in_drag(s, view.rect.x + view.rect.w / 2, 10), "the rest of the strip does")
+}
+
+// Back and Forward float over the main view's top left corner, where they
+// stay as the list scrolls under them, and a click on them goes back
+// rather than to the pinned bar under them. They cast a shadow only while
+// rows scroll under them, not at the top or on the pinned bar.
+@(test)
+back_and_forward_float_over_the_list :: proc(t: ^testing.T) {
+	arena: mem.Dynamic_Arena
+	mem.dynamic_arena_init(&arena)
+	defer mem.dynamic_arena_destroy(&arena)
+	context.allocator = mem.dynamic_arena_allocator(&arena)
+	s := library_state(true)
+	defer library_state_free(s)
+	f: Frame
+	for _ in 0 ..< 3 {
+		library_frame(t, s, &f)
+	}
+	app.pending_set(s, app.Playlist_Place{index = 2})
+	for _ in 0 ..< 3 {
+		library_frame(t, s, &f)
+	}
+	main_x := f32(app.SIDEBAR_DEFAULT + app.HANDLE_W)
+	back, ok := exact_node(s, "Back", .Button)
+	testing.expect(t, ok, "Back in the main view")
+	testing.expect_value(t, back.frame[0], main_x + app.NAV_PAD)
+	testing.expect_value(t, back.frame[1], f32(app.NAV_PAD))
+	testing.expect_value(t, s.library.nav_float, f32(0))
+
+	title := app.view_title(s)
+	h := app.list_header(.Playlist, 1000 - main_x, app.NAV_H)
+	view, _ := list_view(t, s, title)
+	scroll_to(view, app.NAV_SHADOW_FADE)
+	library_frame(t, s, &f)
+	testing.expect_value(t, s.library.nav_float, f32(1))
+	scroll_to(view, app.header_rows_top(h) + 50 * app.TRACK_ROW_H)
+	library_frame(t, s, &f)
+	library_frame(t, s, &f)
+	testing.expect_value(t, s.library.nav_float, f32(0))
+	back, _ = exact_node(s, "Back", .Button)
+	testing.expect_value(t, back.frame[1], f32(app.NAV_PAD))
+	down, up := click_at(back.frame[0] + back.frame[2] / 2, back.frame[1] + back.frame[3] / 2)
+	library_frame(t, s, &f, down, up)
+	library_frame(t, s, &f)
+	testing.expect_value(t, s.library.playlist, 0)
+	testing.expect(t, enabled(s, "Forward"), "Forward goes back to the list left")
 }
 
 // Another list opens at its top, however far the last one was scrolled.

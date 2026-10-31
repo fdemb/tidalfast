@@ -182,8 +182,9 @@ draw_home :: proc(s: ^State, main_w: f32) {
 	content_w := min(main_w, CONTENT_MAX) - 2 * PAGE_PAD
 	view := ui.scroll_view("home", ui.fill(), ui.fill(), inset_end = bar_inset(s))
 	ui.accessible(view, .Group, "Home")
+	nav_float(s, view.view_off.y)
 	centred(content_w)
-	ui.spacer(ui.px(24))
+	ui.spacer(ui.px(max(nav_reserve(s) + 8, 24)))
 	{
 		ui.row("", {}, ui.fill(), ui.px(44))
 		ui.spacer(ui.px(CARD_PAD))

@@ -5,7 +5,8 @@ package app
 // same scroll view: the hero (the cover, the kind of list, its title and a
 // line about it), then Play, Shuffle and More, then the column headings.
 // Once Play has scrolled under the top, a bar with the cover, the title and
-// Play is pinned there, with a copy of the headings under it. An album ends in a footer:
+// Play is pinned there, after Back and Forward, with a copy of the headings
+// under it. An album ends in a footer:
 // its release date, its length and more by its artist.
 //
 // Every part has a fixed height (List_Header), so a frame knows where row 0
@@ -23,11 +24,11 @@ import "../cover"
 import "../text"
 import "../ui"
 
-HERO_PAD :: 24 // above and below the hero's cover
+HERO_PAD :: 24 // above and below the hero's cover, without Back and Forward above it
 HERO_COVER_MIN :: 160
 HERO_COVER_MAX :: 232
 ACTIONS_H :: 72 // Play, Shuffle and More
-COMPACT_H :: 64 // the pinned bar, under the titlebar
+COMPACT_H :: NAV_H // the pinned bar without Back and Forward over it; with them it's as tall as their room
 COMPACT_COVER :: 40
 COMPACT_PLAY :: 36 // the pinned bar's round Play button
 TITLE_SIZE :: 32
@@ -43,20 +44,26 @@ FOOTER_END :: 48
 // content, from the top.
 List_Header :: struct {
 	hero:    f32, // the cover, title and meta line; 0 for search results
+	nav:     f32, // the room above the cover for Back and Forward, or 0
 	actions: f32,
 	bar:     f32, // the pinned bar; 0 for none
 }
 
-// list_header is the header's parts for a main view main_w wide. They run
-// under the titlebar's strip, which only takes the presses that miss their
-// controls (ui.cut_drag_regions), so their padding is the same above and
-// below.
-list_header :: proc(kind: List_Kind, main_w: f32) -> List_Header {
+// list_header is the header's parts for a main view main_w wide, with nav
+// kept above the cover for Back and Forward (nav_reserve). They run under
+// the titlebar's strip, which only takes the presses that miss their
+// controls (ui.cut_drag_regions).
+list_header :: proc(kind: List_Kind, main_w, nav: f32) -> List_Header {
 	if kind == .Search {
 		return {}
 	}
 	side := clamp(main_w * 0.2, HERO_COVER_MIN, HERO_COVER_MAX)
-	return {hero = side + 2 * HERO_PAD, actions = ACTIONS_H, bar = COMPACT_H}
+	return {hero = hero_top(nav) + side + HERO_PAD, nav = nav, actions = ACTIONS_H, bar = nav if nav > 0 else COMPACT_H}
+}
+
+// hero_top is the room above the hero's cover.
+hero_top :: proc(nav: f32) -> f32 {
+	return max(nav + HERO_PAD / 2, HERO_PAD)
 }
 
 // header_table_y is where the column headings are.
@@ -126,7 +133,7 @@ hero_art :: proc(s: ^State, kind: List_Kind, h: List_Header) -> (a: Hero_Art) {
 	sidebar := s.search.fake_source == .None if s.data.fake else !s.search.browsing
 	a.seed = u32(s.library.playlist) * 7919 + 13 if sidebar else hash.fnv32a(transmute([]u8)view_title(s))
 	if h.hero > 0 {
-		a.side = h.hero - 2 * HERO_PAD
+		a.side = h.hero - hero_top(h.nav) - HERO_PAD
 	}
 	return
 }
@@ -142,7 +149,7 @@ LIST_KIND_NAMES := [List_Kind]string {
 // artist is the album's artist's page, for the album's year.
 draw_list_hero :: proc(s: ^State, h: List_Header, kind: List_Kind, art: Hero_Art, artist: ^Artist_Page) {
 	ui.column("hero", {}, ui.fill(), ui.px(h.hero))
-	ui.spacer(ui.px(HERO_PAD))
+	ui.spacer(ui.px(hero_top(h.nav)))
 	ui.row("", {}, ui.fill(), ui.px(art.side))
 	ui.spacer(ui.px(LIST_PAD + 8))
 	{
@@ -372,6 +379,7 @@ list_link :: proc(s: ^State) -> (link, name: string) {
 // after the rows, so it's drawn over them and takes the clicks there.
 draw_pinned_header :: proc(s: ^State, list: ^ui.Box, h: List_Header, cols: Track_Columns, art: Hero_Art) {
 	c := header_collapse(h, list.view_off.y)
+	nav_float(s, list.view_off.y, c.bar)
 	if c.bar <= 0 && !c.pinned {
 		return
 	}
@@ -387,9 +395,9 @@ draw_pinned_header :: proc(s: ^State, list: ^ui.Box, h: List_Header, cols: Track
 		ui.set_next_background({PANEL.r, PANEL.g, PANEL.b, c.bar})
 		ui.column("", {.Draw_Background}, ui.fill(), ui.px(h.bar))
 		if c.content > 0 {
-			row := ui.row("", {}, ui.fill(), ui.px(COMPACT_H))
+			row := ui.row("", {}, ui.fill(), ui.fill())
 			row.opacity = c.content
-			ui.spacer(ui.px(LIST_PAD + 8))
+			ui.spacer(ui.px(NAV_PAD + NAV_W + 12 if h.nav > 0 else LIST_PAD + 8))
 			radius: f32 = COMPACT_COVER / 2 if art.kind == .Artist else 4
 			cover_art(s, art.kind, art.id, art.seed, COMPACT_COVER, ui.px(COMPACT_COVER), radius)
 			ui.spacer(ui.px(12))

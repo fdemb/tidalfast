@@ -90,7 +90,6 @@ State :: struct {
 	toast:            Toast,
 	drag_sent:    u64, // hash of the drag regions the shell has
 	titlebar_h:   f32, // this frame's Frame_Input.titlebar_height
-	titlebar_inset: f32,
 	bench:        Bench,
 	measure:      Measure,
 	dev:          Dev,
@@ -502,7 +501,6 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input, shell: ^platfor
 	}
 	w, h := input.width, input.height
 	s.titlebar_h = input.titlebar_height
-	s.titlebar_inset = input.titlebar_inset
 	r := &s.renderer
 	render.begin_frame(r, w, h, input.scale, CLEAR_COLOR)
 	ui_begin := time.tick_now()

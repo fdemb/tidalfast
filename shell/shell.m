@@ -120,7 +120,13 @@ static void draw_frame(void) {
 
   NSSize size = g_view.bounds.size;
   // Full screen hides the titlebar, and the layout rect is then the view.
-  float titlebar = size.height - g_window.contentLayoutRect.size.height;
+  // Elsewhere the titlebar is as tall as twice the buttons' centre: macOS 26
+  // insets the layout rect further, past the toolbar.
+  float titlebar = 0;
+  NSButton *close = [g_window standardWindowButton:NSWindowCloseButton];
+  if (close && size.height > g_window.contentLayoutRect.size.height) {
+    titlebar = 2 * NSMidY([close convertRect:close.bounds toView:g_view]);
+  }
   NSButton *zoom = [g_window standardWindowButton:NSWindowZoomButton];
   Frame_Input input = {
       .events = g_events,
@@ -1470,7 +1476,7 @@ static void setup_shell_test(void) {
 
 // App
 
-@interface App_Delegate : NSObject <NSApplicationDelegate>
+@interface App_Delegate : NSObject <NSApplicationDelegate, NSWindowDelegate>
 @end
 
 // TIDALFAST_BLUR_REFERENCE=<material>[,<height>] puts AppKit's blur of the
@@ -1529,6 +1535,12 @@ static void setup_blur_reference(void) {
   // buttons stay.
   g_window.titleVisibility = NSWindowTitleHidden;
   g_window.titlebarAppearsTransparent = YES;
+  // An empty toolbar makes the titlebar a toolbar's height, as Finder's is,
+  // which centres the window's buttons level with the app's Back and Forward.
+  g_window.toolbar = [[NSToolbar alloc] initWithIdentifier:@"tidalfast"];
+  g_window.toolbarStyle = NSWindowToolbarStyleUnified;
+  g_window.titlebarSeparatorStyle = NSTitlebarSeparatorStyleNone;
+  g_window.delegate = self;
   g_window.acceptsMouseMovedEvents = YES;
   g_window.releasedWhenClosed = NO;
 
@@ -1623,6 +1635,13 @@ static void setup_blur_reference(void) {
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender {
   return YES;
+}
+
+// In full screen the empty toolbar hides with the menu bar, so the view's
+// top is free, as it was without one.
+- (NSApplicationPresentationOptions)window:(NSWindow *)window
+      willUseFullScreenPresentationOptions:(NSApplicationPresentationOptions)options {
+  return options | NSApplicationPresentationAutoHideToolbar;
 }
 
 @end
