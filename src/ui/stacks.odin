@@ -37,7 +37,18 @@ Style :: struct {
 	hover_color:  render.Color,
 	active_color: render.Color,
 	radius:       f32,
+	shadow:       Shadow, // with Draw_Shadow; zero for SHADOW_DEFAULT
 }
+
+// Shadow is a drop shadow straight down: CSS's box-shadow 0 y blur in black
+// at alpha.
+Shadow :: struct {
+	blur, y, alpha: f32,
+}
+
+// SHADOW_DEFAULT is the shadow of a box that floats well above the rest,
+// such as a menu or the toast.
+SHADOW_DEFAULT :: Shadow{blur = 24, y = 8, alpha = 0.5}
 
 @(private)
 STYLE_DEFAULT :: Style {
@@ -162,3 +173,4 @@ set_next_border_color :: proc(v: render.Color) {style_next().border_color = v}
 set_next_hover_color :: proc(v: render.Color) {style_next().hover_color = v}
 set_next_active_color :: proc(v: render.Color) {style_next().active_color = v}
 set_next_radius :: proc(v: f32) {style_next().radius = v}
+set_next_shadow :: proc(v: Shadow) {style_next().shadow = v}

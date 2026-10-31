@@ -33,7 +33,8 @@ draw_box :: proc(u: ^State, b: ^Box, alpha: f32) {
 	}
 	rect := b.rect
 	if .Draw_Shadow in b.flags {
-		render.push_shadow(r, rect, b.radius, 24, {0, 8}, 0, {0, 0, 0, 0.5 * a})
+		sh := b.shadow if b.shadow != {} else SHADOW_DEFAULT
+		render.push_shadow(r, rect, b.radius, sh.blur, {0, sh.y}, 0, {0, 0, 0, sh.alpha * a})
 	}
 	if .Draw_Backdrop in b.flags {
 		render.push_backdrop(r, rect, b.backdrop.blur, b.backdrop.saturation, fade(b.background, a), b.radius)
