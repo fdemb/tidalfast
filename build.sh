@@ -9,6 +9,12 @@
 # ./build.sh dist         release package in build/dist: TIDALfast.app and a .dmg on macOS,
 #                         an AppImage on Linux (needs linuxdeploy, or LINUXDEPLOY=path).
 #                         TIDALFAST_VERSION=1.2.3 sets the version, else git describe
+#
+# TIDALFAST_SIGN_IDENTITY=name signs the macOS shell and the dist bundle with
+# that code signing identity (see `security find-identity -v -p codesigning`)
+# instead of ad hoc. The Keychain then knows the app by its identifier and
+# certificate rather than the hash of one build, so a rebuild doesn't ask
+# again for the saved login.
 set -eu
 cd "$(dirname "$0")"
 
@@ -32,6 +38,9 @@ else
 	odin_flags="-debug"
 	clang_flags="-g -O0"
 fi
+
+sign_identity=${TIDALFAST_SIGN_IDENTITY:-}
+bundle_id=com.tidalfast.app
 
 # The commit goes into the app for the launch log (launch_log.odin), in
 # full: a short hash of only digits would read as a number.
@@ -167,8 +176,8 @@ if [ "$target" = dist ]; then
 		-framework Cocoa -framework Metal -framework QuartzCore -framework CoreServices -framework MediaPlayer
 	sed -e "s/@VERSION@/$version/g" -e "s/@MACOS_MIN@/$macos_min/g" packaging/macos/Info.plist > "$bundle/Contents/Info.plist"
 	cp packaging/macos/AppIcon.icns "$bundle/Contents/Resources/"
-	codesign --force --sign - "$bundle/Contents/MacOS/app.dylib"
-	codesign --force --sign - "$bundle"
+	codesign --force --sign "${sign_identity:--}" "$bundle/Contents/MacOS/app.dylib"
+	codesign --force --sign "${sign_identity:--}" "$bundle"
 	cp -R "$bundle" build/dist/dmg/
 	ln -s /Applications build/dist/dmg/Applications
 	hdiutil create -quiet -volname TIDALfast -srcfolder build/dist/dmg -format ULFO \
@@ -197,15 +206,20 @@ rm -rf build/app.dylib.dSYM
 [ -d build/app.tmp.dylib.dSYM ] && mv build/app.tmp.dylib.dSYM build/app.dylib.dSYM
 mv -f build/app.tmp.dylib build/app.dylib
 
-# The shell is relinked only when its source or the build mode changes.
-# clang's output differs from build to build, and each new binary has a new
-# ad-hoc signature, which the login Keychain treats as a different app: it
-# would ask again for access to the saved TIDAL login after every build.
-if [ "$target" = all ] && { [ ! -f build/tidalfast ] || [ shell/shell.m -nt build/tidalfast ] || [ shell/platform.h -nt build/tidalfast ] || [ "$(cat build/shell-mode 2>/dev/null)" != "$mode" ]; }; then
+# The shell is relinked only when its source, the build mode or the signing
+# identity changes. clang's output differs from build to build, and each new
+# binary has a new ad-hoc signature, which the login Keychain treats as a
+# different app: it would ask again for access to the saved TIDAL login after
+# every build. TIDALFAST_SIGN_IDENTITY avoids that.
+if [ "$target" = all ] && { [ ! -f build/tidalfast ] || [ shell/shell.m -nt build/tidalfast ] || [ shell/platform.h -nt build/tidalfast ] || [ "$(cat build/shell-mode 2>/dev/null)" != "$mode" ] || [ "$(cat build/shell-sign 2>/dev/null)" != "$sign_identity" ]; }; then
 	echo "$mode" > build/shell-mode
 	clang shell/shell.m -o build/tidalfast -fobjc-arc -mmacosx-version-min=14.0 \
 		-Wall -Wno-unused-parameter $clang_flags \
 		-framework Cocoa -framework Metal -framework QuartzCore -framework CoreServices -framework MediaPlayer
+	if [ -n "$sign_identity" ]; then
+		codesign --force --sign "$sign_identity" --identifier "$bundle_id" build/tidalfast
+	fi
+	echo "$sign_identity" > build/shell-sign
 fi
 
 if [ "$target" = all ]; then
