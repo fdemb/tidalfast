@@ -2,7 +2,7 @@ package audio
 
 // FLAC container parsing: the metadata blocks before the audio, frame
 // headers, and where to start reading for a given sample. Decoding the
-// frames themselves is dr_flac's job, through miniaudio (player.odin).
+// frames themselves is dr_flac's job (third_party/dr_flac, player.odin).
 
 FLAC_MAX_SEEKPOINTS :: 4096
 

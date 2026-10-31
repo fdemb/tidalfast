@@ -74,6 +74,7 @@ c_lib() { # name, library
 }
 c_lib kbts kb_text_shape
 c_lib miniaudio miniaudio
+c_lib dr_flac dr_flac
 [ "$target" = libs ] && exit 0
 
 # Linux: a Wayland shell in C and a Vulkan renderer. The protocol glue comes

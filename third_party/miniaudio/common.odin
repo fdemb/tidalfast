@@ -1,7 +1,9 @@
 // Odin's vendor:miniaudio bindings (dev-2026-10), copied so the library
 // links from build/miniaudio instead of the Odin install, whose miniaudio.a
 // targets the macOS it was built on. miniaudio.h next to this file is the
-// matching miniaudio 0.11.24; build.sh compiles it from miniaudio.c.
+// matching miniaudio 0.11.24; build.sh compiles it from miniaudio.c,
+// without its FLAC decoder: dr_flac is vendored on its own in
+// third_party/dr_flac.
 package miniaudio
 
 import "core:c"

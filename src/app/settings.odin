@@ -222,7 +222,7 @@ settings_to_save :: proc(s: ^State) -> Settings {
 
 output_of :: proc(st: Settings) -> audio.Output {
 	on := audio.BIT_PERFECT && st.bit_perfect
-	return {bit_perfect = on, hog = on && st.hog}
+	return {bit_perfect = on, hog = on && audio.HOG_MODE && st.hog}
 }
 
 // draw_output_button is the player bar's button for the output menu. In
@@ -251,7 +251,7 @@ draw_output_button :: proc(s: ^State) {
 				settings_set(s, st)
 				ui.close_menu()
 			}
-			if st.bit_perfect {
+			if audio.HOG_MODE && st.bit_perfect {
 				if ui.menu_item(fmt.tprintf("%s Hog mode###hog", "✓" if st.hog else "   ")).clicked {
 					st.hog = !st.hog
 					settings_set(s, st)

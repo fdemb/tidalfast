@@ -17,7 +17,7 @@ src/jobs/         bounded priority queues between the UI thread and the workers,
 src/cover/        cover art sizes, decoding on a worker, and the texture cache
 src/cacert/       where libcurl finds CA certificates on Linux when its built-in path is missing
 src/os_services/  secret store (Keychain, libsecret), opening URLs, settings and cache paths
-third_party/      C libraries with their Odin bindings, which build.sh compiles into build/<name>: kbts (kb_text_shape) and miniaudio
+third_party/      C libraries with their Odin bindings, which build.sh compiles into build/<name>: kbts (kb_text_shape), miniaudio and dr_flac
 tests/            `odin test tests`
 examples/cli/     CLI on top of src/tidal
 tools/measure/    startup and memory measurement (docs/measuring.md)
@@ -52,7 +52,7 @@ Read-only checkouts in `~/.t3/scratch/2026-10-14-please-analyze-how-spotifast-is
 
 ## Not done yet
 
-- Linux: bit-perfect output (ALSA `hw:` devices or PipeWire), MPRIS for media keys and Now Playing, AT-SPI for screen readers, and client-side decorations for compositors without xdg-decoration, such as GNOME.
+- Linux: MPRIS for media keys and Now Playing, AT-SPI for screen readers, and client-side decorations for compositors without xdg-decoration, such as GNOME.
 - Windows: DirectWrite, D3D11 and WASAPI exclusive. Keep platform code behind shell procedures and the renderer interface so it can be added.
 
 ## Pitfalls

@@ -30,11 +30,11 @@ package audio
 // (fmp4.odin). A seek starts again at the segment holding the target.
 //
 // Output goes through miniaudio, which plays at whatever rate the device
-// runs at and converts. In bit-perfect mode it goes to the CoreAudio HAL
-// instead (bitperfect_darwin.odin; bitperfect_linux.odin has the same
-// procedures, which refuse): the device is switched to the track's rate,
-// ReplayGain and the volume are skipped, and the samples reach the device
-// as they were decoded. A rate change between tracks lets the ring play
+// runs at and converts. In bit-perfect mode it goes to the CoreAudio HAL on
+// macOS (bitperfect_darwin.odin) or a PipeWire stream on Linux
+// (bitperfect_linux.odin) instead: the device is switched to the track's
+// rate, ReplayGain and the volume are skipped, and the samples reach the
+// device as they were decoded. A rate change between tracks lets the ring play
 // out, re-clocks the device and starts again: a short gap. Tracks at the
 // same rate stay gapless.
 //
@@ -54,6 +54,7 @@ import "core:strings"
 import "core:sync"
 import "core:sys/posix"
 import "core:time"
+import drflac "../../third_party/dr_flac"
 import ma "../../third_party/miniaudio"
 
 RING_FRAMES :: 1 << 17 // about 3 s at 44.1 kHz
@@ -205,8 +206,7 @@ Slot :: struct {
 	// The track's URLs, the stream's segment tables and its header. Emptied
 	// when the slot gets another source.
 	track:       vmem.Arena,
-	decoder:     ma.decoder,
-	decoding:    bool, // decoder is open
+	decoder:     ^drflac.Flac, // nil when closed
 	vpos:        i64, // dr_flac's position in the stream it sees: header, then frames from frame_off
 	frame_off:   i64,
 	next_sample: i64, // sample of the next frame the decoder returns
@@ -281,7 +281,7 @@ Player :: struct {
 	hal:             Hal,
 	hal_scratch:     []f32, // for devices whose buffers don't match the ring's layout
 	watch:           ^Device_Watch, // heap, never freed
-	alive_device:    Device_ID, // the device being watched for going away, 0 for none
+	watching_hal:    bool, // watch_device is on for hal
 	using_hal:       bool, // the open device is hal, not miniaudio's
 	device_open:     bool,
 	device_running:  bool,
@@ -899,7 +899,7 @@ check_device :: proc(p: ^Player) {
 		return
 	}
 	if p.using_hal {
-		lost = lost || (changed && !device_alive(p.hal.device))
+		lost = lost || (changed && !hal_alive(&p.hal))
 		moved = moved && !p.hal.hogged && default_output_device() != p.hal.device
 	} else {
 		moved = false
@@ -993,7 +993,7 @@ step :: proc(p: ^Player) -> bool {
 	if sl.finished {
 		return advance(p)
 	}
-	if (sl.source.kind == .Flac || sl.source.kind == .Dash) && !sl.decoding {
+	if (sl.source.kind == .Flac || sl.source.kind == .Dash) && sl.decoder == nil {
 		if !slot_open(p, sl) {
 			return true // a command interrupted it, or it failed and advance comes next
 		}
@@ -1236,19 +1236,17 @@ slot_open :: proc(p: ^Player, sl: ^Slot) -> bool {
 // decoder_open starts dr_flac on the slot's stream as vread presents it.
 @(private = "file")
 decoder_open :: proc(p: ^Player, sl: ^Slot) -> bool {
-	cfg := ma.decoder_config_init(.f32, 0, 0)
-	cfg.encodingFormat = .flac
-	if r := ma.decoder_init(vread, vseek, sl, &cfg, &sl.decoder); r != .SUCCESS {
+	sl.decoder = drflac.open(vread, vseek, vtell, sl, nil)
+	if sl.decoder == nil {
 		if sl.interrupted {
 			sl.interrupted = false
 			return false
 		}
 		if !sl.failed {
-			slot_fail(p, sl, 0, fmt.tprintf("can't decode this FLAC (%v)", r))
+			slot_fail(p, sl, 0, "can't decode this FLAC")
 		}
 		return false
 	}
-	sl.decoding = true
 	return true
 }
 
@@ -1500,9 +1498,9 @@ dash_segment_sample :: proc(starts: []i64, timescale: i64, rate: int, k: int) ->
 
 @(private = "file")
 slot_close :: proc(sl: ^Slot) {
-	if sl.decoding {
-		ma.decoder_uninit(&sl.decoder)
-		sl.decoding = false
+	if sl.decoder != nil {
+		drflac.close(sl.decoder)
+		sl.decoder = nil
 	}
 	sl.interrupted = false
 }
@@ -1624,9 +1622,9 @@ wait_for_bytes :: proc(data: rawptr) -> bool {
 // dr_flac's view of a slot: the header, then the file from frame_off on.
 
 @(private = "file")
-vread :: proc "c" (dec: ^ma.decoder, out: rawptr, n: c.size_t, read: ^c.size_t) -> ma.result {
+vread :: proc "c" (user: rawptr, out: rawptr, n: c.size_t) -> c.size_t {
 	context = runtime.default_context()
-	sl := (^Slot)(dec.pUserData)
+	sl := (^Slot)(user)
 	st := &sl.stream
 	dst := ([^]u8)(out)[:n]
 	done := 0
@@ -1676,22 +1674,27 @@ vread :: proc "c" (dec: ^ma.decoder, out: rawptr, n: c.size_t, read: ^c.size_t) 
 			slot_fail(sl.player, sl, status, fmt.tprintf("download failed: %s", msg))
 		}
 	}
-	read^ = c.size_t(done)
-	return .SUCCESS if done > 0 else .AT_END
+	return c.size_t(done)
 }
 
 @(private = "file")
-vseek :: proc "c" (dec: ^ma.decoder, offset: i64, origin: ma.seek_origin) -> ma.result {
-	sl := (^Slot)(dec.pUserData)
+vseek :: proc "c" (user: rawptr, offset: c.int, origin: drflac.Seek_Origin) -> b32 {
+	sl := (^Slot)(user)
 	switch origin {
-	case .start:
-		sl.vpos = offset
-	case .current:
-		sl.vpos += offset
-	case .end:
-		return .INVALID_OPERATION
+	case .Set:
+		sl.vpos = i64(offset)
+	case .Cur:
+		sl.vpos += i64(offset)
+	case .End:
+		return false
 	}
-	return .SUCCESS
+	return true
+}
+
+@(private = "file")
+vtell :: proc "c" (user: rawptr, cursor: ^i64) -> b32 {
+	cursor^ = (^Slot)(user).vpos
+	return true
 }
 
 @(private = "file")
@@ -1709,7 +1712,7 @@ decode_chunk :: proc(p: ^Player, sl: ^Slot) {
 			}
 		}
 	} else {
-		ma.decoder_read_pcm_frames(&sl.decoder, raw_data(buf), CHUNK, &frames)
+		frames = drflac.read_pcm_frames_f32(sl.decoder, CHUNK, raw_data(buf))
 		if sl.interrupted {
 			// A command cut the read short; the decoder is reopened for it.
 			sl.interrupted = false
@@ -1824,9 +1827,7 @@ hal_open :: proc(p: ^Player, rate, channels, bits: int) -> (ok: bool, reason: st
 		log.warnf("audio: no bit-perfect output at %d Hz (%s); the system mixer converts it", rate, reason)
 		return
 	}
-	if watch_device(dev, p.watch) {
-		p.alive_device = dev
-	}
+	p.watching_hal = watch_device(&p.hal, p.watch)
 	p.using_hal = true
 	log.infof("audio: bit-perfect output on %s: %s%s, set in %.1f ms", device_name(dev), format_name(p.hal.format), ", hog mode" if p.hal.hogged else "", p.hal.settle_ms)
 	return true, ""
@@ -1837,9 +1838,9 @@ hal_open :: proc(p: ^Player, rate, channels, bits: int) -> (ok: bool, reason: st
 // without it they stay for the next track.
 @(private = "file")
 device_close :: proc(p: ^Player, restore := false) {
-	if p.alive_device != 0 {
-		unwatch_device(p.alive_device, p.watch)
-		p.alive_device = 0
+	if p.watching_hal {
+		unwatch_device(&p.hal, p.watch)
+		p.watching_hal = false
 	}
 	if p.device_open {
 		if p.using_hal {

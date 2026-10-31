@@ -65,7 +65,7 @@ Each item comes out of its pool, and what's left of a pool becomes an item of it
 | gpu | `glyph atlas`, `cover pages`, `instance buffers`, `upload buffers` (Vulkan), `backdrop blur`, and the two rests above |
 | system | `malloc outside the app's buffers`, `other anonymous memory`, `binaries' data`, `thread stacks`, `other tagged regions`, `page tables and unaccounted` |
 
-Malloc that the app has no pointer to, such as AppKit's, Core Text's, libcurl's connections and miniaudio's decoder, goes in `system` as the malloc rest; Instruments' Allocations can say whose it is. On Linux the pools are the footprint and the device memory Vulkan reports, which a GPU keeps outside the footprint; with lavapipe it's host memory and counts twice.
+Malloc that the app has no pointer to, such as AppKit's, Core Text's, libcurl's connections and dr_flac's decoder, goes in `system` as the malloc rest; Instruments' Allocations can say whose it is. On Linux the pools are the footprint and the device memory Vulkan reports, which a GPU keeps outside the footprint; with lavapipe it's host memory and counts twice.
 
 ## Launch log
 

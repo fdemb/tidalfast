@@ -9,7 +9,8 @@ package audio
 // coreaudio_darwin.odin.
 //
 // bitperfect_linux.odin declares the same procedures and the Hal fields
-// the player reads, so the player never sees CoreAudio's types.
+// the player reads, for PipeWire, so the player never sees either OS's
+// types.
 //
 // What the device was set to before (rate, physical format, hog mode) is
 // kept in Hal and put back by hal_close with restore set: when bit-perfect
@@ -24,6 +25,10 @@ import "core:time"
 
 // BIT_PERFECT says whether this OS has bit-perfect output.
 BIT_PERFECT :: true
+
+// HOG_MODE says whether bit-perfect output can take the device for this
+// app alone.
+HOG_MODE :: true
 
 // Hal is one open HAL output: the device, its IOProc and what to put back.
 Hal :: struct {
@@ -61,11 +66,11 @@ device_nominal_rate :: proc(dev: Device_ID) -> f64 {
 	return rate
 }
 
-// device_alive is false once the device has gone, as when a USB DAC is
+// hal_alive is false once h's device has gone, as when a USB DAC is
 // unplugged.
-device_alive :: proc(dev: Device_ID) -> bool {
+hal_alive :: proc(h: ^Hal) -> bool {
 	alive: u32
-	return get(dev, PROP_ALIVE, SCOPE_GLOBAL, &alive) && alive != 0
+	return get(h.device, PROP_ALIVE, SCOPE_GLOBAL, &alive) && alive != 0
 }
 
 device_name :: proc(dev: Device_ID) -> string {
@@ -83,13 +88,13 @@ unwatch_default_output :: proc(w: ^Device_Watch) {
 	unlisten(SYSTEM_OBJECT, PROP_DEFAULT_OUTPUT, watch_listener, w)
 }
 
-// watch_device tells w whenever dev comes or goes.
-watch_device :: proc(dev: Device_ID, w: ^Device_Watch) -> bool {
-	return listen(dev, PROP_ALIVE, watch_listener, w)
+// watch_device tells w whenever h's device comes or goes.
+watch_device :: proc(h: ^Hal, w: ^Device_Watch) -> bool {
+	return listen(h.device, PROP_ALIVE, watch_listener, w)
 }
 
-unwatch_device :: proc(dev: Device_ID, w: ^Device_Watch) {
-	unlisten(dev, PROP_ALIVE, watch_listener, w)
+unwatch_device :: proc(h: ^Hal, w: ^Device_Watch) {
+	unlisten(h.device, PROP_ALIVE, watch_listener, w)
 }
 
 // watch_listener runs on a HAL thread.

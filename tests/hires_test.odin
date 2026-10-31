@@ -11,7 +11,7 @@ import "core:testing"
 import "core:thread"
 import vmem "core:mem/virtual"
 import "core:time"
-import ma "../third_party/miniaudio"
+import drflac "../third_party/dr_flac"
 
 import app "../src/app"
 import "../src/audio"
@@ -62,22 +62,19 @@ demux :: proc(t: ^testing.T, d: dashgen.Dash) -> []u8 {
 	return out[:]
 }
 
-// decode_all decodes a FLAC file with dr_flac, through miniaudio as the
-// player does, to interleaved f32.
+// decode_all decodes a FLAC file with dr_flac, as the player does, to
+// interleaved f32.
 @(private = "file")
 decode_all :: proc(flac: []u8, channels: int) -> []f32 {
-	dec: ma.decoder
-	cfg := ma.decoder_config_init(.f32, 0, 0)
-	cfg.encodingFormat = .flac
-	if ma.decoder_init_memory(raw_data(flac), len(flac), &cfg, &dec) != .SUCCESS {
+	dec := drflac.open_memory(raw_data(flac), len(flac), nil)
+	if dec == nil {
 		return nil
 	}
-	defer ma.decoder_uninit(&dec)
+	defer drflac.close(dec)
 	out := make([dynamic]f32, context.temp_allocator)
 	buf: [4096 * 2]f32
 	for {
-		n: u64
-		ma.decoder_read_pcm_frames(&dec, &buf[0], u64(len(buf) / channels), &n)
+		n := drflac.read_pcm_frames_f32(dec, u64(len(buf) / channels), &buf[0])
 		if n == 0 {
 			break
 		}
