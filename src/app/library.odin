@@ -474,6 +474,12 @@ draw_sidebar_handle :: proc(s: ^State, window_w: f32) {
 // wide and h tall, with Back and Forward over it.
 draw_main_view :: proc(s: ^State, main_w, h: f32) {
 	ui.column("main", {.Clip}, ui.fill(), ui.fill())
+	// Before anything: a search it sends replaces the results the view
+	// would otherwise have built already, and results keep the room for
+	// Back and Forward where the empty page doesn't.
+	if search_page_showing(s) {
+		search_tick(s)
+	}
 	// The room for Back and Forward, over the view when it keeps the room
 	// itself. Like a toolbar, it moves the window.
 	under := nav_reserve(s) > 0
@@ -484,11 +490,6 @@ draw_main_view :: proc(s: ^State, main_w, h: f32) {
 		}
 	} else if !under {
 		ui.spacer(ui.px(nav_h(s)))
-	}
-	// Before the view: a search it sends replaces the results the view
-	// would otherwise have built already.
-	if search_page_showing(s) {
-		search_tick(s)
 	}
 	draw_login_notice(s)
 	s.library.nav_float = 0

@@ -187,7 +187,8 @@ draw_search_bar :: proc(s: ^State, main_w: f32) {
 	ui.set_next_background(SURFACE)
 	ui.set_next_border_color(OUTLINE)
 	ui.set_next_radius(NAV_BUTTON_H / 2)
-	sig := ui.text_field("search", &sr.field, SEARCH_PLACEHOLDER, ui.fill(), ui.fill(), inset = SEARCH_ICON_W - ui.FIELD_PAD)
+	sig := ui.text_field("search", &sr.field, SEARCH_PLACEHOLDER, ui.fill(), NAV_BUTTON_H, inset = SEARCH_ICON_W - ui.FIELD_PAD, focus = sr.focus)
+	sr.focus = false
 	{
 		ui.parent(sig.box)
 		ui.text_style(.Icon, 16, SECONDARY)
@@ -198,10 +199,6 @@ draw_search_bar :: proc(s: ^State, main_w: f32) {
 	}
 	ui.focus_shortcut(sig.box, .F, {ui.PRIMARY})
 	ui.focus_shortcut(sig.box, .L, {ui.PRIMARY})
-	if sr.focus {
-		ui.focus_text_field(sig.box, &sr.field)
-		sr.focus = false
-	}
 	// Return searches for the text it was pressed on. An edit after it that
 	// empties the field closes the search instead, since the last Pending
 	// wins.

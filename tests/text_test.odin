@@ -760,7 +760,7 @@ test_text_field_drag_select :: proc(t: ^testing.T) {
 	frame :: proc(u: ^ui.State, s: ^Shaper, f: ^ui.Text_Field, now: ^f64, events: ..platform.Event) {
 		now^ += 0.016
 		ui.begin_frame(u, events, nil, s.state, 300, 200, now^)
-		ui.text_field("search", f, "Search", ui.px(250), ui.px(30))
+		ui.text_field("search", f, "Search", ui.px(250), 30)
 		ui.end_frame()
 	}
 	frame(&u, &s, f, &now)

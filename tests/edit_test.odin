@@ -356,7 +356,7 @@ test_text_field_events :: proc(t: ^testing.T) {
 	frame :: proc(u: ^ui.State, f: ^ui.Text_Field, now: ^f64, bytes: []u8, events: ..platform.Event) -> ui.Field_Signal {
 		now^ += 0.016
 		ui.begin_frame(u, events, nil, nil, 300, 200, now^, nil, bytes)
-		sig := ui.text_field("search", f, "Search", ui.px(200), ui.px(30))
+		sig := ui.text_field("search", f, "Search", ui.px(200), 30)
 		ui.end_frame()
 		return sig
 	}
@@ -420,7 +420,7 @@ test_app_keys_after_text_field :: proc(t: ^testing.T) {
 	frame :: proc(u: ^ui.State, f: ^ui.Text_Field, now: ^f64, events: ..platform.Event) {
 		now^ += 0.016
 		ui.begin_frame(u, events, nil, nil, 300, 200, now^)
-		ui.text_field("search", f, "Search", ui.px(200), ui.px(30))
+		ui.text_field("search", f, "Search", ui.px(200), 30)
 	}
 	frame(&u, f, &now)
 	ui.end_frame()
@@ -457,7 +457,7 @@ test_text_field_resends_after_text :: proc(t: ^testing.T) {
 	frame :: proc(u: ^ui.State, f: ^ui.Text_Field, now: ^f64, bytes: []u8, events: ..platform.Event) {
 		now^ += 0.016
 		ui.begin_frame(u, events, nil, nil, 300, 200, now^, nil, bytes)
-		b := ui.text_field("search", f, "Search", ui.px(200), ui.px(30))
+		b := ui.text_field("search", f, "Search", ui.px(200), 30)
 		if !b.focused {
 			ui.focus_text_field(b.box, f)
 		}
@@ -505,7 +505,7 @@ test_text_field_blink :: proc(t: ^testing.T) {
 	defer free(f)
 	run :: proc(u: ^ui.State, f: ^ui.Text_Field, now: f64, events: ..platform.Event) -> (animating: bool) {
 		ui.begin_frame(u, events, nil, nil, 300, 200, now)
-		b := ui.text_field("search", f, "Search", ui.px(200), ui.px(30))
+		b := ui.text_field("search", f, "Search", ui.px(200), 30)
 		if len(events) == 0 && !ui.has_focus(b.box) {
 			ui.focus_text_field(b.box, f)
 		}
@@ -544,7 +544,7 @@ test_text_field_keeps_arrows_in_a_row :: proc(t: ^testing.T) {
 		now^ += 0.016
 		ui.begin_frame(u, events, nil, nil, 300, 200, now^)
 		ui.row("bar", {}, ui.fill(), ui.px(30))
-		sig := ui.text_field("search", f, "Search", ui.px(200), ui.px(30))
+		sig := ui.text_field("search", f, "Search", ui.px(200), 30)
 		ui.box_make("go", {.Clickable, .Focusable}, ui.px(40), ui.px(30))
 		ui.end_frame()
 		return sig
@@ -578,7 +578,7 @@ test_text_field_click_after_shortcut :: proc(t: ^testing.T) {
 	frame :: proc(u: ^ui.State, f: ^ui.Text_Field, now: ^f64, events: ..platform.Event) {
 		now^ += 0.016
 		ui.begin_frame(u, events, nil, nil, 300, 200, now^)
-		b := ui.text_field("search", f, "Search", ui.px(200), ui.px(30))
+		b := ui.text_field("search", f, "Search", ui.px(200), 30)
 		ui.focus_shortcut(b.box, .F, {ui.PRIMARY})
 		ui.end_frame()
 	}
@@ -609,7 +609,7 @@ test_text_field_click_after_escape :: proc(t: ^testing.T) {
 	frame :: proc(u: ^ui.State, f: ^ui.Text_Field, now: ^f64, events: ..platform.Event) -> ui.Field_Signal {
 		now^ += 0.016
 		ui.begin_frame(u, events, nil, nil, 300, 200, now^)
-		sig := ui.text_field("search", f, "Search", ui.px(200), ui.px(30))
+		sig := ui.text_field("search", f, "Search", ui.px(200), 30)
 		ui.end_frame()
 		return sig
 	}

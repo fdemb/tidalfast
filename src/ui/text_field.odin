@@ -34,14 +34,20 @@ Field_Layout :: struct {
 // draws the caret, which blinks with a timer while the window has the
 // keyboard. The text scrolls sideways to keep the caret in view. Its
 // background, border and corners come from the style stacks; with the focus
-// its border is the accent. inset is room left of the text, for an icon the
-// caller puts there.
-text_field :: proc(id: string, f: ^Text_Field, placeholder: string, width, height: Size, inset: f32 = 0) -> (sig: Field_Signal) {
+// its border is the accent. height is in points, so the text is centred in
+// the field's first frame, before it has a rect. inset is room left of the
+// text, for an icon the caller puts there. focus gives it the focus with
+// its text selected, as focus_text_field does, but before it's built, so
+// this frame already draws it focused.
+text_field :: proc(id: string, f: ^Text_Field, placeholder: string, width: Size, height: f32, inset: f32 = 0, focus := false) -> (sig: Field_Signal) {
 	u := ctx
 	set_next_text_pad(FIELD_PAD)
-	b := box_make(id, {.Clickable, .Focusable, .Text_Input, .Draw_Background, .Draw_Border, .Clip}, width, height)
+	b := box_make(id, {.Clickable, .Focusable, .Text_Input, .Draw_Background, .Draw_Border, .Clip}, width, px(height))
 	s := signal(b)
 	sig.box = b
+	if focus {
+		focus_text_field(b, f)
+	}
 	focused := b.key != 0 && u.focus == b.key
 	sig.focused = focused
 	if focused {
@@ -175,11 +181,11 @@ text_field :: proc(id: string, f: ^Text_Field, placeholder: string, width, heigh
 
 	shown := clone_temp(t)
 	accessible(b, .Text_Field, placeholder, shown)
-	field_draw(u, b, f, lay, placeholder, shown, focused, caret, inset)
+	field_draw(u, b, f, lay, placeholder, shown, focused, caret, height, inset)
 
 	if focused {
 		line_h := field_line_height(u, font, size)
-		ty := (field_height(b) - line_h) / 2
+		ty := (height - line_h) / 2
 		cx, cw := caret, f32(0)
 		if f.marked {
 			spans := field_spans(lay, f.marked_start, f.marked_end)
@@ -347,21 +353,14 @@ field_line_height :: proc(u: ^State, font: text.Font, size: f32) -> f32 {
 	return text.line_height(u.texts, font, size) if u.texts != nil else size * 1.25
 }
 
-// field_height is the field's height this frame: its own size if it has
-// one, else last frame's.
-@(private)
-field_height :: proc(b: ^Box) -> f32 {
-	return b.pref_size[.Y].value if b.pref_size[.Y].kind == .Pixels else b.rect.h
-}
-
 // field_draw builds the field's insides as floating boxes: the selection,
 // the text or the placeholder, the marked text's underline and the caret.
 @(private)
-field_draw :: proc(u: ^State, b: ^Box, f: ^Text_Field, lay: Field_Layout, placeholder, shown: string, focused: bool, caret, inset: f32) {
+field_draw :: proc(u: ^State, b: ^Box, f: ^Text_Field, lay: Field_Layout, placeholder, shown: string, focused: bool, caret, height, inset: f32) {
 	push_parent(b)
 	defer pop_parent()
 	line_h := field_line_height(u, b.font, b.font_size)
-	ty := (field_height(b) - line_h) / 2
+	ty := (height - line_h) / 2
 	x := FIELD_PAD + inset - f.scroll
 	piece :: proc(pos, size: [2]f32, color: render.Color) -> ^Box {
 		p := box_make("", {.Floating_X, .Floating_Y, .Draw_Background}, px(size.x), px(size.y))

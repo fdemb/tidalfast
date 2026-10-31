@@ -137,11 +137,8 @@ pkce_card :: proc(s: ^State) {
 		ui.set_next_background(SURFACE)
 		ui.set_next_border_color(OUTLINE)
 		ui.set_next_radius(6)
-		sig := ui.text_field("pkce_url", &l.field, "Paste the address here", ui.fill(), ui.px(36))
-		if l.focus_field {
-			ui.focus_text_field(sig.box, &l.field)
-			l.focus_field = false
-		}
+		sig := ui.text_field("pkce_url", &l.field, "Paste the address here", ui.fill(), 36, focus = l.focus_field)
+		l.focus_field = false
 		ui.spacer(ui.px(10))
 		if pill_button("pkce_continue", "Continue", 110, SURFACE_ACTIVE, TEXT) {
 			pkce_submit(s, ui.field_text(&l.field))

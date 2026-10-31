@@ -1029,7 +1029,7 @@ space_frame :: proc(u: ^ui.State, field: ^ui.Text_Field, now: ^f64, events: ..pl
 	now^ += 1.0 / 120
 	ui.begin_frame(u, events, nil, nil, 600, 200, now^)
 	f.button = ui.signal(ui.box_make("button", {.Clickable, .Focusable}, ui.px(100), ui.px(40)))
-	f.field = ui.text_field("field", field, "Search", ui.px(200), ui.px(30))
+	f.field = ui.text_field("field", field, "Search", ui.px(200), 30)
 	f.field_box = ui.find("field")
 	f.area = ui.signal(ui.box_make("area", {.Clickable, .Focusable}, ui.px(200), ui.px(100)))
 	if f.area.right_clicked {
@@ -1332,7 +1332,7 @@ test_ui_placeholder_first_frame :: proc(t: ^testing.T) {
 	f := new(ui.Text_Field)
 	defer free(f)
 	ui.begin_frame(&u, nil, nil, nil, 300, 200, 0)
-	sig := ui.text_field("field", f, "Search", ui.px(200), ui.px(30))
+	sig := ui.text_field("field", f, "Search", ui.px(200), 30)
 	ui.end_frame()
 	label: ^ui.Box
 	for c := sig.box.first; c != nil; c = c.next {
