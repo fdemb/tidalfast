@@ -17,7 +17,7 @@ import "core:hash"
 import "core:math"
 import "core:sys/posix"
 
-import "../kbts"
+import "../../third_party/kbts"
 
 foreign import freetype "system:freetype"
 foreign import fontconfig "system:fontconfig"

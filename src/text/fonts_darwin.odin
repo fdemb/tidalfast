@@ -10,7 +10,7 @@ import "core:slice"
 import "core:strings"
 import "core:sys/posix"
 
-import "../kbts"
+import "../../third_party/kbts"
 
 SIZED_FONTS :: 16
 SCRATCH_SIZE :: 256 // glyphs bigger than this get their own bitmap context

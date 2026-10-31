@@ -24,20 +24,15 @@ die() {
 }
 
 newest_source() {
-	find "$REPO/src" "$REPO/shell" -type f \( -name '*.odin' -o -name '*.m' -o -name '*.h' -o -name '*.c' \) -print0 |
+	find "$REPO/src" "$REPO/shell" "$REPO/third_party" -type f \( -name '*.odin' -o -name '*.m' -o -name '*.h' -o -name '*.c' \) -print0 |
 		xargs -0 stat -f '%m' | sort -n | tail -1
 }
 
 cmd_build() {
 	mkdir -p "$BIN"
 	cd "$REPO" || die "no repo at $REPO"
-	# The dylib links build/kbts/kb_text_shape.a; build it the way build.sh does.
-	if [ ! -f build/kbts/kb_text_shape.a ]; then
-		mkdir -p build/kbts
-		cc -O2 -fPIC -c src/kbts/kb_text_shape.c -o build/kbts/kb_text_shape.o || die "kbts build failed"
-		ar -rcs build/kbts/kb_text_shape.a build/kbts/kb_text_shape.o
-		rm build/kbts/kb_text_shape.o
-	fi
+	# The dylib links the C libraries in build/kbts and build/miniaudio.
+	./build.sh libs || die "C library build failed"
 	echo "verify: building shell"
 	clang shell/shell.m -o "$BIN/tidalfast" -fobjc-arc -mmacosx-version-min=14.0 \
 		-Wall -Wno-unused-parameter -O2 -DHOT_RELOAD=0 \

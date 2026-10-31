@@ -11,7 +11,7 @@ import "core:testing"
 import "core:thread"
 import vmem "core:mem/virtual"
 import "core:time"
-import ma "vendor:miniaudio"
+import ma "../third_party/miniaudio"
 
 import app "../src/app"
 import "../src/audio"

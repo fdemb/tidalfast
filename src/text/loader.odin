@@ -6,7 +6,7 @@ import "core:c/libc"
 import "core:sync"
 import "core:sys/posix"
 
-import "../kbts"
+import "../../third_party/kbts"
 
 // Fallback fonts load on a worker thread. Finding one can mean CoreText
 // going through every installed font, and loading one maps the file and

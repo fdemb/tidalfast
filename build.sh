@@ -5,6 +5,7 @@
 # ./build.sh release app  optimized app dylib only
 # ./build.sh measure      what tools/measure runs: an optimized app in build/measure/app that
 #                         also reads TIDALFAST_API, the mock server and the measure tool
+# ./build.sh libs         only the C libraries in third_party, into build/
 # ./build.sh dist         release package in build/dist: TIDALfast.app and a .dmg on macOS,
 #                         an AppImage on Linux (needs linuxdeploy, or LINUXDEPLOY=path).
 #                         TIDALFAST_VERSION=1.2.3 sets the version, else git describe
@@ -19,7 +20,8 @@ for arg in "$@"; do
 	app) target=app ;;
 	measure) target=measure ;;
 	dist) target=dist mode=release ;;
-	*) echo "usage: $0 [release] [app] | $0 measure | $0 dist" >&2; exit 1 ;;
+	libs) target=libs ;;
+	*) echo "usage: $0 [release] [app] | $0 measure | $0 dist | $0 libs" >&2; exit 1 ;;
 	esac
 done
 
@@ -50,22 +52,29 @@ mkdir -p build build/measure
 # build machine's version, and dyld won't load the dylib on anything older.
 macos_min=14.0
 if [ "$(uname -s)" = Darwin ]; then
-	kbts_flags="-O2 -fPIC -mmacosx-version-min=$macos_min"
+	lib_flags="-O2 -fPIC -mmacosx-version-min=$macos_min"
 else
-	kbts_flags="-O2 -fPIC"
+	lib_flags="-O2 -fPIC"
 fi
 
-# kb_text_shape's C source lives in src/kbts next to its bindings, which
-# link build/kbts/kb_text_shape.a. Rebuilt when the source is newer or the
-# flags change. The .c file adds one export, tidalfast_bidi_class.
-if [ ! -f build/kbts/kb_text_shape.a ] || [ src/kbts/kb_text_shape.h -nt build/kbts/kb_text_shape.a ] || [ src/kbts/kb_text_shape.c -nt build/kbts/kb_text_shape.a ] || [ "$(cat build/kbts/flags 2>/dev/null)" != "$kbts_flags" ]; then
-	mkdir -p build/kbts
-	echo "$kbts_flags" > build/kbts/flags
-	cc $kbts_flags -c src/kbts/kb_text_shape.c -o build/kbts/kb_text_shape.o
-	rm -f build/kbts/kb_text_shape.a
-	ar -rcs build/kbts/kb_text_shape.a build/kbts/kb_text_shape.o
-	rm build/kbts/kb_text_shape.o
-fi
+# The C libraries live in third_party next to their Odin bindings, which
+# link build/<name>/<lib>.a. Each is rebuilt when its source is newer or the
+# flags change. kb_text_shape.c adds one export, tidalfast_bidi_class.
+c_lib() { # name, library
+	dir=third_party/$1
+	out=build/$1/$2.a
+	if [ ! -f "$out" ] || [ "$dir/$2.h" -nt "$out" ] || [ "$dir/$2.c" -nt "$out" ] || [ "$(cat "build/$1/flags" 2>/dev/null)" != "$lib_flags" ]; then
+		mkdir -p "build/$1"
+		echo "$lib_flags" > "build/$1/flags"
+		cc $lib_flags -c "$dir/$2.c" -o "build/$1/$2.o"
+		rm -f "$out"
+		ar -rcs "$out" "build/$1/$2.o"
+		rm "build/$1/$2.o"
+	fi
+}
+c_lib kbts kb_text_shape
+c_lib miniaudio miniaudio
+[ "$target" = libs ] && exit 0
 
 # Linux: a Wayland shell in C and a Vulkan renderer. The protocol glue comes
 # from wayland-scanner and the shaders from glslangValidator; the app #loads

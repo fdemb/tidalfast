@@ -41,10 +41,8 @@ jobs:
           curl -fsSL "https://github.com/odin-lang/Odin/releases/download/$ODIN_VERSION/odin-linux-amd64-$ODIN_VERSION.tar.gz" |
             tar xz -C "$RUNNER_TEMP/odin" --strip-components=1
           echo "$RUNNER_TEMP/odin" >> "$GITHUB_PATH"
-      - name: Build miniaudio and stb
-        run: |
-          sh "$(odin root)/vendor/miniaudio/src/build_miniaudio.sh"
-          cd "$(odin root)/vendor/stb/src" && sh build_stb.sh
+      - name: Build stb
+        run: cd "$(odin root)/vendor/stb/src" && sh build_stb.sh
       - run: ./build.sh
       - name: Test
         run: |

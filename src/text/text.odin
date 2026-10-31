@@ -42,7 +42,7 @@ import "core:slice"
 import "core:unicode"
 import "core:unicode/utf8"
 
-import "../kbts"
+import "../../third_party/kbts"
 
 import "../render"
 

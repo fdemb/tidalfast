@@ -17,7 +17,7 @@ src/jobs/         bounded priority queues between the UI thread and the workers,
 src/cover/        cover art sizes, decoding on a worker, and the texture cache
 src/cacert/       where libcurl finds CA certificates on Linux when its built-in path is missing
 src/os_services/  secret store (Keychain, libsecret), opening URLs, settings and cache paths
-src/kbts/         kb_text_shape's C source and Odin bindings, which build.sh compiles into build/kbts
+third_party/      C libraries with their Odin bindings, which build.sh compiles into build/<name>: kbts (kb_text_shape) and miniaudio
 tests/            `odin test tests`
 examples/cli/     CLI on top of src/tidal
 tools/measure/    startup and memory measurement (docs/measuring.md)

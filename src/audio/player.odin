@@ -54,7 +54,7 @@ import "core:strings"
 import "core:sync"
 import "core:sys/posix"
 import "core:time"
-import ma "vendor:miniaudio"
+import ma "../../third_party/miniaudio"
 
 RING_FRAMES :: 1 << 17 // about 3 s at 44.1 kHz
 CHUNK :: 4096 // frames decoded per step

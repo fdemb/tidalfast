@@ -8,7 +8,7 @@ import "core:testing"
 import "core:unicode/utf8"
 import "core:time"
 
-import "../src/kbts"
+import "../third_party/kbts"
 import "../src/platform"
 import "../src/render"
 import "../src/text"
