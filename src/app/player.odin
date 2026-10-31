@@ -107,6 +107,7 @@ Playback :: struct {
 	next_failed:     Track_Source,
 	paused:          bool,
 	status:          audio.Status,
+	output_seen:     audio.Device_Info, // the last open output, kept while the device reopens; reset when the output setting changes
 	resume_sample:   i64, // position kept across a reload
 	seek_id:         u32, // waiting for this seek to show up in status
 	seek_serial:     u64, // the source it's for; it's dropped once that isn't current
@@ -815,6 +816,9 @@ playback_observe :: proc(s: ^State, status: audio.Status) {
 	pb := &s.playback
 	pb.status = status
 	st := &pb.status
+	if st.device.rate > 0 {
+		pb.output_seen = st.device
+	}
 	// Keep what bit-perfect output changed on the device on disk while it
 	// lasts, so a start after a crash can put it back.
 	if st.change != s.settings.device {

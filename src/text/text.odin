@@ -82,6 +82,7 @@ ICON_PLUS :: "\ue3d4" // Icon
 ICON_CHECK :: "\ue182" // Icon
 ICON_HOUSE :: "\ue2c2" // Icon
 ICON_HOUSE_FILL :: "\ue2c2" // Icon_Fill
+ICON_SPEAKER_HIFI :: "\uea08" // Icon
 
 MAX_FACES :: 32 // also kb_text_shape's font stack limit
 FALLBACK_CAPACITY :: 4096 // to start with; it doubles when three quarters full

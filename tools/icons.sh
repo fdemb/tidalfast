@@ -25,6 +25,7 @@ bold share-network e408
 bold plus e3d4
 bold check e182
 bold house e2c2
+bold speaker-hifi ea08
 fill house e2c2
 "
 
