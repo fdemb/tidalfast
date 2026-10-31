@@ -31,8 +31,8 @@ package audio
 //
 // Output goes through miniaudio, which plays at whatever rate the device
 // runs at and converts. In bit-perfect mode it goes to the CoreAudio HAL
-// instead (coreaudio_darwin.odin; Linux doesn't have it yet, see
-// bitperfect_linux.odin): the device is switched to the track's rate,
+// instead (bitperfect_darwin.odin; bitperfect_linux.odin has the same
+// procedures, which refuse): the device is switched to the track's rate,
 // ReplayGain and the volume are skipped, and the samples reach the device
 // as they were decoded. A rate change between tracks lets the ring play
 // out, re-clocks the device and starts again: a short gap. Tracks at the
@@ -171,7 +171,7 @@ wake_wait_for :: proc(w: ^Wake, d: time.Duration) {
 	sync.atomic_store(&w.pending, false)
 }
 
-// Device_Watch is where the CoreAudio listeners leave their news for the
+// Device_Watch is where the device listeners leave their news for the
 // decode thread, and what the decode thread sleeps on. A listener
 // may still be running after it's removed, so it touches nothing but the
 // watch, and the watch is never freed. Clearing a pointer to the Player
@@ -281,7 +281,7 @@ Player :: struct {
 	hal:             Hal,
 	hal_scratch:     []f32, // for devices whose buffers don't match the ring's layout
 	watch:           ^Device_Watch, // heap, never freed
-	alive_device:    Audio_Object_ID, // the device whose alive state is listened to, 0 for none
+	alive_device:    Device_ID, // the device being watched for going away, 0 for none
 	using_hal:       bool, // the open device is hal, not miniaudio's
 	device_open:     bool,
 	device_running:  bool,
@@ -355,7 +355,7 @@ create :: proc(wake_ui: proc "c" (), volume: f32, capture_path := "", window := 
 	p.device = new(ma.device, a)
 	p.watch = new(Device_Watch, runtime.heap_allocator())
 	if !null_output {
-		listen(SYSTEM_OBJECT, PROP_DEFAULT_OUTPUT, device_listener, p.watch)
+		watch_default_output(p.watch)
 	}
 	if capture_path != "" {
 		p.capture_fd = posix.open(strings.clone_to_cstring(capture_path, context.temp_allocator), {.WRONLY, .CREAT, .TRUNC}, {.IRUSR, .IWUSR, .IRGRP, .IROTH})
@@ -390,7 +390,7 @@ destroy :: proc(p: ^Player) {
 	wake_post(&p.watch.wake)
 	posix.pthread_join(p.thread)
 	if !p.null_output {
-		unlisten(SYSTEM_OBJECT, PROP_DEFAULT_OUTPUT, device_listener, p.watch)
+		unwatch_default_output(p.watch)
 	}
 	for &sl in p.slots {
 		slot_close(&sl)
@@ -495,16 +495,15 @@ when ODIN_TEST {
 		wake_post(&p.watch.wake)
 	}
 
-	// listener_watch is what CoreAudio hands p's listeners, kept after p
+	// listener_watch is what p's device listeners are handed, kept after p
 	// is destroyed.
 	listener_watch :: proc(p: ^Player) -> rawptr {
 		return p.watch
 	}
 
-	// run_listener runs the default output listener as CoreAudio would.
+	// run_listener does what the default output listener does.
 	run_listener :: proc "c" (watch: rawptr) {
-		address := Property_Address{selector = PROP_DEFAULT_OUTPUT}
-		device_listener(SYSTEM_OBJECT, 1, &address, watch)
+		watch_note((^Device_Watch)(watch), default_changed = true, device_changed = false)
 	}
 }
 
@@ -869,21 +868,17 @@ do_set_output :: proc(p: ^Player, o: Output) {
 	p.wake_ui()
 }
 
-// device_listener is the CoreAudio listener for the default output and the
-// HAL device's alive state. It only notes what changed and wakes the
-// decode thread, which runs check_device.
-@(private = "file")
-device_listener :: proc "c" (id: Audio_Object_ID, count: u32, addresses: [^]Property_Address, client: rawptr) -> OS_Status {
-	w := (^Device_Watch)(client)
-	for a in addresses[:count] {
-		if a.selector == PROP_DEFAULT_OUTPUT {
-			sync.atomic_store(&w.default_changed, true)
-		} else {
-			sync.atomic_store(&w.device_changed, true)
-		}
+// watch_note is all a device listener does: note what changed and wake
+// the decode thread, which runs check_device.
+@(private)
+watch_note :: proc "contextless" (w: ^Device_Watch, default_changed, device_changed: bool) {
+	if default_changed {
+		sync.atomic_store(&w.default_changed, true)
+	}
+	if device_changed {
+		sync.atomic_store(&w.device_changed, true)
 	}
 	wake_post(&w.wake)
-	return 0
 }
 
 // check_device acts on what the listeners saw. If the HAL device went
@@ -935,14 +930,7 @@ check_device :: proc(p: ^Player) {
 // device, for the app to keep on disk.
 @(private = "file")
 update_change :: proc(p: ^Player) {
-	c: Device_Change
-	h := &p.hal
-	if h.device != 0 && h.has_orig && h.rate != 0 {
-		c.uid_len = copy(c.uid[:], device_uid(h.device))
-		c.orig_rate = h.orig_rate
-		c.orig_format = h.orig_format
-		c.rate = f64(h.rate)
-	}
+	c := hal_device_change(&p.hal)
 	sync.lock(&p.status_mutex)
 	changed := c != p.st.change
 	p.st.change = c
@@ -1102,7 +1090,7 @@ update_device :: proc(p: ^Player) {
 	if want && !p.device_running {
 		ring_skip_flush(&p.pcm)
 		if p.using_hal {
-			p.device_running = hal_start(&p.hal, hal_io_proc, p)
+			p.device_running = hal_start(&p.hal, p)
 		} else if ma.device_start(p.device) == .SUCCESS {
 			p.device_running = true
 		}
@@ -1836,8 +1824,7 @@ hal_open :: proc(p: ^Player, rate, channels, bits: int) -> (ok: bool, reason: st
 		log.warnf("audio: no bit-perfect output at %d Hz (%s); the system mixer converts it", rate, reason)
 		return
 	}
-	p.hal.channel_map = channel_map_make(channels, device_stereo_channels(dev))
-	if listen(dev, PROP_ALIVE, device_listener, p.watch) {
+	if watch_device(dev, p.watch) {
 		p.alive_device = dev
 	}
 	p.using_hal = true
@@ -1851,7 +1838,7 @@ hal_open :: proc(p: ^Player, rate, channels, bits: int) -> (ok: bool, reason: st
 @(private = "file")
 device_close :: proc(p: ^Player, restore := false) {
 	if p.alive_device != 0 {
-		unlisten(p.alive_device, PROP_ALIVE, device_listener, p.watch)
+		unwatch_device(p.alive_device, p.watch)
 		p.alive_device = 0
 	}
 	if p.device_open {
@@ -1918,15 +1905,13 @@ audio_callback :: proc "c" (device: ^ma.device, output, input: rawptr, frame_cou
 	after_render(p, out, u64(frame_count), n)
 }
 
-// hal_io_proc is the HAL's IOProc: the ring's frames as they are, into
-// the device's buffers (hal_fill). It keeps the callback's rules: no locks,
-// allocation or system calls.
-@(private = "file")
-hal_io_proc :: proc "c" (device: Audio_Object_ID, now: rawptr, input: ^Audio_Buffer_List, input_time: rawptr, output: ^Audio_Buffer_List, output_time: rawptr, client: rawptr) -> OS_Status {
-	p := (^Player)(client)
+// hal_render is what the HAL's IOProc does: the ring's frames as they
+// are, into the device's buffers (hal_fill). It keeps the callback's rules:
+// no locks, allocation or system calls.
+@(private)
+hal_render :: proc "contextless" (p: ^Player, output: ^Audio_Buffer_List) {
 	frames, n, out := hal_fill(output, &p.pcm, p.hal_scratch, &p.hal.channel_map)
 	after_render(p, out, frames, n)
-	return 0
 }
 
 // after_render is the callbacks' bookkeeping once out has frame_count

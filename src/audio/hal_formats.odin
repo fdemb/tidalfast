@@ -8,6 +8,9 @@ package audio
 import "base:intrinsics"
 import "core:fmt"
 
+// Device_ID names an output device to bitperfect_<os>.odin, 0 for none.
+Device_ID :: u32
+
 Value_Range :: struct {
 	minimum: f64,
 	maximum: f64,
