@@ -556,19 +556,18 @@ push_image :: proc(r: ^Renderer, rect: Rect, texture: Texture, src: Rect = {}, t
 }
 
 // Rim is how a rim changes the linear colour c under it: c * (1 - darken)
-// + lift. Dark colours get lighter and light ones darker, with c = lift /
-// darken left as it is.
+// + lift. Colours move toward lift / darken, so with the two equal it is
+// white at that alpha.
 Rim :: struct {
 	lift:   f32,
 	darken: f32,
+	width:  f32, // in points, 0 for one physical pixel
 }
 
 // push_rim draws a hairline just inside rect's edge that changes what's under
-// it by rim. It keeps the hue of what it lies on, so on a cover it is the
-// cover's own edge, lighter where the cover is dark and darker where it's
-// light.
+// it by rim.
 push_rim :: proc(r: ^Renderer, rect: Rect, rim: Rim, radius: f32 = 0) {
-	push(r, rect, {colors = corners(Color{1, 1, 1, rim.lift}), radii = corners(radius), border = 1 / r.scale, additive = true, darken = rim.darken})
+	push(r, rect, {colors = corners(Color{1, 1, 1, rim.lift}), radii = corners(radius), border = rim.width if rim.width > 0 else 1 / r.scale, additive = true, darken = rim.darken})
 }
 
 // push_shadow draws a drop shadow for a box of the given rect and radius.
