@@ -45,16 +45,25 @@ resolve_stream :: proc(s: ^Session, track_id: i64, quality: Quality, allocator :
 		context.temp_allocator,
 	)
 	if rerr != nil {
-		return {}, remap_error(rerr, .Stream_Not_Available, "Stream not available for this track", "Stream unavailable")
+		err = remap_error(rerr, .Stream_Not_Available, "Stream not available for this track", "Stream unavailable")
+		// TIDAL refuses a track it won't play with a 401 and a 4xxx subStatus,
+		// such as 4005 "Asset is not ready for playback". That says nothing
+		// about the login, and a plain 401 would end it.
+		if e, ok := &err.(Api_Error); ok && e.kind == .Http && e.status == 401 && e.sub_status >= 4000 && e.sub_status < 5000 {
+			e.kind = .Stream_Not_Available
+			e.message = "Stream not available for this track"
+		}
+		return {}, err
 	}
 	return parse_playback_info(obj, allocator)
 }
 
 // resolve_stream_flac asks for the best FLAC the login can get. The PKCE
 // client asks for HI_RES_LOSSLESS, and asks again for LOSSLESS if TIDAL
-// refuses that tier: a 403, no stream at that tier, or a lossy one in its
-// place. riptide falls back the same way. Either tier may come as BTS or
-// as DASH. The device-code client asks for LOSSLESS, which it gets as AAC.
+// refuses that tier: a 403, no stream at that tier (a 404, or a 401 with a
+// 4xxx subStatus), or a lossy one in its place. riptide falls back the
+// same way. Either tier may come as BTS or as DASH. The device-code client
+// asks for LOSSLESS, which it gets as AAC.
 // refused is the HI_RES_LOSSLESS answer's error when it fell back.
 resolve_stream_flac :: proc(s: ^Session, track_id: i64, allocator := context.allocator) -> (info: Stream_Info, refused: Error, err: Error) {
 	if !session_is_pkce(s) {

@@ -361,6 +361,54 @@ aac_stream_message :: proc(t: ^testing.T) {
 	testing.expect_value(t, s.playback.index, 2)
 }
 
+// TIDAL answers 401 with subStatus 4005 for a track it won't play. The
+// login stays, and the player says so and skips on.
+@(test)
+unplayable_track_keeps_the_login :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	not_ready := Mock_Answer{401, `{"status":401,"subStatus":4005,"userMessage":"Asset is not ready for playback"}`}
+	m.playback["HI_RES_LOSSLESS"] = not_ready
+	m.playback["LOSSLESS"] = not_ready
+	s := login_state(&m)
+	defer login_state_free(s)
+	d := &s.data
+	s.playback.player = audio.create(quiet, 0, null_output = true)
+	login := TEST_LOGIN
+	login.is_pkce = true
+	sign_in(s, login)
+	queued_kinds(d)
+	app.view_open(d, .Playlist, "pl", "pl", "", 2)
+	rows := make([]app.Row, 2, context.temp_allocator)
+	for &r, i in rows {
+		r.title = fmt.tprintf("Track %d", i + 1)
+		r.id = i64(1000 + i)
+		r.seconds = 30
+	}
+	app.view_add_rows(&d.view, 0, len(rows), rows, len(rows))
+
+	app.playback_play_row(s, 0)
+	_, queued := queued_kinds(d)
+	ran := false
+	for job in queued {
+		if _, stream := job.payload.(app.Stream_Job); stream {
+			runner := context.logger
+			context.logger = log.nil_logger() // the failed stream is logged as an error
+			run_now(s, job)
+			context.logger = runner
+			ran = true
+		}
+	}
+	testing.expect(t, ran, "no stream was asked for")
+	testing.expect(t, !app.show_login(s), "an unplayable track signed out")
+	run_disk(s)
+	_, saved := keychain_auth(d)
+	testing.expect(t, saved, "the keychain item went")
+	testing.expect(t, strings.has_prefix(app.small_str(&s.playback.message), "Couldn't play Track 1"), app.small_str(&s.playback.message))
+	testing.expect_value(t, s.playback.index, 1)
+}
+
 @(private = "file")
 bts_answer :: proc(quality, codec, mime: string) -> Mock_Answer {
 	manifest := fmt.tprintf(`{{"mimeType":"%s","codecs":"%s","encryptionType":"NONE","urls":["http://127.0.0.1/a"]}}`, mime, codec)
@@ -408,6 +456,8 @@ stream_quality_fallback :: proc(t: ^testing.T) {
 		{name = "AAC, then DASH", pkce = true, hires = dash_answer("HI_RES_LOSSLESS", "mp4a.40.2"), lossless = dash_answer("LOSSLESS", "flac"), quality = "LOSSLESS", dash = true, refused = .Lossy_Stream, hires_asks = 1, lossless_asks = 1},
 		{name = "404, then BTS", pkce = true, hires = {404, `{"status":404,"userMessage":"not found"}`}, lossless = bts_answer("LOSSLESS", "flac", "audio/flac"), quality = "LOSSLESS", refused = .Stream_Not_Available, hires_asks = 1, lossless_asks = 1},
 		{name = "a 500 isn't a refusal", pkce = true, hires = {500, `{"status":500}`}, err = .Http, hires_asks = 1},
+		{name = "401 for the track, then BTS", pkce = true, hires = {401, `{"status":401,"subStatus":4005,"userMessage":"Asset is not ready for playback"}`}, lossless = bts_answer("LOSSLESS", "flac", "audio/flac"), quality = "LOSSLESS", refused = .Stream_Not_Available, hires_asks = 1, lossless_asks = 1},
+		{name = "401 for the session", pkce = true, hires = {401, `{"status":401,"subStatus":11002,"userMessage":"Session is not valid"}`}, err = .Http, hires_asks = 1},
 		{name = "device client", pkce = false, lossless = bts_answer("LOSSLESS", "mp4a.40.2", "audio/mp4"), err = .Lossy_Stream, lossless_asks = 1},
 	}
 	for c in cases {
