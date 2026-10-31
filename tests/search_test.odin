@@ -8,6 +8,7 @@ import "core:testing"
 import "core:unicode/utf8"
 
 import app "../src/app"
+import "../src/audio"
 import "../src/cover"
 import "../src/jobs"
 import "../src/tidal"
@@ -850,8 +851,73 @@ sidebar_wants_only_visible_covers :: proc(t: ^testing.T) {
 	library_frame(t, s, &f)
 	library_frame(t, s, &f)
 	testing.expectf(t, s.data.covers.used < 30, "%d covers wanted for a window of about 12 rows", s.data.covers.used)
-	testing.expect(t, cover.lookup(&s.data.covers, cover.key_of("img-0", 40)) != nil, "the first playlist's cover is wanted")
-	testing.expect(t, cover.lookup(&s.data.covers, cover.key_of("img-499", 40)) == nil, "the last playlist's cover isn't")
+	testing.expect(t, cover.lookup(&s.data.covers, cover.key_of("img-0", app.PLAYLIST_COVER)) != nil, "the first playlist's cover is wanted")
+	testing.expect(t, cover.lookup(&s.data.covers, cover.key_of("img-499", app.PLAYLIST_COVER)) == nil, "the last playlist's cover isn't")
+}
+
+// A click on a sidebar playlist opens it; a double-click plays it from the
+// top as well, and the row then shows it's what plays.
+@(test)
+double_click_plays_a_playlist :: proc(t: ^testing.T) {
+	arena: vmem.Arena
+	_ = vmem.arena_init_growing(&arena)
+	defer vmem.arena_destroy(&arena)
+	context.allocator = vmem.arena_allocator(&arena)
+	s := library_state(true)
+	defer library_state_free(s)
+	s.playback.player = audio.create(proc "c" () {}, 0, null_output = true)
+	defer app.playback_shutdown(s)
+	f: Frame
+	library_frame(t, s, &f)
+	library_frame(t, s, &f)
+	down, up := left_click(s, "Discover Weekly, ")
+	library_frame(t, s, &f, down, up)
+	library_frame(t, s, &f)
+	testing.expect(t, app.playlist_showing(s, 1), "a click opens the playlist")
+	testing.expect_value(t, s.playback.index, -1)
+	visited := s.history.count
+
+	down.click_count = 2
+	library_frame(t, s, &f, down, up)
+	library_frame(t, s, &f)
+	testing.expect(t, app.playlist_showing(s, 1), "the playlist stays open")
+	testing.expect_value(t, s.playback.index, 0)
+	testing.expect(t, app.sidebar_queued(s, 1), "the queue came from the playlist")
+	testing.expect(t, !app.sidebar_queued(s, 0), "and not from Liked Songs")
+	testing.expect_value(t, s.history.count, visited)
+}
+
+// A double-clicked playlist whose songs haven't come waits for them, and
+// opening another list before they do drops the wait.
+@(test)
+double_click_waits_for_the_first_song :: proc(t: ^testing.T) {
+	arena: vmem.Arena
+	_ = vmem.arena_init_growing(&arena)
+	defer vmem.arena_destroy(&arena)
+	context.allocator = vmem.arena_allocator(&arena)
+	s := library_state(false)
+	defer library_state_free(s)
+	items := make([]app.Sidebar_Item, 3)
+	for &item, i in items {
+		item = {id = fmt.aprintf("pl-%d", i), name = fmt.aprintf("Playlist %d", i), tracks = 5}
+	}
+	s.data.sidebar.items = items
+	f: Frame
+	library_frame(t, s, &f)
+	library_frame(t, s, &f)
+	down, up := left_click(s, "Playlist 1, ")
+	library_frame(t, s, &f, down, up)
+	down.click_count = 2
+	library_frame(t, s, &f, down, up)
+	library_frame(t, s, &f)
+	testing.expect(t, app.playlist_showing(s, 2), "the playlist opens")
+	testing.expect_value(t, s.playback.index, -1)
+	testing.expect(t, s.library.play_waiting, "it waits for its songs")
+
+	library_frame(t, s, &f, press(s, "Playlist 0, "))
+	library_frame(t, s, &f)
+	testing.expect(t, !s.library.play_waiting, "another list drops the wait")
+	testing.expect_value(t, s.playback.index, -1)
 }
 
 // The sidebar's Search row opens the search page with the field focused

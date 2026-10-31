@@ -125,12 +125,16 @@ found_free :: proc(sr: ^Search) {
 	sr.found = {}
 }
 
+// SEARCH_HINT is the shortcut that opens search, shown at the end of the
+// sidebar's Search row.
+SEARCH_HINT :: "⌘F" when ODIN_OS == .Darwin else "Ctrl+F"
+
 // draw_search_entry is the Search row under Home in the sidebar, lit while
 // the search page shows.
 draw_search_entry :: proc(s: ^State) {
 	current := search_page_showing(s)
 	icon := text.ICON_MAGNIFYING_GLASS_FILL if current else text.ICON_MAGNIFYING_GLASS
-	if sidebar_nav_row("##search_entry", "Search", icon, current) {
+	if sidebar_nav_row("##search_entry", "Search", icon, current, SEARCH_HINT) {
 		pending_set(s, Search_Place{})
 	}
 }

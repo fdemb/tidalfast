@@ -157,24 +157,35 @@ draw_home_entry :: proc(s: ^State) {
 }
 
 // sidebar_nav_row is a row at the top of the sidebar, an icon and a name
-// that open a page, lit while the page shows. It returns whether it was
-// clicked.
-sidebar_nav_row :: proc(id, name, icon: string, current: bool) -> (clicked: bool) {
-	ui.row("", {}, ui.fill(), ui.px(SIDEBAR_ROW_H))
+// that open a page, lit while the page shows, with a shortcut's hint at
+// its end if it has one. It returns whether it was clicked.
+sidebar_nav_row :: proc(id, name, icon: string, current: bool, hint := "") -> (clicked: bool) {
+	ui.row("", {}, ui.fill(), ui.px(NAV_ROW_H))
 	ui.spacer(ui.px(SIDEBAR_PAD))
 	{
-		ui.set_next_radius(6)
-		row_highlight(SIDEBAR_ROWS, current)
+		ui.set_next_radius(8)
+		sidebar_selected(current)
 		b := ui.row(id, {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects}, ui.fill(), ui.fill())
 		ui.accessible(b, .Button, name, selected = current)
 		clicked = ui.signal(b).clicked
 		ui.spacer(ui.px(ROW_PAD))
-		ui.text_style(.Icon_Fill if current else .Icon, 20, TEXT)
+		ui.text_style(.Icon_Fill if current else .Icon, 17, TEXT if current else SECONDARY)
 		ui.set_next_text_align(.Center)
-		ui.label(icon, ui.px(40), ui.fill())
-		ui.spacer(ui.px(12))
-		ui.text_style(.Semibold, 15, TEXT)
+		ui.label(icon, ui.px(18), ui.fill())
+		ui.spacer(ui.px(10))
+		ui.text_style(.Medium, 13, TEXT if current else NAV_TEXT)
 		ui.label(name, ui.fill(), ui.fill())
+		if hint != "" {
+			ui.column("", {}, ui.children_sum(), ui.fill())
+			ui.spacer(ui.fill())
+			ui.text_style(.Medium, 11, DIM)
+			ui.set_next_text_pad(5)
+			ui.set_next_radius(4)
+			ui.set_next_border_color(OUTLINE)
+			ui.box_make(fmt.tprintf("%s###%s_hint", hint, id), {.Draw_Text, .Draw_Border}, ui.text_size(), ui.px(18))
+			ui.spacer(ui.fill())
+		}
+		ui.spacer(ui.px(ROW_PAD))
 	}
 	ui.spacer(ui.px(SIDEBAR_PAD))
 	return

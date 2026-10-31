@@ -1562,14 +1562,14 @@ sidebar_entry :: proc(s: ^State, i: int) -> Sidebar_Entry {
 	d := &s.data
 	seed := u32(i) * 7919 + 13
 	if d.fake {
-		return {PLAYLISTS[i], fmt.tprintf("Playlist · %d songs", ROW_COUNT if i == 0 else 20 + i * 37 % 300), "", seed}
+		return {PLAYLISTS[i], fmt.tprintf("%d songs", ROW_COUNT if i == 0 else 20 + i * 37 % 300), "", seed}
 	}
 	if i == 0 {
-		songs := fmt.tprintf("Playlist · %d songs", d.sidebar.liked_count) if d.sidebar.loaded else "Playlist"
+		songs := fmt.tprintf("%d songs", d.sidebar.liked_count) if d.sidebar.loaded else ""
 		return {"Liked Songs", songs, "", seed}
 	}
 	pl := d.sidebar.items[i - 1]
-	return {pl.name, fmt.tprintf("Playlist · %d songs", pl.tracks), pl.image, seed}
+	return {pl.name, fmt.tprintf("%d songs", pl.tracks), pl.image, seed}
 }
 
 view_title :: proc(s: ^State) -> string {

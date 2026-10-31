@@ -969,30 +969,65 @@ queue_find :: proc(pb: ^Playback, track: i64, at: int) -> int {
 // list_key names the open list: its kind and TIDAL id, or the search's
 // query. A list opened again gets the same key, a different one another.
 list_key :: proc(s: ^State) -> u64 {
-	h: u64 = 14695981039346656037
-	fnv :: proc(h: u64, b: u8) -> u64 {
-		return (h ~ u64(b)) * 1099511628211
-	}
 	if s.data.fake {
 		sr := &s.search
-		h = fnv(h, u8(sr.fake_source))
-		if sr.fake_source == .None {
-			h = fnv(fnv(h, u8(s.library.playlist)), u8(s.library.playlist >> 8))
-		}
-		for b in transmute([]u8)small_str(&sr.fake_title) {
-			h = fnv(h, b)
-		}
-		return h
+		return fake_list_key(sr.fake_source, s.library.playlist, small_str(&sr.fake_title))
 	}
 	v := &s.data.view
 	if v.source == .None {
 		return 0
 	}
-	h = fnv(h, u8(v.source))
-	for b in transmute([]u8)small_str(&v.id) {
+	return source_list_key(v.source, small_str(&v.id))
+}
+
+// source_list_key is list_key for a TIDAL list. Queue files keep it, so it
+// mustn't change.
+source_list_key :: proc(source: Source, id: string) -> u64 {
+	h := fnv(FNV_BASIS, u8(source))
+	for b in transmute([]u8)id {
 		h = fnv(h, b)
 	}
 	return h
+}
+
+// fake_list_key is list_key for the fake data: the playlist while no fake
+// list is browsed, the browsed list's title otherwise.
+fake_list_key :: proc(source: Source, playlist: int, title: string) -> u64 {
+	h := fnv(FNV_BASIS, u8(source))
+	if source != .None {
+		for b in transmute([]u8)title {
+			h = fnv(h, b)
+		}
+		return h
+	}
+	return fnv(fnv(h, u8(playlist)), u8(playlist >> 8))
+}
+
+FNV_BASIS :: 14695981039346656037
+
+@(private = "file")
+fnv :: proc(h: u64, b: u8) -> u64 {
+	return (h ~ u64(b)) * 1099511628211
+}
+
+// sidebar_queued says whether the play queue came from sidebar entry i.
+sidebar_queued :: proc(s: ^State, i: int) -> bool {
+	pb := &s.playback
+	if pb.index < 0 || pb.index >= len(pb.entries) {
+		return false
+	}
+	key: u64
+	switch {
+	case s.data.fake:
+		key = fake_list_key(.None, i, "")
+	case i == 0:
+		key = source_list_key(.Liked, "")
+	case i - 1 < len(s.data.sidebar.items):
+		key = source_list_key(.Playlist, s.data.sidebar.items[i - 1].id)
+	case:
+		return false
+	}
+	return pb.list_key == key
 }
 
 // playing_row is the row of the open list that plays, or -1. Only the list

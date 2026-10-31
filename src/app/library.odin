@@ -28,9 +28,22 @@ Row_Colors :: struct {
 }
 
 SIDEBAR_ROWS :: Row_Colors {
-	selected       = {0x27 / 255.0, 0x27 / 255.0, 0x27 / 255.0, 1},
-	hover          = {0x20 / 255.0, 0x20 / 255.0, 0x20 / 255.0, 1},
-	selected_hover = {0x2e / 255.0, 0x2e / 255.0, 0x2e / 255.0, 1},
+	selected       = {0x25 / 255.0, 0x25 / 255.0, 0x25 / 255.0, 1},
+	hover          = {0x1d / 255.0, 0x1d / 255.0, 0x1d / 255.0, 1},
+	selected_hover = {0x2a / 255.0, 0x2a / 255.0, 0x2a / 255.0, 1},
+}
+SIDEBAR_SELECTED_BORDER :: render.Color{0x33 / 255.0, 0x33 / 255.0, 0x33 / 255.0, 1}
+SIDEBAR_SELECTED_SHADOW :: ui.Shadow{blur = 2, y = 1, alpha = 0.35}
+
+// sidebar_selected styles the next box as a lit sidebar row, raised a little
+// with a hairline border and a soft shadow, when current.
+sidebar_selected :: proc(current: bool) {
+	row_highlight(SIDEBAR_ROWS, current)
+	if current {
+		ui.set_next_border_color(SIDEBAR_SELECTED_BORDER)
+		ui.set_next_shadow(SIDEBAR_SELECTED_SHADOW)
+		ui.set_next_flags({.Draw_Border, .Draw_Shadow})
+	}
 }
 
 LIST_ROWS :: Row_Colors {
@@ -46,6 +59,8 @@ row_highlight :: proc(colors: Row_Colors, selected: bool) {
 OUTLINE :: render.Color{0x2c / 255.0, 0x2c / 255.0, 0x2c / 255.0, 1}
 TEXT :: render.Color{0xf3 / 255.0, 0xf3 / 255.0, 0xf3 / 255.0, 1}
 SECONDARY :: render.Color{0xad / 255.0, 0xad / 255.0, 0xad / 255.0, 1}
+NAV_TEXT :: render.Color{0xd6 / 255.0, 0xd6 / 255.0, 0xd6 / 255.0, 1} // the sidebar's Home and Search when not lit
+QUIET :: render.Color{0x8f / 255.0, 0x8f / 255.0, 0x8f / 255.0, 1} // the sidebar's subtitles and settings button
 DIM :: render.Color{0x74 / 255.0, 0x74 / 255.0, 0x74 / 255.0, 1}
 ACCENT :: render.Color{0, 1, 1, 1}
 PLAYBACK_ERROR :: render.Color{0xf0 / 255.0, 0x8a / 255.0, 0x6c / 255.0, 1}
@@ -62,12 +77,20 @@ BAR_BLUR :: 20
 BAR_SATURATION :: 1.8
 BAR_TINT :: render.Color{PANEL.r, PANEL.g, PANEL.b, 0.75}
 TRACK_ROW_H :: 56
-PLAYLIST_ROW_H :: 56
+PLAYLIST_ROW_H :: 50 // a playlist and the gap under it
+PLAYLIST_GAP :: 2
+PLAYLIST_COVER :: 36
 HEADER_H :: 34
-SIDEBAR_ROW_H :: 40 // Home and the Your Library heading
+NAV_ROW_H :: 32 // Home and Search
+NAV_GAP :: 2 // between Home and Search
+NAV_TOP :: 4 // between the top row and Home
+HEADING_GAP :: 16 // between Search and the Your Library heading
+HEADING_H :: 28
+SIDEBAR_HEAD_H :: NAV_TOP + 2 * NAV_ROW_H + NAV_GAP + HEADING_GAP + HEADING_H // under the top row, above the playlists
+SIDEBAR_LIST_TOP :: 4 // between the heading and the first playlist
 SIDEBAR_PAD :: 8 // between the sidebar's edges and its rows
-ROW_PAD :: 10 // between a sidebar row's edge and its cover
-SIDEBAR_INDENT :: SIDEBAR_PAD + ROW_PAD // where the covers, the heading and the search text start
+ROW_PAD :: 10 // between a sidebar row's edge and its icon
+SIDEBAR_INDENT :: SIDEBAR_PAD + ROW_PAD // where the icons, the heading and the search text start
 LIST_PAD :: 16 // between the main view's sides and its rows
 LIST_PAD_Y :: 8 // above the first row and below the last
 NAV_PAD :: 8 // between Back and Forward and the main view's left edge, and its top without a titlebar
@@ -98,6 +121,8 @@ Library :: struct {
 	anchor_offset: f32,
 	songs:         Songs_Total, // list_songs's sum, for the header
 	nav_float:     f32, // this frame's shadow under Back and Forward, 0 to 1 (nav_float)
+	play_waiting:  bool, // a double-clicked playlist plays once it can
+	play_gen:      u32, // its list_gen
 }
 
 // Songs_Total is the open list's length in seconds, and the list_gen,
@@ -376,27 +401,20 @@ history_button :: proc(id, name: string, enabled: bool) -> ui.Signal {
 	return ui.signal(b)
 }
 
-// draw_sidebar is the sidebar, h tall: the room at the top, Home, Search,
-// the Your Library heading and the playlists under them.
+// draw_sidebar is the sidebar, h tall: the top row with the settings
+// button, Home, Search, the Your Library heading and the playlists under
+// them.
 draw_sidebar :: proc(s: ^State, h: f32) {
 	lib := &s.library
 	ui.set_next_background(PANEL)
 	ui.column("sidebar", {.Draw_Background, .Clip}, ui.px(lib.sidebar_w), ui.fill())
-	top := s.titlebar_h if s.titlebar_h > 0 else SIDEBAR_PAD
-	if s.titlebar_h > 0 {
-		// Under the window's buttons, and moves the window.
-		ui.box_make("", {.Window_Drag}, ui.fill(), ui.px(s.titlebar_h))
-	} else {
-		ui.spacer(ui.px(SIDEBAR_PAD))
-	}
-	draw_home_entry(s)
-	draw_search_entry(s)
+	// As tall as the main view's room for Back and Forward, so the settings
+	// button is level with them. Under the window's buttons it moves the
+	// window.
+	top := nav_h(s)
 	{
-		ui.row("", {}, ui.fill(), ui.px(SIDEBAR_ROW_H))
-		ui.spacer(ui.px(SIDEBAR_INDENT))
-		ui.text_style(.Semibold, 15, TEXT)
-		heading := ui.label("Your Library", ui.fill(), ui.fill())
-		ui.accessible(heading, .Static_Text, heading.label)
+		ui.row("", {.Window_Drag} if s.titlebar_h > 0 else {}, ui.fill(), ui.px(top))
+		ui.spacer(ui.fill())
 		{
 			ui.column("", {}, ui.children_sum(), ui.fill())
 			ui.spacer(ui.fill())
@@ -405,40 +423,28 @@ draw_sidebar :: proc(s: ^State, h: f32) {
 		}
 		ui.spacer(ui.px(SIDEBAR_PAD))
 	}
-	ui.spacer(ui.px(LIST_PAD_Y))
-	list_h := h - top - 3 * SIDEBAR_ROW_H - 2 * LIST_PAD_Y
+	ui.spacer(ui.px(NAV_TOP))
+	draw_home_entry(s)
+	ui.spacer(ui.px(NAV_GAP))
+	draw_search_entry(s)
+	ui.spacer(ui.px(HEADING_GAP))
+	{
+		ui.row("", {}, ui.fill(), ui.px(HEADING_H))
+		ui.spacer(ui.px(SIDEBAR_INDENT))
+		ui.text_style(.Semibold, 11, DIM)
+		heading := ui.label("Your Library", ui.fill(), ui.fill())
+		ui.accessible(heading, .Static_Text, heading.label)
+	}
+	ui.spacer(ui.px(SIDEBAR_LIST_TOP))
+	list_h := h - top - SIDEBAR_HEAD_H - SIDEBAR_LIST_TOP - LIST_PAD_Y
 	list := ui.scroll_view("playlists", ui.px(lib.sidebar_w), ui.px(list_h), inset_end = bar_inset(s))
 	list.pad.x = SIDEBAR_PAD
 	ui.accessible(list, .List, "Playlists")
 	{
 		rows := ui.virtual_rows(list, sidebar_count(s), PLAYLIST_ROW_H)
 		for i in rows.first ..< rows.last {
-			entry := sidebar_entry(s, i)
-			current := lib.playlist == i && !s.search.browsing && !home_showing(s) && !search_page_showing(s)
-			ui.set_next_radius(6)
-			row_highlight(SIDEBAR_ROWS, current)
-			item := ui.row(fmt.tprintf("##playlist%d", i), {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects, .Draw_Border}, ui.fill(), ui.px(PLAYLIST_ROW_H))
-			ui.accessible(item, .Row, fmt.tprintf("%s, %s", entry.name, entry.subtitle), selected = current)
-			if ui.drop_hover(item) {
-				item.border_color = ACCENT
-				lib.drop_target = i
-			}
-			if track, ok := ui.dropped(item); ok {
-				add_to_list(s, int(track), i)
-			}
-			sig := ui.signal(item)
-			if sig.clicked {
-				pending_set(s, Playlist_Place{index = i})
-			}
-			ui.spacer(ui.px(ROW_PAD))
-			cover_art(s, .Playlist, entry.image, entry.seed, 40, ui.px(40))
-			ui.spacer(ui.px(12))
-			ui.column("", {}, ui.fill(), ui.fill())
-			ui.spacer(ui.px(10))
-			ui.text_style(.Medium, 14, TEXT)
-			ui.label(entry.name, ui.fill(), ui.px(19))
-			ui.text_style(.Regular, 12, SECONDARY)
-			ui.label(entry.subtitle, ui.fill(), ui.px(17))
+			draw_playlist_row(s, i)
+			ui.spacer(ui.px(PLAYLIST_GAP))
 		}
 		sidebar_prefetch(s, rows.first - COVER_PREFETCH_ROWS, rows.first)
 		sidebar_prefetch(s, rows.last, rows.last + COVER_PREFETCH_ROWS)
@@ -446,10 +452,82 @@ draw_sidebar :: proc(s: ^State, h: f32) {
 	ui.spacer(ui.px(LIST_PAD_Y))
 }
 
+// draw_playlist_row is sidebar entry i: its cover, name and number of
+// songs, lit while it's open, its name in the accent while the queue came
+// from it, with level bars while that plays.
+@(private = "file")
+draw_playlist_row :: proc(s: ^State, i: int) {
+	lib := &s.library
+	entry := sidebar_entry(s, i)
+	current := playlist_showing(s, i)
+	queued := sidebar_queued(s, i)
+	ui.set_next_radius(10)
+	sidebar_selected(current)
+	item := ui.row(fmt.tprintf("##playlist%d", i), {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects, .Draw_Border}, ui.fill(), ui.px(PLAYLIST_ROW_H - PLAYLIST_GAP))
+	ui.accessible(item, .Row, fmt.tprintf("%s, %s", entry.name, entry.subtitle), selected = current)
+	if ui.drop_hover(item) {
+		item.border_color = ACCENT
+		lib.drop_target = i
+	}
+	if track, ok := ui.dropped(item); ok {
+		add_to_list(s, int(track), i)
+	}
+	sig := ui.signal(item)
+	if sig.clicked {
+		pending_set(s, Playlist_Place{index = i})
+	}
+	if sig.double_clicked {
+		pending_set(s, Play_Playlist{index = i})
+	}
+	ui.spacer(ui.px(8))
+	cover_art(s, .Playlist, entry.image, entry.seed, PLAYLIST_COVER, ui.px(PLAYLIST_COVER), radius = 6)
+	ui.spacer(ui.px(10))
+	{
+		ui.column("", {}, ui.fill(), ui.fill())
+		ui.spacer(ui.fill())
+		ui.text_style(.Medium, 13, ACCENT if queued else TEXT)
+		ui.label(entry.name, ui.fill(), ui.px(16))
+		ui.spacer(ui.px(2))
+		ui.text_style(.Regular, 12, QUIET)
+		ui.label(entry.subtitle, ui.fill(), ui.px(15))
+		ui.spacer(ui.fill())
+	}
+	if queued && playback_playing(s) {
+		draw_level_bars()
+	}
+	ui.spacer(ui.px(8))
+}
+
+// playlist_showing says whether the main view shows sidebar entry i.
+playlist_showing :: proc(s: ^State, i: int) -> bool {
+	return s.library.playlist == i && !s.search.browsing && !home_showing(s) && !search_page_showing(s)
+}
+
+// draw_level_bars is four short bars in the accent, standing for sound. They
+// stay still, so a playing playlist asks for no frames.
+@(private = "file")
+draw_level_bars :: proc() {
+	ui.row("", {}, ui.px(20), ui.fill())
+	ui.spacer(ui.fill())
+	bars := [4]f32{7, 12, 5, 9}
+	for bar_h, j in bars {
+		if j > 0 {
+			ui.spacer(ui.px(2))
+		}
+		ui.column("", {}, ui.px(2), ui.fill())
+		ui.spacer(ui.fill())
+		ui.set_next_background(ACCENT)
+		ui.set_next_radius(1)
+		ui.box_make("", {.Draw_Background}, ui.px(2), ui.px(bar_h))
+		ui.spacer(ui.px(18)) // the tallest bar centred in the row
+	}
+	ui.spacer(ui.fill())
+}
+
 @(private = "file")
 sidebar_prefetch :: proc(s: ^State, first, last: int) {
 	for i in max(first, 0) ..< min(last, sidebar_count(s)) {
-		cover_want(s, .Playlist, sidebar_entry(s, i).image, 40, PRIORITY_COVER_NEAR)
+		cover_want(s, .Playlist, sidebar_entry(s, i).image, PLAYLIST_COVER, PRIORITY_COVER_NEAR)
 	}
 }
 
@@ -1339,6 +1417,7 @@ status_text :: proc(s: ^State) -> string {
 // The last one asked for in a frame wins.
 Pending :: union {
 	Playlist_Place,
+	Play_Playlist,
 	List_Place,
 	Home_Place,
 	Search_Place, // the search page, with the field focused
@@ -1350,6 +1429,12 @@ Pending :: union {
 }
 
 Close_Search :: struct {}
+
+// Play_Playlist is a double-click on sidebar entry index: open it, then play
+// it from the top once its first song has come (play_when_ready).
+Play_Playlist :: struct {
+	index: int,
+}
 
 // Search_Now is Return in the search field: search for query at once.
 Search_Now :: struct {
@@ -1415,9 +1500,36 @@ pending_set :: proc(s: ^State, p: Pending) {
 	s.pending = p
 }
 
-// pending_apply does what the last frame asked for. Run it after the frame
-// is drawn; it returns true when it changed something worth a frame.
+// pending_apply does what the last frame asked for, and plays a
+// double-clicked playlist whose first song has come since. Run it after
+// the frame is drawn; it returns true when it changed something worth a
+// frame.
 pending_apply :: proc(s: ^State) -> bool {
+	played := play_when_ready(s)
+	return apply_pending(s) || played
+}
+
+// play_when_ready plays the open list from the top, keeping shuffle as it
+// is, when it's a double-clicked playlist and its first song can play.
+// Opening another list drops the wait.
+play_when_ready :: proc(s: ^State) -> bool {
+	lib := &s.library
+	if !lib.play_waiting {
+		return false
+	}
+	if lib.play_gen != lib.list_gen {
+		lib.play_waiting = false
+		return false
+	}
+	if !row_playable(s, 0) {
+		return false
+	}
+	lib.play_waiting = false
+	return play_ordered(s, {order = .Shuffled if s.settings.shuffle else .In_Order})
+}
+
+@(private = "file")
+apply_pending :: proc(s: ^State) -> bool {
 	pending := s.pending
 	s.pending = nil
 	// Cmd-F and Cmd-L go to the search field only while it's built.
@@ -1431,6 +1543,15 @@ pending_apply :: proc(s: ^State) -> bool {
 	case Playlist_Place:
 		history_visit(s, p)
 		place_go(s, p)
+	case Play_Playlist:
+		if !playlist_showing(s, p.index) {
+			place := Playlist_Place{index = p.index}
+			history_visit(s, place)
+			place_go(s, place)
+		}
+		s.library.play_waiting = true
+		s.library.play_gen = s.library.list_gen
+		play_when_ready(s)
 	case List_Place:
 		history_visit(s, p)
 		place_go(s, p)

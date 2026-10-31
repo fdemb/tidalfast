@@ -28,6 +28,7 @@ import "core:sync"
 
 import "../audio"
 import "../render"
+import "../text"
 import "../ui"
 
 Settings :: struct {
@@ -225,12 +226,12 @@ output_of :: proc(st: Settings) -> audio.Output {
 	return {bit_perfect = audio.BIT_PERFECT && st.bit_perfect}
 }
 
-// draw_settings_button is the sidebar's button for the settings menu.
+// draw_settings_button is the sidebar's gear for the settings menu.
 draw_settings_button :: proc(s: ^State) {
-	ui.text_style(.Regular, 12, SECONDARY)
-	ui.set_next_text_pad(10)
-	ui.set_next_radius(6)
-	b := ui.box_make("Settings###settings", {.Clickable, .Focusable, .Draw_Text, .Draw_Hot_Effects, .Draw_Active_Effects}, ui.text_size(), ui.px(26))
+	ui.text_style(.Icon, 17, QUIET)
+	ui.set_next_text_align(.Center)
+	ui.set_next_radius(14)
+	b := ui.box_make(text.ICON_GEAR + "###settings", {.Clickable, .Focusable, .Draw_Text, .Draw_Hot_Effects, .Draw_Active_Effects}, ui.px(28), ui.px(28))
 	ui.accessible(b, .Button, "Settings")
 	if ui.signal(b).clicked {
 		ui.open_menu("settings_menu", {b.rect.x, b.rect.y + b.rect.h + 4})
