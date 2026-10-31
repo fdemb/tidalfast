@@ -1012,7 +1012,7 @@ draw_player_bar :: proc(s: ^State, w, h: f32) {
 				ui.text_style(.Regular, 11, DIM)
 				ui.text_pad(0)
 				if sig := ui.link(fmt.tprintf("%s###track_format", format), SECONDARY, ui.px(16)); sig.clicked {
-					open_output_menu(sig.box.rect.x, bar.rect.y - 8)
+					open_output_menu(sig.box.rect.x, sig.box.rect.y - 8)
 				}
 			}
 		} else {
