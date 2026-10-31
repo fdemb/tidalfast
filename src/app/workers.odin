@@ -356,6 +356,7 @@ worker_main :: proc "c" (arg: rawptr) -> rawptr {
 	context.logger = app_logger()
 	d := (^Data)(arg)
 	temp_given := false
+	temp := &d.worker_temps[sync.atomic_add(&d.worker_count, 1) % WORKERS]
 	for {
 		job: Job
 		ticket: jobs.Ticket
@@ -382,6 +383,7 @@ worker_main :: proc "c" (arg: rawptr) -> rawptr {
 		temp_take_back(&temp_given)
 		res := run_job(d, job)
 		free_all(context.temp_allocator)
+		temp_publish(temp)
 		if retry_later(d, res) {
 			again := requeued(job, res)
 			result_free(&res)
@@ -414,6 +416,7 @@ worker_main :: proc "c" (arg: rawptr) -> rawptr {
 			temp_give_back(&temp_given)
 		}
 	}
+	sync.atomic_store(&temp.base, 0)
 	runtime.default_temp_allocator_destroy(&runtime.global_default_temp_allocator_data)
 	return nil
 }
@@ -444,6 +447,23 @@ temp_range :: proc() -> (start: rawptr, size: uint) {
 		return nil, 0
 	}
 	return temp_tail(uintptr(b.base), b.capacity, TEMP_KEEP)
+}
+
+// Worker_Temp is where a worker's temp block is, for the memory breakdown
+// to count its pages. base is 0 for none (atomic).
+Worker_Temp :: struct {
+	base: uintptr,
+	size: uint,
+}
+
+@(private = "file")
+temp_publish :: proc(t: ^Worker_Temp) {
+	b := runtime.global_default_temp_allocator_data.arena.curr_block
+	if b == nil {
+		return
+	}
+	sync.atomic_store(&t.size, b.capacity)
+	sync.atomic_store(&t.base, uintptr(b.base))
 }
 
 @(private = "file")

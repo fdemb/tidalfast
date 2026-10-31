@@ -9,6 +9,7 @@
 ./build/measure/measure compare docs/measure-baseline.json build/measure/20261015-114141.json
 ./build/measure/measure ab main      # this checkout against main, the two taking turns
 ./build/measure/measure launches     # your own launches, from the app's launch log
+./build/measure/measure html         # the app's memory snapshots as a page
 ```
 
 `./build.sh measure` builds an optimized app in `build/measure/app` (its own shell and dylib, hot reload off), `tests/mock_tidal` and the tool. The app is the release build plus `TIDALFAST_MOCK_API`, which keeps the test screens and the text bench and lets it read `TIDALFAST_API` and `TIDALFAST_PKCE_REDIRECT`. The real release build doesn't take them, so it can't run against the mock. With either one set it shows the fake data, as every build does without a mock URL it takes (see [Building](building.md)).
@@ -40,6 +41,31 @@ For each startup mark it prints the median of a and of b, then the median and mi
 Measured against itself on 17 October (`measure ab HEAD`), the tool marked nothing. The UI thread's instructions differed by 0.1 to 0.3% at every mark, lower for b in 7 of 9 pairs, a small offset between two copies of one build; times differed by up to 3.7% in their medians with no pattern in the pairs. It writes `<out>-a.json` and `<out>-b.json`, and removes the worktree when it's done.
 
 Judge a change on `ui_instructions` first: it moves least from run to run (see The numbers). Times are what a person waits for, but they need the change to be several percent before the middle half clears zero.
+
+## Snapshots
+
+The memory scenario runs for a minute on a script. To see where the memory of a real session goes, take snapshots while you use the app, in any build, release included: the app menu's **Take Memory Snapshot** on macOS, or `kill -USR1 <pid>`. Linux has no menu bar, so there it's `kill`. A build from before snapshots quits on SIGUSR1; the macOS shell ignores it from the first line of `main` until the app has set its handler.
+
+On the next frame the app splits its footprint into groups, `api`, `playback`, `ui`, `gpu` and `system`, with the items in each, and a thread writes it to `snapshots/<UTC time>.json` next to the settings file (`~/Library/Application Support/tidalfast/` on macOS, `~/.config/tidalfast/` on Linux), or to the folder `TIDALFAST_SNAPSHOTS` names. A file also has the build, uptime, window size in points, peak footprint and a few counts (covers, rows, kept lists). The files hold sizes and counts, nothing about the account. A snapshot costs about 60 ms of CPU, most of it walking the address space, and nothing runs between them: the signal handler only writes to a pipe whose thread sleeps until then.
+
+`./build/measure/measure html [folder] [page.html]` puts every snapshot in the folder on one page, `build/measure/snapshots.html` unless named: a stacked bar per snapshot, a group's items on hover, and a table of every item with the peak, uptime, window and build of each. After a few snapshots over a session it shows which groups grew.
+
+The breakdown comes from two views of the same moment:
+
+- The OS's. On macOS, `os_memory` walks the address space with `mach_vm_region_recurse` and sums each region's dirty and compressed pages by its tag, the way `footprint(1)` does. That splits the footprint into pools: untagged anonymous memory (the app's arenas and the shell's memory blocks), malloc, Metal's memory (the task's graphics ledger, which includes graphics memory that's mapped nowhere), IOSurfaces (the drawables and the window's backing), and the rest (binaries' `__DATA`, thread stacks, other tagged regions, and what the walk can't place, the page tables among it). Against `footprint -p` the pools came out within timing noise of its categories.
+- The app's. For each arena and buffer it owns, the pages `mincore` says count toward the footprint (`MINCORE_MODIFIED` or `MINCORE_PAGED_OUT` on macOS, resident on Linux). That counts pages given back with `MADV_FREE_REUSABLE` as gone, as the footprint does. Pages in `State` and the persistent arena go to the field or the step of `start` whose range holds the page's first byte, so none counts twice. Heap buffers count what `malloc_size` says, and textures and buffers on the GPU their `allocatedSize`.
+
+Each item comes out of its pool, and what's left of a pool becomes an item of its own: `other anonymous memory`, `malloc outside the app's buffers`, `other GPU memory (driver, pipelines)` and `drawables and window surfaces`. The items:
+
+| group | items |
+|---|---|
+| api | `session` (the TIDAL session's arena), `sidebar`, `open list`, `list refresh`, `queued list` (the list the queue follows), `kept lists` (closed lists kept in memory), `freed list (debug)`, `artist pages`, `home`, `search results`, `liked and followed ids`, `worker scratch` (the workers' temp blocks, malloc), `data state` (`Data` in `State` without the cover index, and what `data_start` took from the persistent arena) |
+| playback | `player` (the Player, its ring and scratch buffers), `stream windows`, `track data` (URLs, segment tables, headers), `queue`, `playback state` |
+| ui | `text caches` (shaped runs, glyph pool, shaper memory, coverage, atlas entries), `font tables` (kb_text_shape's parsed tables, malloc), `cover index`, `fake rows`, `frame arena`, `app state` (the rest of `State` and of the persistent arena) |
+| gpu | `glyph atlas`, `cover pages`, `instance buffers`, `upload buffers` (Vulkan), `backdrop blur`, and the two rests above |
+| system | `malloc outside the app's buffers`, `other anonymous memory`, `binaries' data`, `thread stacks`, `other tagged regions`, `page tables and unaccounted` |
+
+Malloc that the app has no pointer to, such as AppKit's, Core Text's, libcurl's connections and miniaudio's decoder, goes in `system` as the malloc rest; Instruments' Allocations can say whose it is. On Linux the pools are the footprint and the device memory Vulkan reports, which a GPU keeps outside the footprint; with lavapipe it's host memory and counts twice.
 
 ## Launch log
 
@@ -93,7 +119,7 @@ Then it quits through SIGTERM, the same path as Ctrl-C, so shutdown runs.
 - **instructions** and **cycles** are what every thread of the process has run since it started, dyld included, from `proc_pid_rusage` (`rusage_info_v4`). **ui_instructions** and **ui_cycles** are the UI thread's alone, from the `thread_selfcounts` system call, which isn't public API; a kernel without it gives zeros, and so does Linux for now. Unlike times, instruction counts hardly move with load, clock speed or heat: a fixed piece of work counted the same to 0.1% on an idle machine and with every core busy, while its time grew 25%. In the app they still vary, because how far other threads get by a mark, and how many frames run before it, differ from run to run. Over nine launches on 17 October the UI thread's count at `tracks` had a standard deviation of about 1% (fake and mock), the whole process's 0.7% (mock) to 3.7% (fake), and the time at `tracks` 6 to 7%. Only the app's marks and samples carry them; the shell's marks have times only.
 - The rest is the app's own accounting: `arena` (the persistent arena's used bytes), `frame_peak` (the frame arena's high-water mark), `atlas_pages`, `runs` (shaped runs in the text cache), `covers` and `cover_bytes` (the cover cache's entries and its pages' bytes), `rows` and `view_bytes` (the open list and its arena).
 
-With `TIDALFAST_MEASURE` unset, measuring costs two additions per drawn row and cover, the marks until `tracks` is reached, and the launch log's one line. With it set, marks and samples come from frames that happen anyway. Only the memory scenario starts a thread, which samples once a second (`tick` lines) and wakes the UI when a stage's wait is over. A sample costs a few milliseconds because of `mincore` over 600 MB of fonts, so marks leave that out. An idle window shows 0 CPU time over 10 s with it unset and with `=1`.
+With `TIDALFAST_MEASURE` unset, measuring costs two additions per drawn row and cover, the marks until `tracks` is reached, and the launch log's one line. With it set, marks and samples come from frames that happen anyway. Only the memory scenario starts a thread, which samples once a second (`tick` lines) and wakes the UI when a stage's wait is over. A sample costs a few milliseconds because of `mincore` over 600 MB of fonts, so marks leave that out. That pass also makes the kernel build about 3 MB of page tables for the font mappings, which count toward the footprint until the kernel takes them back, usually during an idle stage. So a sample's footprint can be 3 MB under the next sample's for no change in the app. An idle window shows 0 CPU time over 10 s with it unset and with `=1`.
 
 The frame-time overlay (backtick) shows footprint and gpu under the frame times.
 

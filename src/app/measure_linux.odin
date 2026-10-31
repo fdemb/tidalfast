@@ -7,6 +7,22 @@ import "core:time"
 
 import "../render"
 
+foreign import libc "system:c"
+
+@(default_calling_convention = "c")
+foreign libc {
+	mincore :: proc(addr: rawptr, length: uint, vec: [^]u8) -> i32 ---
+	@(link_name = "malloc_usable_size")
+	malloc_size :: proc(ptr: rawptr) -> uint ---
+}
+
+// mincore's resident bit. Linux doesn't say whether a page is dirty, and
+// for anonymous memory resident is what the footprint counts.
+PAGE_COUNTS :: 0x1
+
+// glibc's malloc takes anonymous memory like the arenas.
+HEAP_POOL :: Mem_Pool.Anon
+
 // process_start_ns reads when the kernel started this process: field 22 of
 // /proc/self/stat, in clock ticks since boot, set against the boot-time
 // clock now. Ticks are 10 ms on most kernels.
@@ -110,6 +126,18 @@ status_kb :: proc "contextless" (text, name: string) -> int {
 		}
 	}
 	return 0
+}
+
+// os_memory has two pools on Linux: the footprint, all of it anonymous
+// memory (process_memory), and the device memory the renderer holds, which
+// a GPU keeps outside it. With a CPU device such as lavapipe the device
+// memory is in the footprint too, so it counts twice.
+os_memory :: proc(r: ^render.Renderer) -> Os_Memory {
+	pm := process_memory(r)
+	om := Os_Memory{footprint = pm.footprint}
+	om.pools[.Anon] = pm.footprint
+	om.pools[.Gpu] = pm.gpu
+	return om
 }
 
 // process_counters and thread_counters have nothing on Linux yet:

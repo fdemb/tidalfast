@@ -448,17 +448,25 @@ start :: proc(s: ^State, shell: ^platform.Shell) {
 	if !render.init(&s.renderer, shell.surface) {
 		log.error("app: renderer init failed")
 	}
+	measure_init_part(s, .Render)
 	if !text.init(&s.text, shell.request_redraw) {
 		log.error("app: text init failed")
 	}
+	measure_init_part(s, .Text)
 	ui.init(&s.ui)
+	measure_init_part(s, .Ui)
 	library_init(&s.library)
+	measure_init_part(s, .Library)
 	data_start(s, shell)
+	measure_init_part(s, .Data)
 	if s.data.fake {
 		s.rows = make_rows()
 	}
+	measure_init_part(s, .Rows)
 	playback_start(s, shell)
+	measure_init_part(s, .Playback)
 	search_init(s)
+	measure_init_part(s, .Search)
 	// TIDALFAST_BENCH=1 scrolls the library's track table, =text the text
 	// test screen's list.
 	switch bench {

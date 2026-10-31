@@ -3,6 +3,7 @@ package tidal_tests
 import "core:fmt"
 import "core:os"
 import "core:strings"
+import "core:sys/posix"
 import "core:testing"
 import "core:time"
 
@@ -286,6 +287,68 @@ test_launch_log_append :: proc(t: ^testing.T) {
 	testing.expect_value(t, last[len(last) - 2][:10], fmt.tprintf("{{\"i\":%04d,", app.LAUNCH_LOG_LIMIT / len(line) + 1))
 }
 
+// What's left of each pool goes in as an item, and a pool the app's items
+// already fill gets none.
+@(test)
+test_breakdown_settle :: proc(t: ^testing.T) {
+	b: app.Breakdown
+	app.breakdown_add(&b, .Api, .Anon, "open list", 3)
+	app.breakdown_add(&b, .Ui, .Malloc, "font tables", 6)
+	app.breakdown_add(&b, .Gpu, .Gpu, "glyph atlas", 5)
+	om := app.Os_Memory{footprint = 40}
+	om.pools = {.Anon = 4, .Malloc = 20, .Gpu = 4, .Surfaces = 9, .Other = 3}
+	om.other = {{"thread stacks", 1}, {"binaries' data", 2}, {}, {}}
+	app.breakdown_settle(&b, om)
+	rest :: proc(b: ^app.Breakdown, name: string) -> (app.Mem_Item, bool) {
+		for item in b.items[:b.count] {
+			if item.name == name {
+				return item, true
+			}
+		}
+		return {}, false
+	}
+	item, ok := rest(&b, "other anonymous memory")
+	testing.expect(t, ok)
+	testing.expect_value(t, item.bytes, 1)
+	testing.expect_value(t, item.group, app.Mem_Group.System)
+	item, _ = rest(&b, "malloc outside the app's buffers")
+	testing.expect_value(t, item.bytes, 14)
+	item, _ = rest(&b, "drawables and window surfaces")
+	testing.expect_value(t, item.bytes, 9)
+	testing.expect_value(t, item.group, app.Mem_Group.Gpu)
+	_, ok = rest(&b, "other GPU memory (driver, pipelines)")
+	testing.expect(t, !ok)
+	item, _ = rest(&b, "binaries' data")
+	testing.expect_value(t, item.pool, app.Mem_Pool.Other)
+	total := 0
+	for item in b.items[:b.count] {
+		total += item.bytes
+	}
+	// One over the footprint: the glyph atlas came out bigger than its pool.
+	testing.expect_value(t, total, 41)
+}
+
+// pages_counted counts the pages written, and only pages whose first byte
+// is in the range.
+@(test)
+test_pages_counted :: proc(t: ^testing.T) {
+	page := int(posix.sysconf(._PAGESIZE))
+	n := 8 * page
+	p := posix.mmap(nil, uint(n), {.READ, .WRITE}, {.PRIVATE, .ANONYMOUS})
+	testing.expect(t, p != posix.MAP_FAILED)
+	defer posix.munmap(p, uint(n))
+	bytes := ([^]u8)(p)
+	testing.expect_value(t, app.pages_counted(p, n), 0)
+	for i in 0 ..< 3 {
+		bytes[i * page] = 1
+	}
+	testing.expect_value(t, app.pages_counted(p, n), 3 * page)
+	// From the middle of page 0: pages 1 and 2 start in the range.
+	testing.expect_value(t, app.pages_counted(&bytes[page / 2], n - page / 2), 2 * page)
+	testing.expect_value(t, app.pages_counted(&bytes[1], page - 1), 0)
+	testing.expect_value(t, app.pages_counted(nil, n), 0)
+}
+
 // The memory scenario waits for the longest list to load. On an account
 // whose Liked Songs is the longest that list is .Liked, not .Playlist, and
 // the scenario waited for it forever.
@@ -304,4 +367,36 @@ test_measure_list_loaded :: proc(t: ^testing.T) {
 	testing.expect(t, !app.measure_list_loaded(d, 3))
 	d.fake = true
 	testing.expect(t, app.measure_list_loaded(d, 0))
+}
+
+// measure html reads every snapshot in the folder, oldest first, and leaves
+// out files that aren't snapshots.
+@(test)
+test_measure_snapshots_page :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	dir := fmt.tprintf("%s/tidalfast-snapshots-%d", temp_base(), time.now()._nsec)
+	testing.expect(t, os.make_directory_all(dir) == nil)
+	defer os.remove_all(dir)
+	write :: proc(dir, name, list: string) {
+		_ = os.write_entire_file(fmt.tprintf("%s/%s.json", dir, name), transmute([]u8)strings.concatenate({
+			`{"snapshot":"`, name, `","time":1793441700,"commit":"0123456789abcdef-dirty","build":"release","uptime_s":3725.1,`,
+			`"window":"1100x700@2","footprint_peak":314572800,"gpu":73400320,"kept_lists":3,"footprint":209715200,"items":[`,
+			`{"group":"api","pool":"anon","name":"open list","bytes":`, list, `}]}`,
+		}))
+	}
+	write(dir, "20261031-121500", "3145728")
+	write(dir, "20261031-101500", "1048576")
+	_ = os.write_entire_file(fmt.tprintf("%s/settings.json", dir), transmute([]u8)string(`{"volume":1}`))
+
+	snaps := measure.load_snapshots(dir)
+	testing.expect_value(t, len(snaps), 2)
+	testing.expect_value(t, snaps[0].snapshot, "20261031-101500")
+	testing.expect_value(t, snaps[1].items[0].bytes, 3 << 20)
+	testing.expect_value(t, snaps[0].uptime_s, 3725.1)
+
+	page := measure.snapshots_page(snaps, "MacBookAir10,1", dir)
+	testing.expect(t, !strings.contains(page, "/*DATA*/"))
+	testing.expect(t, strings.contains(page, `"name":"20261031-121500","build":"release 0123456-dirty","uptime":"1h 02m","window":"1100x700@2","footprint":200.0,"peak":300.0`), page[:300])
+	testing.expect(t, strings.contains(page, `{"group":"api","name":"open list","mb":3.00}`))
+	testing.expect_value(t, len(measure.load_snapshots(fmt.tprintf("%s/none", dir))), 0)
 }

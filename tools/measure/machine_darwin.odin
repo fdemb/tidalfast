@@ -49,3 +49,11 @@ launch_log_default :: proc() -> string {
 	}
 	return join(os.get_env("HOME", context.allocator), "Library", "Application Support", "tidalfast", "launches.jsonl")
 }
+
+// snapshot_dir_default is where the app writes memory snapshots.
+snapshot_dir_default :: proc() -> string {
+	if dir := os.get_env("TIDALFAST_SNAPSHOTS", context.allocator); dir != "" {
+		return dir
+	}
+	return join(os.get_env("HOME", context.allocator), "Library", "Application Support", "tidalfast", "snapshots")
+}

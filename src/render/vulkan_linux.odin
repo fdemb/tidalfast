@@ -343,6 +343,22 @@ gpu_allocated :: proc "contextless" (r: ^Renderer) -> int {
 	return sync.atomic_load(&r.gpu.allocated)
 }
 
+// gpu_memory is what the renderer's own buffers take. The textures made
+// with texture_create aren't in it, see texture_bytes.
+gpu_memory :: proc(r: ^Renderer) -> Gpu_Memory {
+	m: Gpu_Memory
+	for &f in r.gpu.frames {
+		m.instances += f.instances.allocated
+		m.staging += f.staging.allocated + f.capture.allocated
+	}
+	return m
+}
+
+@(private)
+gpu_texture_bytes :: proc(slot: ^Texture_Slot) -> int {
+	return slot.gpu.size
+}
+
 // pick_device takes the first device with a queue that draws and presents
 // to the surface, a GPU before a CPU implementation such as lavapipe.
 @(private)

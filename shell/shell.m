@@ -1293,6 +1293,7 @@ static void update_display_link(void) {
 //   ime                 print what NSTextInputClient answers
 //   ax-dump             print the window's accessibility tree, as an assistive app reads it
 //   ax-press=label      AXPress on the first element whose label or value starts with label
+//   menu=title          the menu bar's item with that title, as clicking it does
 //   hide, unhide        hide the app and show it again, as Cmd-H and clicking its Dock icon do
 //   capture=path        copy the last TIDALFAST_CAPTURE frame to path
 //   quit
@@ -1330,6 +1331,18 @@ static void test_key(NSString *spec) {
   push_event((Event){.kind = EVENT_KEY_DOWN, .modifiers = mods, .key = key, .time = now});
   push_event((Event){.kind = EVENT_KEY_UP, .modifiers = mods, .key = key, .time = now});
   request_redraw();
+}
+
+static void test_menu(NSString *title) {
+  for (NSMenuItem *top in NSApp.mainMenu.itemArray) {
+    NSMenu *menu = top.submenu;
+    NSInteger i = [menu indexOfItemWithTitle:title];
+    if (i >= 0) {
+      [menu performActionForItemAtIndex:i];
+      return;
+    }
+  }
+  fprintf(stderr, "shell: test: no menu item %s\n", title.UTF8String);
 }
 
 static void test_ime_state(void) {
@@ -1447,6 +1460,8 @@ static void test_step(NSString *command, NSString *arg) {
   } else if ([command isEqualToString:@"unhide"]) {
     [NSApp unhide:nil];
     [NSApp activateIgnoringOtherApps:YES];
+  } else if ([command isEqualToString:@"menu"]) {
+    test_menu(arg);
   } else if ([command isEqualToString:@"quit"]) {
     [NSApp terminate:nil];
   } else {
@@ -1520,6 +1535,12 @@ static void setup_blur_reference(void) {
 }
 
 @implementation App_Delegate
+
+// The menu bar's Take Memory Snapshot: SIGUSR1, which the app answers by
+// writing a memory snapshot on its next frame (src/app/snapshot.odin).
+- (void)takeMemorySnapshot:(id)sender {
+  kill(getpid(), SIGUSR1);
+}
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
   measure_mark("launched");
@@ -1660,12 +1681,18 @@ static NSMenu *main_menu(void) {
   NSMenuItem *app_item = [NSMenuItem new];
   [bar addItem:app_item];
   NSMenu *app_menu = [NSMenu new];
+  [app_menu addItemWithTitle:@"Take Memory Snapshot" action:@selector(takeMemorySnapshot:) keyEquivalent:@""];
+  [app_menu addItem:NSMenuItem.separatorItem];
   [app_menu addItemWithTitle:@"Quit TIDALfast" action:@selector(terminate:) keyEquivalent:@"q"];
   app_item.submenu = app_menu;
   return bar;
 }
 
 int main(int argc, const char *argv[]) {
+  // SIGUSR1 asks the app for a memory snapshot (src/app/snapshot.odin),
+  // and the app sets its handler once it's loaded. Until then it's
+  // ignored, so the menu item can't quit the app.
+  signal(SIGUSR1, SIG_IGN);
   @autoreleasepool {
     measure_init();
     measure_mark("main");

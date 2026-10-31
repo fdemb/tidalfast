@@ -68,3 +68,14 @@ launch_log_default :: proc() -> string {
 	}
 	return join(os.get_env("HOME", context.allocator), ".config", "tidalfast", "launches.jsonl")
 }
+
+// snapshot_dir_default is where the app writes memory snapshots.
+snapshot_dir_default :: proc() -> string {
+	if dir := os.get_env("TIDALFAST_SNAPSHOTS", context.allocator); dir != "" {
+		return dir
+	}
+	if dir := os.get_env("XDG_CONFIG_HOME", context.allocator); dir != "" {
+		return join(dir, "tidalfast", "snapshots")
+	}
+	return join(os.get_env("HOME", context.allocator), ".config", "tidalfast", "snapshots")
+}

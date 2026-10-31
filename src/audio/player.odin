@@ -404,6 +404,25 @@ destroy :: proc(p: ^Player) {
 	vmem.arena_destroy(&arena)
 }
 
+// Memory is where the player keeps its bytes, for counting their pages:
+// its arena (the Player, the PCM ring and scratch buffers), and each
+// slot's track arena (URLs, segment tables, the header) and download
+// window. The arenas' mutexes guard their blocks against the decode thread.
+Memory :: struct {
+	arena:   ^vmem.Arena,
+	tracks:  [2]^vmem.Arena,
+	windows: [2][]u8,
+}
+
+memory :: proc(p: ^Player) -> Memory {
+	m := Memory{arena = &p.arena}
+	for &sl, i in p.slots {
+		m.tracks[i] = &sl.track
+		m.windows[i] = sl.stream.buf
+	}
+	return m
+}
+
 // play replaces whatever plays with source, from sample at. The audio
 // stops at once; the new track starts when its first bytes arrive. A seek
 // not yet applied goes with the track it was for.

@@ -16,7 +16,18 @@ foreign libc {
 	// Through libc rather than intrinsics.syscall, whose registers an
 	// optimized build trusts across the call: that crashed.
 	syscall :: proc(number: i32, #c_vararg args: ..any) -> i32 ---
+	mincore :: proc(addr: rawptr, length: uint, vec: [^]u8) -> i32 ---
+	malloc_size :: proc(ptr: rawptr) -> uint ---
+	mach_vm_region_recurse :: proc(task: darwin.task_t, address: ^u64, size: ^u64, depth: ^u32, info: rawptr, count: ^u32) -> darwin.Kern_Return ---
 }
+
+// mincore's MINCORE_MODIFIED and MINCORE_PAGED_OUT: a page that counts
+// toward the footprint. An anonymous page that was only read is modified
+// too, and one given back with MADV_FREE_REUSABLE isn't, just as the
+// footprint counts them.
+PAGE_COUNTS :: 0x4 | 0x20
+
+HEAP_POOL :: Mem_Pool.Malloc
 
 // process_start_ns reads when the kernel started this process, from
 // kinfo_proc's p_starttime, a timeval at offset 0.
@@ -82,4 +93,83 @@ thread_counters :: proc "contextless" () -> Counters {
 		return {}
 	}
 	return {instructions = c[0], cycles = c[1]}
+}
+
+// os_memory splits the footprint into pools by walking the address space
+// the way footprint(1) does: each region's dirty and compressed pages, by
+// the tag its maker gave it. Metal's memory comes from the task's graphics
+// ledger, since some of it is mapped nowhere. What the walk can't place,
+// the page tables among it, goes in as one part.
+os_memory :: proc(r: ^render.Renderer) -> Os_Memory {
+	TASK_VM_INFO :: 22
+	info: [93]u32
+	count := u32(len(info))
+	om: Os_Memory
+	graphics := 0
+	if darwin.task_info(darwin.mach_task_self(), TASK_VM_INFO, darwin.task_info_t(&info[0]), &count) == .Success {
+		at :: proc(info: ^[93]u32, offset: int) -> int {
+			return int(intrinsics.unaligned_load((^u64)(&info[offset / 4])))
+		}
+		om.footprint = at(&info, 144)
+		// ledger_tag_graphics_footprint and its compressed part
+		graphics = at(&info, 272) + at(&info, 280)
+	}
+
+	VM_MEMORY_MALLOC_LAST :: 13
+	VM_MEMORY_ANALYSIS_TOOL :: 10
+	VM_MEMORY_STACK :: 30
+	VM_MEMORY_IOSURFACE :: 88
+	VM_MEMORY_IOACCELERATOR :: 100
+	page := int(posix.sysconf(._PAGESIZE))
+	surfaces, accelerator, binaries, stacks, tagged := 0, 0, 0, 0, 0
+	address: u64
+	depth: u32
+	for {
+		size: u64
+		region: [21]u32 // vm_region_submap_info_64
+		n := u32(len(region))
+		if mach_vm_region_recurse(darwin.mach_task_self(), &address, &size, &depth, &region[0], &n) != .Success {
+			break
+		}
+		bytes := ([^]u8)(&region[0])
+		if intrinsics.unaligned_load((^i32)(&bytes[48])) != 0 { // is_submap
+			depth += 1
+			continue
+		}
+		tag := int(region[5])
+		dirty := (int(region[9]) + int(region[8])) * page // pages_dirtied, pages_swapped_out
+		external := bytes[46] != 0
+		switch {
+		case tag >= 1 && tag <= VM_MEMORY_MALLOC_LAST && tag != VM_MEMORY_ANALYSIS_TOOL:
+			om.pools[.Malloc] += max(dirty - int(region[16]) * page, 0) // less pages_reusable
+		case tag == VM_MEMORY_IOSURFACE:
+			surfaces += dirty
+		case tag == VM_MEMORY_IOACCELERATOR:
+			accelerator += dirty
+		case tag == 0 && !external:
+			om.pools[.Anon] += dirty
+		case tag == 0:
+			binaries += dirty
+		case tag == VM_MEMORY_STACK:
+			stacks += dirty
+		case:
+			tagged += dirty
+		}
+		address += size
+	}
+	// The ledger has the IOAccelerator regions' memory and the graphics
+	// memory mapped nowhere, less what Metal marked purgeable.
+	om.pools[.Gpu] = graphics if graphics > 0 else accelerator
+	om.pools[.Surfaces] = surfaces
+	counted := om.pools[.Anon] + om.pools[.Malloc] + om.pools[.Gpu] + om.pools[.Surfaces] + binaries + stacks + tagged
+	om.other = {
+		{"binaries' data", binaries},
+		{"thread stacks", stacks},
+		{"other tagged regions", tagged},
+		{"page tables and unaccounted", max(om.footprint - counted, 0)},
+	}
+	for part in om.other {
+		om.pools[.Other] += part.bytes
+	}
+	return om
 }

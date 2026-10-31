@@ -10,6 +10,7 @@
 //     ./build/measure/measure compare a.json b.json
 //     ./build/measure/measure ab main            this checkout against main, taking turns
 //     ./build/measure/measure launches           the app's own log of real launches
+//     ./build/measure/measure html               the app's memory snapshots as a page
 //
 // Flags: -runs=N, -setup=fake,mock, -app=path, -timeout=seconds, -out=path,
 // and -real, which runs against your own account and Keychain item with
@@ -60,6 +61,15 @@ main :: proc() {
 			usage()
 		}
 		os.exit(compare_files(args[1], args[2]))
+	}
+	if args[0] == "html" {
+		if len(args) > 3 {
+			usage()
+		}
+		exe_dir, _ := os.get_executable_directory(context.allocator)
+		dir := args[1] if len(args) > 1 else snapshot_dir_default()
+		page := args[2] if len(args) > 2 else join(exe_dir, "snapshots.html")
+		os.exit(snapshots_html(dir, page))
 	}
 	if args[0] == "launches" {
 		if len(args) > 2 {
@@ -215,7 +225,8 @@ usage :: proc() {
 	fmt.eprintln(`usage: measure startup|memory|all|frames [-runs=N] [-setup=fake,mock] [-app=path] [-timeout=s] [-out=path] [-real]
        measure ab <git ref> [-runs=N] [-setup=fake,mock] [-timeout=s] [-out=path]
        measure compare a.json b.json
-       measure launches [launches.jsonl]`)
+       measure launches [launches.jsonl]
+       measure html [snapshots folder] [page.html]`)
 	os.exit(2)
 }
 

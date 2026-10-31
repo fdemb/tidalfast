@@ -96,6 +96,15 @@ Measure :: struct {
 	sema:         sync.Sema, // posted to stop the thread early
 	frame_time:   f64, // the frame being measured's Frame_Input.time
 	frames:       Frame_Samples,
+	init_offsets: [Init_Part]int, // the persistent arena's offset after each step of start
+	// Memory snapshots, see snapshot.odin.
+	snap_pipe:    [2]posix.FD,
+	snap_thread:  posix.pthread_t,
+	snap_running: bool,
+	snap_wanted:  bool, // a SIGUSR1 came (atomic)
+	snap_busy:    bool, // snapshot is being written (atomic)
+	snap_len:     int,
+	snapshot:     [8192]u8,
 }
 
 MAX_FRAME_SAMPLES :: 1024
@@ -150,6 +159,7 @@ measure_start :: proc(s: ^State, shell: ^platform.Shell) {
 	m.renderer = &s.renderer
 	m.start_ns = process_start_ns()
 	measure_thread_start(m)
+	snapshot_start(m)
 }
 
 measure_reload :: proc(s: ^State, shell: ^platform.Shell) {
@@ -157,10 +167,12 @@ measure_reload :: proc(s: ^State, shell: ^platform.Shell) {
 	m.wake = shell.request_redraw
 	m.renderer = &s.renderer
 	measure_thread_start(m)
+	snapshot_start(m)
 }
 
 measure_unload :: proc(s: ^State) {
 	m := &s.measure
+	snapshot_stop(m)
 	if !m.running {
 		return
 	}
@@ -219,10 +231,12 @@ measure_count_cover :: #force_inline proc(s: ^State, ready: bool) {
 	s.measure.covers_ready += int(ready)
 }
 
-// measure_frame runs after a frame is presented: it prints the marks that
-// frame reached and moves the memory scenario on.
+// measure_frame runs after a frame is presented: it takes a snapshot if
+// one was asked for, prints the marks that frame reached and moves the
+// memory scenario on.
 measure_frame :: proc(s: ^State) {
 	m := &s.measure
+	snapshot_frame(s)
 	if m.mode == .Off && .Tracks in m.marks {
 		return
 	}
@@ -516,7 +530,6 @@ measure_write :: proc(json: string) {
 	posix.write(posix.STDERR_FILENO, raw_data(buf[:]), uint(n))
 }
 
-@(private = "file")
 measure_ms :: proc "contextless" (m: ^Measure) -> f64 {
 	return f64(time.to_unix_nanoseconds(time.now()) - m.start_ns) / 1e6
 }

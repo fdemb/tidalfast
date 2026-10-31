@@ -281,6 +281,35 @@ gpu_allocated :: proc "contextless" (r: ^Renderer) -> int {
 	return int(msg_proc(proc "c" (id, SEL) -> uint)(r.gpu.device, sel_registerName("currentAllocatedSize")))
 }
 
+// gpu_memory is what the renderer's own buffers and textures take, from
+// each one's allocatedSize. The textures made with texture_create aren't
+// in it, see texture_bytes.
+gpu_memory :: proc(r: ^Renderer) -> Gpu_Memory {
+	g := &r.gpu
+	m: Gpu_Memory
+	for buf in g.buffers {
+		m.instances += resource_bytes(buf)
+	}
+	m.backdrop = resource_bytes(g.scene)
+	for t in g.levels {
+		m.backdrop += resource_bytes(t)
+	}
+	return m
+}
+
+@(private)
+gpu_texture_bytes :: proc(slot: ^Texture_Slot) -> int {
+	return resource_bytes(slot.gpu.texture)
+}
+
+@(private)
+resource_bytes :: proc(resource: id) -> int {
+	if resource == nil {
+		return 0
+	}
+	return int(msg_proc(proc "c" (id, SEL) -> uint)(resource, sel_registerName("allocatedSize")))
+}
+
 // build_pipelines returns the rect pipeline and the blur's two, or nils
 // after logging why they failed.
 @(private)

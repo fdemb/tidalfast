@@ -190,7 +190,23 @@ Renderer :: struct {
 	capture_path:   string,
 }
 
+// Gpu_Memory is the GPU memory the renderer allocates for itself, in bytes.
+Gpu_Memory :: struct {
+	instances: int, // the frames' instance buffers
+	staging:   int, // upload and capture buffers (Vulkan)
+	backdrop:  int, // the blur's textures (Metal)
+}
+
 // Textures
+
+// texture_bytes is the GPU memory behind t, 0 for none.
+texture_bytes :: proc(r: ^Renderer, t: Texture) -> int {
+	slot := texture_slot(r, t)
+	if slot == nil {
+		return 0
+	}
+	return gpu_texture_bytes(slot)
+}
 
 // texture_create makes a texture with undefined contents; fill it with
 // texture_update. Mipmapped textures regenerate their mips on every update,
