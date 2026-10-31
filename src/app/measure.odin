@@ -289,8 +289,7 @@ measure_step :: proc(s: ^State) {
 			measure_wait(m, .Open_List, 0)
 		}
 	case .Open_List:
-		loaded := d.fake || (d.view.source == .Playlist && d.view.done)
-		if loaded && m.rows > 0 && m.covers_ready == m.covers {
+		if measure_list_loaded(d, longest_list(s)) && m.rows > 0 && m.covers_ready == m.covers {
 			measure_wait(m, .List_Open, SETTLE_WAIT)
 		}
 	case .List_Open:
@@ -434,6 +433,16 @@ measure_wait :: proc(m: ^Measure, stage: Memory_Stage, wait: time.Duration) {
 	}
 	sync.atomic_store(&m.wake_at, m.deadline._nsec)
 	m.wake()
+}
+
+// measure_list_loaded says whether sidebar entry index is the open list
+// and all its rows are in. Entry 0 is Liked Songs, which is the longest
+// list on many accounts.
+measure_list_loaded :: proc(d: ^Data, index: int) -> bool {
+	if d.fake {
+		return true
+	}
+	return d.view.source == (Source.Liked if index == 0 else Source.Playlist) && d.view.done
 }
 
 // longest_list is the sidebar entry with the most tracks. The fake data's

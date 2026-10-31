@@ -285,3 +285,23 @@ test_launch_log_append :: proc(t: ^testing.T) {
 	last := strings.split_lines(strings.trim_space(string(data)), context.temp_allocator)
 	testing.expect_value(t, last[len(last) - 2][:10], fmt.tprintf("{{\"i\":%04d,", app.LAUNCH_LOG_LIMIT / len(line) + 1))
 }
+
+// The memory scenario waits for the longest list to load. On an account
+// whose Liked Songs is the longest that list is .Liked, not .Playlist, and
+// the scenario waited for it forever.
+@(test)
+test_measure_list_loaded :: proc(t: ^testing.T) {
+	d := new(app.Data)
+	defer free(d)
+	d.view.source = .Liked
+	d.view.done = true
+	testing.expect(t, app.measure_list_loaded(d, 0))
+	testing.expect(t, !app.measure_list_loaded(d, 3))
+	d.view.source = .Playlist
+	testing.expect(t, app.measure_list_loaded(d, 3))
+	testing.expect(t, !app.measure_list_loaded(d, 0))
+	d.view.done = false
+	testing.expect(t, !app.measure_list_loaded(d, 3))
+	d.fake = true
+	testing.expect(t, app.measure_list_loaded(d, 0))
+}
