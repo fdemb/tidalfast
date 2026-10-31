@@ -70,9 +70,16 @@ Memory_Stage :: enum u8 {
 
 IDLE_WAIT :: 5 * time.Second
 SETTLE_WAIT :: 3 * time.Second
-PLAY_WAIT :: 30 * time.Second
+// The footprint settles within a second of playback starting, on the mock
+// and on a real account alike.
+PLAY_WAIT :: 8 * time.Second
 PLAY_START_LIMIT :: 20 * time.Second
 IDLE_AFTER_WAIT :: 10 * time.Second
+// A stage of the memory or frames scenario that hasn't moved on by then is
+// stuck: the thread says so and quits. A real account's longest list can
+// take a while to load.
+STAGE_LIMIT :: 30 * time.Second
+STAGE_LIMIT_REAL :: 120 * time.Second
 
 Measure :: struct {
 	mode:         Measure_Mode,
@@ -96,6 +103,8 @@ Measure :: struct {
 	sema:         sync.Sema, // posted to stop the thread early
 	frame_time:   f64, // the frame being measured's Frame_Input.time
 	frames:       Frame_Samples,
+	stage_since:  i64, // tick nanoseconds when the stage began (atomic)
+	stage_limit:  i64, // STAGE_LIMIT or STAGE_LIMIT_REAL in nanoseconds, 0 until the first frame (atomic)
 	init_offsets: [Init_Part]int, // the persistent arena's offset after each step of start
 	// Memory snapshots, see snapshot.odin.
 	snap_pipe:    [2]posix.FD,
@@ -187,12 +196,16 @@ measure_unload :: proc(s: ^State) {
 @(private = "file")
 measure_thread_start :: proc(m: ^Measure) {
 	if (m.mode == .Memory || m.mode == .Frames) && m.stage != .Done && !m.running {
+		if m.stage_since == 0 {
+			m.stage_since = time.tick_now()._nsec
+		}
 		m.running = posix.pthread_create(&m.thread, nil, measure_thread, m) == .NONE
 	}
 }
 
 // measure_thread samples once a second and wakes the UI when a stage's
-// wait is over, since an idle window draws no frames.
+// wait is over, since an idle window draws no frames. A stage stuck past
+// its limit ends the run with an error line.
 @(private = "file")
 measure_thread :: proc "c" (arg: rawptr) -> rawptr {
 	context = runtime.default_context()
@@ -210,6 +223,15 @@ measure_thread :: proc "c" (arg: rawptr) -> rawptr {
 			if _, ok := sync.atomic_compare_exchange_strong(&m.wake_at, at, 0); ok {
 				m.wake()
 			}
+		}
+		limit := sync.atomic_load(&m.stage_limit)
+		if limit == 0 {
+			limit = i64(STAGE_LIMIT_REAL)
+		}
+		if time.tick_now()._nsec - sync.atomic_load(&m.stage_since) > limit {
+			measure_write(fmt.bprintf(buf[:], `{{"error":"%v took over %d s"}}`, m.stage, limit / i64(time.Second)))
+			measure_quit()
+			break
 		}
 	}
 	return nil
@@ -239,6 +261,10 @@ measure_frame :: proc(s: ^State) {
 	snapshot_frame(s)
 	if m.mode == .Off && .Tracks in m.marks {
 		return
+	}
+	if m.mode == .Memory || m.mode == .Frames {
+		real := !s.data.fake && !s.data.mock
+		sync.atomic_store(&m.stage_limit, i64(STAGE_LIMIT_REAL if real else STAGE_LIMIT))
 	}
 	measure_mark(s, .First_Frame)
 	if s.dev.screen == .Library && !show_login(s) && (s.data.fake || (s.data.sidebar.loaded && len(s.data.sidebar.items) > 0)) {
@@ -441,6 +467,7 @@ frames_flush :: proc(s: ^State) {
 @(private = "file")
 measure_wait :: proc(m: ^Measure, stage: Memory_Stage, wait: time.Duration) {
 	m.stage = stage
+	sync.atomic_store(&m.stage_since, time.tick_now()._nsec)
 	m.deadline = {}
 	if wait > 0 {
 		m.deadline = time.tick_add(time.tick_now(), wait)

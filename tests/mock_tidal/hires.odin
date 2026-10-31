@@ -55,20 +55,41 @@ hires_prepare :: proc(dir: string) -> bool {
 			return false
 		}
 		data, rerr := os.read_entire_file(flac, context.allocator)
-		if rerr != nil {
+		if rerr != nil || !hires_take(i, data) {
 			return false
 		}
-		if h.bits == 16 {
-			audio_files[7] = {h.name, data}
-		}
-		d, ok := dashgen.from_flac(data, HIRES_SEGMENT_SECONDS)
-		if !ok {
-			fmt.eprintfln("mock: couldn't cut %s into segments", h.name)
-			return false
-		}
-		hires_dash[i] = d
-		fmt.printfln("mock: %s: %d-bit %d Hz, %d samples in %d segments", h.name, d.bits, d.rate, d.total, len(d.segments))
 	}
+	return true
+}
+
+// hires_load reads the FLAC files an earlier hires_prepare left in dir.
+hires_load :: proc(dir: string) -> bool {
+	for h, i in HIRES {
+		if !os.exists(fmt.tprintf("%s/%s-source.wav", dir, h.name)) {
+			return false
+		}
+		data, err := os.read_entire_file(fmt.tprintf("%s/%s.flac", dir, h.name), context.allocator)
+		if err != nil || !hires_take(i, data) {
+			return false
+		}
+	}
+	return true
+}
+
+// hires_take serves track i's FLAC, and cuts it into DASH segments.
+@(private = "file")
+hires_take :: proc(i: int, data: []u8) -> bool {
+	h := HIRES[i]
+	if h.bits == 16 {
+		audio_files[7] = {h.name, data}
+	}
+	d, ok := dashgen.from_flac(data, HIRES_SEGMENT_SECONDS)
+	if !ok {
+		fmt.eprintfln("mock: couldn't cut %s into segments", h.name)
+		return false
+	}
+	hires_dash[i] = d
+	fmt.printfln("mock: %s: %d-bit %d Hz, %d samples in %d segments", h.name, d.bits, d.rate, d.total, len(d.segments))
 	return true
 }
 

@@ -10,10 +10,10 @@ import "core:strings"
 // worktree of its own, against this checkout's measure build (b). The two
 // take turns, a then b, then b then a, so a machine that gets busier or
 // hotter over the run weighs on both alike. Startup is judged on the
-// differences between runs next to each other (paired_startup); the memory
-// scenario runs once each and is compared as `measure compare` does, and
-// with the fake data the frames scenario runs three times each, taking
-// turns, compared by its medians. Each build gets a mock of its own, both
+// differences between runs next to each other (paired_startup); with
+// -memory the memory scenario runs once each and is compared as `measure
+// compare` does; and with the fake data the frames scenario runs three
+// times each, taking turns, compared by its medians. Each build gets a mock of its own, both
 // this checkout's.
 run_ab :: proc(cfg: ^Config, base, stamp: string) -> int {
 	for setup in cfg.setups {
@@ -75,9 +75,13 @@ run_ab :: proc(cfg: ^Config, base, stamp: string) -> int {
 			add_startup(&results[k], setup, runs[k][:])
 		}
 		append(&paired, ..paired_startup(setup, runs[0][:], runs[1][:]))
-		for k in turns(n) {
-			lines := run_once(cfg, &sides[k], setup, "memory", 0, 1)
-			add_memory(&results[k], setup, {lines})
+		// One memory run each doesn't judge memory (see below) and took most
+		// of the time, so it runs only when asked for.
+		if cfg.memory {
+			for k in turns(n) {
+				lines := run_once(cfg, &sides[k], setup, "memory", 0, 1)
+				add_memory(&results[k], setup, {lines})
+			}
 		}
 		if setup == "fake" {
 			nf := frames_runs(cfg)
@@ -104,8 +108,10 @@ run_ab :: proc(cfg: ^Config, base, stamp: string) -> int {
 	write_paired(&b, paired[:])
 	// Builds of the same code came out 12 MB apart on one memory run each, so
 	// one run doesn't get marked.
-	fmt.sbprintln(&b, "\nmemory, one run each, not marked: compare `measure memory -runs=N` of each build for that")
-	write_compare(&b, compare(scenario_metrics(results[0].metrics[:], "memory"), results[1].metrics[:]), marks = false)
+	if cfg.memory {
+		fmt.sbprintln(&b, "\nmemory, one run each, not marked: compare `measure memory -runs=N` of each build for that")
+		write_compare(&b, compare(scenario_metrics(results[0].metrics[:], "memory"), results[1].metrics[:]), marks = false)
+	}
 	if frames := scenario_metrics(results[0].metrics[:], "frames"); len(frames) > 0 {
 		fmt.sbprintln(&b, "\nframes, the fake data's library bench, medians over the runs; more fps is better")
 		write_compare(&b, compare(frames, results[1].metrics[:]))

@@ -10,6 +10,10 @@ package mock_tidal
 //
 // album-source.wav in the audio directory is the whole sweep, for
 // tests/audio_check to compare a capture against.
+//
+// Encoding takes a few seconds, so the files stay in the directory with a
+// stamp naming the mock binary that made them, and a mock started again
+// from the same binary reads them back (audio_load).
 
 import "core:encoding/base64"
 import "core:fmt"
@@ -17,6 +21,7 @@ import "core:math"
 import "core:mem"
 import "core:os"
 import "core:strings"
+import "core:time"
 
 import "../../src/audio"
 
@@ -39,6 +44,57 @@ Audio_File :: struct {
 }
 
 audio_files: [8]Audio_File // 7 is the hi-res album's 16/44.1 track
+
+// audio_stamp names this mock binary and the seektable setting. The
+// files are the same as long as both are.
+audio_stamp :: proc(seektable: bool) -> string {
+	exe, _ := os.get_executable_path(context.temp_allocator)
+	info, err := os.stat(exe, context.temp_allocator)
+	if err != nil {
+		return ""
+	}
+	return fmt.tprintf("%s %d %d seektable=%v", exe, info.size, time.to_unix_nanoseconds(info.modification_time), seektable)
+}
+
+// audio_load reads the files an earlier run of this binary left in dir,
+// the hi-res ones too. False when the stamp doesn't match or a file is
+// missing; then they have to be made again.
+audio_load :: proc(dir, stamp: string) -> bool {
+	have, err := os.read_entire_file(fmt.tprintf("%s/stamp", dir), context.temp_allocator)
+	if stamp == "" || err != nil || string(have) != stamp || !os.exists(fmt.tprintf("%s/album-source.wav", dir)) {
+		return false
+	}
+	names := [7]string{"album1", "album2", "album3", "tone0", "tone1", "tone2", "tone3"}
+	for name, i in names {
+		data, rerr := os.read_entire_file(fmt.tprintf("%s/%s.flac", dir, name), context.allocator)
+		if rerr != nil {
+			return false
+		}
+		audio_files[i] = {name, data}
+	}
+	if !hires_load(dir) {
+		return false
+	}
+	fmt.printfln("mock: audio from %s", dir)
+	return true
+}
+
+// audio_make makes every file in dir, and the stamp once they're all
+// there, so files from a run cut short aren't read back.
+audio_make :: proc(dir, stamp: string, seektable: bool) {
+	_ = os.remove(fmt.tprintf("%s/stamp", dir))
+	if !audio_prepare(dir, seektable) {
+		fmt.eprintln("mock: couldn't make the audio files; playback won't work")
+		return
+	}
+	if !hires_prepare(dir) {
+		fmt.eprintln("mock: couldn't make the hi-res files")
+		return
+	}
+	if stamp != "" {
+		_ = os.write_entire_file(fmt.tprintf("%s/stamp", dir), transmute([]u8)stamp)
+	}
+}
 
 audio_prepare :: proc(dir: string, seektable: bool) -> bool {
 	os.make_directory(dir)

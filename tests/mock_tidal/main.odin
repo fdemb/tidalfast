@@ -44,7 +44,7 @@
 //     -cover-401=N       answer the first N covers after each device login with 401
 //     -cover-401-delay=MS  wait this long before each of those 401s (default 0)
 //     -poll-429=N        answer poll N of each code with 429 and Retry-After: 1
-//     -audio-dir=PATH    where the generated audio goes (default /tmp/tidalfast-mock-audio)
+//     -audio-dir=PATH    where the generated audio goes (default /tmp/tidalfast-mock-audio); a later run of the same binary reads it back
 //     -seektable=0       FLAC files without a SEEKTABLE, so seeks have to search
 //     -audio-delay=MS    added before every audio response, like network latency
 //     -audio-rate=KB     audio bandwidth in KB/s per connection (default unlimited)
@@ -248,11 +248,8 @@ main :: proc() {
 	}
 	ep, _ := net.bound_endpoint(sock)
 	server.port = ep.port
-	if !audio_prepare(c.audio_dir, c.seektable) {
-		fmt.eprintln("mock: couldn't make the audio files; playback won't work")
-	}
-	if !hires_prepare(c.audio_dir) {
-		fmt.eprintln("mock: couldn't make the hi-res files")
+	if stamp := audio_stamp(c.seektable); !audio_load(c.audio_dir, stamp) {
+		audio_make(c.audio_dir, stamp, c.seektable)
 	}
 	fmt.printfln("mock: listening on http://127.0.0.1:%d", ep.port)
 	os.flush(os.stdout)

@@ -9,6 +9,7 @@
 //     ./build/measure/measure frames             fake, 3 runs
 //     ./build/measure/measure compare a.json b.json
 //     ./build/measure/measure ab main            this checkout against main, taking turns
+//     ./build/measure/measure ab main -memory    the same, with a memory run of each
 //     ./build/measure/measure launches           the app's own log of real launches
 //     ./build/measure/measure html               the app's memory snapshots as a page
 //
@@ -34,6 +35,7 @@ Config :: struct {
 	timeout:  time.Duration, // 0: the scenario's default
 	out:      string,
 	real:     bool,
+	memory:   bool, // ab: run the memory scenario too
 	log_dir:  string,
 	failed:   int,
 }
@@ -112,6 +114,11 @@ main :: proc() {
 			cfg.out = value
 		case "-real":
 			cfg.real = true
+		case "-memory":
+			if base == "" {
+				usage()
+			}
+			cfg.memory = true
 		case:
 			usage()
 		}
@@ -223,7 +230,7 @@ main :: proc() {
 
 usage :: proc() {
 	fmt.eprintln(`usage: measure startup|memory|all|frames [-runs=N] [-setup=fake,mock] [-app=path] [-timeout=s] [-out=path] [-real]
-       measure ab <git ref> [-runs=N] [-setup=fake,mock] [-timeout=s] [-out=path]
+       measure ab <git ref> [-runs=N] [-setup=fake,mock] [-timeout=s] [-out=path] [-memory]
        measure compare a.json b.json
        measure launches [launches.jsonl]
        measure html [snapshots folder] [page.html]`)
@@ -365,8 +372,8 @@ stop_side_mock :: proc(side: ^Side) {
 }
 
 // start_mock starts tests/mock_tidal on a free loopback port and waits
-// until it listens. It makes its audio files first, in log_dir, which
-// takes a while.
+// until it listens. The first start of a new mock binary makes its audio
+// files first, which takes a few seconds; later ones read them back.
 start_mock :: proc(cfg: ^Config, log_dir: string) -> (p: os.Process, url: string, ok: bool) {
 	log_path := join(log_dir, "mock.log")
 	f, err := os.create(log_path)
@@ -374,7 +381,9 @@ start_mock :: proc(cfg: ^Config, log_dir: string) -> (p: os.Process, url: string
 		return
 	}
 	defer os.close(f)
-	audio := fmt.tprintf("-audio-dir=%s", join(log_dir, "mock-audio"))
+	// Shared by every run of this mock binary, which reads back the files
+	// an earlier run encoded.
+	audio := fmt.tprintf("-audio-dir=%s", join(cfg.out_dir, "mock-audio"))
 	perr: os.Error
 	p, perr = os.process_start({command = {cfg.mock, "-port=0", audio}, stdout = f, stderr = f})
 	if perr != nil {
