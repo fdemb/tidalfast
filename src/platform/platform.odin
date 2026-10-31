@@ -3,7 +3,7 @@
 // tests/abi_test.odin compares their field offsets.
 package platform
 
-ABI_VERSION :: 7
+ABI_VERSION :: 8
 
 Event_Kind :: enum u32 {
 	None,
@@ -45,6 +45,8 @@ Mouse_Button :: enum u32 {
 	Left,
 	Right,
 	Middle,
+	Back, // the side buttons on a mouse
+	Forward,
 }
 Mouse_Buttons :: bit_set[Mouse_Button; u32]
 

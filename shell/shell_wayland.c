@@ -1125,6 +1125,10 @@ static double g_mouse_x, g_mouse_y;
 #define EVDEV_BTN_LEFT 0x110
 #define EVDEV_BTN_RIGHT 0x111
 #define EVDEV_BTN_MIDDLE 0x112
+#define EVDEV_BTN_SIDE 0x113
+#define EVDEV_BTN_EXTRA 0x114
+#define EVDEV_BTN_FORWARD 0x115
+#define EVDEV_BTN_BACK 0x116
 
 // Keys by evdev code, the place on the keyboard. Unlisted codes are KEY_NONE.
 static const uint8_t g_keys[128] = {
@@ -1195,6 +1199,8 @@ static void pointer_button(void *data, struct wl_pointer *p, uint32_t serial, ui
   if (code == EVDEV_BTN_LEFT) button = MOUSE_BUTTON_LEFT;
   else if (code == EVDEV_BTN_RIGHT) button = MOUSE_BUTTON_RIGHT;
   else if (code == EVDEV_BTN_MIDDLE) button = MOUSE_BUTTON_MIDDLE;
+  else if (code == EVDEV_BTN_SIDE || code == EVDEV_BTN_BACK) button = MOUSE_BUTTON_BACK;
+  else if (code == EVDEV_BTN_EXTRA || code == EVDEV_BTN_FORWARD) button = MOUSE_BUTTON_FORWARD;
   else return;
   double now = now_seconds();
   bool down = state == WL_POINTER_BUTTON_STATE_PRESSED;

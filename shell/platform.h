@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#define PLATFORM_ABI_VERSION 7
+#define PLATFORM_ABI_VERSION 8
 
 typedef enum {
   EVENT_NONE,
@@ -41,6 +41,8 @@ typedef enum {
   MOUSE_BUTTON_LEFT,
   MOUSE_BUTTON_RIGHT,
   MOUSE_BUTTON_MIDDLE,
+  MOUSE_BUTTON_BACK, // the side buttons on a mouse
+  MOUSE_BUTTON_FORWARD,
 } Mouse_Button;
 
 typedef enum {

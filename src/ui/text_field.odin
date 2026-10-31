@@ -212,7 +212,7 @@ text_field :: proc(id: string, f: ^Text_Field, placeholder: string, width, heigh
 focus_shortcut :: proc(b: ^Box, code: platform.Key, modifiers: platform.Modifiers) {
 	u := ctx
 	if b.key != 0 && u.shortcut_count < MAX_SHORTCUTS {
-		u.shortcuts[u.shortcut_count] = {{code, modifiers}, b.key}
+		u.shortcuts[u.shortcut_count] = {{code = code, modifiers = modifiers}, b.key}
 		u.shortcut_count += 1
 	}
 }

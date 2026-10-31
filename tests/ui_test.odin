@@ -1010,6 +1010,79 @@ test_ui_menu_keyboard :: proc(t: ^testing.T) {
 	testing.expect_value(t, f.a.box.focus_t, f32(0))
 }
 
+Space_Frame :: struct {
+	button, area, item: ui.Signal,
+	field:              ui.Field_Signal,
+	field_box:          ^ui.Box,
+	space, held, text:  bool, // what take_key and text_focused said after the views
+}
+
+// A button, a text field, and an area that opens a menu with one item on a
+// right click. After building them it asks for Space as the app does.
+@(private = "file")
+space_frame :: proc(u: ^ui.State, field: ^ui.Text_Field, now: ^f64, events: ..platform.Event) -> (f: Space_Frame) {
+	now^ += 1.0 / 120
+	ui.begin_frame(u, events, nil, nil, 600, 200, now^)
+	f.button = ui.signal(ui.box_make("button", {.Clickable, .Focusable}, ui.px(100), ui.px(40)))
+	f.field = ui.text_field("field", field, "Search", ui.px(200), ui.px(30))
+	f.field_box = ui.find("field")
+	f.area = ui.signal(ui.box_make("area", {.Clickable, .Focusable}, ui.px(200), ui.px(100)))
+	if f.area.right_clicked {
+		ui.open_menu("menu", ui.mouse())
+	}
+	if ui.menu("menu") {
+		f.item = ui.menu_item("Item##item")
+	}
+	f.text = ui.text_focused()
+	f.space = ui.take_key(.Space, repeats = false)
+	f.held = ui.take_key(.Space)
+	ui.end_frame()
+	return
+}
+
+// Space clicks only in a menu. With a button focused by a click it goes to
+// the app, which plays and pauses with it; a text field keeps it, and a
+// held Space repeats only for a caller that asks for repeats.
+@(test)
+test_ui_space_goes_to_the_app :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	field := new(ui.Text_Field)
+	defer free(field)
+	now := 0.0
+	space_frame(&u, field, &now)
+	space_frame(&u, field, &now)
+
+	f := space_frame(&u, field, &now, {kind = .Mouse_Down, x = 20, y = 20, click_count = 1}, {kind = .Mouse_Up, x = 20, y = 20})
+	testing.expect(t, ui.has_focus(f.button.box), "the click focuses the button")
+	f = space_frame(&u, field, &now, {kind = .Key_Down, key = .Space})
+	testing.expect(t, !f.button.clicked, "Space doesn't click the focused button")
+	testing.expect(t, f.space && !f.text, "Space waits for the app")
+	f = space_frame(&u, field, &now, {kind = .Key_Down, key = .Space, repeat = true})
+	testing.expect(t, !f.space, "a repeated Space is skipped with repeats = false")
+	testing.expect(t, f.held, "and taken with repeats")
+	f = space_frame(&u, field, &now, {kind = .Key_Down, key = .Return})
+	testing.expect(t, f.button.clicked && f.button.keyboard, "Enter still clicks it")
+
+	r := f.field_box.rect
+	f = space_frame(&u, field, &now, {kind = .Mouse_Down, x = r.x + 10, y = r.y + 10, click_count = 1}, {kind = .Mouse_Up, x = r.x + 10, y = r.y + 10})
+	testing.expect(t, f.field.focused)
+	f = space_frame(&u, field, &now, {kind = .Key_Down, key = .Space})
+	testing.expect(t, f.text, "text_focused says the field has the focus")
+
+	// A menu opened with the mouse and highlighted with Down: Space clicks
+	// the item. With nothing highlighted it does nothing, not even play.
+	a := f.area.box.rect
+	space_frame(&u, field, &now, {kind = .Mouse_Down, x = a.x + 10, y = a.y + 10, button = .Right}, {kind = .Mouse_Up, x = a.x + 10, y = a.y + 10, button = .Right})
+	f = space_frame(&u, field, &now, {kind = .Key_Down, key = .Space})
+	testing.expect(t, !f.space && !f.item.clicked, "Space in a menu with nothing highlighted goes nowhere")
+	space_frame(&u, field, &now, {kind = .Key_Down, key = .Down})
+	f = space_frame(&u, field, &now, {kind = .Key_Down, key = .Space})
+	testing.expect(t, f.item.clicked && f.item.keyboard, "Space clicks the highlighted item")
+	testing.expect(t, !f.space)
+}
+
 // The mouse and the keys move one highlight in a menu, and an item has no
 // focus ring.
 @(test)

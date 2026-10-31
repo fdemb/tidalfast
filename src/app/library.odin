@@ -241,6 +241,44 @@ draw_library :: proc(s: ^State, w, h: f32) {
 	draw_toast(s, w, h - status_bar_h(s) - (0 if s.blur_reference else PLAYER_BAR_H))
 	draw_track_menu(s)
 	draw_drag_ghost(s)
+	library_shortcuts(s)
+}
+
+VOLUME_STEP :: 0.1
+
+// library_shortcuts runs the shortcuts that work anywhere in the library,
+// with the keys the views didn't take, and the mouse's Back and Forward. A
+// text field keeps its own keys.
+library_shortcuts :: proc(s: ^State) {
+	if ui.take_button(.Back) {
+		pending_set(s, Go_Back{})
+	}
+	if ui.take_button(.Forward) {
+		pending_set(s, Go_Forward{})
+	}
+	if ui.text_focused() {
+		return
+	}
+	for ui.take_key(.Space, repeats = false) {
+		playback_toggle(s)
+		ui.data_changed()
+	}
+	for ui.take_key(.Right, {ui.PRIMARY}) {
+		playback_next(s)
+		ui.data_changed()
+	}
+	for ui.take_key(.Left, {ui.PRIMARY}) {
+		playback_previous(s)
+		ui.data_changed()
+	}
+	for ui.take_key(.Up, {ui.PRIMARY}) {
+		playback_set_volume(s, min(s.settings.volume + VOLUME_STEP, 1), true)
+		ui.data_changed()
+	}
+	for ui.take_key(.Down, {ui.PRIMARY}) {
+		playback_set_volume(s, max(s.settings.volume - VOLUME_STEP, 0), true)
+		ui.data_changed()
+	}
 }
 
 // draw_history_buttons is Back and Forward through the places visited
@@ -598,7 +636,7 @@ table_header :: proc(cols: Track_Columns, pinned := false) {
 
 // table_keys moves the selection among the first count rows with the
 // arrow keys while the table has the focus, and plays the selected row with
-// Enter or Space. A row selected past count, as in an artist's full top
+// Enter. A row selected past count, as in an artist's full top
 // tracks, isn't one of them. It returns true when the selection moved, for
 // the caller to scroll it into view. Page Up and Down go by view_h, the
 // height the rows show in. The table has no focus ring: its selected row

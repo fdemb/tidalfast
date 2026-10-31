@@ -107,8 +107,9 @@ static void request_redraw(void) {
 // From the whole login session, so it sees releases that went to other apps.
 static uint32_t held_mouse_buttons(void) {
   uint32_t held = 0;
-  // Mouse_Button's values are CGMouseButton's: left, right, center.
-  for (uint32_t b = MOUSE_BUTTON_LEFT; b <= MOUSE_BUTTON_MIDDLE; b++) {
+  // Mouse_Button's values are CGMouseButton's: left, right, center, then
+  // the side buttons as 3 and 4.
+  for (uint32_t b = MOUSE_BUTTON_LEFT; b <= MOUSE_BUTTON_FORWARD; b++) {
     if (CGEventSourceButtonState(kCGEventSourceStateCombinedSessionState, b)) held |= 1u << b;
   }
   return held;
@@ -1071,8 +1072,12 @@ static Event mouse_event(NSView *view, NSEvent *e, uint32_t kind, uint32_t butto
 - (void)mouseUp:(NSEvent *)e { push_event(mouse_event(self, e, EVENT_MOUSE_UP, MOUSE_BUTTON_LEFT)); }
 - (void)rightMouseDown:(NSEvent *)e { push_event(mouse_event(self, e, EVENT_MOUSE_DOWN, MOUSE_BUTTON_RIGHT)); }
 - (void)rightMouseUp:(NSEvent *)e { push_event(mouse_event(self, e, EVENT_MOUSE_UP, MOUSE_BUTTON_RIGHT)); }
-- (void)otherMouseDown:(NSEvent *)e { push_event(mouse_event(self, e, EVENT_MOUSE_DOWN, MOUSE_BUTTON_MIDDLE)); }
-- (void)otherMouseUp:(NSEvent *)e { push_event(mouse_event(self, e, EVENT_MOUSE_UP, MOUSE_BUTTON_MIDDLE)); }
+- (void)otherMouseDown:(NSEvent *)e {
+  if (e.buttonNumber <= MOUSE_BUTTON_FORWARD) push_event(mouse_event(self, e, EVENT_MOUSE_DOWN, (uint32_t)e.buttonNumber));
+}
+- (void)otherMouseUp:(NSEvent *)e {
+  if (e.buttonNumber <= MOUSE_BUTTON_FORWARD) push_event(mouse_event(self, e, EVENT_MOUSE_UP, (uint32_t)e.buttonNumber));
+}
 - (void)mouseMoved:(NSEvent *)e { push_event(mouse_event(self, e, EVENT_MOUSE_MOVE, 0)); }
 - (void)mouseDragged:(NSEvent *)e { push_event(mouse_event(self, e, EVENT_MOUSE_MOVE, 0)); }
 - (void)rightMouseDragged:(NSEvent *)e { push_event(mouse_event(self, e, EVENT_MOUSE_MOVE, 0)); }

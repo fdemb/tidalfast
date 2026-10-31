@@ -29,6 +29,7 @@ import "../text"
 MAX_BOXES :: 8192
 BOX_TABLE :: 4096 // buckets, a power of two
 MAX_KEY_PRESSES :: 32
+NAV_BUTTONS :: platform.Mouse_Buttons{.Back, .Forward}
 MAX_EDIT_EVENTS :: 64
 MAX_SHORTCUTS :: 8
 STACK_DEPTH :: 64
@@ -68,7 +69,7 @@ Align :: enum u8 {
 
 Box_Flag :: enum u32 {
 	Clickable, // gets hot and active, takes mouse presses
-	Focusable, // Tab stops here, Enter and Space click it
+	Focusable, // Tab stops here, Enter clicks it, and Space in a menu
 	View_Scroll, // takes scroll input into view_off
 	Allow_Overflow_X, // children may be wider than the box
 	Allow_Overflow_Y,
@@ -163,7 +164,7 @@ Signal :: struct {
 	held:           bool, // left button went down on the box and is still down
 	pressed:        bool, // left button went down on the box this frame
 	released:       bool, // left button came up after being pressed on the box
-	clicked:        bool, // pressed on the box, or released over it with Click_On_Release, or Enter or Space while focused
+	clicked:        bool, // pressed on the box, or released over it with Click_On_Release, or Enter while focused, or Space on a menu item
 	keyboard:       bool, // clicked came from a key
 	double_clicked: bool,
 	right_clicked:  bool, // right or control-click went down on the box
@@ -188,6 +189,7 @@ Hit :: struct {
 Key_Press :: struct {
 	code:      platform.Key,
 	modifiers: platform.Modifiers,
+	repeat:    bool, // the key is held and the OS sent it again
 }
 
 // Edit_Event is a key press the UI didn't use, text from the shell, a
@@ -270,8 +272,9 @@ State :: struct {
 	focus:          Key,
 	focus_visible:  bool, // the focus came from the keyboard, so draw a ring
 	focus_reveal:   bool, // the keyboard moved the focus: scroll it into view
-	key_click:      Key, // Enter or Space this frame
+	key_click:      Key, // Enter, or Space in a menu, this frame
 	keys:           [MAX_KEY_PRESSES]Key_Press, // presses the UI didn't use
+	nav_buttons:    platform.Mouse_Buttons, // Back and Forward pressed this frame, for take_button
 	key_count:      int,
 	edits:          [MAX_EDIT_EVENTS]Edit_Event,
 	edit_count:     int,
@@ -540,6 +543,7 @@ process_events :: proc(u: ^State, events: []platform.Event, text_bytes: []u8) {
 	u.double_clicked = 0
 	u.key_click = 0
 	u.key_count = 0
+	u.nav_buttons = {}
 	u.edit_count = 0
 	u.scroll = {}
 	u.scroll_precise = {}
@@ -565,7 +569,17 @@ process_events :: proc(u: ^State, events: []platform.Event, text_bytes: []u8) {
 		input_apply(&u.input, e)
 		#partial switch e.kind {
 		case .Mouse_Down:
-			mouse_pressed(u, e)
+			if e.button in NAV_BUTTONS {
+				// They don't press anything under the mouse. With a menu open
+				// they only close it, as a click outside does.
+				if u.menu != 0 && u.menu_open {
+					close_menu()
+				} else {
+					u.nav_buttons += {e.button}
+				}
+			} else {
+				mouse_pressed(u, e)
+			}
 		case .Mouse_Up:
 			hover := hit_at(u, u.input.mouse)
 			if k := u.active[e.button]; k != 0 {
@@ -739,8 +753,8 @@ key_down :: proc(u: ^State, e: platform.Event) {
 	case !e.repeat && (code == .F1 || (code == .D && mods == {PRIMARY, .Shift})):
 		u.debug = !u.debug
 		return
-	case shortcut_for(u, {code, mods}) != 0:
-		target := shortcut_for(u, {code, mods})
+	case shortcut_for(u, {code = code, modifiers = mods}) != 0:
+		target := shortcut_for(u, {code = code, modifiers = mods})
 		if u.menu != 0 && u.menu_open {
 			close_menu()
 		}
@@ -766,9 +780,16 @@ key_down :: proc(u: ^State, e: platform.Event) {
 			move_focus(u, 0, false)
 			return
 		}
-	case (code == .Return || code == .Space) && mods == {} && u.focus != 0:
+	case code == .Return && mods == {} && u.focus != 0:
 		// With a menu open, only its items take keys.
 		if !menu_blocks(u, u.focus) {
+			u.key_click = u.focus
+		}
+		return
+	case code == .Space && mods == {} && u.menu != 0 && u.menu_open:
+		// Space clicks only in a menu. Elsewhere it goes to the app, which
+		// plays and pauses with it.
+		if u.focus != 0 && !menu_blocks(u, u.focus) {
 			u.key_click = u.focus
 		}
 		return
@@ -782,16 +803,16 @@ key_down :: proc(u: ^State, e: platform.Event) {
 		}
 	}
 	if u.key_count < MAX_KEY_PRESSES {
-		u.keys[u.key_count] = {code, mods}
+		u.keys[u.key_count] = {code, mods, bool(e.repeat)}
 		u.key_count += 1
 	}
-	queue_edit(u, {op = .Key, target = u.focus, key = {code, mods}})
+	queue_edit(u, {op = .Key, target = u.focus, key = {code, mods, bool(e.repeat)}})
 }
 
 @(private)
 shortcut_for :: proc(u: ^State, k: Key_Press) -> Key {
 	for sc in u.shortcuts[:u.shortcut_count] {
-		if sc.key == k {
+		if sc.key.code == k.code && sc.key.modifiers == k.modifiers {
 			return sc.target
 		}
 	}
@@ -1392,12 +1413,12 @@ column :: proc(id: string = "", flags: Box_Flags = {}, width: Size = {}, height:
 
 // take_key removes one press of code with exactly these modifiers from this
 // frame's unused keys and reports whether there was one. The first caller
-// gets it.
-take_key :: proc(code: platform.Key, modifiers: platform.Modifiers = {}) -> bool {
+// gets it. With repeats false, a held key counts only when it goes down.
+take_key :: proc(code: platform.Key, modifiers: platform.Modifiers = {}, repeats := true) -> bool {
 	u := ctx
 	for i in 0 ..< u.key_count {
 		k := u.keys[i]
-		if k.code == code && k.modifiers == modifiers {
+		if k.code == code && k.modifiers == modifiers && (repeats || !k.repeat) {
 			u.keys[i] = u.keys[u.key_count - 1]
 			u.key_count -= 1
 			return true
@@ -1406,10 +1427,28 @@ take_key :: proc(code: platform.Key, modifiers: platform.Modifiers = {}) -> bool
 	return false
 }
 
+// take_button reports whether Back or Forward on the mouse went down this
+// frame, and keeps the press from any later caller.
+take_button :: proc(button: platform.Mouse_Button) -> bool {
+	u := ctx
+	if button in u.nav_buttons {
+		u.nav_buttons -= {button}
+		return true
+	}
+	return false
+}
+
 // find is the keyed box id under the current parent, as the last frame left
 // it, or nil before it's built for the first time.
 find :: proc(id: string) -> ^Box {
 	return box_lookup(ctx, key_from_string(seed_key(top_parent()), id))
+}
+
+// text_focused says whether a text field has the focus. It gets the keys
+// it uses, and they still wait for ui.take_key, so app-wide shortcuts
+// check this first.
+text_focused :: proc() -> bool {
+	return focus_takes_text(ctx)
 }
 
 has_focus :: proc(b: ^Box) -> bool {
