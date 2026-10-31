@@ -2,6 +2,10 @@
 
 `src/render` draws everything as instances of one quad. Each instance is a rounded box drawn with a signed distance function in the fragment shader. It has four corner colours, four corner radii, a border width, an edge softness, a clip rect, and an optional texture with a source rect. A shadow is a soft-edged box drawn under the real one (`push_shadow`).
 
+One blend state covers every instance: premultiplied over, `src + dst * (1 - src.a)`. An instance with the `Additive` flag writes its `extra` as the alpha instead, so the blend gives `dst * (1 - extra) + colour`. With `extra` 0 that adds the colour to what's under it, as macOS's plus-lighter does, without a second pipeline.
+
+`push_rim` uses it for a one-pixel stroke just inside a cover's edge, with white at `lift` as the colour and `darken` as `extra`. Each channel under it moves toward `lift / darken` in linear light, so dark edges get lighter, light edges get darker, and the stroke keeps the cover's hue rather than drawing a gray line. A dark cover keeps a visible edge on the dark background, and a light cover gets a faint darker one. Covers use a lift of 0.03 and a darken of 0.25, which leaves a channel at linear 0.12 (sRGB 97) as it is, so the darkening on light covers shows more than the lift on dark ones. A dark green edge goes from (55, 99, 20) to (68, 99, 53), a light yellow one from (229, 227, 80) to (206, 204, 85). The stroke is one physical pixel at any scale: `push_rim` asks for a border of `1 / scale` points, which `push` rounds to one pixel. The low channels rise and the high ones fall, so the stroke is a little less saturated than the cover.
+
 The API takes points. The renderer multiplies by the backing scale and rounds rect edges, clip rects and borders to whole pixels, so a 1 pt border is exactly 2 pixels at 2x.
 
 Colours are sRGB with straight alpha, as a design tool shows them. The drawable is `BGRA8Unorm_sRGB`, so the GPU blends in linear space. The shader interpolates gradient colours in premultiplied sRGB, which matches CSS gradients, then converts to linear before blending. Glyph coverage blends in linear space the same way.

@@ -13,6 +13,7 @@ import "../ui"
 
 COVER_PREFETCH_ROWS :: 4 // rows above and below the view whose covers load too
 DATA_SLOTS :: 16 // job queue slots covers leave free for data jobs
+COVER_RIM :: render.Rim{lift = 0.03, darken = 0.25} // the hairline around a cover
 
 // cover_art draws a cover size points square, centred in a cell of width
 // cell_w. Without an image id it draws the fake data's gradient for seed.
@@ -26,6 +27,7 @@ cover_art :: proc(s: ^State, kind: cover.Kind, id: string, seed: u32, size: f32,
 		hue := f32(seed % 997) / 997
 		ui.set_next_background(hsv(hue, 0.55, 0.75) if id == "" else SURFACE_ACTIVE)
 		b := ui.box_make("", {.Draw_Background}, ui.px(size), ui.px(size))
+		b.rim = COVER_RIM
 		if id == "" {
 			b.gradient = hsv(hue + 0.08, 0.7, 0.35)
 		} else {
@@ -36,6 +38,7 @@ cover_art :: proc(s: ^State, kind: cover.Kind, id: string, seed: u32, size: f32,
 				img := ui.box_make("", {}, ui.fill(), ui.fill())
 				img.texture = cover.texture(&s.data.covers, e)
 				img.texture_src = cover.src(&s.data.covers, e)
+				img.rim = COVER_RIM
 				img.opacity = cover.alpha(e, s.ui.time)
 				if img.opacity < 1 {
 					ui.request_frame()

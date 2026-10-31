@@ -9,7 +9,7 @@ struct Instance {
 	float border;
 	float softness;
 	uint flags;
-	float pad;
+	float extra;
 	vec4 clip;
 };
 
@@ -27,6 +27,7 @@ layout(location = 0) out vec4 out_color;
 const uint TEXTURED = 1u;
 const uint NEAREST = 2u;
 const uint COVERAGE = 4u;
+const uint ADDITIVE = 16u;
 
 // Signed distance from p to a box centred on the origin with rounded corners.
 // Negative inside.
@@ -83,4 +84,7 @@ void main() {
 		}
 	}
 	out_color = color * coverage;
+	if ((r.flags & ADDITIVE) != 0u) {
+		out_color.a = r.extra * coverage;
+	}
 }

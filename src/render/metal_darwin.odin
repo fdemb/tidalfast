@@ -65,6 +65,7 @@ constant uint TEXTURED = 1;
 constant uint NEAREST = 2;
 constant uint COVERAGE = 4;
 constant uint BACKDROP = 8;
+constant uint ADDITIVE = 16;
 
 struct Fragment_In {
 	float4 position [[position]];
@@ -163,7 +164,11 @@ fragment float4 rect_fragment(Fragment_In in [[stage_in]],
 			color *= (r.flags & NEAREST) ? colour_tex.sample(nearest_sampler, uv) : colour_tex.sample(linear_sampler, uv);
 		}
 	}
-	return color * coverage;
+	color *= coverage;
+	if (r.flags & ADDITIVE) {
+		color.a = r.extra * coverage;
+	}
+	return color;
 }
 
 // The dual Kawase filter (Bjorge, 2015). A full-screen triangle per pass.

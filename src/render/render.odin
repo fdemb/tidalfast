@@ -79,6 +79,8 @@ Style :: struct {
 	texture:  Texture, // zero draws solid colour
 	src:      Rect, // texels; zero means the whole texture
 	nearest:  bool, // sample without filtering
+	additive: bool, // add the colour to what's under it, see Instance_Flag.Additive
+	darken:   f32, // with additive, scale what's under it by 1 - darken first
 }
 
 // A handle into the renderer's texture table: slot index in the low 16 bits,
@@ -98,6 +100,10 @@ Instance_Flag :: enum u32 {
 	Nearest,
 	Coverage, // sample the R8 texture, bound in its own slot
 	Backdrop, // sample the blurred backdrop, see push_backdrop
+	// Write extra as the alpha, so the premultiplied blend gives
+	// dst * (1 - extra) + colour: with extra 0 it adds the colour to what's
+	// under it, as plus-lighter does.
+	Additive,
 }
 Instance_Flags :: bit_set[Instance_Flag; u32]
 
@@ -111,7 +117,7 @@ Instance :: struct {
 	border:   f32,
 	softness: f32,
 	flags:    Instance_Flags,
-	extra:    f32, // Backdrop: the saturation
+	extra:    f32, // Backdrop: the saturation. Additive: the alpha
 	clip:     [4]f32, // x0 y0 x1 y1
 }
 #assert(size_of(Instance) == 144)
@@ -418,6 +424,10 @@ push :: proc(r: ^Renderer, rect: Rect, style: Style) {
 		inst.border = max(math.round(style.border * r.scale), 1)
 	}
 	inst.softness = style.softness * r.scale
+	if style.additive {
+		inst.flags += {.Additive}
+		inst.extra = style.darken
+	}
 	inst.clip = r.clips[min(r.clip_depth, MAX_CLIP_DEPTH) - 1]
 	append_instance(r, inst, texture, kind)
 }
@@ -543,6 +553,22 @@ push_gradient :: proc(r: ^Renderer, rect: Rect, from, to: Color, horizontal := f
 // radius is set. src is in texels; zero means the whole texture.
 push_image :: proc(r: ^Renderer, rect: Rect, texture: Texture, src: Rect = {}, tint := WHITE, radius: f32 = 0, nearest := false) {
 	push(r, rect, {colors = corners(tint), radii = corners(radius), texture = texture, src = src, nearest = nearest})
+}
+
+// Rim is how a rim changes the linear colour c under it: c * (1 - darken)
+// + lift. Dark colours get lighter and light ones darker, with c = lift /
+// darken left as it is.
+Rim :: struct {
+	lift:   f32,
+	darken: f32,
+}
+
+// push_rim draws a hairline just inside rect's edge that changes what's under
+// it by rim. It keeps the hue of what it lies on, so on a cover it is the
+// cover's own edge, lighter where the cover is dark and darker where it's
+// light.
+push_rim :: proc(r: ^Renderer, rect: Rect, rim: Rim, radius: f32 = 0) {
+	push(r, rect, {colors = corners(Color{1, 1, 1, rim.lift}), radii = corners(radius), border = 1 / r.scale, additive = true, darken = rim.darken})
 }
 
 // push_shadow draws a drop shadow for a box of the given rect and radius.
