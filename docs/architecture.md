@@ -22,6 +22,7 @@ tests/            `odin test tests`
 examples/cli/     CLI on top of src/tidal
 tools/measure/    startup and memory measurement (docs/measuring.md)
 tools/save_cost/  times what a list save and a queue save cost the UI thread
+tools/audio_top/  macOS's pw-top: each output device's rate and formats, and the processes playing to it
 tools/icons.sh    cuts the Phosphor icon fonts down to the icons the app draws
 tools/icon.sh     renders the app icon in packaging/ for macOS and Linux
 packaging/        Info.plist, the .desktop file and the app icon for `./build.sh dist`

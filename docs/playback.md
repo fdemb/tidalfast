@@ -119,6 +119,13 @@ SIGKILL and a crash can't be caught, and the nominal rate and physical format st
 
 The decode thread also watches the device. A listener on its `kAudioDevicePropertyDeviceIsAlive` and one on the system's default output only note what changed and wake the decode thread. CoreAudio may still be running a listener after `AudioObjectRemovePropertyListener` returns, so a listener touches only the player's `Device_Watch`: the flags it sets and the semaphore it posts both live there, and the decode thread sleeps on that semaphore. The watch is never freed. After the player is destroyed nobody waits on it, and a late post does nothing. When the device has gone, as when a USB DAC is unplugged mid-track, the decode thread stops and destroys the dead output without trying to restore anything on it, and plays on from the audible position on whatever is now the default output. If nothing can open, the track fails and the player bar says so. When the default output moves to another device, the device is put back and the track moves to the new default the same way. miniaudio follows the default output by itself.
 
+`tools/audio_top` shows what the devices are doing from outside the app: each output device's nominal rate, buffer size, physical and virtual formats, whether it's running and who hogs it, and on macOS 14 and later every process sending audio and to which device. `-log -interval=2` prints a timestamped line for each change instead, which shows the rate switching per track. It only reads properties.
+
+```
+odin build tools/audio_top -out:build/audio_top
+./build/audio_top -once
+```
+
 Gapless still works at the same rate: the ring doesn't care. A rate change lets the ring play out, stops the IOProc, sets the new rate and starts it again. The player logs the time from the last IOProc call with the old track's frames to the first with the new one's.
 
 ### Bit-perfect output on Linux
