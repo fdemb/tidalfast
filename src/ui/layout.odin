@@ -9,6 +9,8 @@
 //    solved, so percentages of it are taken again from that size. Then
 //    children that don't fit their parent shrink. Along the child axis each child gives up its size times (1 - strictness), in
 //    proportion, until the overflow is gone or nothing is left to give.
+//    A box with Shrink_From_End takes the room from its last children
+//    instead, so the child crossing its edge is cut and the rest get none.
 //    Across it, a child larger than its parent is cut to the parent's size.
 //    Boxes that allow overflow (scroll views) skip this on that axis.
 //    A box's gutter and pad come off its size before its children get any.
@@ -128,6 +130,14 @@ solve_violations :: proc(b: ^Box, axis: Axis) {
 			for c := b.first; c != nil; c = c.next {
 				if !floating_on(c, axis) {
 					c.fixed_size[axis] = min(c.fixed_size[axis], allowed)
+				}
+			}
+		} else if .Shrink_From_End in b.flags {
+			left := allowed
+			for c := b.first; c != nil; c = c.next {
+				if !floating_on(c, axis) {
+					c.fixed_size[axis] = min(c.fixed_size[axis], left)
+					left -= c.fixed_size[axis]
 				}
 			}
 		} else {

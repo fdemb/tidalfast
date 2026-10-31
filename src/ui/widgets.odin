@@ -289,7 +289,10 @@ virtual_rows_end :: proc(v: Virtual_Rows) {
 // the parent can then be a box inside the view that starts there.
 @(deferred_out = virtual_rows_end)
 virtual_rows :: proc(view: ^Box, count: int, row_h: f32, start: f32 = 0) -> Virtual_Rows {
-	first, last := virtual_range(view.view_off.y - view.pad.y - start, view.rect.h, row_h, count)
+	// A new view has no height until it's laid out. The window's is enough
+	// to fill it, so its first frame isn't drawn empty.
+	view_h := ctx.height if view.first_frame == ctx.frame else view.rect.h
+	first, last := virtual_range(view.view_off.y - view.pad.y - start, view_h, row_h, count)
 	if last > first {
 		first, last = max(first - 1, 0), min(last + 1, count)
 	}
@@ -332,9 +335,11 @@ floating_end :: proc() {
 
 // Menus. One context menu is open at a time. open_menu opens it at pos;
 // menu builds it while it's open or fading out. A click outside it or
-// Escape closes it, and so does clicking an item. While it's open the focus
-// is inside it, starting on the first item, and the keyboard reaches
-// nothing else. Closing it puts the focus back where it was.
+// Escape closes it, and so does clicking an item. While it's open the
+// keyboard reaches nothing else. The focus is its highlighted item, which
+// the mouse and the keys both move, and which starts on the first item
+// only when the keyboard opened the menu. Closing it puts the focus back
+// where it was.
 
 open_menu :: proc(id: string, pos: [2]f32) {
 	u := ctx
@@ -345,7 +350,8 @@ open_menu :: proc(id: string, pos: [2]f32) {
 	u.menu = key_from_string(0, id)
 	u.menu_open = true
 	u.menu_pos = pos
-	u.menu_focus_new = true
+	u.menu_focus_new = u.key_click != 0
+	u.focus = 0
 }
 
 close_menu :: proc() {
@@ -403,14 +409,10 @@ menu :: proc(id: string, width: f32 = 220) -> bool {
 		floating_end()
 		return false
 	}
-	// Keep it in the window, above the mouse if there's no room below.
-	pos := u.menu_pos
-	pos.x = max(min(pos.x, u.width - width - 8), 8)
-	if pos.y + b.rect.h > u.height - 8 {
-		pos.y = pos.y - b.rect.h
-	}
-	pos.y = max(pos.y, 8)
-	b.fixed_pos = pos + {0, (1 - b.open_t) * -6}
+	// Above pos if there's no room below.
+	b.fixed_pos = u.menu_pos + {0, (1 - b.open_t) * -6}
+	b.keep_in_window = true
+	b.flip_y = b.fixed_pos.y
 	b.opacity = b.open_t
 	push_parent(b)
 	spacer(px(6))
@@ -419,7 +421,7 @@ menu :: proc(id: string, width: f32 = 220) -> bool {
 
 menu_item :: proc(id: string) -> Signal {
 	u := ctx
-	flags := Box_Flags{.Clickable, .Focusable, .Draw_Text, .Draw_Hot_Effects}
+	flags := Box_Flags{.Clickable, .Focusable, .Draw_Text, .Draw_Hot_Effects, .Focus_Is_Hot, .No_Focus_Ring}
 	if !u.menu_open {
 		flags += {.Disabled}
 	}
@@ -448,16 +450,21 @@ menu_separator :: proc() {
 
 // tooltip shows label next to the mouse once sig's box has been hovered
 // for TOOLTIP_DELAY. Until then it asks for a frame at the deadline so it
-// can appear without input.
+// can appear without input. Within TOOLTIP_WARM of the last tooltip it
+// shows at once without fading in, so moving the mouse along a row of
+// buttons shows each one's. Boxes scrolling under a still mouse wait for
+// the delay. It stays where it showed while the mouse moves over the box.
 tooltip :: proc(sig: Signal, label: string) {
 	u := ctx
 	if !sig.hovering || u.input.buttons != {} || (u.menu != 0 && u.menu_open) {
 		return
 	}
-	if shows := u.hot_since + TOOLTIP_DELAY; u.time < shows {
+	warm := u.hot_by_mouse && u.time - u.tooltip_seen < TOOLTIP_WARM
+	if shows := u.hot_since + TOOLTIP_DELAY; u.time < shows && !warm {
 		wake_at(shows)
 		return
 	}
+	u.tooltip_seen = u.time
 	floating()
 	set_next_font_size(12)
 	set_next_text_pad(8)
@@ -468,12 +475,16 @@ tooltip :: proc(sig: Signal, label: string) {
 	b := box_make("###tooltip", {.Floating_X, .Floating_Y, .Draw_Background, .Draw_Border, .Draw_Text})
 	b.label = label
 	b.pref_size = {.X = text_size(), .Y = text_size(10)}
+	if warm && b.first_frame == u.frame {
+		b.open_t = 1
+	}
 	b.open_t = approach(u, b.open_t, 1, 1 - math.exp(-u.dt * 20), 0.01)
 	b.opacity = b.open_t
-	pos := u.input.mouse + {10, 20}
-	pos.x = max(min(pos.x, u.width - b.rect.w - 8), 8)
-	if pos.y + b.rect.h > u.height - 8 {
-		pos.y = u.input.mouse.y - b.rect.h - 8
+	if b.first_frame == u.frame || u.tooltip_owner != sig.box.key {
+		u.tooltip_owner = sig.box.key
+		u.tooltip_pos = u.input.mouse
 	}
-	b.fixed_pos = pos
+	b.fixed_pos = u.tooltip_pos + {10, 20}
+	b.keep_in_window = true
+	b.flip_y = u.tooltip_pos.y - 8
 }

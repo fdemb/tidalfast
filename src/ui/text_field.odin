@@ -371,14 +371,17 @@ field_draw :: proc(u: ^State, b: ^Box, f: ^Text_Field, lay: Field_Layout, placeh
 		}
 	}
 
-	label := box_make("", {.Floating_X, .Floating_Y, .Draw_Text}, px(lay.width + 2), px(line_h))
-	label.fixed_pos = {x, ty}
+	label: ^Box
 	if shown == "" {
+		// As wide as the field in this frame's layout, less the padding.
+		set_next_text_pad(FIELD_PAD)
+		label = box_make("", {.Floating_X, .Floating_Y, .Draw_Text}, fill(), px(line_h))
+		label.fixed_pos = {0, ty}
 		label.label = placeholder
-		label.fixed_pos.x = FIELD_PAD
-		label.pref_size[.X] = px(max(b.rect.w - 2 * FIELD_PAD, 0))
 		label.text_color.a *= 0.45
 	} else {
+		label = box_make("", {.Floating_X, .Floating_Y, .Draw_Text}, px(lay.width + 2), px(line_h))
+		label.fixed_pos = {x, ty}
 		label.label = shown
 	}
 	label.id = label.label

@@ -549,7 +549,9 @@ top_tracks_arrows_move_the_selection :: proc(t: ^testing.T) {
 }
 
 // A track selected in the full top tracks below the five the page shows
-// isn't played by Enter on the page, and Down there starts at the first.
+// isn't played by Enter on the page. The keyboard coming into the page's
+// top tracks selects the first, since the table shows the focus only with
+// its selected row, and Enter plays that.
 @(test)
 top_tracks_play_only_what_they_show :: proc(t: ^testing.T) {
 	fonts: Fonts
@@ -577,13 +579,11 @@ top_tracks_play_only_what_they_show :: proc(t: ^testing.T) {
 
 	table, _ := exact(s, "Top tracks", .Table)
 	library_frame(t, s, &f, {kind = .Access_Focus, target = table.id})
-	library_frame(t, s, &f, key(.Return))
 	library_frame(t, s, &f)
-	testing.expect(t, app.playback_item(s) == nil, "Enter plays nothing the page doesn't show")
-	library_frame(t, s, &f, key(.Down))
+	testing.expect_value(t, s.library.selected, 0)
 	library_frame(t, s, &f, key(.Return))
 	item := app.playback_item(s)
-	testing.expect(t, item != nil && item.title == app.view_row(s, 0).title, "Down selects the first track, which Enter plays")
+	testing.expect(t, item != nil && item.title == app.view_row(s, 0).title, "Enter plays the first track, not the one the page doesn't show")
 }
 
 // A search that's cleared, or that fails, before its results show leaves

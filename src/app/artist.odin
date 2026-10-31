@@ -555,9 +555,9 @@ draw_top_tracks :: proc(s: ^State, p: ^List_Place, view: ^ui.Box, width: f32) {
 	// A keyed parent of its own, so the arrow keys find no other box to
 	// move the focus to and reach table_keys.
 	ui.column("top_tracks_group", {}, ui.fill(), ui.children_sum())
-	list := ui.column("top_tracks", {.Focusable}, ui.fill(), ui.px(f32(shown) * TRACK_ROW_H))
+	list := ui.column("top_tracks", {.Focusable, .No_Focus_Ring}, ui.fill(), ui.px(f32(shown) * TRACK_ROW_H))
 	ui.accessible(list, .Table, "Top tracks")
-	if table_keys(s, list, min(n, TOP_TRACKS), list.rect.h) {
+	if table_keys(s, list, min(n, TOP_TRACKS), list.rect.h, 0) {
 		top := list.rect.y - view.rect.y + view.view_off.y
 		sel := f32(s.library.selected)
 		ui.scroll_to(view, top + sel * TRACK_ROW_H, top + (sel + 1) * TRACK_ROW_H)

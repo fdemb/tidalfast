@@ -169,7 +169,8 @@ artist_and_album_links :: proc(t: ^testing.T) {
 }
 
 // A song with more artists than fit lists them up to the edge of its
-// column: the one that crosses it is cut, and the rest are left out.
+// column: the one that crosses it is cut, and the rest are left out. This
+// holds from the row's first frame.
 @(test)
 artist_links_stop_at_the_edge :: proc(t: ^testing.T) {
 	fonts: Fonts
@@ -190,26 +191,25 @@ artist_links_stop_at_the_edge :: proc(t: ^testing.T) {
 	app.view_open(&s.data, .Playlist, "uuid", "A playlist", "", 1)
 	app.view_add_rows(&s.data.view, 0, 1, rows, 1)
 	f := Frame{fonts = &fonts}
-	for _ in 0 ..< 3 {
+	for frame in 1 ..= 3 {
 		library_frame(t, s, &f)
-	}
-
-	first, ok := access_node(s, "Artist number 0")
-	testing.expect(t, ok)
-	_, last := access_node(s, "Artist number 11")
-	testing.expect(t, !last)
-	title, _ := access_node(s, "Crowded song")
-	right := title.frame[0] + title.frame[2]
-	shown := 0
-	nodes, _ := ui.access_tree(&s.ui)
-	for n in nodes {
-		if strings.has_prefix(string(n.label), "Artist number") {
-			shown += 1
-			testing.expectf(t, n.frame[0] + n.frame[2] <= right + 0.5, "%s ends at %v, past %v", n.label, n.frame[0] + n.frame[2], right)
+		first, ok := access_node(s, "Artist number 0")
+		testing.expectf(t, ok, "frame %d: the first artist", frame)
+		_, last := access_node(s, "Artist number 11")
+		testing.expectf(t, !last, "frame %d: not the last artist", frame)
+		title, _ := access_node(s, "Crowded song")
+		right := title.frame[0] + title.frame[2]
+		shown := 0
+		nodes, _ := ui.access_tree(&s.ui)
+		for n in nodes {
+			if strings.has_prefix(string(n.label), "Artist number") {
+				shown += 1
+				testing.expectf(t, n.frame[0] + n.frame[2] <= right + 0.5, "frame %d: %s ends at %v, past %v", frame, n.label, n.frame[0] + n.frame[2], right)
+			}
 		}
+		testing.expectf(t, shown > 1 && shown < 12, "frame %d: %d artists shown", frame, shown)
+		testing.expect(t, first.frame[2] > 0)
 	}
-	testing.expect(t, shown > 1 && shown < 12)
-	testing.expect(t, first.frame[2] > 0)
 }
 
 // A search the full queue held gives way to the next query, which goes out

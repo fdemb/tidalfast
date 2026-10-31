@@ -2,6 +2,7 @@ package tidal_tests
 
 import "core:fmt"
 import "core:mem"
+import vmem "core:mem/virtual"
 import "core:slice"
 import "core:testing"
 import "core:time"
@@ -10,6 +11,7 @@ import app "../src/app"
 import "../src/audio"
 import "../src/cover"
 import "../src/jobs"
+import "../src/platform"
 import "../src/render"
 import "../src/text"
 import tidal "../src/tidal"
@@ -408,4 +410,45 @@ freed_list_poisons_its_gaps :: proc(t: ^testing.T) {
 	}
 	app.view_close(d)
 	testing.expect_value(t, u64(gaps[0].offset), u64(0xdbdb_dbdb_dbdb_dbdb))
+}
+
+// The track table has no focus ring: its selected row shows the focus. So
+// the keyboard coming into it with nothing selected selects the first row
+// in view.
+@(test)
+keyboard_focus_selects_the_first_row_in_view :: proc(t: ^testing.T) {
+	arena: vmem.Arena
+	_ = vmem.arena_init_growing(&arena)
+	defer vmem.arena_destroy(&arena)
+	context.allocator = vmem.arena_allocator(&arena)
+	s := library_state(true)
+	defer library_state_free(s)
+	f: Frame
+	for _ in 0 ..< 3 {
+		library_frame(t, s, &f)
+	}
+	testing.expect_value(t, s.library.selected, -1)
+	library_frame(t, s, &f, {kind = .Mouse_Move, x = 600, y = 400})
+	library_frame(t, s, &f, {kind = .Scroll, x = 600, y = 400, dy = -3000, precise = true, phase = .Began})
+	for _ in 0 ..< 3 {
+		library_frame(t, s, &f)
+	}
+
+	table: platform.Access_Node
+	nodes, _ := ui.access_tree(&s.ui)
+	for n in nodes {
+		if n.role == .Table {
+			table = n
+		}
+	}
+	testing.expect(t, table.id != 0, "the track table")
+	library_frame(t, s, &f, {kind = .Access_Focus, target = table.id})
+	library_frame(t, s, &f)
+	testing.expect(t, s.library.selected > 0, "a row past the top is selected")
+	shown := false
+	nodes, _ = ui.access_tree(&s.ui)
+	for n in nodes {
+		shown ||= n.role == .Row && .Selected in n.flags
+	}
+	testing.expect(t, shown, "the selected row is in view")
 }

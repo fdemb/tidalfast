@@ -161,6 +161,27 @@ test_ui_layout_scroll_and_floating :: proc(t: ^testing.T) {
 	testing.expect_value(t, float.rect.w, f32(20))
 }
 
+// Shrink_From_End keeps the first children whole and cuts the one that
+// crosses the edge, inside the padding, leaving none for the rest.
+@(test)
+test_ui_layout_shrink_from_end :: proc(t: ^testing.T) {
+	root := node(ui.px(100), ui.px(20))
+	root.flags = {.Shrink_From_End}
+	root.pad.x = 5
+	kids := [3]ui.Box{node(ui.px(50, 0), ui.px(20)), node(ui.px(30, 0), ui.px(20)), node(ui.px(30, 0), ui.px(20))}
+	for &k in kids {
+		ui.add_child(&root, &k)
+	}
+	ui.layout(&root)
+	expect_rect(t, &kids[0], {5, 0, 50, 20})
+	expect_rect(t, &kids[1], {55, 0, 30, 20})
+	expect_rect(t, &kids[2], {85, 0, 10, 20})
+	cut := node(ui.px(40, 0), ui.px(20))
+	ui.add_child(&root, &cut)
+	ui.layout(&root)
+	testing.expect_value(t, cut.rect.w, f32(0))
+}
+
 @(test)
 test_ui_virtual_range :: proc(t: ^testing.T) {
 	Case :: struct {
@@ -911,7 +932,8 @@ Menu_Frame :: struct {
 	animating:  bool,
 }
 
-// A focusable area that opens a menu with items A and B on a right click.
+// A focusable area that opens a menu with items A and B on a right click
+// or a key.
 @(private = "file")
 menu_frame :: proc(u: ^ui.State, now: ^f64, events: ..platform.Event) -> (f: Menu_Frame) {
 	now^ += 1.0 / 120
@@ -919,7 +941,7 @@ menu_frame :: proc(u: ^ui.State, now: ^f64, events: ..platform.Event) -> (f: Men
 	ui.box_make("play", {.Clickable, .Focusable}, ui.px(100), ui.px(40))
 	area := ui.box_make("area", {.Clickable, .Focusable}, ui.px(300), ui.px(100))
 	f.area = ui.signal(area)
-	if f.area.right_clicked {
+	if f.area.right_clicked || f.area.keyboard {
 		ui.open_menu("menu", ui.mouse())
 	}
 	if ui.menu("menu") {
@@ -941,9 +963,13 @@ test_ui_menu_keyboard :: proc(t: ^testing.T) {
 	f := menu_frame(&u, &now, {kind = .Key_Down, key = .Tab}, {kind = .Key_Down, key = .Tab})
 	testing.expect(t, ui.has_focus(f.area.box))
 
-	// Opening the menu moves the focus to its first item.
+	// Opening the menu with the mouse highlights nothing. Down highlights
+	// the first item.
 	f = menu_frame(&u, &now, {kind = .Mouse_Down, x = 50, y = 60, button = .Right}, {kind = .Mouse_Up, x = 50, y = 60, button = .Right})
-	testing.expect(t, f.a.box != nil && ui.has_focus(f.a.box), "the first item has the focus")
+	testing.expect(t, f.a.box != nil && !ui.has_focus(f.a.box) && !ui.has_focus(f.b.box), "no item has the focus")
+	testing.expect(t, !ui.has_focus(f.area.box), "the area behind the menu loses the focus")
+	f = menu_frame(&u, &now, {kind = .Key_Down, key = .Down})
+	testing.expect(t, ui.has_focus(f.a.box), "Down highlights the first item")
 
 	// Tab and the arrows stay inside the menu.
 	f = menu_frame(&u, &now, {kind = .Key_Down, key = .Tab})
@@ -976,6 +1002,253 @@ test_ui_menu_keyboard :: proc(t: ^testing.T) {
 	}
 	testing.expect(t, !f.animating, "the menu fades out and frames stop")
 	testing.expect(t, f.a.box == nil)
+
+	// Opening it from the keyboard highlights the first item.
+	f = menu_frame(&u, &now, {kind = .Key_Down, key = .Return})
+	f = menu_frame(&u, &now)
+	testing.expect(t, f.a.box != nil && ui.has_focus(f.a.box), "the first item has the focus")
+	testing.expect_value(t, f.a.box.focus_t, f32(0))
+}
+
+// The mouse and the keys move one highlight in a menu, and an item has no
+// focus ring.
+@(test)
+test_ui_menu_hover_is_focus :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	now := 0.0
+	menu_frame(&u, &now)
+	menu_frame(&u, &now)
+	f := menu_frame(&u, &now, {kind = .Mouse_Down, x = 50, y = 60, button = .Right}, {kind = .Mouse_Up, x = 50, y = 60, button = .Right})
+	for _ in 0 ..< 100 {
+		if f = menu_frame(&u, &now); !f.animating {
+			break
+		}
+	}
+	ra, rb := f.a.box.rect, f.b.box.rect
+	testing.expect(t, f.a.box.hot_t == 0 && f.b.box.hot_t == 0, "nothing is highlighted")
+
+	// Moving over B highlights it.
+	menu_frame(&u, &now, {kind = .Mouse_Move, x = rb.x + 10, y = rb.y + rb.h / 2})
+	f = menu_frame(&u, &now)
+	testing.expect(t, ui.has_focus(f.b.box), "the hovered item has the focus")
+	testing.expect(t, f.b.box.hot_t > 0)
+
+	// Up moves the highlight off B though the mouse is still over it.
+	menu_frame(&u, &now, {kind = .Key_Down, key = .Up})
+	f = menu_frame(&u, &now)
+	testing.expect(t, ui.has_focus(f.a.box), "Up moves the highlight to A")
+	for _ in 0 ..< 200 {
+		if f = menu_frame(&u, &now); !f.animating {
+			break
+		}
+	}
+	testing.expect_value(t, f.a.box.hot_t, f32(1))
+	testing.expect_value(t, f.b.box.hot_t, f32(0))
+	testing.expect_value(t, f.a.box.focus_t, f32(0))
+
+	// Moving back onto A keeps it. Moving out of the menu takes the
+	// highlight off.
+	menu_frame(&u, &now, {kind = .Mouse_Move, x = ra.x + 10, y = ra.y + ra.h / 2})
+	f = menu_frame(&u, &now)
+	testing.expect(t, ui.has_focus(f.a.box))
+	menu_frame(&u, &now, {kind = .Mouse_Move, x = 290, y = 190})
+	f = menu_frame(&u, &now)
+	testing.expect(t, !ui.has_focus(f.a.box) && !ui.has_focus(f.b.box), "no item has the focus")
+	testing.expect(t, ui.menu_is_open("menu"), "the menu stays open")
+}
+
+// Two 40 pt buttons with tooltips at the bottom right of a 300 by 200
+// window, shift points left of there, and an empty strip at the left.
+@(private = "file")
+tooltip_frame :: proc(u: ^ui.State, now: ^f64, shift: f32, events: ..platform.Event) -> (tip: ^ui.Box, animating: bool) {
+	ui.begin_frame(u, events, nil, nil, 300, 200, now^)
+	ui.spacer(ui.px(160))
+	{
+		ui.row("row", {}, ui.fill(), ui.px(40))
+		ui.spacer(ui.px(220 - shift))
+		a := ui.box_make("a", {.Clickable}, ui.px(40), ui.px(40))
+		ui.tooltip(ui.signal(a), "First")
+		b := ui.box_make("b", {.Clickable}, ui.px(40), ui.px(40))
+		ui.tooltip(ui.signal(b), "Second")
+	}
+	// find also returns last frame's box until it's pruned.
+	if tip = ui.find("###tooltip"); tip != nil && tip.last_frame != u.frame {
+		tip = nil
+	}
+	animating = ui.end_frame()
+	return
+}
+
+// A tooltip near the window's edges is inside the window from its first
+// frame, though it has no size before it's laid out.
+@(test)
+test_ui_tooltip_fits_from_first_frame :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	now := 0.0
+	tooltip_frame(&u, &now, 0)
+	tooltip_frame(&u, &now, 0)
+	tip, _ := tooltip_frame(&u, &now, 0, {kind = .Mouse_Move, x = 290, y = 180})
+	testing.expect(t, tip == nil, "no tooltip before the delay")
+	now += 0.6
+	tip, _ = tooltip_frame(&u, &now, 0)
+	testing.expect(t, tip != nil, "the tooltip shows after the delay")
+	// Without a text state the label has no width, only the padding's height.
+	r := tip.rect
+	testing.expect(t, r.h > 0)
+	testing.expect(t, r.y >= 8 && r.y + r.h <= 180 - 8, "above the mouse")
+}
+
+// Right after a tooltip, the next one shows at once and at full opacity.
+// Once the warm time has passed it waits for the delay again.
+@(test)
+test_ui_tooltip_warm :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	now := 0.0
+	tooltip_frame(&u, &now, 0)
+	tooltip_frame(&u, &now, 0)
+	tooltip_frame(&u, &now, 0, {kind = .Mouse_Move, x = 240, y = 180})
+	now += 0.6
+	tip, _ := tooltip_frame(&u, &now, 0)
+	testing.expect(t, tip != nil && tip.label == "First")
+
+	// Across the gap and onto the second button.
+	now += 0.1
+	tip, _ = tooltip_frame(&u, &now, 0, {kind = .Mouse_Move, x = 100, y = 180})
+	testing.expect(t, tip == nil, "no tooltip over the gap")
+	now += 0.2
+	tip, _ = tooltip_frame(&u, &now, 0, {kind = .Mouse_Move, x = 280, y = 180})
+	testing.expect(t, tip != nil && tip.label == "Second", "the second tooltip shows at once")
+	testing.expect_value(t, tip.opacity, f32(1))
+
+	// Away for longer than the warm time.
+	now += 0.1
+	tooltip_frame(&u, &now, 0, {kind = .Mouse_Move, x = 100, y = 180})
+	now += 1.5
+	tip, _ = tooltip_frame(&u, &now, 0, {kind = .Mouse_Move, x = 240, y = 180})
+	testing.expect(t, tip == nil, "the delay is back")
+}
+
+// Buttons moving under a still mouse, as in a list that scrolls, don't
+// show their tooltips at once, however recent the last one was.
+@(test)
+test_ui_tooltip_waits_while_scrolling :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	now := 0.0
+	tooltip_frame(&u, &now, 0)
+	tooltip_frame(&u, &now, 0)
+	tooltip_frame(&u, &now, 0, {kind = .Mouse_Move, x = 240, y = 180})
+	now += 0.6
+	tip, _ := tooltip_frame(&u, &now, 0)
+	testing.expect(t, tip != nil && tip.label == "First")
+
+	// The second button moves under the mouse. Hot follows a frame later.
+	now += 0.05
+	tooltip_frame(&u, &now, 40)
+	now += 0.05
+	tip, _ = tooltip_frame(&u, &now, 40)
+	testing.expect(t, tip == nil, "no tooltip for the button that moved under the mouse")
+	now += 0.6
+	tip, _ = tooltip_frame(&u, &now, 40)
+	testing.expect(t, tip != nil && tip.label == "Second", "it shows after the delay")
+}
+
+// A tooltip stays where it showed while the mouse moves over its button,
+// and moves to the mouse for the next button.
+@(test)
+test_ui_tooltip_stays_put :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	now := 0.0
+	tooltip_frame(&u, &now, 0)
+	tooltip_frame(&u, &now, 0)
+	tooltip_frame(&u, &now, 0, {kind = .Mouse_Move, x = 225, y = 180})
+	now += 0.6
+	tip, _ := tooltip_frame(&u, &now, 0)
+	testing.expect(t, tip != nil)
+	if tip == nil {
+		return
+	}
+	x := tip.rect.x
+	now += 0.05
+	tip, _ = tooltip_frame(&u, &now, 0, {kind = .Mouse_Move, x = 235, y = 185})
+	testing.expect_value(t, tip.rect.x, x)
+	now += 0.05
+	tip, _ = tooltip_frame(&u, &now, 0, {kind = .Mouse_Move, x = 270, y = 180})
+	testing.expect(t, tip != nil && tip.label == "Second")
+	testing.expect_value(t, tip.rect.x, x + 45)
+}
+
+// A scroll view's first frame builds the rows that fill it, though it
+// hasn't been laid out yet.
+@(test)
+test_ui_new_view_builds_rows :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	now := 0.0
+	_, rows, _ := rows_frame(&u, &now, 200, 100)
+	testing.expect(t, rows.last - rows.first >= 20, "the first frame fills the view")
+}
+
+// A box with No_Focus_Ring draws none when the keyboard focuses it.
+@(test)
+test_ui_no_focus_ring :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	now := 0.0
+	frame :: proc(u: ^ui.State, now: ^f64, events: ..platform.Event) -> (plain, quiet: ^ui.Box) {
+		now^ += 1.0 / 120
+		ui.begin_frame(u, events, nil, nil, 300, 200, now^)
+		plain = ui.box_make("plain", {.Focusable}, ui.px(100), ui.px(40))
+		quiet = ui.box_make("quiet", {.Focusable, .No_Focus_Ring}, ui.px(100), ui.px(40))
+		ui.end_frame()
+		return
+	}
+	frame(&u, &now)
+	frame(&u, &now, {kind = .Key_Down, key = .Tab})
+	plain, quiet := frame(&u, &now)
+	testing.expect(t, ui.has_focus(plain) && plain.focus_t > 0, "the plain box has a ring")
+	frame(&u, &now, {kind = .Key_Down, key = .Tab})
+	for _ in 0 ..< 10 {
+		plain, quiet = frame(&u, &now)
+	}
+	testing.expect(t, ui.has_focus(quiet))
+	testing.expect_value(t, quiet.focus_t, f32(0))
+}
+
+// A text field's placeholder is as wide as the field, less the padding,
+// from the field's first frame.
+@(test)
+test_ui_placeholder_first_frame :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	f := new(ui.Text_Field)
+	defer free(f)
+	ui.begin_frame(&u, nil, nil, nil, 300, 200, 0)
+	sig := ui.text_field("field", f, "Search", ui.px(200), ui.px(30))
+	ui.end_frame()
+	label: ^ui.Box
+	for c := sig.box.first; c != nil; c = c.next {
+		if c.label == "Search" {
+			label = c
+		}
+	}
+	testing.expect(t, label != nil)
+	if label != nil {
+		testing.expect_value(t, label.rect.w, f32(200))
+		testing.expect_value(t, label.text_pad, f32(ui.FIELD_PAD))
+	}
 }
 
 // A target at the top and a virtual list of 100 draggable rows below it.

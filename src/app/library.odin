@@ -527,11 +527,12 @@ draw_track_list :: proc(s: ^State, main_w: f32) {
 		// A keyed parent of its own, so the arrow keys find no other box
 		// to move the focus to and reach table_keys.
 		ui.column("rows_group", {}, ui.fill(), ui.children_sum())
-		table := ui.column("rows", {.Focusable}, ui.fill(), ui.children_sum())
+		table := ui.column("rows", {.Focusable, .No_Focus_Ring}, ui.fill(), ui.children_sum())
 		table.pad = {LIST_PAD, LIST_PAD_Y}
 		ui.accessible(table, .Table, view_title(s))
 		pinned := header_pinned_h(h)
-		if table_keys(s, table, n, list.rect.h - pinned) {
+		first_shown := int(math.ceil((list.view_off.y + pinned - rows_top) / TRACK_ROW_H))
+		if table_keys(s, table, n, list.rect.h - pinned, first_shown) {
 			// Clear of the pinned bar and headings, with the padding above
 			// and below, so the first and last rows show it.
 			y := rows_top + f32(lib.selected) * TRACK_ROW_H
@@ -584,10 +585,16 @@ table_header :: proc(cols: Track_Columns, pinned := false) {
 // Enter or Space. A row selected past count, as in an artist's full top
 // tracks, isn't one of them. It returns true when the selection moved, for
 // the caller to scroll it into view. Page Up and Down go by view_h, the
-// height the rows show in.
-table_keys :: proc(s: ^State, list: ^ui.Box, count: int, view_h: f32) -> (moved: bool) {
+// height the rows show in. The table has no focus ring: its selected row
+// shows the focus, so the keyboard coming into it selects first_shown, the
+// first row in view, when none is.
+table_keys :: proc(s: ^State, list: ^ui.Box, count: int, view_h: f32, first_shown: int) -> (moved: bool) {
 	lib := &s.library
 	sel := lib.selected if lib.selected < count else -1
+	if ui.has_focus(list) && ui.focus_visible() && sel < 0 && count > 0 {
+		sel = clamp(first_shown, 0, count - 1)
+		lib.selected = sel
+	}
 	if ui.signal(list).keyboard && sel >= 0 {
 		play(s, sel)
 	}
@@ -771,44 +778,31 @@ text_link :: proc(s: ^State, label, id: string, has_id: bool, height: ui.Size) -
 // artist_links shows the artists in joined, each a link to its top tracks,
 // with the commas between them as plain text. Without refs the whole
 // string is one link for the fake data and text otherwise. When they don't
-// fit, the one that crosses the edge ends in an ellipsis and the rest are
-// left out. That goes by the box's width from the last layout, and the box
-// clips, so in the frame after a resize nothing is drawn past it. sig is
+// fit, the one that crosses the edge ends in an ellipsis and the rest get
+// no room (Shrink_From_End), as the layout of this frame finds them. sig is
 // the signal of the link that was clicked, pressed or dragged, and k says
 // which artist it is. pad is the room left and right of the names.
 artist_links :: proc(s: ^State, joined: string, refs: []Artist_Ref, pad: f32, height := ui.Size{}) -> (k: int, sig: ui.Signal) {
-	box := ui.row("###artists", {.Clip}, ui.fill(), height if height.kind != .Null else ui.fill())
-	// The widths below leave out padding.
+	box := ui.row("###artists", {.Clip, .Shrink_From_End}, ui.fill(), height if height.kind != .Null else ui.fill())
+	box.pad.x = pad
 	ui.text_pad(0)
-	ui.spacer(ui.px(pad))
-	room := box.rect.w - 2 * pad if box.rect.w > 0 else max(f32)
-	x: f32
 	for j in 0 ..< max(len(refs), 1) {
 		name, linked := joined, s.data.fake
 		if len(refs) > 0 {
 			name, linked = artist_name(joined, refs[j]), refs[j].id != 0
 		}
 		if j > 0 {
-			sep := ui.label(joined[refs[j - 1].end:refs[j].start], ui.text_size(0, 0), ui.fill())
-			x += ui.text_width(sep.font, sep.font_size, sep.label)
+			ui.label(joined[refs[j - 1].end:refs[j].start], ui.text_size(0, 0), ui.fill())
 		}
-		b: ^ui.Box
 		if linked {
 			link := ui.link(fmt.tprintf("%s###artist%d", name, j), TEXT, ui.fill())
-			b = link.box
 			if link.clicked || link.pressed || link.right_clicked || link.dragging {
 				k, sig = j, link
 			}
 		} else {
-			b = ui.label(name, ui.text_size(0, 0), ui.fill())
+			b := ui.label(name, ui.text_size(0, 0), ui.fill())
 			ui.accessible(b, .Static_Text, name)
 		}
-		w := ui.text_width(b.font, b.font_size, name)
-		if x + w > room {
-			b.pref_size[.X] = ui.px(max(room - x, 0))
-			break
-		}
-		x += w
 	}
 	return
 }

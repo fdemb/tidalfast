@@ -33,6 +33,7 @@ MAX_EDIT_EVENTS :: 64
 MAX_SHORTCUTS :: 8
 STACK_DEPTH :: 64
 TOOLTIP_DELAY :: 0.5 // seconds of hovering before a tooltip shows
+TOOLTIP_WARM :: 1 // seconds after a tooltip that the next one shows without the delay
 DRAG_THRESHOLD :: 4 // points the mouse moves before a press becomes a drag
 MAX_SETTLE_FRAMES :: 3 // extra frames in a row that a layout mismatch may ask for
 
@@ -87,6 +88,9 @@ Box_Flag :: enum u32 {
 	Window_Drag, // empty titlebar space: a press there moves the window, see drag_regions
 	Draw_Backdrop, // background over a blur of what's under the box, see render.push_backdrop
 	Click_Shield, // clickable only so presses don't reach what's under it; under the titlebar it moves the window, see cut_drag_regions
+	Focus_Is_Hot, // hot while it has the focus, for menu items: hover and the keyboard move one highlight
+	No_Focus_Ring, // shows the focus itself, as a table does with its selected row
+	Shrink_From_End, // children that don't fit give up room from the end, not in proportion: the one crossing the edge is cut short and those after it get none
 }
 Box_Flags :: bit_set[Box_Flag; u32]
 
@@ -127,6 +131,8 @@ Build :: struct {
 	gutter:                    f32, // points at the right that children's widths leave out
 	pad:                       [2]f32, // points before and after the children on each axis, inside the box
 	inset_end:                 f32, // a scroll view's bottom under something drawn over it, see scroll_view
+	keep_in_window:            bool, // a floating box moved inside the window once its size is known, see fit_floating
+	flip_y:                    f32, // with keep_in_window, where its bottom goes when it doesn't fit below
 	id:                        string, // as given; must live until end_frame
 	label:                     string, // the part of id before "##"
 	using style:               Style,
@@ -246,6 +252,7 @@ State :: struct {
 	hot:            Key,
 	hot_parent:     Key, // the hot box's clickable parent, which counts as hovered
 	hot_since:      f64,
+	hot_by_mouse:   bool, // the mouse moving made hot what it is, not boxes moving under it
 	active:         [platform.Mouse_Button]Key,
 	pressed:        [platform.Mouse_Button]Key, // this frame
 	released:       [platform.Mouse_Button]Key,
@@ -293,7 +300,9 @@ State :: struct {
 	menu_focus_new: bool, // the first menu item built takes the focus
 	menu_saved:     Key, // the focus before the menu opened, restored when it closes
 	menu_saved_vis: bool,
-	tooltip_owner:  Key,
+	tooltip_seen:   f64, // when a tooltip was last built
+	tooltip_owner:  Key, // the box the tooltip is showing for
+	tooltip_pos:    [2]f32, // where it showed for that box, which it stays at
 
 	drag_active:    bool,
 	drag_payload:   u64,
@@ -323,6 +332,8 @@ init :: proc(u: ^State) {
 	u.boxes = make([]Box, MAX_BOXES)
 	u.table = make([]^Box, BOX_TABLE)
 	u.hits = make([]Hit, MAX_BOXES)
+	// No tooltip yet, though the time may start at 0.
+	u.tooltip_seen = -TOOLTIP_WARM
 }
 
 // Sizes
@@ -537,6 +548,7 @@ process_events :: proc(u: ^State, events: []platform.Event, text_bytes: []u8) {
 	u.drop_next = false
 	u.drag_unclaimed = false
 
+	moved := false
 	for event in events {
 		e := event
 		// A control-click is a right click on macOS. Its mouse up still says
@@ -574,6 +586,7 @@ process_events :: proc(u: ^State, events: []platform.Event, text_bytes: []u8) {
 				u.drop_pos = u.input.mouse
 			}
 		case .Mouse_Move:
+			moved = true
 			if u.active[.Left] != 0 && !u.drag_moved {
 				d := u.input.mouse - u.drag_start
 				u.drag_moved = d.x * d.x + d.y * d.y >= DRAG_THRESHOLD * DRAG_THRESHOLD
@@ -616,6 +629,7 @@ process_events :: proc(u: ^State, events: []platform.Event, text_bytes: []u8) {
 	if hot != u.hot {
 		u.hot = hot
 		u.hot_since = u.time
+		u.hot_by_mouse = moved
 	}
 	u.hot_parent = 0
 	for h in u.hits[:u.hit_count] {
@@ -623,6 +637,27 @@ process_events :: proc(u: ^State, events: []platform.Event, text_bytes: []u8) {
 			u.hot_parent = h.click_parent
 			break
 		}
+	}
+	if moved && u.menu != 0 && u.menu_open {
+		menu_hover(u, hot)
+	}
+}
+
+// menu_hover moves an open menu's highlight, which is the focus, to the
+// item under the mouse, or takes it off when there's none, as a macOS menu
+// does. Only a moving mouse does this, so the arrow keys move the highlight
+// away from a still one.
+@(private)
+menu_hover :: proc(u: ^State, hot: Key) {
+	item := Key(0)
+	for h in u.hits[:u.hit_count] {
+		if hot != 0 && h.key == hot && h.in_menu {
+			item = h.key if .Focusable in h.flags else h.focus_parent
+			break
+		}
+	}
+	if item != u.focus {
+		move_focus(u, item, false)
 	}
 }
 
@@ -960,6 +995,7 @@ end_frame :: proc() -> bool {
 	measure(u, u.floating_root)
 	layout(u.root)
 	layout(u.floating_root)
+	fit_floating(u)
 	u.hit_count = 0
 	u.drag_count = 0
 	mismatch := false
@@ -1017,6 +1053,37 @@ measure :: proc(u: ^State, b: ^Box) {
 	}
 	for c := b.first; c != nil; c = c.next {
 		measure(u, c)
+	}
+}
+
+// fit_floating moves the floating boxes that keep_in_window into the
+// window, now that their sizes are known: left of the right edge, and up
+// so their bottom is at flip_y when they don't fit below. Placing them
+// while they're built would go by last frame's size, which a new box
+// doesn't have.
+@(private)
+fit_floating :: proc(u: ^State) {
+	MARGIN :: 8
+	for b := u.floating_root.first; b != nil; b = b.next {
+		if !b.keep_in_window {
+			continue
+		}
+		pos := [2]f32{b.rect.x, b.rect.y}
+		pos.x = max(min(pos.x, u.width - b.rect.w - MARGIN), MARGIN)
+		if pos.y + b.rect.h > u.height - MARGIN {
+			pos.y = b.flip_y - b.rect.h
+		}
+		pos.y = max(pos.y, MARGIN)
+		shift_box(b, pos - {b.rect.x, b.rect.y})
+	}
+}
+
+@(private)
+shift_box :: proc(b: ^Box, d: [2]f32) {
+	b.rect.x += d.x
+	b.rect.y += d.y
+	for c := b.first; c != nil; c = c.next {
+		shift_box(c, d)
 	}
 }
 
@@ -1156,9 +1223,14 @@ box_make :: proc(id: string, flags: Box_Flags = {}, width: Size = {}, height: Si
 
 	if b.key != 0 {
 		rate := 1 - math.exp(-u.dt * 18)
-		b.hot_t = approach(u, b.hot_t, 1 if u.hot == b.key || u.hot_parent == b.key else 0, rate, 0.002)
+		hot := u.hot == b.key || u.hot_parent == b.key
+		if .Focus_Is_Hot in flags {
+			hot = u.focus == b.key
+		}
+		ring := u.focus == b.key && u.focus_visible && .No_Focus_Ring not_in flags
+		b.hot_t = approach(u, b.hot_t, 1 if hot else 0, rate, 0.002)
 		b.active_t = approach(u, b.active_t, 1 if u.active[.Left] == b.key else 0, rate, 0.002)
-		b.focus_t = approach(u, b.focus_t, 1 if u.focus == b.key && u.focus_visible else 0, rate, 0.002)
+		b.focus_t = approach(u, b.focus_t, 1 if ring else 0, rate, 0.002)
 	}
 	if .View_Scroll in b.flags && b.key != 0 {
 		scroll_box(u, b)
