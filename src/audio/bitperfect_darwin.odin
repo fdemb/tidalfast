@@ -24,6 +24,9 @@ import "core:time"
 // BIT_PERFECT says whether this OS has bit-perfect output.
 BIT_PERFECT :: true
 
+// MIXER_NAME is what converts and mixes the apps' sound on this OS.
+MIXER_NAME :: "CoreAudio"
+
 // Hal is one open HAL output: the device, its IOProc and what to put back.
 Hal :: struct {
 	device:         Device_ID,
@@ -85,15 +88,39 @@ unwatch_default_output :: proc(w: ^Device_Watch) {
 // rate or physical format changes.
 watch_device :: proc(h: ^Hal, w: ^Device_Watch) -> bool {
 	ok := listen(h.device, PROP_ALIVE, watch_listener, w)
-	ok &= listen(h.device, PROP_NOMINAL_RATE, watch_listener, w)
-	ok &= listen(h.stream, PROP_PHYSICAL_FORMAT, watch_listener, w)
+	ok &= watch_format(h.device, w)
 	return ok
 }
 
 unwatch_device :: proc(h: ^Hal, w: ^Device_Watch) {
 	unlisten(h.device, PROP_ALIVE, watch_listener, w)
-	unlisten(h.device, PROP_NOMINAL_RATE, watch_listener, w)
-	unlisten(h.stream, PROP_PHYSICAL_FORMAT, watch_listener, w)
+	unwatch_format(h.device, w)
+}
+
+// watch_format tells w whenever dev's nominal rate or physical format
+// changes.
+watch_format :: proc(dev: Device_ID, w: ^Device_Watch) -> bool {
+	if dev == 0 {
+		return false
+	}
+	ok := listen(dev, PROP_NOMINAL_RATE, watch_listener, w)
+	ok &= listen(device_output_stream(dev), PROP_PHYSICAL_FORMAT, watch_listener, w)
+	return ok
+}
+
+unwatch_format :: proc(dev: Device_ID, w: ^Device_Watch) {
+	if dev == 0 {
+		return
+	}
+	unlisten(dev, PROP_NOMINAL_RATE, watch_listener, w)
+	unlisten(device_output_stream(dev), PROP_PHYSICAL_FORMAT, watch_listener, w)
+}
+
+// device_physical_format is the bits per sample of dev's output stream's
+// physical format, and whether it's floating point. bits is 0 if unknown.
+device_physical_format :: proc(dev: Device_ID) -> (bits: int, float: bool, ok: bool) {
+	f := stream_physical_format(device_output_stream(dev)) or_return
+	return int(f.bits), f.format_flags & FLAG_FLOAT != 0, true
 }
 
 // hal_taken says how another app changed h's device since hal_configure

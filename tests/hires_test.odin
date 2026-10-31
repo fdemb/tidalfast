@@ -1406,17 +1406,78 @@ physical_format_holds_every_bit :: proc(t: ^testing.T) {
 	testing.expect(t, !ok)
 }
 
-// The Output menu says why output isn't bit-perfect when it was asked for.
+// The output button names the device with a dot for the path, the menu
+// shows each step from the track to the device, and the track's format goes
+// under its title.
 @(test)
-output_menu_says_why :: proc(t: ^testing.T) {
+output_button_and_signal_path :: proc(t: ^testing.T) {
 	s := new(app.State)
 	defer free(s)
 	pb := &s.playback
 	s.settings.bit_perfect = true
-	pb.status.rate = 96000
-	pb.status.device = {rate = 96000, bits = 32, float = true}
-	pb.status.device.reason_len = copy(pb.status.device.reason[:], "no 24-bit format at 96 kHz")
-	testing.expect_value(t, app.output_description(s), "Not bit-perfect: no 24-bit format at 96 kHz")
-	pb.status.device = {bit_perfect = true, rate = 96000, bits = 32, float = true}
+
+	// Nothing has played.
+	label, mark := app.output_label(s)
+	testing.expect_value(t, label, "Output")
+	testing.expect_value(t, mark, app.Path_Mark.None)
+	testing.expect_value(t, app.output_description(s), "Bit-perfect output is on")
+	testing.expect_value(t, app.track_format(s), "")
+	path := app.signal_path(s)
+	testing.expect_value(t, path[0].detail, "Nothing playing")
+	testing.expect_value(t, path[3].mark, app.Path_Mark.None)
+
+	// Bit-perfect: every step passes the samples on.
+	pb.status = {serial = 1, rate = 96000, bits = 24}
+	dev := audio.Device_Info{bit_perfect = true, rate = 96000, bits = 24}
+	dev.name_len = copy(dev.name[:], "Protocol Micro")
+	app.playback_observe(s, {serial = 1, rate = 96000, bits = 24, device = dev})
+	label, mark = app.output_label(s)
+	testing.expect_value(t, label, "Protocol Micro")
+	testing.expect_value(t, mark, app.Path_Mark.Exact)
 	testing.expect_value(t, app.output_description(s), "Bit-perfect, 96 kHz")
+	testing.expect_value(t, app.track_format(s), "FLAC, 24-bit, 96 kHz")
+	path = app.signal_path(s)
+	for step in path {
+		testing.expectf(t, step.mark == .Exact, "%s: %v", step.name, step.mark)
+	}
+	testing.expect_value(t, path[0].detail, "FLAC, 24-bit, 96 kHz")
+	testing.expect_value(t, path[2].detail, "Direct, no conversion")
+	testing.expect_value(t, path[3].name, "Protocol Micro")
+	testing.expect_value(t, path[3].detail, "24-bit integer, 96 kHz")
+
+	// While the device reopens, the button keeps the last output.
+	app.playback_observe(s, {serial = 1, rate = 96000, bits = 24})
+	label, mark = app.output_label(s)
+	testing.expect_value(t, label, "Protocol Micro")
+	testing.expect_value(t, mark, app.Path_Mark.Exact)
+
+	// Another app took the device: the mixer resamples, and the menu says
+	// why.
+	dev = {rate = 48000, bits = 24}
+	dev.name_len = copy(dev.name[:], "Protocol Micro")
+	dev.reason_len = copy(dev.reason[:], "another app set the device to 48 kHz")
+	app.playback_observe(s, {serial = 1, rate = 96000, bits = 24, device = dev})
+	label, mark = app.output_label(s)
+	testing.expect_value(t, label, "Protocol Micro")
+	testing.expect_value(t, mark, app.Path_Mark.Converted)
+	testing.expect_value(t, app.output_description(s), "Not bit-perfect: another app set the device to 48 kHz")
+	path = app.signal_path(s)
+	testing.expect_value(t, path[0].mark, app.Path_Mark.Exact)
+	testing.expect_value(t, path[1].mark, app.Path_Mark.Exact)
+	testing.expect_value(t, path[2].detail, "Resampled to 48 kHz and mixed")
+	testing.expect_value(t, path[2].mark, app.Path_Mark.Converted)
+	testing.expect_value(t, path[3].mark, app.Path_Mark.Converted)
+
+	// Bit-perfect output off: the conversions are the user's choice, so no
+	// step is marked as a problem and the button has no dot.
+	s.settings.bit_perfect = false
+	label, mark = app.output_label(s)
+	testing.expect_value(t, label, "Protocol Micro")
+	testing.expect_value(t, mark, app.Path_Mark.None)
+	testing.expect_value(t, app.output_description(s), "Bit-perfect output is off")
+	path = app.signal_path(s)
+	testing.expect_value(t, path[1].detail, "Applies volume and ReplayGain")
+	for step in path[1:] {
+		testing.expectf(t, step.mark == .Expected, "%s: %v", step.name, step.mark)
+	}
 }

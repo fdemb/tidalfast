@@ -34,6 +34,9 @@ import "core:time"
 // BIT_PERFECT says whether this OS has bit-perfect output.
 BIT_PERFECT :: true
 
+// MIXER_NAME is what converts and mixes the apps' sound on this OS.
+MIXER_NAME :: "PipeWire"
+
 // Hal is one open PipeWire stream.
 Hal :: struct {
 	device:      Device_ID,
@@ -78,7 +81,20 @@ device_nominal_rate :: proc(dev: Device_ID) -> f64 {
 }
 
 device_name :: proc(dev: Device_ID) -> string {
-	return "PipeWire's default output"
+	return "Default output"
+}
+
+// watch_format does nothing: the graph's rate is checked in the stream's
+// process callback, and miniaudio's device has no rate to read.
+watch_format :: proc(dev: Device_ID, w: ^Device_Watch) -> bool {
+	return false
+}
+
+unwatch_format :: proc(dev: Device_ID, w: ^Device_Watch) {}
+
+// device_physical_format is unknown: the sink's format is PipeWire's.
+device_physical_format :: proc(dev: Device_ID) -> (bits: int, float: bool, ok: bool) {
+	return
 }
 
 // hal_alive is false once the stream has failed, or the graph has left

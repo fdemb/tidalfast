@@ -1002,6 +1002,13 @@ draw_player_bar :: proc(s: ^State, w, h: f32) {
 			} else if k, sig := artist_links(s, item.artist, item.artists, 0, ui.px(18)); sig.clicked {
 				open_artist_of(s, item.artist, item.artists, k, item.row)
 			}
+			if format := track_format(s); format != "" {
+				ui.text_style(.Regular, 11, DIM)
+				ui.text_pad(0)
+				if sig := ui.link(fmt.tprintf("%s###track_format", format), SECONDARY, ui.px(16)); sig.clicked {
+					open_output_menu(sig.box.rect.x, sig.box.rect.y - 8)
+				}
+			}
 		} else {
 			ui.text_style(.Regular, 12, PLAYBACK_ERROR)
 			first, rest := msg, ""
@@ -1091,16 +1098,17 @@ draw_player_bar :: proc(s: ^State, w, h: f32) {
 		// Laid out by hand so it fits in side at any window width: the volume
 		// slider gives up room before anything else does.
 		ui.row("extras", {}, ui.px(side), ui.fill())
-		slider_w := clamp(side - OUTPUT_W - OUTPUT_GAP, 0, VOLUME_W)
-		ui.spacer(ui.px(side - OUTPUT_W - OUTPUT_GAP - slider_w, 0))
-		draw_output_button(s)
+		output_w := min(output_width(s), side - OUTPUT_GAP)
+		slider_w := clamp(side - output_w - OUTPUT_GAP, 0, VOLUME_W)
+		ui.spacer(ui.px(side - output_w - OUTPUT_GAP - slider_w, 0))
+		draw_output_button(s, output_w)
+		ui.spacer(ui.px(OUTPUT_GAP))
 		draw_volume(s, slider_w)
 	}
 	ui.spacer(ui.px(16))
 }
 
 TIME_PAD :: 8 // between the times and the progress bar
-OUTPUT_W :: 78 // the Output button
 OUTPUT_GAP :: 12
 VOLUME_W :: 110
 

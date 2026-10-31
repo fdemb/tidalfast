@@ -129,15 +129,21 @@ Status :: struct {
 Device_Info :: struct {
 	bit_perfect: bool, // the HAL path is in use: no conversion, gain or volume
 	rate:        int, // the device's rate, 0 when closed
-	bits:        int, // the physical format's bits per sample
+	bits:        int, // the physical format's bits per sample, 0 if unknown
 	float:       bool, // the physical format is floating point
 	// Why bit-perfect output was asked for and isn't in use.
 	reason:      [64]u8,
 	reason_len:  int,
+	name:        [64]u8,
+	name_len:    int,
 }
 
 device_reason :: proc(d: ^Device_Info) -> string {
 	return string(d.reason[:d.reason_len])
+}
+
+device_info_name :: proc(d: ^Device_Info) -> string {
+	return string(d.name[:d.name_len])
 }
 
 // Wake is what the decode thread sleeps on. Posts coalesce: while one is
@@ -281,6 +287,7 @@ Player :: struct {
 	hal_scratch:     []f32, // for devices whose buffers don't match the ring's layout
 	watch:           ^Device_Watch, // heap, never freed
 	watching_hal:    bool, // watch_device is on for hal
+	mixer_watched:   Device_ID, // the device watch_format is on for while miniaudio plays, 0 for none
 	taken:           [64]u8, // why the next device_open skips hal: another app changed the device
 	taken_len:       int,
 	using_hal:       bool, // the open device is hal, not miniaudio's
@@ -921,6 +928,12 @@ check_device :: proc(p: ^Player) {
 		}
 		moved = moved && default_output_device() != p.hal.device
 	} else {
+		// The rate or format of what miniaudio plays to changed, or the
+		// default output moved and miniaudio followed it: only the status
+		// changes.
+		if !lost && taken == "" && p.mixer_watched != 0 && (changed || moved) {
+			mixer_refresh(p)
+		}
 		moved = false
 	}
 	if !lost && taken == "" && !moved {
@@ -949,6 +962,21 @@ check_device :: proc(p: ^Player) {
 	if m.serial != 0 && !m.end {
 		do_seek(p, m.serial, sample, m.seek_id, 0)
 	}
+	p.wake_ui()
+}
+
+// mixer_refresh publishes the default output's rate, format and name while
+// miniaudio plays to it, and moves the watch to it if it's another device.
+@(private = "file")
+mixer_refresh :: proc(p: ^Player) {
+	dev := default_output_device()
+	if dev != p.mixer_watched {
+		unwatch_format(p.mixer_watched, p.watch)
+		p.mixer_watched = dev if watch_format(dev, p.watch) else 0
+	}
+	sync.lock(&p.status_mutex)
+	mixer_info(dev, &p.st.device)
+	sync.unlock(&p.status_mutex)
 	p.wake_ui()
 }
 
@@ -1780,8 +1808,6 @@ device_open :: proc(p: ^Player, rate, channels, bits: int) -> bool {
 	sync.atomic_store(&p.bypass, p.output.bit_perfect)
 	info := Device_Info {
 		rate = rate,
-		bits = 32,
-		float = true,
 	}
 	hal_ok, reason := false, ""
 	if p.taken_len > 0 {
@@ -1797,6 +1823,7 @@ device_open :: proc(p: ^Player, rate, channels, bits: int) -> bool {
 			bits        = int(p.hal.format.bits),
 			float       = p.hal.format.format_flags & FLAG_FLOAT != 0,
 		}
+		info.name_len = copy(info.name[:], device_name(p.hal.device))
 	} else {
 		info.reason_len = copy(info.reason[:], reason)
 		cfg := ma.device_config_init(.playback)
@@ -1819,9 +1846,14 @@ device_open :: proc(p: ^Player, rate, channels, bits: int) -> bool {
 			log.errorf("audio: device_init failed: %v", r)
 			return false
 		}
-		// Linux has no device rate to read here and keeps the track's.
-		if rate := device_nominal_rate(default_output_device()); !p.null_output && rate > 0 {
-			info.rate = int(rate)
+		if p.null_output {
+			info.name_len = copy(info.name[:], "Null device")
+		} else {
+			dev := default_output_device()
+			mixer_info(dev, &info)
+			if watch_format(dev, p.watch) {
+				p.mixer_watched = dev
+			}
 		}
 		log.infof("audio: %s device open at %d Hz, %d channels", "null" if p.null_output else "output", rate, channels)
 	}
@@ -1862,11 +1894,27 @@ hal_open :: proc(p: ^Player, rate, channels, bits: int) -> (ok: bool, reason: st
 // device_close stops and closes the device. With restore, a device that
 // bit-perfect output changed gets its rate and format back;
 // without it they stay for the next track.
+// mixer_info fills in what miniaudio plays to: the system's default output.
+// Linux has no device rate or format to read here and keeps the track's
+// rate.
+@(private = "file")
+mixer_info :: proc(dev: Device_ID, info: ^Device_Info) {
+	if rate := device_nominal_rate(dev); rate > 0 {
+		info.rate = int(rate)
+	}
+	info.bits, info.float, _ = device_physical_format(dev)
+	info.name_len = copy(info.name[:], device_name(dev))
+}
+
 @(private = "file")
 device_close :: proc(p: ^Player, restore := false) {
 	if p.watching_hal {
 		unwatch_device(&p.hal, p.watch)
 		p.watching_hal = false
+	}
+	if p.mixer_watched != 0 {
+		unwatch_format(p.mixer_watched, p.watch)
+		p.mixer_watched = 0
 	}
 	if p.device_open {
 		if p.using_hal {

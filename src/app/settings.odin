@@ -202,6 +202,9 @@ settings_queue :: proc(d: ^Data, st: Settings, now := false) {
 
 // settings_set applies st to the player and saves it.
 settings_set :: proc(s: ^State, st: Settings) {
+	if output_of(st) != output_of(s.settings) {
+		s.playback.output_seen = {}
+	}
 	s.settings = st
 	if s.playback.player != nil {
 		audio.set_output(s.playback.player, output_of(st))
@@ -220,77 +223,6 @@ settings_to_save :: proc(s: ^State) -> Settings {
 
 output_of :: proc(st: Settings) -> audio.Output {
 	return {bit_perfect = audio.BIT_PERFECT && st.bit_perfect}
-}
-
-// draw_output_button is the player bar's button for the output menu. In
-// bit-perfect mode it shows the format reaching the device.
-draw_output_button :: proc(s: ^State) {
-	pb := &s.playback
-	dev := pb.status.device
-	label := "Output"
-	color := SECONDARY
-	if s.settings.bit_perfect {
-		label = "Bit-perfect"
-		if dev.bit_perfect && pb.status.bits > 0 {
-			label = fmt.tprintf("%d/%s", pb.status.bits, khz(dev.rate))
-			color = ACCENT
-		}
-	}
-	output_pill(s, label, color)
-	ui.spacer(ui.px(OUTPUT_GAP))
-
-	if ui.menu("output_menu", 300) {
-		ui.text_style(.Regular, 13, TEXT)
-		when audio.BIT_PERFECT {
-			st := s.settings
-			if ui.menu_item(fmt.tprintf("%s Bit-perfect output###bit_perfect", "✓" if st.bit_perfect else "   ")).clicked {
-				st.bit_perfect = !st.bit_perfect
-				settings_set(s, st)
-				ui.close_menu()
-			}
-			ui.menu_separator()
-		}
-		ui.text_style(.Regular, 11, DIM)
-		ui.set_next_text_pad(14)
-		ui.label(output_description(s), ui.fill(), ui.px(26))
-	}
-}
-
-// output_pill is the button, centred in a column as tall as the bar.
-@(private = "file")
-output_pill :: proc(s: ^State, label: string, color: render.Color) {
-	ui.column("", {}, ui.px(OUTPUT_W), ui.fill())
-	ui.spacer(ui.fill())
-	ui.text_style(.Semibold, 11, color)
-	ui.set_next_text_align(.Center)
-	ui.set_next_background({})
-	ui.set_next_border_color(color)
-	ui.set_next_hover_color({1, 1, 1, 0.08})
-	ui.set_next_radius(12)
-	b := ui.box_make(fmt.tprintf("%s###output", label), {.Clickable, .Focusable, .Draw_Background, .Draw_Border, .Draw_Hot_Effects, .Draw_Active_Effects, .Draw_Text}, ui.fill(), ui.px(24))
-	sig := ui.signal(b)
-	if sig.clicked {
-		ui.open_menu("output_menu", {b.rect.x, b.rect.y - 8})
-	}
-	ui.tooltip(sig, output_description(s))
-	ui.spacer(ui.fill())
-}
-
-// output_description says what reaches the device.
-output_description :: proc(s: ^State) -> string {
-	pb := &s.playback
-	dev := pb.status.device
-	switch {
-	case !s.settings.bit_perfect:
-		return "System mixer"
-	case dev.rate == 0:
-		return "Bit-perfect"
-	case dev.bit_perfect:
-		return fmt.tprintf("Bit-perfect, %s kHz", khz(dev.rate))
-	case dev.reason_len > 0:
-		return fmt.tprintf("Not bit-perfect: %s", audio.device_reason(&dev))
-	}
-	return "Not bit-perfect"
 }
 
 // draw_settings_button is the sidebar's button for the settings menu.
@@ -338,10 +270,3 @@ draw_settings_button :: proc(s: ^State) {
 	}
 }
 
-@(private = "file")
-khz :: proc(rate: int) -> string {
-	if rate % 1000 == 0 {
-		return fmt.tprintf("%d", rate / 1000)
-	}
-	return fmt.tprintf("%.1f", f64(rate) / 1000)
-}
