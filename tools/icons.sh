@@ -29,6 +29,7 @@ bold speaker-hifi ea08
 fill house e2c2
 bold magnifying-glass e30c
 fill magnifying-glass e30c
+bold gear e270
 "
 
 for weight in fill bold; do
