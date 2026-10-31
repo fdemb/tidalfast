@@ -4,31 +4,25 @@ package audio
 // through an AudioUnit that converts to whatever rate the device runs at;
 // this talks to the device itself instead: it sets the device's nominal
 // sample rate to the track's, picks a physical format with the track's bit
-// depth, can take the device in hog mode, and renders into an
-// AudioDeviceIOProc. The CoreAudio calls themselves are in
-// coreaudio_darwin.odin.
+// depth, and renders into an AudioDeviceIOProc. The CoreAudio calls
+// themselves are in coreaudio_darwin.odin.
 //
 // bitperfect_linux.odin declares the same procedures and the Hal fields
 // the player reads, for PipeWire, so the player never sees either OS's
 // types.
 //
-// What the device was set to before (rate, physical format, hog mode) is
-// kept in Hal and put back by hal_close with restore set: when bit-perfect
-// is turned off, on a hot reload and when the app quits. The same goes out
+// What the device was set to before (rate and physical format) is kept in
+// Hal and put back by hal_close with restore set: when bit-perfect is
+// turned off, on a hot reload and when the app quits. The same goes out
 // as a Device_Change for the app to keep on disk (hal_device_change), so a
 // start after a crash can put it back (device_change_undo).
 
 import "core:fmt"
 import "core:log"
-import "core:sys/posix"
 import "core:time"
 
 // BIT_PERFECT says whether this OS has bit-perfect output.
 BIT_PERFECT :: true
-
-// HOG_MODE says whether bit-perfect output can take the device for this
-// app alone.
-HOG_MODE :: true
 
 // Hal is one open HAL output: the device, its IOProc and what to put back.
 Hal :: struct {
@@ -45,7 +39,6 @@ Hal :: struct {
 	orig_rate:      f64,
 	orig_format:    Stream_Description,
 	has_orig:       bool,
-	hogged:         bool, // we hold hog mode
 	settle_ms:      f64, // how long the last rate change took to show
 }
 
@@ -112,15 +105,14 @@ watch_listener :: proc "c" (id: Audio_Object_ID, count: u32, addresses: [^]Prope
 	return 0
 }
 
-// hal_configure readies dev for rate, channels and bits: hog mode if
-// asked, then the nominal rate and a physical format that holds every bit
-// of the source. Waits off the main thread (polling, up to
+// hal_configure readies dev for rate, channels and bits: the nominal rate
+// and a physical format that holds every bit of the source. Waits off the main thread (polling, up to
 // HAL_SETTLE_TIMEOUT) until the device reports the rate, that physical
 // format, and a 32-bit float virtual format at the rate, which is what the
 // IOProc writes. If any of that doesn't happen, ok is false and reason
 // says why, short enough for a menu line. Must be called with the IOProc
 // stopped, since it sets the channel map.
-hal_configure :: proc(h: ^Hal, dev: Device_ID, rate, channels, bits: int, hog: bool) -> (ok: bool, reason: string) {
+hal_configure :: proc(h: ^Hal, dev: Device_ID, rate, channels, bits: int) -> (ok: bool, reason: string) {
 	if dev == 0 {
 		return false, "no output device"
 	}
@@ -133,23 +125,6 @@ hal_configure :: proc(h: ^Hal, dev: Device_ID, rate, channels, bits: int, hog: b
 		h.stream = device_output_stream(dev)
 		h.orig_format, _ = stream_physical_format(h.stream)
 		h.has_orig = true
-	}
-	if hog && !h.hogged {
-		// Setting the property toggles it: it takes hog mode when nobody
-		// has it and gives it up when we do, whatever the value.
-		pid := posix.getpid()
-		switch device_hog_owner(dev) {
-		case pid:
-			h.hogged = true
-		case -1:
-			v := pid
-			h.hogged = set(dev, PROP_HOG_MODE, SCOPE_GLOBAL, &v) == 0 && device_hog_owner(dev) == pid
-		}
-		if !h.hogged {
-			log.warn("audio: couldn't take the device in hog mode, playing without it")
-		}
-	} else if !hog && h.hogged {
-		hal_release_hog(h)
 	}
 	if h.stream == 0 {
 		return false, "the device has no output stream"
@@ -243,7 +218,7 @@ hal_stop :: proc(h: ^Hal) {
 }
 
 // hal_close stops and destroys the IOProc. With restore, the device gets
-// back its rate and physical format and hog mode is released.
+// back its rate and physical format.
 hal_close :: proc(h: ^Hal, restore: bool) {
 	hal_stop(h)
 	if h.io_proc != nil {
@@ -267,24 +242,7 @@ hal_close :: proc(h: ^Hal, restore: bool) {
 		}
 		log.infof("audio: %s back to %.0f Hz", device_name(h.device), h.orig_rate)
 	}
-	hal_release_hog(h)
 	h^ = {}
-}
-
-@(private = "file")
-hal_release_hog :: proc(h: ^Hal) {
-	if !h.hogged {
-		return
-	}
-	h.hogged = false
-	if device_hog_owner(h.device) != posix.getpid() {
-		return
-	}
-	pid := posix.pid_t(-1)
-	set(h.device, PROP_HOG_MODE, SCOPE_GLOBAL, &pid)
-	if device_hog_owner(h.device) == posix.getpid() {
-		log.warn("audio: hog mode is still ours after releasing it")
-	}
 }
 
 // hal_device_change is what h has changed on its device so far, zero for

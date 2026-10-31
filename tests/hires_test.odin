@@ -371,12 +371,9 @@ settings_persistence :: proc(t: ^testing.T) {
 	st, ok := app.settings_load(path)
 	testing.expect(t, !ok)
 	testing.expect_value(t, st, app.Settings{volume = 0.7})
-	testing.expect(t, app.settings_save(path, {bit_perfect = true, hog = true}))
+	testing.expect(t, app.settings_save(path, {bit_perfect = true}))
 	st, ok = app.settings_load(path)
 	testing.expect(t, ok)
-	testing.expect_value(t, st, app.Settings{bit_perfect = true, hog = true})
-	testing.expect(t, app.settings_save(path, {bit_perfect = true}))
-	st, _ = app.settings_load(path)
 	testing.expect_value(t, st, app.Settings{bit_perfect = true})
 	testing.expect(t, !os.exists(fmt.tprintf("%s.tmp", path)))
 
@@ -387,10 +384,10 @@ settings_persistence :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(string(data), `"Docked"`))
 	st, _ = app.settings_load(path)
 	testing.expect_value(t, st, app.Settings{scrollbars = .Docked})
-	_ = os.write_entire_file(path, transmute([]u8)string(`{"hog": true, "scrollbars": "Sideways"}`))
+	_ = os.write_entire_file(path, transmute([]u8)string(`{"scrollbars": "Sideways"}`))
 	st, ok = app.settings_load(path)
 	testing.expect(t, ok)
-	testing.expect_value(t, st, app.Settings{hog = true, volume = 0.7})
+	testing.expect_value(t, st, app.Settings{volume = 0.7})
 
 	// The player bar too, by name; a file from before it has it blurred.
 	testing.expect(t, app.settings_save(path, {bar = .Solid}))
@@ -434,15 +431,21 @@ settings_persistence :: proc(t: ^testing.T) {
 	testing.expect(t, app.settings_save(path, {volume = 0}))
 	st, _ = app.settings_load(path)
 	testing.expect_value(t, st.volume, 0)
-	_ = os.write_entire_file(path, transmute([]u8)string(`{"bit_perfect": false, "hog": false, "scrollbars": "Floating"}`))
+	_ = os.write_entire_file(path, transmute([]u8)string(`{"bit_perfect": false, "scrollbars": "Floating"}`))
 	st, ok = app.settings_load(path)
 	testing.expect(t, ok)
 	testing.expect_value(t, st.volume, 0.7)
 	_ = os.write_entire_file(path, transmute([]u8)string(`{"volume": 3}`))
 	st, _ = app.settings_load(path)
 	testing.expect_value(t, st.volume, 1)
-	// Hog mode only counts with bit-perfect output.
-	testing.expect_value(t, app.output_of({hog = true}), audio.Output{})
+	// A file from when the app had hog mode still loads, and saving drops it.
+	_ = os.write_entire_file(path, transmute([]u8)string(`{"bit_perfect": true, "hog": true}`))
+	st, ok = app.settings_load(path)
+	testing.expect(t, ok)
+	testing.expect_value(t, st, app.Settings{bit_perfect = true, volume = 0.7})
+	testing.expect(t, app.settings_save(path, st))
+	data, _ = os.read_entire_file(path, context.temp_allocator)
+	testing.expect(t, !strings.contains(string(data), "hog"))
 }
 
 @(private = "file")
@@ -1207,8 +1210,7 @@ settings_saves_in_order :: proc(t: ^testing.T) {
 	writer :: proc(sh: ^Shared) {
 		for i in 0 ..< 40 {
 			st := app.Settings {
-				bit_perfect = true,
-				hog         = i % 2 == 0,
+				bit_perfect = i % 2 == 0,
 				device      = {rate = f64(1000 + i), orig_rate = 48000, uid_len = 3, uid = {0 = 'u', 1 = 'i', 2 = 'd'}},
 			}
 			app.settings_put(sh.store, st)
@@ -1237,7 +1239,7 @@ settings_saves_in_order :: proc(t: ^testing.T) {
 		thread.destroy(w)
 	}
 	// The newest settings, written last by whichever thread.
-	app.settings_put(&store, {bit_perfect = true, hog = true})
+	app.settings_put(&store, {bit_perfect = true, volume = 0.5})
 	testing.expect(t, app.settings_flush(&store))
 	sync.atomic_store(&sh.done, true)
 	thread.join(r)
@@ -1246,7 +1248,7 @@ settings_saves_in_order :: proc(t: ^testing.T) {
 	testing.expectf(t, sh.bad == 0, "%d of %d reads weren't whole settings", sh.bad, sh.reads)
 	st, ok := app.settings_load(store.path)
 	testing.expect(t, ok)
-	testing.expect_value(t, st, app.Settings{bit_perfect = true, hog = true})
+	testing.expect_value(t, st, app.Settings{bit_perfect = true, volume = 0.5})
 	entries, _ := os.read_all_directory_by_path(dir, context.temp_allocator)
 	for e in entries {
 		testing.expectf(t, e.name == "settings.json", "left behind: %s", e.name)
@@ -1378,6 +1380,6 @@ output_menu_says_why :: proc(t: ^testing.T) {
 	pb.status.device = {rate = 96000, bits = 32, float = true}
 	pb.status.device.reason_len = copy(pb.status.device.reason[:], "no 24-bit format at 96 kHz")
 	testing.expect_value(t, app.output_description(s), "Not bit-perfect: no 24-bit format at 96 kHz")
-	pb.status.device = {bit_perfect = true, hogged = true, rate = 96000, bits = 32, float = true}
-	testing.expect_value(t, app.output_description(s), "Bit-perfect, 96 kHz, hog mode")
+	pb.status.device = {bit_perfect = true, rate = 96000, bits = 32, float = true}
+	testing.expect_value(t, app.output_description(s), "Bit-perfect, 96 kHz")
 }

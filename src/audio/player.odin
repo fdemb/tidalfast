@@ -98,7 +98,6 @@ Source :: struct {
 // Output is how the player reaches the device.
 Output :: struct {
 	bit_perfect: bool, // HAL output at the track's rate, no gain or volume
-	hog:         bool, // with bit_perfect: take the device for this app alone
 }
 
 Play_State :: enum u8 {
@@ -129,7 +128,6 @@ Status :: struct {
 // Device_Info describes the open output.
 Device_Info :: struct {
 	bit_perfect: bool, // the HAL path is in use: no conversion, gain or volume
-	hogged:      bool,
 	rate:        int, // the device's rate, 0 when closed
 	bits:        int, // the physical format's bits per sample
 	float:       bool, // the physical format is floating point
@@ -883,10 +881,9 @@ watch_note :: proc "contextless" (w: ^Device_Watch, default_changed, device_chan
 
 // check_device acts on what the listeners saw. If the HAL device went
 // away, its output closes with nothing restored: there's nothing left to
-// restore. If the system's default output moved to another device while
-// this one isn't hogged, the device is put back and let go. Hogging a
-// device takes it out of the system's choices, so the default moving then
-// is no reason to leave. miniaudio follows the default output by itself. Either way the track plays on from the audible position on the
+// restore. If the system's default output moved to another device, the
+// device is put back and let go. miniaudio follows the default output by
+// itself. Either way the track plays on from the audible position on the
 // default output as it is now; if that can't open, the track fails and the
 // player bar says so.
 @(private = "file")
@@ -900,7 +897,7 @@ check_device :: proc(p: ^Player) {
 	}
 	if p.using_hal {
 		lost = lost || (changed && !hal_alive(&p.hal))
-		moved = moved && !p.hal.hogged && default_output_device() != p.hal.device
+		moved = moved && default_output_device() != p.hal.device
 	} else {
 		moved = false
 	}
@@ -1764,7 +1761,6 @@ device_open :: proc(p: ^Player, rate, channels, bits: int) -> bool {
 	if hal_ok {
 		info = {
 			bit_perfect = true,
-			hogged      = p.hal.hogged,
 			rate        = rate,
 			bits        = int(p.hal.format.bits),
 			float       = p.hal.format.format_flags & FLAG_FLOAT != 0,
@@ -1815,13 +1811,11 @@ device_open :: proc(p: ^Player, rate, channels, bits: int) -> bool {
 @(private = "file")
 hal_open :: proc(p: ^Player, rate, channels, bits: int) -> (ok: bool, reason: string) {
 	// The device the last track played on, until the output is restored.
-	// While we hog it, it is no longer the system's default output, so
-	// asking for the default again would find another device.
 	dev := p.hal.device if p.hal.device != 0 else default_output_device()
 	// The IOProc writes the virtual format, 32-bit float, and the HAL
 	// converts it to the physical one: exact for an integer format at least
 	// as deep as the source, or 32-bit float for up to 24 bits.
-	ok, reason = hal_configure(&p.hal, dev, rate, channels, bits, p.output.hog)
+	ok, reason = hal_configure(&p.hal, dev, rate, channels, bits)
 	if !ok {
 		hal_close(&p.hal, restore = true)
 		log.warnf("audio: no bit-perfect output at %d Hz (%s); the system mixer converts it", rate, reason)
@@ -1829,12 +1823,12 @@ hal_open :: proc(p: ^Player, rate, channels, bits: int) -> (ok: bool, reason: st
 	}
 	p.watching_hal = watch_device(&p.hal, p.watch)
 	p.using_hal = true
-	log.infof("audio: bit-perfect output on %s: %s%s, set in %.1f ms", device_name(dev), format_name(p.hal.format), ", hog mode" if p.hal.hogged else "", p.hal.settle_ms)
+	log.infof("audio: bit-perfect output on %s: %s, set in %.1f ms", device_name(dev), format_name(p.hal.format), p.hal.settle_ms)
 	return true, ""
 }
 
 // device_close stops and closes the device. With restore, a device that
-// bit-perfect output changed gets its rate, format and hog mode back;
+// bit-perfect output changed gets its rate and format back;
 // without it they stay for the next track.
 @(private = "file")
 device_close :: proc(p: ^Player, restore := false) {

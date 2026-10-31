@@ -7,7 +7,6 @@ package audio
 // through the procedures bitperfect_linux.odin also has.
 
 import CF "core:sys/darwin/CoreFoundation"
-import "core:sys/posix"
 
 foreign import CoreAudio "system:CoreAudio.framework"
 
@@ -41,7 +40,6 @@ PROP_ALIVE := fourcc("livn")
 PROP_STEREO_CHANNELS := fourcc("dch2")
 PROP_NOMINAL_RATE := fourcc("nsrt")
 PROP_AVAILABLE_RATES := fourcc("nsr#")
-PROP_HOG_MODE := fourcc("oink")
 PROP_STREAMS := fourcc("stm#")
 PROP_PHYSICAL_FORMAT := fourcc("pft ")
 PROP_AVAILABLE_PHYSICAL := fourcc("pfta")
@@ -109,13 +107,6 @@ listen :: proc(id: Audio_Object_ID, selector: u32, listener: Listener_Proc, clie
 unlisten :: proc(id: Audio_Object_ID, selector: u32, listener: Listener_Proc, client: rawptr) {
 	addr := Property_Address{selector, SCOPE_GLOBAL, ELEMENT_MAIN}
 	AudioObjectRemovePropertyListener(id, &addr, listener, client)
-}
-
-// device_hog_owner is the pid that has the device in hog mode, -1 for none.
-device_hog_owner :: proc(dev: Audio_Object_ID) -> posix.pid_t {
-	pid := posix.pid_t(-1)
-	get(dev, PROP_HOG_MODE, SCOPE_GLOBAL, &pid)
-	return pid
 }
 
 // device_output_stream is the device's first output stream, 0 if none.

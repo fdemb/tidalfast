@@ -152,9 +152,6 @@ playback_start :: proc(s: ^State, shell: ^platform.Shell) {
 	when !audio.BIT_PERFECT {
 		s.settings.bit_perfect = false
 	}
-	when !audio.HOG_MODE {
-		s.settings.hog = false
-	}
 	// The app died with a device switched to a track's rate. Put it back
 	// before anything plays.
 	if s.settings.device.rate != 0 {

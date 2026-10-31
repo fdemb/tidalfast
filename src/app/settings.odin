@@ -1,8 +1,9 @@
 package app
 
-// Settings: the volume, shuffle and repeat, bit-perfect output, hog mode,
-// how lists show their scrollbars and whether the player bar blurs them. They live in a small JSON file, ~/Library/Application Support/tidalfast/settings.json, or
-// wherever TIDALFAST_SETTINGS points. The fake data has none unless
+// Settings: the volume, shuffle and repeat, bit-perfect output, how lists
+// show their scrollbars and whether the player bar blurs them. They live in
+// a small JSON file, ~/Library/Application Support/tidalfast/settings.json,
+// or wherever TIDALFAST_SETTINGS points. The fake data has none unless
 // TIDALFAST_SETTINGS points to one, and a mock run without a mock URL has
 // none (run_decide). A worker writes it, so a click never
 // waits on the disk. Saves go one at a time and only the newest settings
@@ -31,7 +32,6 @@ import "../ui"
 
 Settings :: struct {
 	bit_perfect: bool,
-	hog:         bool,
 	device:      audio.Device_Change, // rate 0 when no device is changed
 	scrollbars:  ui.Scrollbars,
 	bar:         Player_Bar,
@@ -53,7 +53,6 @@ Player_Bar :: enum u8 {
 @(private = "file")
 Settings_File :: struct {
 	bit_perfect:   bool,
-	hog:           bool,
 	scrollbars:    ui.Scrollbars,
 	bar:           Player_Bar,
 	device_change: Maybe(Device_Change_File) `json:"device_change,omitempty"`,
@@ -92,7 +91,7 @@ settings_decode_json :: proc(data: []u8) -> (st: Settings, ok: bool) {
 	if json.unmarshal(data, &f, allocator = context.temp_allocator) != nil {
 		return {volume = VOLUME_DEFAULT}, false
 	}
-	st = {bit_perfect = f.bit_perfect, hog = f.hog, scrollbars = f.scrollbars, bar = f.bar, volume = clamp(f.volume.? or_else VOLUME_DEFAULT, 0, 1), shuffle = f.shuffle, repeat = f.repeat}
+	st = {bit_perfect = f.bit_perfect, scrollbars = f.scrollbars, bar = f.bar, volume = clamp(f.volume.? or_else VOLUME_DEFAULT, 0, 1), shuffle = f.shuffle, repeat = f.repeat}
 	if c, has := f.device_change.?; has && c.rate != 0 && len(c.uid) <= len(st.device.uid) {
 		st.device = {orig_rate = c.orig_rate, orig_format = c.orig_format, rate = c.rate}
 		st.device.uid_len = copy(st.device.uid[:], c.uid)
@@ -111,7 +110,6 @@ settings_save :: proc(path: string, st: Settings) -> bool {
 	}
 	f := Settings_File {
 		bit_perfect = st.bit_perfect,
-		hog         = st.hog,
 		scrollbars  = st.scrollbars,
 		bar         = st.bar,
 		volume      = st.volume,
@@ -221,8 +219,7 @@ settings_to_save :: proc(s: ^State) -> Settings {
 }
 
 output_of :: proc(st: Settings) -> audio.Output {
-	on := audio.BIT_PERFECT && st.bit_perfect
-	return {bit_perfect = on, hog = on && audio.HOG_MODE && st.hog}
+	return {bit_perfect = audio.BIT_PERFECT && st.bit_perfect}
 }
 
 // draw_output_button is the player bar's button for the output menu. In
@@ -250,13 +247,6 @@ draw_output_button :: proc(s: ^State) {
 				st.bit_perfect = !st.bit_perfect
 				settings_set(s, st)
 				ui.close_menu()
-			}
-			if audio.HOG_MODE && st.bit_perfect {
-				if ui.menu_item(fmt.tprintf("%s Hog mode###hog", "✓" if st.hog else "   ")).clicked {
-					st.hog = !st.hog
-					settings_set(s, st)
-					ui.close_menu()
-				}
 			}
 			ui.menu_separator()
 		}
@@ -296,8 +286,7 @@ output_description :: proc(s: ^State) -> string {
 	case dev.rate == 0:
 		return "Bit-perfect"
 	case dev.bit_perfect:
-		hog := ", hog mode" if dev.hogged else ""
-		return fmt.tprintf("Bit-perfect, %s kHz%s", khz(dev.rate), hog)
+		return fmt.tprintf("Bit-perfect, %s kHz", khz(dev.rate))
 	case dev.reason_len > 0:
 		return fmt.tprintf("Not bit-perfect: %s", audio.device_reason(&dev))
 	}

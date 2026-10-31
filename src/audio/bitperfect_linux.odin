@@ -17,8 +17,7 @@ package audio
 // What this can't see: a sink whose hardware can't run at the graph's rate
 // resamples inside PipeWire, and a software volume on the sink scales the
 // samples. Other streams, such as notifications, are resampled to the
-// graph's rate and mixed in while they play, as on macOS without hog mode.
-// PipeWire has no hog mode.
+// graph's rate and mixed in while they play, as on macOS.
 //
 // Nothing on the device needs putting back: the graph goes back to its
 // default rate once the stream is gone. So there is no Device_Change.
@@ -35,17 +34,12 @@ import "core:time"
 // BIT_PERFECT says whether this OS has bit-perfect output.
 BIT_PERFECT :: true
 
-// HOG_MODE says whether bit-perfect output can take the device for this
-// app alone.
-HOG_MODE :: false
-
 // Hal is one open PipeWire stream.
 Hal :: struct {
 	device:      Device_ID,
 	out:         ^Pw_Output, // heap; nil when closed
 	format:      Stream_Description, // what the stream sends: 32-bit float
 	channel_map: Channel_Map, // read by process; set while it's stopped
-	hogged:      bool, // always false
 	settle_ms:   f64, // how long the graph took to reach the rate
 }
 
@@ -123,7 +117,7 @@ unwatch_device :: proc(h: ^Hal, w: ^Device_Watch) {
 // and stereo go out as stereo; more channels are refused. bits doesn't
 // matter: a float holds up to 24 bits exactly. If the graph doesn't get
 // there, ok is false and reason says why, short enough for a menu line.
-hal_configure :: proc(h: ^Hal, dev: Device_ID, rate, channels, bits: int, hog: bool) -> (ok: bool, reason: string) {
+hal_configure :: proc(h: ^Hal, dev: Device_ID, rate, channels, bits: int) -> (ok: bool, reason: string) {
 	hal_close(h, false)
 	if channels < 1 || channels > 2 {
 		return false, fmt.tprintf("%d channels; PipeWire output is stereo", channels)

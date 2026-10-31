@@ -1402,7 +1402,7 @@ run_decide_picks_the_run :: proc(t: ^testing.T) {
 }
 
 // A run that fell back to the fake data, as above, plays its tones
-// without bit-perfect output or hog mode whatever the settings say, and
+// without bit-perfect output whatever the settings say, and
 // reads and writes no settings file: not the user's, not TIDALFAST_SETTINGS.
 @(test)
 mock_fallback_leaves_bit_perfect_and_the_settings_alone :: proc(t: ^testing.T) {
@@ -1413,7 +1413,7 @@ mock_fallback_leaves_bit_perfect_and_the_settings_alone :: proc(t: ^testing.T) {
 	defer os.remove_all(dir)
 	testing.expect(t, os.make_directory_all(dir) == nil)
 	path := fmt.tprintf("%s/settings.json", dir)
-	on := `{"bit_perfect": true, "hog": true, "volume": 0.5}`
+	on := `{"bit_perfect": true, "volume": 0.5}`
 	testing.expect(t, os.write_entire_file(path, transmute([]u8)on) == nil)
 	os.set_env("TIDALFAST_API", "")
 
