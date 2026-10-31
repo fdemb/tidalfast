@@ -105,7 +105,7 @@ Box :: struct {
 	view_bounds:     [2]f32, // size of the children from the last layout
 	view_off:        [2]f32, // scroll offset drawn
 	view_off_target: [2]f32, // where view_off is easing to
-	built_size:      [2]f32, // the rect size a scroll view's children were built for
+	built_size:      [2]f32, // the size a scroll view's children were built for, see build_size
 	bar_t:           f32, // a scroll view's scrollbar fading in
 	bar_seen:        f32, // view_off.y when the scrollbar was last built
 	bar_time:        f64, // when view_off.y last moved, or the mouse or the focus came in
@@ -1234,7 +1234,7 @@ box_make :: proc(id: string, flags: Box_Flags = {}, width: Size = {}, height: Si
 	}
 	if .View_Scroll in b.flags && b.key != 0 {
 		scroll_box(u, b)
-		b.built_size = {b.rect.w, b.rect.h}
+		b.built_size = build_size(b)
 	}
 	return b
 }
@@ -1284,7 +1284,8 @@ scroll_box :: proc(u: ^State, b: ^Box) {
 			b.view_off[axis] -= u.scroll_precise[axis]
 		}
 	}
-	limit := [2]f32{max(b.view_bounds.x - b.rect.w, 0), max(b.view_bounds.y - b.rect.h, 0)}
+	size := build_size(b)
+	limit := [2]f32{max(b.view_bounds.x - size.x, 0), max(b.view_bounds.y - size.y, 0)}
 	rate := 1 - math.exp(-u.dt * 20)
 	for axis in 0 ..< 2 {
 		overflow := Box_Flag.Allow_Overflow_X if axis == 0 else .Allow_Overflow_Y
@@ -1295,6 +1296,20 @@ scroll_box :: proc(u: ^State, b: ^Box) {
 		b.view_off[axis] = clamp(b.view_off[axis], 0, limit[axis])
 		b.view_off[axis] = approach(u, b.view_off[axis], b.view_off_target[axis], rate, 0.25)
 	}
+}
+
+// build_size is b's size as its build can know it: on each axis, its own
+// size in points if it has one, or else its size in the last layout. A
+// scroll view given its size in points builds the right rows from its
+// first frame and right after a resize.
+build_size :: proc(b: ^Box) -> [2]f32 {
+	size := [2]f32{b.rect.w, b.rect.h}
+	for axis in Axis {
+		if b.pref_size[axis].kind == .Pixels {
+			size[int(axis)] = b.pref_size[axis].value
+		}
+	}
+	return size
 }
 
 signal :: proc(b: ^Box) -> (s: Signal) {

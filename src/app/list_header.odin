@@ -482,12 +482,13 @@ more_by :: proc(s: ^State, page: ^Artist_Page, open: ^Found) -> []Found {
 
 // draw_album_footer is what comes after an album's last row, at top in the
 // view's content: its release date and length, then a shelf of more by its
-// artist. Out of view it's a spacer of its height.
-draw_album_footer :: proc(s: ^State, list: ^ui.Box, artist: ^Artist_Page, top, width: f32) {
+// artist. Out of view it's a spacer of its height. list is the view,
+// view_h tall.
+draw_album_footer :: proc(s: ^State, list: ^ui.Box, view_h: f32, artist: ^Artist_Page, top, width: f32) {
 	found := album_found(s, artist)
 	items := more_by(s, artist, found)
 	height := f32(FOOTER_TEXT_H + FOOTER_END) + (FOOTER_SHELF_H if len(items) > 0 else 0)
-	if list.view_off.y + list.rect.h < top {
+	if list.view_off.y + view_h < top {
 		ui.spacer(ui.px(height))
 		return
 	}

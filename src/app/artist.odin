@@ -147,7 +147,7 @@ open_card :: proc(s: ^State, source: Source, f: Found) {
 
 // draw_artist draws the place p of the main view, main_w wide: the page or
 // a grid. The full top tracks are the table, which draw_main_view draws.
-draw_artist :: proc(s: ^State, p: ^List_Place, main_w: f32) {
+draw_artist :: proc(s: ^State, p: ^List_Place, main_w, view_h: f32) {
 	page := artist_find(&s.data, artist_key(s, p))
 	if page == nil {
 		return
@@ -157,10 +157,10 @@ draw_artist :: proc(s: ^State, p: ^List_Place, main_w: f32) {
 	defer draw_artist_menu(s, p, page)
 	content_w := min(main_w, CONTENT_MAX) - 2 * PAGE_PAD
 	if grid, ok := p.artist_view.(Artist_Grid); ok {
-		draw_artist_grid(s, page, grid.part, content_w)
+		draw_artist_grid(s, page, grid.part, content_w, view_h)
 		return
 	}
-	view := ui.scroll_view(fmt.tprintf("artist##%d", page.id), ui.fill(), ui.fill(), inset_end = bar_inset(s))
+	view := ui.scroll_view(fmt.tprintf("artist##%d", page.id), ui.px(main_w), ui.px(view_h), inset_end = bar_inset(s))
 	ui.accessible(view, .Group, small_str(&page.name))
 	nav_float(s, view.view_off.y)
 	draw_artist_hero(s, page, main_w, content_w)
@@ -557,7 +557,7 @@ draw_top_tracks :: proc(s: ^State, p: ^List_Place, view: ^ui.Box, width: f32) {
 	ui.column("top_tracks_group", {}, ui.fill(), ui.children_sum())
 	list := ui.column("top_tracks", {.Focusable, .No_Focus_Ring}, ui.fill(), ui.px(f32(shown) * TRACK_ROW_H))
 	ui.accessible(list, .Table, "Top tracks")
-	if table_keys(s, list, min(n, TOP_TRACKS), list.rect.h, 0) {
+	if table_keys(s, list, min(n, TOP_TRACKS), f32(shown) * TRACK_ROW_H, 0) {
 		top := list.rect.y - view.rect.y + view.view_off.y
 		sel := f32(s.library.selected)
 		ui.scroll_to(view, top + sel * TRACK_ROW_H, top + (sel + 1) * TRACK_ROW_H)
@@ -567,13 +567,18 @@ draw_top_tracks :: proc(s: ^State, p: ^List_Place, view: ^ui.Box, width: f32) {
 	}
 }
 
+// draw_artist_grid is the grid of one of the artist's parts under its
+// title, view_h tall in all.
 @(private = "file")
-draw_artist_grid :: proc(s: ^State, page: ^Artist_Page, part: Artist_Part, content_w: f32) {
+draw_artist_grid :: proc(s: ^State, page: ^Artist_Page, part: Artist_Part, content_w, view_h: f32) {
+	TOP :: 8
+	TITLE_H :: 44
+	GAP :: 16
 	spec := artist_part_spec(part)
 	{
 		centred(content_w)
-		ui.spacer(ui.px(8))
-		ui.row("", {}, ui.fill(), ui.px(44))
+		ui.spacer(ui.px(TOP))
+		ui.row("", {}, ui.fill(), ui.px(TITLE_H))
 		if ui.take_key(.Escape) {
 			pending_set(s, Go_Back{})
 		}
@@ -585,15 +590,16 @@ draw_artist_grid :: proc(s: ^State, page: ^Artist_Page, part: Artist_Part, conte
 		title := ui.label(spec.title, ui.fill(), ui.px(26))
 		ui.accessible(title, .Static_Text, title.label)
 	}
-	ui.spacer(ui.px(16))
-	ui.row("", {}, ui.fill(), ui.fill())
+	ui.spacer(ui.px(GAP))
+	grid_h := view_h - TOP - TITLE_H - GAP
+	ui.row("", {}, ui.fill(), ui.px(grid_h))
 	ui.spacer(ui.fill())
 	{
 		ui.column("", {}, ui.px(content_w), ui.fill())
 		#partial switch state in page.parts[part] {
 		case Artist_Ready:
 			items := state.content.(Artist_Cards).items
-			if clicked := card_grid(s, fmt.tprintf("grid##%d_%d", page.id, int(part)), spec.title, items, spec.source, content_w); clicked >= 0 {
+			if clicked := card_grid(s, fmt.tprintf("grid##%d_%d", page.id, int(part)), spec.title, items, spec.source, content_w, grid_h); clicked >= 0 {
 				open_card(s, spec.source, items[clicked])
 			}
 		case Artist_Failed:

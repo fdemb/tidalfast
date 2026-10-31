@@ -24,6 +24,7 @@ import "../ui"
 
 LOGIN_W :: 460
 LOGIN_H :: 430
+LOGIN_NOTICE_H :: 48
 
 draw_login :: proc(s: ^State) {
 	ui.set_next_background(WINDOW_BG)
@@ -225,7 +226,7 @@ draw_login_notice :: proc(s: ^State) {
 	}
 	d := &s.data
 	ui.set_next_background(SURFACE)
-	ui.row("login_notice", {.Draw_Background}, ui.fill(), ui.px(48))
+	ui.row("login_notice", {.Draw_Background}, ui.fill(), ui.px(LOGIN_NOTICE_H))
 	ui.spacer(ui.px(16))
 	ui.text_style(.Regular, 13, TEXT)
 	msg := ui.label("This login can only stream AAC. Log in again for lossless.", ui.fill(), ui.fill())

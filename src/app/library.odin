@@ -64,6 +64,7 @@ BAR_TINT :: render.Color{PANEL.r, PANEL.g, PANEL.b, 0.75}
 TRACK_ROW_H :: 56
 PLAYLIST_ROW_H :: 56
 HEADER_H :: 34
+SIDEBAR_ROW_H :: 40 // Home and the Your Library heading
 SIDEBAR_PAD :: 8 // between the sidebar's edges and its rows
 ROW_PAD :: 10 // between a sidebar row's edge and its cover
 SIDEBAR_INDENT :: SIDEBAR_PAD + ROW_PAD // where the covers, the heading and the search text start
@@ -222,11 +223,14 @@ draw_library :: proc(s: ^State, w, h: f32) {
 	bg := ui.box_make("", {.Draw_Background}, ui.fill(), ui.fill())
 	bg.child_axis = .Y
 	ui.parent(bg)
+	// The views' sizes come from the window's, worked out here and passed
+	// down, so a scroll view knows how many rows fill it while it's built.
+	body_h := h - status_bar_h(s) - (PLAYER_BAR_H if !s.blur_reference && !s.bar_over_content else 0)
 	{
-		ui.row("body", {}, ui.fill(), ui.fill())
-		draw_sidebar(s)
+		ui.row("body", {}, ui.fill(), ui.px(body_h))
+		draw_sidebar(s, body_h)
 		draw_sidebar_handle(s, w)
-		draw_main_view(s, w - lib.sidebar_w - HANDLE_W)
+		draw_main_view(s, w - lib.sidebar_w - HANDLE_W, body_h)
 	}
 	if !s.blur_reference {
 		draw_player_bar(s, w, h)
@@ -330,10 +334,13 @@ history_button :: proc(id, name: string, enabled: bool) -> ui.Signal {
 	return ui.signal(b)
 }
 
-draw_sidebar :: proc(s: ^State) {
+// draw_sidebar is the sidebar, h tall: the room at the top, Home, the
+// Your Library heading, the search field and the playlists under them.
+draw_sidebar :: proc(s: ^State, h: f32) {
 	lib := &s.library
 	ui.set_next_background(PANEL)
 	ui.column("sidebar", {.Draw_Background, .Clip}, ui.px(lib.sidebar_w), ui.fill())
+	top := s.titlebar_h if s.titlebar_h > 0 else SIDEBAR_PAD
 	if s.titlebar_h > 0 {
 		// Under the window's buttons, and moves the window.
 		ui.box_make("", {.Window_Drag}, ui.fill(), ui.px(s.titlebar_h))
@@ -342,7 +349,7 @@ draw_sidebar :: proc(s: ^State) {
 	}
 	draw_home_entry(s)
 	{
-		ui.row("", {}, ui.fill(), ui.px(40))
+		ui.row("", {}, ui.fill(), ui.px(SIDEBAR_ROW_H))
 		ui.spacer(ui.px(SIDEBAR_INDENT))
 		ui.text_style(.Semibold, 15, TEXT)
 		heading := ui.label("Your Library", ui.fill(), ui.fill())
@@ -356,7 +363,8 @@ draw_sidebar :: proc(s: ^State) {
 		ui.spacer(ui.px(SIDEBAR_PAD))
 	}
 	draw_search_field(s)
-	list := ui.scroll_view("playlists", ui.fill(), ui.fill(), inset_end = bar_inset(s))
+	list_h := h - top - 2 * SIDEBAR_ROW_H - SEARCH_FIELD_H - LIST_PAD_Y
+	list := ui.scroll_view("playlists", ui.px(lib.sidebar_w), ui.px(list_h), inset_end = bar_inset(s))
 	list.pad.x = SIDEBAR_PAD
 	ui.accessible(list, .List, "Playlists")
 	{
@@ -420,7 +428,9 @@ draw_sidebar_handle :: proc(s: ^State, window_w: f32) {
 	ui.box_make("", {.Draw_Background}, ui.px(1), ui.fill())
 }
 
-draw_main_view :: proc(s: ^State, main_w: f32) {
+// draw_main_view is the view the history's current place shows, main_w
+// wide and h tall, with Back and Forward over it.
+draw_main_view :: proc(s: ^State, main_w, h: f32) {
 	ui.column("main", {.Clip}, ui.fill(), ui.fill())
 	// The room for Back and Forward, over the view when it keeps the room
 	// itself. Like a toolbar, it moves the window.
@@ -435,36 +445,41 @@ draw_main_view :: proc(s: ^State, main_w: f32) {
 	}
 	draw_login_notice(s)
 	s.library.nav_float = 0
-	draw_view(s, main_w)
+	view_h := h - (0 if under else nav_h(s)) - (LOGIN_NOTICE_H if login_notice_shown(s) else 0)
+	draw_view(s, main_w, view_h)
 	draw_history_buttons(s)
 }
 
-// draw_view is what the history's current place shows in the main view.
-draw_view :: proc(s: ^State, main_w: f32) {
+// draw_view is what the history's current place shows in the main view,
+// w wide and h tall.
+draw_view :: proc(s: ^State, w, h: f32) {
 	if home_showing(s) {
-		draw_home(s, main_w)
+		draw_home(s, w, h)
 		return
 	}
 	if p := artist_place(s); p != nil {
 		if _, table := p.artist_view.(Artist_Top_Tracks); !table {
-			draw_artist(s, p, main_w)
+			draw_artist(s, p, w, h)
 			return
 		}
 	}
 	if search_showing(s) {
 		draw_search_header(s)
-		if !draw_search_tabs(s) {
-			draw_found_list(s)
+		songs := draw_search_tabs(s)
+		if !songs {
+			draw_found_list(s, w, h - SEARCH_HEADER_H - SEARCH_TABS_H)
 			return
 		}
+		draw_track_list(s, w, h - SEARCH_HEADER_H - SEARCH_TABS_H)
+		return
 	}
-	draw_track_list(s, main_w)
+	draw_track_list(s, w, h)
 }
 
 // draw_search_header is the search results' title and what was found,
 // above the tabs.
 draw_search_header :: proc(s: ^State) {
-	ui.row("", {}, ui.fill(), ui.px(106))
+	ui.row("", {}, ui.fill(), ui.px(SEARCH_HEADER_H))
 	ui.spacer(ui.px(24))
 	ui.column("", {}, ui.fill(), ui.fill())
 	ui.spacer(ui.px(26))
@@ -479,8 +494,9 @@ draw_search_header :: proc(s: ^State) {
 // draw_track_list is the open list as one scroll view: its header (see
 // list_header.odin), the column headings, the rows and, for an album, its
 // footer. Row 0 is at the header's rows_top, which the anchor, the
-// benchmarks and the keyboard's scrolling all go by.
-draw_track_list :: proc(s: ^State, main_w: f32) {
+// benchmarks and the keyboard's scrolling all go by. The view is main_w
+// wide and view_h tall.
+draw_track_list :: proc(s: ^State, main_w, view_h: f32) {
 	lib := &s.library
 	kind := list_kind(s)
 	cols := track_columns(main_w - 2 * LIST_PAD, kind)
@@ -494,7 +510,7 @@ draw_track_list :: proc(s: ^State, main_w: f32) {
 	artist := album_artist_page(s) if kind == .Album else nil
 	defer draw_list_menu(s, kind)
 
-	list := ui.scroll_view("tracks", ui.fill(), ui.fill(), inset_end = bar_inset(s))
+	list := ui.scroll_view("tracks", ui.px(main_w), ui.px(view_h), inset_end = bar_inset(s))
 	// One scroll view shows every list, so its offset belongs to the list
 	// that was open. A refresh keeps list_gen, and the anchor below.
 	if lib.scrolled_gen != lib.list_gen {
@@ -502,7 +518,7 @@ draw_track_list :: proc(s: ^State, main_w: f32) {
 		list.view_off.y, list.view_off_target.y = 0, 0
 	}
 	if s.bench.running && s.bench.ui {
-		list.view_off.y = rows_top + bench_offset(s, list.rect.h)
+		list.view_off.y = rows_top + bench_offset(s, view_h)
 		list.view_off_target.y = list.view_off.y
 	} else if s.data.bench.running {
 		list.view_off.y = rows_top + cover_bench_offset(s, list)
@@ -532,7 +548,7 @@ draw_track_list :: proc(s: ^State, main_w: f32) {
 		ui.accessible(table, .Table, view_title(s))
 		pinned := header_pinned_h(h)
 		first_shown := int(math.ceil((list.view_off.y + pinned - rows_top) / TRACK_ROW_H))
-		if table_keys(s, table, n, list.rect.h - pinned, first_shown) {
+		if table_keys(s, table, n, view_h - pinned, first_shown) {
 			// Clear of the pinned bar and headings, with the padding above
 			// and below, so the first and last rows show it.
 			y := rows_top + f32(lib.selected) * TRACK_ROW_H
@@ -548,7 +564,7 @@ draw_track_list :: proc(s: ^State, main_w: f32) {
 		}
 	}
 	if kind == .Album {
-		draw_album_footer(s, list, artist, rows_top + f32(n) * TRACK_ROW_H + LIST_PAD_Y, main_w - list.gutter)
+		draw_album_footer(s, list, view_h, artist, rows_top + f32(n) * TRACK_ROW_H + LIST_PAD_Y, main_w - list.gutter)
 	}
 	draw_pinned_header(s, list, h, cols, art)
 }

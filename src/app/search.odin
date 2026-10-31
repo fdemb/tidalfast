@@ -37,6 +37,9 @@ import "../ui"
 SEARCH_DEBOUNCE :: 0.25 // seconds without typing before the request goes
 SEARCH_PAGE :: 50
 FOUND_MAX :: 50
+SEARCH_FIELD_H :: 44 // the sidebar's search field and its margin
+SEARCH_HEADER_H :: 106 // the results' title and what was found
+SEARCH_TABS_H :: 40 // the tabs under it, with their margins
 
 Search_Tab :: enum u8 {
 	Songs,
@@ -118,7 +121,7 @@ found_free :: proc(sr: ^Search) {
 // search: the debounce, Cmd-F and Cmd-L, Return to search at once.
 draw_search_field :: proc(s: ^State) {
 	sr := &s.search
-	ui.column("", {}, ui.fill(), ui.px(44))
+	ui.column("", {}, ui.fill(), ui.px(SEARCH_FIELD_H))
 	ui.spacer(ui.px(2))
 	{
 		ui.row("", {}, ui.fill(), ui.px(32))
@@ -513,6 +516,7 @@ draw_search_tabs :: proc(s: ^State) -> (songs: bool) {
 		.Artists   = "Artists",
 		.Playlists = "Playlists",
 	}
+	ui.column("", {}, ui.fill(), ui.px(SEARCH_TABS_H))
 	ui.spacer(ui.px(4))
 	{
 		ui.row("search_tabs", {}, ui.fill(), ui.px(30))
@@ -531,7 +535,6 @@ draw_search_tabs :: proc(s: ^State) -> (songs: bool) {
 			ui.spacer(ui.px(6))
 		}
 	}
-	ui.spacer(ui.px(6))
 	return sr.tab == .Songs
 }
 
@@ -583,12 +586,12 @@ found_at :: proc(s: ^State, tab: Search_Tab, i: int) -> Found {
 	return {}
 }
 
-// draw_found_list lists the albums, artists or playlists found. A click
-// opens one.
-draw_found_list :: proc(s: ^State) {
+// draw_found_list lists the albums, artists or playlists found in a view w
+// wide and h tall. A click opens one.
+draw_found_list :: proc(s: ^State, w, h: f32) {
 	sr := &s.search
 	tab := sr.tab
-	list := ui.scroll_view("found", ui.fill(), ui.fill(), inset_end = bar_inset(s))
+	list := ui.scroll_view("found", ui.px(w), ui.px(h), inset_end = bar_inset(s))
 	list.pad = {LIST_PAD, LIST_PAD_Y}
 	ui.accessible(list, .List, fmt.tprintf("%v", tab))
 	n := found_count(s, tab)

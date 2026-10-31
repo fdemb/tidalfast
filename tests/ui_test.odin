@@ -1187,16 +1187,34 @@ test_ui_tooltip_stays_put :: proc(t: ^testing.T) {
 	testing.expect_value(t, tip.rect.x, x + 45)
 }
 
-// A scroll view's first frame builds the rows that fill it, though it
-// hasn't been laid out yet.
+// A scroll view given its size in points builds the rows that fill it in
+// its first frame, before any layout, and in the frame its size changes.
 @(test)
-test_ui_new_view_builds_rows :: proc(t: ^testing.T) {
+test_ui_sized_view_builds_rows :: proc(t: ^testing.T) {
 	u: ui.State
 	ui.init(&u)
 	defer ui_destroy(&u)
 	now := 0.0
-	_, rows, _ := rows_frame(&u, &now, 200, 100)
+	frame :: proc(u: ^ui.State, now: ^f64, height: f32) -> (rows: ui.Virtual_Rows, animating: bool) {
+		now^ += 1.0 / 120
+		ui.begin_frame(u, nil, nil, nil, 300, height, now^)
+		{
+			view := ui.scroll_view("view", ui.px(300), ui.px(height))
+			rows = ui.virtual_rows(view, 100, 10)
+			for i in rows.first ..< rows.last {
+				ui.box_make(fmt.tprintf("##row%d", i), {.Focusable, .Clickable}, ui.fill(), ui.px(10))
+			}
+		}
+		animating = ui.end_frame()
+		return
+	}
+	rows, _ := frame(&u, &now, 200)
 	testing.expect(t, rows.last - rows.first >= 20, "the first frame fills the view")
+	for _ in 0 ..< 10 {
+		frame(&u, &now, 200)
+	}
+	rows, _ = frame(&u, &now, 400)
+	testing.expect(t, rows.last - rows.first >= 40, "the frame after a resize fills the taller view")
 }
 
 // A box with No_Focus_Ring draws none when the keyboard focuses it.

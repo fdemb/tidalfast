@@ -80,10 +80,10 @@ card_row :: proc(s: ^State, id, title: string, items: []Found, source: Source, w
 	n := min(len(items), SHELF_CARDS)
 	content := f32(n) * CARD_PITCH - CARD_GAP
 	key := fmt.tprintf("%s##shelf", id)
-	// The row as it was laid out last frame, for the buttons.
-	off, view_w: f32 = 0, width
+	// Where the row is scrolling to, for the buttons.
+	off, view_w: f32 = 0, max(width, 1)
 	if prev := ui.find(key); prev != nil {
-		off, view_w = prev.view_off_target.x, max(prev.rect.w, 1)
+		off = prev.view_off_target.x
 	}
 	page := max(math.floor((view_w + CARD_GAP) / CARD_PITCH), 1) * CARD_PITCH
 	move: f32
@@ -104,7 +104,7 @@ card_row :: proc(s: ^State, id, title: string, items: []Found, source: Source, w
 		}
 	}
 	ui.spacer(ui.px(8))
-	view := ui.box_make(key, {.View_Scroll, .Clip, .Allow_Overflow_X}, ui.fill(), ui.px(CARD_H))
+	view := ui.box_make(key, {.View_Scroll, .Clip, .Allow_Overflow_X}, ui.px(width), ui.px(CARD_H))
 	view.child_axis = .X
 	ui.accessible(view, .List, title)
 	if move != 0 {
@@ -166,16 +166,16 @@ card :: proc(s: ^State, i: int, f: Found, kind: cover.Kind, filled: bool) -> ui.
 	return ui.signal(b)
 }
 
-// card_grid lays items out in rows in a view that fills the parent and
-// scrolls down. Only the rows in view are built. It returns the card
+// card_grid lays items out in rows in a view width wide and height tall
+// that scrolls down. Only the rows in view are built. It returns the card
 // clicked, or -1.
-card_grid :: proc(s: ^State, id, title: string, items: []Found, source: Source, width: f32) -> (clicked: int) {
+card_grid :: proc(s: ^State, id, title: string, items: []Found, source: Source, width, height: f32) -> (clicked: int) {
 	clicked = -1
 	cols := max(int((width + CARD_GAP) / CARD_PITCH), 1)
 	n := len(items)
 	row_h := f32(CARD_H + GRID_ROW_GAP)
 	kind := card_cover(source)
-	view := ui.scroll_view(id, ui.fill(), ui.fill(), inset_end = bar_inset(s))
+	view := ui.scroll_view(id, ui.px(width), ui.px(height), inset_end = bar_inset(s))
 	ui.accessible(view, .List, title)
 	rows := ui.virtual_rows(view, (n + cols - 1) / cols, row_h)
 	for r in rows.first ..< rows.last {

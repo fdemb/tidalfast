@@ -136,7 +136,7 @@ scroll_gutter :: proc(id: string) -> f32 {
 // gutter_of goes by the last layout, like the rest of the scrollbar.
 @(private)
 gutter_of :: proc(view: ^Box) -> f32 {
-	return SCROLLBAR_TRACK if ctx.scrollbars == .Docked && view.view_bounds.y > view.rect.h else 0
+	return SCROLLBAR_TRACK if ctx.scrollbars == .Docked && view.view_bounds.y > build_size(view).y else 0
 }
 
 @(private)
@@ -164,7 +164,7 @@ Thumb :: struct {
 
 @(private)
 thumb_of :: proc(view: ^Box) -> (t: Thumb, ok: bool) {
-	content, h := view.view_bounds.y - view.inset_end, view.rect.h - view.inset_end
+	content, h := view.view_bounds.y - view.inset_end, build_size(view).y - view.inset_end
 	if content <= h || h <= 0 {
 		return {}, false
 	}
@@ -255,8 +255,9 @@ scrollbar :: proc(view: ^Box) {
 		flags += {.Clickable}
 	}
 	set_next_flags({})
-	bar := box_make("###scrollbar", flags, px(SCROLLBAR_TRACK), px(view.rect.h - view.inset_end))
-	bar.fixed_pos = {view.rect.w - SCROLLBAR_TRACK, view.view_off.y}
+	size := build_size(view)
+	bar := box_make("###scrollbar", flags, px(SCROLLBAR_TRACK), px(size.y - view.inset_end))
+	bar.fixed_pos = {size.x - SCROLLBAR_TRACK, view.view_off.y}
 	bar.opacity = view.bar_t
 	push_parent(bar)
 	defer pop_parent()
@@ -286,13 +287,12 @@ virtual_rows_end :: proc(v: Virtual_Rows) {
 // One row past each edge is built too, so the keyboard can move the focus
 // onto it and scroll it into view. start is where row 0 is in the view's
 // content past its pad, for rows under a header that scrolls with them;
-// the parent can then be a box inside the view that starts there.
+// the parent can then be a box inside the view that starts there. Give
+// the view its height in points (see build_size): with a fill it goes by
+// the last layout, so a new view's first frame builds no rows.
 @(deferred_out = virtual_rows_end)
 virtual_rows :: proc(view: ^Box, count: int, row_h: f32, start: f32 = 0) -> Virtual_Rows {
-	// A new view has no height until it's laid out. The window's is enough
-	// to fill it, so its first frame isn't drawn empty.
-	view_h := ctx.height if view.first_frame == ctx.frame else view.rect.h
-	first, last := virtual_range(view.view_off.y - view.pad.y - start, view_h, row_h, count)
+	first, last := virtual_range(view.view_off.y - view.pad.y - start, build_size(view).y, row_h, count)
 	if last > first {
 		first, last = max(first - 1, 0), min(last + 1, count)
 	}
@@ -306,13 +306,14 @@ virtual_rows :: proc(view: ^Box, count: int, row_h: f32, start: f32 = 0) -> Virt
 // content.
 scroll_to :: proc(view: ^Box, y0, y1: f32) {
 	t := &view.view_off_target.y
-	h := view.rect.h - view.inset_end
+	size := build_size(view)
+	h := size.y - view.inset_end
 	if y0 < t^ {
 		t^ = y0
 	} else if y1 > t^ + h {
 		t^ = y1 - h
 	}
-	t^ = clamp(t^, 0, max(view.view_bounds.y - view.rect.h, 0))
+	t^ = clamp(t^, 0, max(view.view_bounds.y - size.y, 0))
 	ctx.animating = true
 }
 

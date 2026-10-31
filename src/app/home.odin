@@ -151,7 +151,7 @@ home_showing :: proc(s: ^State) -> bool {
 // Home shows.
 draw_home_entry :: proc(s: ^State) {
 	current := home_showing(s)
-	ui.row("", {}, ui.fill(), ui.px(40))
+	ui.row("", {}, ui.fill(), ui.px(SIDEBAR_ROW_H))
 	ui.spacer(ui.px(SIDEBAR_PAD))
 	{
 		ui.set_next_radius(6)
@@ -172,14 +172,14 @@ draw_home_entry :: proc(s: ^State) {
 	ui.spacer(ui.px(SIDEBAR_PAD))
 }
 
-// draw_home draws the page main_w wide: the greeting, the shortcuts, then
-// the shelves, grey ones while they're on their way, or why they didn't
-// come with a Retry, or that the feed had none with a Refresh.
-draw_home :: proc(s: ^State, main_w: f32) {
+// draw_home draws the page main_w wide and view_h tall: the greeting, the
+// shortcuts, then the shelves, grey ones while they're on their way, or why
+// they didn't come with a Retry, or that the feed had none with a Refresh.
+draw_home :: proc(s: ^State, main_w, view_h: f32) {
 	h := &s.data.home
 	home_want(&s.data)
 	content_w := min(main_w, CONTENT_MAX) - 2 * PAGE_PAD
-	view := ui.scroll_view("home", ui.fill(), ui.fill(), inset_end = bar_inset(s))
+	view := ui.scroll_view("home", ui.px(main_w), ui.px(view_h), inset_end = bar_inset(s))
 	ui.accessible(view, .Group, "Home")
 	nav_float(s, view.view_off.y)
 	centred(content_w)
