@@ -256,6 +256,10 @@ library_shortcuts :: proc(s: ^State) {
 	if ui.take_button(.Forward) {
 		pending_set(s, Go_Forward{})
 	}
+	// On the search page the field takes these itself (focus_shortcut).
+	for ui.take_key(.F, {ui.PRIMARY}) || ui.take_key(.L, {ui.PRIMARY}) {
+		pending_set(s, Search_Place{})
+	}
 	if ui.text_focused() {
 		return
 	}
@@ -309,10 +313,10 @@ draw_history_buttons :: proc(s: ^State) {
 
 // nav_reserve is the room for Back and Forward that the view under them
 // keeps at the top of its scroll view, so that it scrolls under them: all
-// of it on Home, the artist page and a track list. The search results and
-// an artist's grid keep their headers still, and a view under the login
-// notice is clear of them, so the main view keeps the room above those
-// instead.
+// of it on Home, the artist page, a track list and the search results. The
+// empty search page and an artist's grid keep their headers still, and a
+// view under the login notice is clear of them, so the main view keeps the
+// room above those instead.
 nav_reserve :: proc(s: ^State) -> f32 {
 	if login_notice_shown(s) {
 		return 0
@@ -324,7 +328,7 @@ nav_reserve :: proc(s: ^State) -> f32 {
 		_, grid := p.artist_view.(Artist_Grid)
 		return 0 if grid else nav_h(s)
 	}
-	return 0 if search_showing(s) else nav_h(s)
+	return 0 if search_page_showing(s) && !search_showing(s) else nav_h(s)
 }
 
 // nav_h is the room for Back and Forward at the top of the main view: the
@@ -372,8 +376,8 @@ history_button :: proc(id, name: string, enabled: bool) -> ui.Signal {
 	return ui.signal(b)
 }
 
-// draw_sidebar is the sidebar, h tall: the room at the top, Home, the
-// Your Library heading, the search field and the playlists under them.
+// draw_sidebar is the sidebar, h tall: the room at the top, Home, Search,
+// the Your Library heading and the playlists under them.
 draw_sidebar :: proc(s: ^State, h: f32) {
 	lib := &s.library
 	ui.set_next_background(PANEL)
@@ -386,6 +390,7 @@ draw_sidebar :: proc(s: ^State, h: f32) {
 		ui.spacer(ui.px(SIDEBAR_PAD))
 	}
 	draw_home_entry(s)
+	draw_search_entry(s)
 	{
 		ui.row("", {}, ui.fill(), ui.px(SIDEBAR_ROW_H))
 		ui.spacer(ui.px(SIDEBAR_INDENT))
@@ -400,8 +405,8 @@ draw_sidebar :: proc(s: ^State, h: f32) {
 		}
 		ui.spacer(ui.px(SIDEBAR_PAD))
 	}
-	draw_search_field(s)
-	list_h := h - top - 2 * SIDEBAR_ROW_H - SEARCH_FIELD_H - LIST_PAD_Y
+	ui.spacer(ui.px(LIST_PAD_Y))
+	list_h := h - top - 3 * SIDEBAR_ROW_H - 2 * LIST_PAD_Y
 	list := ui.scroll_view("playlists", ui.px(lib.sidebar_w), ui.px(list_h), inset_end = bar_inset(s))
 	list.pad.x = SIDEBAR_PAD
 	ui.accessible(list, .List, "Playlists")
@@ -409,7 +414,7 @@ draw_sidebar :: proc(s: ^State, h: f32) {
 		rows := ui.virtual_rows(list, sidebar_count(s), PLAYLIST_ROW_H)
 		for i in rows.first ..< rows.last {
 			entry := sidebar_entry(s, i)
-			current := lib.playlist == i && !s.search.browsing && !home_showing(s)
+			current := lib.playlist == i && !s.search.browsing && !home_showing(s) && !search_page_showing(s)
 			ui.set_next_radius(6)
 			row_highlight(SIDEBAR_ROWS, current)
 			item := ui.row(fmt.tprintf("##playlist%d", i), {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects, .Draw_Border}, ui.fill(), ui.px(PLAYLIST_ROW_H))
@@ -438,7 +443,6 @@ draw_sidebar :: proc(s: ^State, h: f32) {
 		sidebar_prefetch(s, rows.first - COVER_PREFETCH_ROWS, rows.first)
 		sidebar_prefetch(s, rows.last, rows.last + COVER_PREFETCH_ROWS)
 	}
-	// Only below: the search field's margin is already above.
 	ui.spacer(ui.px(LIST_PAD_Y))
 }
 
@@ -481,11 +485,19 @@ draw_main_view :: proc(s: ^State, main_w, h: f32) {
 	} else if !under {
 		ui.spacer(ui.px(nav_h(s)))
 	}
+	// Before the view: a search it sends replaces the results the view
+	// would otherwise have built already.
+	if search_page_showing(s) {
+		search_tick(s)
+	}
 	draw_login_notice(s)
 	s.library.nav_float = 0
 	view_h := h - (0 if under else nav_h(s)) - (LOGIN_NOTICE_H if login_notice_shown(s) else 0)
 	draw_view(s, main_w, view_h)
 	draw_history_buttons(s)
+	if search_page_showing(s) {
+		draw_search_bar(s, main_w)
+	}
 }
 
 // draw_view is what the history's current place shows in the main view,
@@ -501,32 +513,11 @@ draw_view :: proc(s: ^State, w, h: f32) {
 			return
 		}
 	}
-	if search_showing(s) {
-		draw_search_header(s)
-		songs := draw_search_tabs(s)
-		if !songs {
-			draw_found_list(s, w, h - SEARCH_HEADER_H - SEARCH_TABS_H)
-			return
-		}
-		draw_track_list(s, w, h - SEARCH_HEADER_H - SEARCH_TABS_H)
+	if search_page_showing(s) {
+		draw_search_page(s, w, h)
 		return
 	}
 	draw_track_list(s, w, h)
-}
-
-// draw_search_header is the search results' title and what was found,
-// above the tabs.
-draw_search_header :: proc(s: ^State) {
-	ui.row("", {}, ui.fill(), ui.px(SEARCH_HEADER_H))
-	ui.spacer(ui.px(24))
-	ui.column("", {}, ui.fill(), ui.fill())
-	ui.spacer(ui.px(26))
-	ui.text_style(.Bold, 28, TEXT)
-	title := ui.label(view_title(s), ui.fill(), ui.px(38))
-	ui.accessible(title, .Static_Text, title.label)
-	ui.text_style(.Regular, 13, SECONDARY)
-	subtitle := ui.label(view_subtitle(s), ui.fill(), ui.px(20))
-	ui.accessible(subtitle, .Static_Text, subtitle.label)
 }
 
 // draw_track_list is the open list as one scroll view: its header (see
@@ -570,7 +561,9 @@ draw_track_list :: proc(s: ^State, main_w, view_h: f32) {
 	lib.top_row = max(int(math.floor((list.view_off.y - rows_top) / TRACK_ROW_H)), 0)
 	lib.top_offset = list.view_off.y - rows_top - f32(lib.top_row) * TRACK_ROW_H
 
-	if list.view_off.y < header_table_y(h) {
+	if list.view_off.y < header_table_y(h) && kind == .Search {
+		draw_search_hero(s, h, list.view_off.y)
+	} else if list.view_off.y < header_table_y(h) {
 		draw_list_hero(s, h, kind, art, artist)
 		draw_list_actions(s, kind, h)
 	} else {
@@ -1347,6 +1340,8 @@ Pending :: union {
 	Playlist_Place,
 	List_Place,
 	Home_Place,
+	Search_Place, // the search page, with the field focused
+	Search_Now,
 	Close_Search,
 	Play_Row,
 	Go_Back,
@@ -1354,6 +1349,11 @@ Pending :: union {
 }
 
 Close_Search :: struct {}
+
+// Search_Now is Return in the search field: search for query at once.
+Search_Now :: struct {
+	query: Small,
+}
 
 // Play_Row plays row index of the open list, or with an order the row it
 // picks.
@@ -1374,8 +1374,9 @@ Play_Order :: enum u8 {
 	Shuffled,
 }
 
-// Place is what the main view shows, as the History keeps it. A search is
-// only ever a place: typing starts it, not a Pending.
+// Place is what the main view shows, as the History keeps it. A search
+// with a query becomes a place when its results show (search_shown); one
+// without is the search page with nothing searched for.
 Place :: union {
 	Playlist_Place,
 	List_Place,
@@ -1418,6 +1419,11 @@ pending_set :: proc(s: ^State, p: Pending) {
 pending_apply :: proc(s: ^State) -> bool {
 	pending := s.pending
 	s.pending = nil
+	// Cmd-F and Cmd-L go to the search field only while it's built.
+	on_search_page := search_page_showing(s)
+	defer if on_search_page && !search_page_showing(s) {
+		ui.drop_shortcuts()
+	}
 	switch p in pending {
 	case nil:
 		return false
@@ -1430,9 +1436,14 @@ pending_apply :: proc(s: ^State) -> bool {
 	case Home_Place:
 		history_visit(s, p)
 		place_go(s, p)
+	case Search_Place:
+		search_open(s)
+	case Search_Now:
+		q := p.query
+		search_now(s, small_str(&q))
 	case Close_Search:
-		if search_showing(s) && !home_showing(s) {
-			history_visit(s, Playlist_Place{index = s.library.playlist})
+		if search_page_showing(s) {
+			history_visit(s, Search_Place{})
 		}
 		search_close(s)
 	case Play_Row:
@@ -1454,14 +1465,14 @@ pending_apply :: proc(s: ^State) -> bool {
 
 // history_step goes by places back or forward from history_from. A search
 // is searched for again, and the history moves to it once its results show
-// (search_shown).
+// (search_shown). The search page without a query shows at once.
 history_step :: proc(s: ^State, by: int) -> bool {
 	h := &s.history
 	to := history_from(s) + by
 	if to < 0 || to >= h.count {
 		return false
 	}
-	if search, ok := h.places[to].(Search_Place); ok {
+	if search, ok := h.places[to].(Search_Place); ok && search.query.len > 0 {
 		search_go(s, small_str(&search.query), to)
 		return true
 	}
@@ -1470,9 +1481,9 @@ history_step :: proc(s: ^State, by: int) -> bool {
 	return true
 }
 
-// place_go shows a sidebar entry or a list without recording it in the
-// history. A search's place is searched for again instead, see
-// history_step.
+// place_go shows a sidebar entry, a list, Home or the empty search page
+// without recording it in the history. A search with a query is searched
+// for again instead, see history_step.
 place_go :: proc(s: ^State, place: Place) {
 	search_stop(s)
 	place := place
@@ -1484,6 +1495,7 @@ place_go :: proc(s: ^State, place: Place) {
 	case Home_Place:
 		home_visit(s)
 	case Search_Place:
+		ui.field_set_text(&s.search.field, "")
 	}
 }
 

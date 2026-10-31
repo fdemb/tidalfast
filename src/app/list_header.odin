@@ -6,7 +6,9 @@ package app
 // line about it), then Play, Shuffle and More, then the column headings.
 // Once Play has scrolled under the top, a bar with the cover, the title and
 // Play is pinned there, after Back and Forward, with a copy of the headings
-// under it. An album ends in a footer:
+// under it. Search results have their title as the hero and their tabs as
+// the actions, which pin with the headings under a bar of their own. An
+// album ends in a footer:
 // its release date, its length and more by its artist.
 //
 // Every part has a fixed height (List_Header), so a frame knows where row 0
@@ -43,10 +45,11 @@ FOOTER_END :: 48
 // List_Header is where the parts of the header sit in the scroll view's
 // content, from the top.
 List_Header :: struct {
-	hero:    f32, // the cover, title and meta line; 0 for search results
-	nav:     f32, // the room above the cover for Back and Forward, or 0
-	actions: f32,
-	bar:     f32, // the pinned bar; 0 for none
+	hero:        f32, // the cover, title and meta line
+	nav:         f32, // the room above the cover for Back and Forward, or 0
+	actions:     f32,
+	bar:         f32, // the pinned bar; 0 for none
+	pin_actions: bool, // the actions pin with the headings: the search results' tabs
 }
 
 // list_header is the header's parts for a main view main_w wide, with nav
@@ -55,10 +58,18 @@ List_Header :: struct {
 // controls (ui.cut_drag_regions).
 list_header :: proc(kind: List_Kind, main_w, nav: f32) -> List_Header {
 	if kind == .Search {
-		return {}
+		return search_list_header(nav)
 	}
 	side := clamp(main_w * 0.2, HERO_COVER_MIN, HERO_COVER_MAX)
 	return {hero = hero_top(nav) + side + HERO_PAD, nav = nav, actions = ACTIONS_H, bar = nav if nav > 0 else COMPACT_H}
+}
+
+// search_list_header is the search results' header: their title and what
+// was found under the room for Back, Forward and the search field, then the
+// tabs. The bar pinned in that room is only a background, since the field
+// is there; the tabs pin under it with the headings.
+search_list_header :: proc(nav: f32) -> List_Header {
+	return {hero = nav + SEARCH_HEADER_H, nav = nav, actions = SEARCH_TABS_H, bar = nav, pin_actions = true}
 }
 
 // hero_top is the room above the hero's cover.
@@ -78,9 +89,9 @@ header_rows_top :: proc(h: List_Header) -> f32 {
 }
 
 // header_pinned_h is how much of the view's top the pinned bar and
-// headings cover once the header has collapsed.
+// headings, and the tabs with them, cover once the header has collapsed.
 header_pinned_h :: proc(h: List_Header) -> f32 {
-	return h.bar + HEADER_H + 1
+	return h.bar + (h.actions if h.pin_actions else 0) + HEADER_H + 1
 }
 
 // Header_Collapse is the header scrolled down by an offset: how far the
@@ -93,14 +104,17 @@ Header_Collapse :: struct {
 
 // header_collapse: the bar's background fades in as the hero's bottom
 // reaches it, its content as Play goes under it, and the headings pin when
-// they reach it. Without a bar, as for search results, the headings pin as
-// soon as the view scrolls.
+// they reach it. The search results' tabs pin, with the headings, when
+// they reach it, and their bar has no content.
 header_collapse :: proc(h: List_Header, offset: f32) -> (c: Header_Collapse) {
-	c.pinned = offset > header_table_y(h) - h.bar
+	c.pinned = offset > (h.hero if h.pin_actions else header_table_y(h)) - h.bar
 	if h.bar <= 0 {
 		return
 	}
 	c.bar = clamp((offset - (h.hero - h.bar - BAR_FADE)) / BAR_FADE, 0, 1)
+	if h.pin_actions {
+		return
+	}
 	c.content = clamp((offset - (header_table_y(h) - h.bar - BAR_CONTENT_FADE)) / BAR_CONTENT_FADE, 0, 1)
 	return
 }
@@ -375,9 +389,11 @@ list_link :: proc(s: ^State) -> (link, name: string) {
 }
 
 // draw_pinned_header pins the bar and the headings to the top of list,
-// which is the parent, once the header has scrolled under. It's built
-// after the rows, so it's drawn over them and takes the clicks there.
-draw_pinned_header :: proc(s: ^State, list: ^ui.Box, h: List_Header, cols: Track_Columns, art: Hero_Art) {
+// which is the parent, once the header has scrolled under, and the search
+// results' tabs with them. The found albums, artists and playlists have no
+// headings. It's built after the rows, so it's drawn over them and takes
+// the clicks there.
+draw_pinned_header :: proc(s: ^State, list: ^ui.Box, h: List_Header, cols: Track_Columns, art: Hero_Art, headings := true) {
 	c := header_collapse(h, list.view_off.y)
 	nav_float(s, list.view_off.y, c.bar)
 	if c.bar <= 0 && !c.pinned {
@@ -411,7 +427,12 @@ draw_pinned_header :: proc(s: ^State, list: ^ui.Box, h: List_Header, cols: Track
 	if c.pinned {
 		ui.set_next_background(PANEL)
 		ui.column("", {.Draw_Background}, ui.fill(), ui.children_sum())
-		table_header(cols, pinned = true)
+		if h.pin_actions {
+			draw_search_tabs(s)
+		}
+		if headings {
+			table_header(cols, pinned = true)
+		}
 	}
 }
 

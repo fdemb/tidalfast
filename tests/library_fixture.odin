@@ -139,3 +139,10 @@ enabled :: proc(s: ^app.State, label: string) -> bool {
 	assert(ok, label)
 	return .Disabled not_in n.flags
 }
+
+// open_search opens the search page with Cmd-F and draws it, so the field
+// has the focus for the next frame's keys and text.
+open_search :: proc(t: ^testing.T, s: ^app.State, f: ^Frame, loc := #caller_location) {
+	library_frame(t, s, f, key(.F, {ui.PRIMARY}), loc = loc)
+	library_frame(t, s, f, loc = loc)
+}

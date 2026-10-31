@@ -3,7 +3,10 @@ package app
 // Search, and the lists that aren't sidebar entries: search results, an
 // album's tracks and an artist's top tracks.
 //
-// The field sits at the top of the sidebar; Cmd-F or Cmd-L focuses it.
+// The field sits in the room at the top of the search page, right of Back
+// and Forward. The sidebar's Search row, Cmd-F and Cmd-L open the page with
+// the field focused. The page is a place in
+// the history (Search_Place); without a query it shows what to search for.
 // Each edit raises the query generation. Once typing has stopped for
 // SEARCH_DEBOUNCE a Search job asks TIDAL for songs, albums, artists and
 // playlists at once, and a result for an older generation is dropped. The
@@ -11,7 +14,7 @@ package app
 // table, covers, playing a row and the queue work as for a playlist, and
 // further pages come as Tracks jobs. Albums, artists and playlists show as
 // tabs above it and open their own lists. Clearing the field, or Escape,
-// goes back to the sidebar's playlist.
+// leaves the page empty and the sidebar's playlist open under it.
 //
 // With TIDALFAST_FAKE=1 the search runs over the fake rows on the UI
 // thread, and its lists are row indices instead of a Track_View.
@@ -31,14 +34,17 @@ import "core:unicode/utf8"
 import "../cover"
 import "../jobs"
 import "../platform"
+import "../text"
 import "../tidal"
 import "../ui"
 
 SEARCH_DEBOUNCE :: 0.25 // seconds without typing before the request goes
 SEARCH_PAGE :: 50
 FOUND_MAX :: 50
-SEARCH_FIELD_H :: 44 // the sidebar's search field and its margin
+SEARCH_BAR_MAX :: 480 // the field's widest
+SEARCH_ICON_W :: 36 // the magnifying glass at the field's start
 SEARCH_HEADER_H :: 106 // the results' title and what was found
+SEARCH_PLACEHOLDER :: "What do you want to play?"
 SEARCH_TABS_H :: 40 // the tabs under it, with their margins
 
 Search_Tab :: enum u8 {
@@ -88,6 +94,8 @@ Search :: struct {
 	// The history place Back or Forward went to, which the history moves
 	// to when its results show. nil for a new search.
 	place:       Maybe(int),
+	// The field takes the focus the next time it's built.
+	focus:       bool,
 	// The fake data's lists: indices into State.rows, and for the tabs
 	// indices of rows (albums, artists) and of PLAYLISTS.
 	fake:        []i32,
@@ -117,47 +125,177 @@ found_free :: proc(sr: ^Search) {
 	sr.found = {}
 }
 
-// draw_search_field is the field with the sidebar's width, and runs the
-// search: the debounce, Cmd-F and Cmd-L, Return to search at once.
-draw_search_field :: proc(s: ^State) {
-	sr := &s.search
-	ui.column("", {}, ui.fill(), ui.px(SEARCH_FIELD_H))
-	ui.spacer(ui.px(2))
-	{
-		ui.row("", {}, ui.fill(), ui.px(32))
-		ui.spacer(ui.px(SIDEBAR_INDENT - ui.FIELD_PAD))
-		ui.text_style(.Regular, 13, TEXT)
-		ui.set_next_background(SURFACE)
-		ui.set_next_border_color(OUTLINE)
-		ui.set_next_radius(6)
-		sig := ui.text_field("search", &sr.field, "Search", ui.fill(), ui.px(32))
-		ui.focus_shortcut(sig.box, .F, {ui.PRIMARY})
-		ui.focus_shortcut(sig.box, .L, {ui.PRIMARY})
-		ui.spacer(ui.px(SIDEBAR_INDENT - ui.FIELD_PAD))
-		// Return searches for the text it was pressed on. Edits after it in
-		// the same frame start the debounce over, as they would in the next.
-		submitted := strings.trim_space(sig.submitted_text)
-		switch {
-		case sig.submitted && submitted != "" && sig.submitted_text != ui.field_text(&sr.field):
-			search_stop(s)
-			search_send(s, submitted)
-			search_edited(s)
-		case sig.submitted && submitted != "":
-			if sig.changed {
-				search_edited(s)
-			}
-			sr.due = s.ui.time
-		case sig.changed:
-			search_edited(s)
-		}
+// draw_search_entry is the Search row under Home in the sidebar, lit while
+// the search page shows.
+draw_search_entry :: proc(s: ^State) {
+	current := search_page_showing(s)
+	icon := text.ICON_MAGNIFYING_GLASS_FILL if current else text.ICON_MAGNIFYING_GLASS
+	if sidebar_nav_row("##search_entry", "Search", icon, current) {
+		pending_set(s, Search_Place{})
 	}
-	// Nothing goes while the input method is still composing.
+}
+
+// search_page_showing says whether the main view shows the search page:
+// the history's current place is a search, with or without a query.
+search_page_showing :: proc(s: ^State) -> bool {
+	h := &s.history
+	if h.count == 0 {
+		return false
+	}
+	_, ok := h.places[h.at].(Search_Place)
+	return ok
+}
+
+// search_open shows the search page with the field focused, for
+// pending_apply. Text left in the field is searched for again, so its
+// results come back.
+search_open :: proc(s: ^State) {
+	s.search.focus = true
+	if search_page_showing(s) {
+		return
+	}
+	history_visit(s, Search_Place{})
+	if q := search_query(s); q != "" {
+		search_go(s, q, nil)
+	}
+}
+
+// draw_search_page is the search page under the field, main_w wide and
+// view_h tall: the results, or with none showing what the field is for.
+draw_search_page :: proc(s: ^State, main_w, view_h: f32) {
+	if !search_showing(s) {
+		draw_search_empty(s, view_h)
+	} else if s.search.tab == .Songs {
+		draw_track_list(s, main_w, view_h)
+	} else {
+		draw_found_list(s, main_w, view_h)
+	}
+}
+
+// draw_search_bar is the search page's field, a pill like Back and Forward
+// and as tall, right of them in the main view's room at the top, which is
+// main_w wide. Like them it's built after the view, over the bar the
+// results pin there. So Return asks for its search once the frame is done
+// (Search_Now), and the debounce runs before the view (search_tick).
+draw_search_bar :: proc(s: ^State, main_w: f32) {
+	sr := &s.search
+	x := f32(NAV_PAD + NAV_W + NAV_PAD)
+	w := clamp(main_w - x - NAV_PAD, 0, SEARCH_BAR_MAX)
+	bar := ui.row("search_bar", {.Floating_X, .Floating_Y}, ui.px(w), ui.px(NAV_BUTTON_H))
+	bar.fixed_pos = {x, (nav_h(s) - NAV_BUTTON_H) / 2}
+	ui.text_style(.Regular, 14, TEXT)
+	ui.set_next_background(SURFACE)
+	ui.set_next_border_color(OUTLINE)
+	ui.set_next_radius(NAV_BUTTON_H / 2)
+	sig := ui.text_field("search", &sr.field, SEARCH_PLACEHOLDER, ui.fill(), ui.fill(), inset = SEARCH_ICON_W - ui.FIELD_PAD)
+	{
+		ui.parent(sig.box)
+		ui.text_style(.Icon, 16, SECONDARY)
+		ui.set_next_text_align(.Center)
+		icon := ui.box_make("", {.Floating_X, .Floating_Y, .Draw_Text}, ui.px(SEARCH_ICON_W), ui.px(NAV_BUTTON_H))
+		icon.label = text.ICON_MAGNIFYING_GLASS
+		icon.fixed_pos = {2, 0}
+	}
+	ui.focus_shortcut(sig.box, .F, {ui.PRIMARY})
+	ui.focus_shortcut(sig.box, .L, {ui.PRIMARY})
+	if sr.focus {
+		ui.focus_text_field(sig.box, &sr.field)
+		sr.focus = false
+	}
+	// Return searches for the text it was pressed on. An edit after it that
+	// empties the field closes the search instead, since the last Pending
+	// wins.
+	if submitted := strings.trim_space(sig.submitted_text); sig.submitted && submitted != "" {
+		pending_set(s, Search_Now{query = small(submitted)})
+	}
+	if sig.changed {
+		search_edited(s)
+	}
+}
+
+// search_tick sends the search once typing has stopped for the debounce.
+// It runs before the view is built, since the results replace what the
+// view would show. Nothing goes while the input method is still composing.
+search_tick :: proc(s: ^State) {
+	sr := &s.search
 	if sr.due > 0 && !sr.field.marked {
 		if s.ui.time >= sr.due {
 			search_send(s, search_query(s))
 		} else {
 			ui.wake_at(sr.due)
 		}
+	}
+}
+
+// search_now searches for q at once, for Return, once the frame is done.
+// Text typed after Return in that frame starts the debounce over, as it
+// would in the next frame.
+search_now :: proc(s: ^State, q: string) {
+	sr := &s.search
+	search_stop(s)
+	search_send(s, q)
+	if search_query(s) != q {
+		sr.due = s.ui.time + SEARCH_DEBOUNCE
+	}
+}
+
+// draw_search_hero is the top of the search results' scroll view, under
+// the room for the bar: their title and what was found, then the tabs,
+// unless they're pinned (draw_pinned_header).
+draw_search_hero :: proc(s: ^State, h: List_Header, offset: f32) {
+	ui.spacer(ui.px(h.nav))
+	draw_search_header(s)
+	if header_collapse(h, offset).pinned {
+		ui.spacer(ui.px(h.actions))
+	} else {
+		draw_search_tabs(s)
+	}
+}
+
+// draw_search_header is the search results' title and what was found,
+// above the tabs.
+@(private = "file")
+draw_search_header :: proc(s: ^State) {
+	ui.row("", {}, ui.fill(), ui.px(SEARCH_HEADER_H))
+	ui.spacer(ui.px(24))
+	ui.column("", {}, ui.fill(), ui.fill())
+	ui.spacer(ui.px(26))
+	ui.text_style(.Bold, 28, TEXT)
+	title := ui.label(view_title(s), ui.fill(), ui.px(38))
+	ui.accessible(title, .Static_Text, title.label)
+	ui.text_style(.Regular, 13, SECONDARY)
+	subtitle := ui.label(view_subtitle(s), ui.fill(), ui.px(20))
+	ui.accessible(subtitle, .Static_Text, subtitle.label)
+}
+
+// draw_search_empty is the search page under the field, h tall, while no
+// results show: what to search for, that a search is out, or why the last
+// one failed.
+@(private = "file")
+draw_search_empty :: proc(s: ^State, h: f32) {
+	sr := &s.search
+	q := search_query(s)
+	title, line := "Search TIDAL", "Songs, albums, artists and playlists"
+	switch {
+	case q != "" && (sr.loading || sr.due > 0):
+		title, line = fmt.tprintf("Searching for “%s”", q), ""
+	case q != "" && sr.error.len > 0:
+		title, line = fmt.tprintf("Couldn't search for “%s”", q), small_str(&sr.error)
+	}
+	ui.column("search_empty", {}, ui.fill(), ui.px(h))
+	ui.spacer(ui.px(min(h * 0.25, 120)))
+	ui.text_style(.Icon, 48, DIM)
+	ui.set_next_text_align(.Center)
+	ui.label(text.ICON_MAGNIFYING_GLASS, ui.fill(), ui.px(64))
+	ui.spacer(ui.px(12))
+	ui.text_style(.Bold, 22, TEXT)
+	ui.set_next_text_align(.Center)
+	ui.accessible(ui.label(title, ui.fill(), ui.px(30)), .Static_Text, title)
+	if line != "" {
+		ui.spacer(ui.px(4))
+		ui.text_style(.Regular, 14, SECONDARY)
+		ui.set_next_text_align(.Center)
+		ui.accessible(ui.label(line, ui.fill(), ui.px(20)), .Static_Text, line)
 	}
 }
 
@@ -181,6 +319,7 @@ search_edited :: proc(s: ^State) {
 		return
 	}
 	s.search.due = s.ui.time + SEARCH_DEBOUNCE
+	ui.wake_at(s.search.due)
 }
 
 // search_stop forgets the search that's waiting or out: the debounce, the
@@ -500,9 +639,9 @@ search_status :: proc(s: ^State) -> string {
 	return ""
 }
 
-// draw_search_tabs is the row of tabs over the search results. It returns
-// false when a tab other than Songs is showing, in place of the table.
-draw_search_tabs :: proc(s: ^State) -> (songs: bool) {
+// draw_search_tabs is the row of tabs over the search results. A tab other
+// than Songs shows its list in place of the table.
+draw_search_tabs :: proc(s: ^State) {
 	sr := &s.search
 	counts := [Search_Tab]int {
 		.Songs     = view_count(s),
@@ -535,7 +674,6 @@ draw_search_tabs :: proc(s: ^State) -> (songs: bool) {
 			ui.spacer(ui.px(6))
 		}
 	}
-	return sr.tab == .Songs
 }
 
 @(private = "file")
@@ -587,45 +725,57 @@ found_at :: proc(s: ^State, tab: Search_Tab, i: int) -> Found {
 }
 
 // draw_found_list lists the albums, artists or playlists found in a view w
-// wide and h tall. A click opens one.
+// wide and h tall, under the same header as the songs, which collapses the
+// same way. A click opens one.
 draw_found_list :: proc(s: ^State, w, h: f32) {
 	sr := &s.search
 	tab := sr.tab
+	head := search_list_header(nav_reserve(s))
+	top := head.hero + head.actions
 	list := ui.scroll_view("found", ui.px(w), ui.px(h), inset_end = bar_inset(s))
-	list.pad = {LIST_PAD, LIST_PAD_Y}
-	ui.accessible(list, .List, fmt.tprintf("%v", tab))
-	n := found_count(s, tab)
-	rows := ui.virtual_rows(list, n, TRACK_ROW_H)
-	for i in rows.first ..< rows.last {
-		f := found_at(s, tab, i)
-		ui.set_next_radius(6)
-		row_highlight(LIST_ROWS, false)
-		row := ui.row(fmt.tprintf("##found%d", i), {.Clickable, .Draw_Background, .Draw_Hot_Effects}, ui.fill(), ui.px(TRACK_ROW_H))
-		ui.accessible(row, .Row, fmt.tprintf("%s, %s", f.name, f.subtitle))
-		if ui.signal(row).clicked {
-			open_found(s, tab, f)
-		}
-		ui.spacer(ui.px(16))
-		kind := FOUND_COVER[tab]
-		cover_art(s, kind, f.image, u32(i) * 2654435761 >> 7, 40, ui.px(52), 20 if kind == .Artist else 4)
-		ui.spacer(ui.px(8))
-		ui.column("", {}, ui.fill(), ui.fill())
-		ui.spacer(ui.px(9))
-		ui.text_pad(4)
-		ui.text_style(.Medium, 14, TEXT)
-		ui.label(f.name, ui.fill(), ui.px(20))
-		ui.text_style(.Regular, 13, SECONDARY)
-		if tab == .Albums && f.artist != "" {
-			ui.row("", {}, ui.fill(), ui.px(18))
-			ui.label("Album ·", ui.text_size(), ui.fill())
-			// The fake data's album id is the row it's found at.
-			if k, sig := artist_links(s, f.artist, f.artists, 0); sig.clicked {
-				open_artist_of(s, f.artist, f.artists, k, int(f.id))
+	if list.view_off.y < top {
+		draw_search_hero(s, head, list.view_off.y)
+	} else {
+		ui.spacer(ui.px(top))
+	}
+	{
+		items := ui.column("found_rows", {}, ui.fill(), ui.children_sum())
+		items.pad = {LIST_PAD, LIST_PAD_Y}
+		ui.accessible(items, .List, fmt.tprintf("%v", tab))
+		n := found_count(s, tab)
+		rows := ui.virtual_rows(list, n, TRACK_ROW_H, top + LIST_PAD_Y)
+		for i in rows.first ..< rows.last {
+			f := found_at(s, tab, i)
+			ui.set_next_radius(6)
+			row_highlight(LIST_ROWS, false)
+			row := ui.row(fmt.tprintf("##found%d", i), {.Clickable, .Draw_Background, .Draw_Hot_Effects}, ui.fill(), ui.px(TRACK_ROW_H))
+			ui.accessible(row, .Row, fmt.tprintf("%s, %s", f.name, f.subtitle))
+			if ui.signal(row).clicked {
+				open_found(s, tab, f)
 			}
-		} else {
-			ui.label(f.subtitle, ui.fill(), ui.px(18))
+			ui.spacer(ui.px(16))
+			kind := FOUND_COVER[tab]
+			cover_art(s, kind, f.image, u32(i) * 2654435761 >> 7, 40, ui.px(52), 20 if kind == .Artist else 4)
+			ui.spacer(ui.px(8))
+			ui.column("", {}, ui.fill(), ui.fill())
+			ui.spacer(ui.px(9))
+			ui.text_pad(4)
+			ui.text_style(.Medium, 14, TEXT)
+			ui.label(f.name, ui.fill(), ui.px(20))
+			ui.text_style(.Regular, 13, SECONDARY)
+			if tab == .Albums && f.artist != "" {
+				ui.row("", {}, ui.fill(), ui.px(18))
+				ui.label("Album ·", ui.text_size(), ui.fill())
+				// The fake data's album id is the row it's found at.
+				if k, sig := artist_links(s, f.artist, f.artists, 0); sig.clicked {
+					open_artist_of(s, f.artist, f.artists, k, int(f.id))
+				}
+			} else {
+				ui.label(f.subtitle, ui.fill(), ui.px(18))
+			}
 		}
 	}
+	draw_pinned_header(s, list, head, {}, {}, headings = false)
 }
 
 // open_found opens a found album, artist or playlist once the frame is

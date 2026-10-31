@@ -222,7 +222,7 @@ back_and_forward_through_an_artist :: proc(t: ^testing.T) {
 	s.data.lists.memory = true
 	f := Frame{fonts = &fonts, size = {1100, 2400}}
 	library_frame(t, s, &f)
-	library_frame(t, s, &f, key(.F, {ui.PRIMARY}))
+	open_search(t, s, &f)
 	library_frame(t, s, &f, type_text(&f, "seven"))
 	library_frame(t, s, &f, dt = 1)
 	run_page_jobs(s)
@@ -504,7 +504,7 @@ leaving_the_artist_page :: proc(t: ^testing.T) {
 	library_frame(t, s, &f, press(s, "Back"))
 	library_frame(t, s, &f)
 	testing.expect(t, page_showing(s), "Back to the page")
-	library_frame(t, s, &f, key(.F, {ui.PRIMARY}))
+	open_search(t, s, &f)
 	library_frame(t, s, &f, type_text(&f, "Jóga"))
 	library_frame(t, s, &f, dt = 1)
 	library_frame(t, s, &f)
@@ -586,9 +586,9 @@ top_tracks_play_only_what_they_show :: proc(t: ^testing.T) {
 	testing.expect(t, item != nil && item.title == app.view_row(s, 0).title, "Enter plays the first track, not the one the page doesn't show")
 }
 
-// A search that's cleared, or that fails, before its results show leaves
-// the artist page showing, and the history where it was. So does going
-// Back to a search that then fails.
+// A search that fails before its results show leaves the search page
+// saying so, and the history where it was. Going Back to a search that
+// then fails leaves the artist page showing.
 @(test)
 abandoned_search_keeps_the_artist_page :: proc(t: ^testing.T) {
 	fonts: Fonts
@@ -604,7 +604,7 @@ abandoned_search_keeps_the_artist_page :: proc(t: ^testing.T) {
 	defer library_state_free(s)
 	f := Frame{fonts = &fonts, size = {1100, 2400}}
 	library_frame(t, s, &f)
-	library_frame(t, s, &f, key(.F, {ui.PRIMARY}))
+	open_search(t, s, &f)
 	library_frame(t, s, &f, type_text(&f, "seven"))
 	library_frame(t, s, &f, dt = 1)
 	run_page_jobs(s)
@@ -615,14 +615,15 @@ abandoned_search_keeps_the_artist_page :: proc(t: ^testing.T) {
 	library_frame(t, s, &f)
 	testing.expect(t, page_showing(s), "the page")
 
-	library_frame(t, s, &f, key(.F, {ui.PRIMARY}))
-	library_frame(t, s, &f, type_text(&f, "zzz"))
-	library_frame(t, s, &f, dt = 1)
-	library_frame(t, s, &f, key(.A, {ui.PRIMARY}), key(.Backspace))
-	library_frame(t, s, &f)
+	// The search page searches again for what's in the field.
+	open_search(t, s, &f)
 	run_page_jobs(s)
 	library_frame(t, s, &f)
-	testing.expect(t, page_showing(s), "the page after a search cleared before it came back")
+	testing.expect(t, !page_showing(s), "the search page in place of the artist page")
+	testing.expect(t, has(s, "Results for “seven”", .Static_Text), "the search again")
+	library_frame(t, s, &f, key(.A, {ui.PRIMARY}), key(.Backspace))
+	library_frame(t, s, &f)
+	testing.expect(t, has(s, "Search TIDAL", .Static_Text), "the search page emptied")
 
 	m.answers["/search"] = {500, `{"userMessage":"down"}`}
 	library_frame(t, s, &f, type_text(&f, "zzz"))
@@ -630,8 +631,14 @@ abandoned_search_keeps_the_artist_page :: proc(t: ^testing.T) {
 	run_page_jobs(s)
 	library_frame(t, s, &f)
 	library_frame(t, s, &f)
-	testing.expect(t, page_showing(s), "the page after a failed search")
+	testing.expect(t, has(s, "Couldn't search for “zzz”", .Static_Text), "the search page after a failed search")
 	testing.expect(t, !enabled(s, "Forward"), "nothing to go Forward to")
+
+	library_frame(t, s, &f, press(s, "Back"))
+	library_frame(t, s, &f)
+	run_page_jobs(s)
+	library_frame(t, s, &f)
+	testing.expect(t, page_showing(s), "Back from the search page to the artist page")
 
 	library_frame(t, s, &f, press(s, "Back"))
 	library_frame(t, s, &f)
@@ -672,7 +679,7 @@ back_walks_past_a_search_that_hasnt_answered :: proc(t: ^testing.T) {
 	defer library_state_free(s)
 	f := Frame{fonts = &fonts, size = {1100, 2400}}
 	library_frame(t, s, &f)
-	library_frame(t, s, &f, key(.F, {ui.PRIMARY}))
+	open_search(t, s, &f)
 	library_frame(t, s, &f, type_text(&f, "seven"))
 	library_frame(t, s, &f, dt = 1)
 	run_page_jobs(s)

@@ -52,7 +52,7 @@ library_shortcuts_control_playback :: proc(t: ^testing.T) {
 	testing.expect_value(t, s.settings.volume, f32(0.6))
 
 	// In the search field the keys are the field's.
-	library_frame(t, s, &f, key(.F, {ui.PRIMARY}))
+	open_search(t, s, &f)
 	testing.expect(t, ui.text_focused())
 	playing := app.playback_playing(s)
 	library_frame(t, s, &f, key(.Space), key(.Right, {ui.PRIMARY}), key(.Up, {ui.PRIMARY}))
@@ -87,9 +87,18 @@ mouse_back_and_forward_go_through_history :: proc(t: ^testing.T) {
 	testing.expect_value(t, s.library.playlist, first)
 	testing.expectf(t, s.library.selected == -1, "Back over a row doesn't select it, selected %d", s.library.selected)
 
-	library_frame(t, s, &f, key(.F, {ui.PRIMARY}))
+	open_search(t, s, &f)
 	testing.expect(t, ui.text_focused())
+	testing.expect(t, app.search_page_showing(s))
+	library_frame(t, s, &f, back, back_up)
+	library_frame(t, s, &f)
+	testing.expect(t, !app.search_page_showing(s), "Back from the search page")
+	testing.expect_value(t, s.library.playlist, first)
 	library_frame(t, s, &f, {kind = .Mouse_Down, x = 600, y = 400, button = .Forward}, {kind = .Mouse_Up, x = 600, y = 400, button = .Forward})
+	library_frame(t, s, &f)
+	testing.expect(t, app.search_page_showing(s), "Forward to the search page")
+
+	library_frame(t, s, &f, press(s, app.PLAYLISTS[3]))
 	library_frame(t, s, &f)
 	testing.expect_value(t, s.library.playlist, 3)
 

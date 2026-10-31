@@ -148,7 +148,7 @@ artist_and_album_links :: proc(t: ^testing.T) {
 	testing.expect_value(t, app.small_str(&s.data.view.id), "41")
 
 	// An album in the search results links to its artists.
-	library_frame(t, s, &f, {kind = .Key_Down, key = .F, modifiers = {ui.PRIMARY}})
+	open_search(t, s, &f)
 	library_frame(t, s, &f, type_text(&f, "abc"))
 	library_frame(t, s, &f, {kind = .Key_Down, key = .Return})
 	sr := &s.search
@@ -225,7 +225,7 @@ held_search_gives_way_to_the_next_query :: proc(t: ^testing.T) {
 	f: Frame
 	library_frame(t, s, &f)
 	for jobs.push(&s.data.queue, app.Job{payload = app.Cover_Job{}}, app.PRIORITY_COVER) {}
-	library_frame(t, s, &f, {kind = .Key_Down, key = .F, modifiers = {ui.PRIMARY}})
+	open_search(t, s, &f)
 	library_frame(t, s, &f, type_text(&f, "abc"))
 	library_frame(t, s, &f, {kind = .Key_Down, key = .Return})
 	library_frame(t, s, &f, type_text(&f, "d"))
@@ -265,7 +265,7 @@ sidebar_pick_ends_the_search :: proc(t: ^testing.T) {
 	f: Frame
 	library_frame(t, s, &f)
 	library_frame(t, s, &f)
-	library_frame(t, s, &f, {kind = .Key_Down, key = .F, modifiers = {ui.PRIMARY}})
+	open_search(t, s, &f)
 	library_frame(t, s, &f, type_text(&f, "abc"))
 	testing.expect(t, sr.due > 0)
 
@@ -277,8 +277,9 @@ sidebar_pick_ends_the_search :: proc(t: ^testing.T) {
 	testing.expect_value(t, search_jobs(s), 0)
 	testing.expect_value(t, s.data.view.source, app.Source.Liked)
 
-	// The request is out.
-	library_frame(t, s, &f, {kind = .Key_Down, key = .Return})
+	// The request is out: the search page searches again for the text
+	// left in the field.
+	open_search(t, s, &f)
 	testing.expect(t, sr.loading)
 	sent := sr.gen
 	library_frame(t, s, &f, press(s, "Liked Songs"))
@@ -309,7 +310,7 @@ fake_search_lists_albums_and_artists :: proc(t: ^testing.T) {
 	sr := &s.search
 	f: Frame
 	library_frame(t, s, &f)
-	library_frame(t, s, &f, {kind = .Key_Down, key = .F, modifiers = {ui.PRIMARY}})
+	open_search(t, s, &f)
 	library_frame(t, s, &f, type_text(&f, "Jóga"))
 	library_frame(t, s, &f, dt = 1)
 	testing.expect(t, app.search_showing(s))
@@ -339,7 +340,7 @@ fake_search_lists_albums_and_artists :: proc(t: ^testing.T) {
 searched_state :: proc(t: ^testing.T, f: ^Frame) -> ^app.State {
 	s := library_state(true)
 	library_frame(t, s, f)
-	library_frame(t, s, f, key(.F, {ui.PRIMARY}))
+	open_search(t, s, f)
 	library_frame(t, s, f, type_text(f, "Jóga"))
 	library_frame(t, s, f, dt = 1)
 	assert(app.small_str(&s.search.query) == "Jóga")
@@ -366,10 +367,10 @@ field_shortcuts_keep_their_order :: proc(t: ^testing.T) {
 	testing.expect_value(t, field.anchor, field.cursor)
 	// And Cmd-L from another focus, here the next box after a Tab.
 	library_frame(t, s, &f, key(.Tab))
-	testing.expect(t, !ui.has_focus(node_box(s, "Search")))
+	testing.expect(t, !ui.has_focus(node_box(s, app.SEARCH_PLACEHOLDER)))
 	library_frame(t, s, &f, key(.L, {ui.PRIMARY}), text_at(&f, 0, "Jóga"))
 	testing.expect_value(t, ui.field_text(field), "Jóga")
-	testing.expect(t, ui.has_focus(node_box(s, "Search")))
+	testing.expect(t, ui.has_focus(node_box(s, app.SEARCH_PLACEHOLDER)))
 	library_frame(t, s, &f, dt = 1)
 
 	// Return searches for the text it was pressed on. The X after it
@@ -397,18 +398,18 @@ field_shortcuts_keep_their_order :: proc(t: ^testing.T) {
 	// Text typed before a Tab goes in, though the field lost the focus.
 	library_frame(t, s, &f, text_at(&f, 0, "!"), key(.Tab))
 	testing.expect_value(t, ui.field_text(field), "Jóga!")
-	testing.expect(t, !ui.has_focus(node_box(s, "Search")))
+	testing.expect(t, !ui.has_focus(node_box(s, app.SEARCH_PLACEHOLDER)))
 
 	// Once Escape in an empty field gives up the focus, text after it goes
 	// nowhere, until Cmd-F gives the focus back.
-	library_frame(t, s, &f, key(.F, {ui.PRIMARY}))
+	open_search(t, s, &f)
 	library_frame(t, s, &f, key(.Escape), key(.Escape), text_at(&f, 0, "a"))
 	testing.expect_value(t, ui.field_text(field), "")
-	testing.expect(t, !ui.has_focus(node_box(s, "Search")))
-	library_frame(t, s, &f, key(.F, {ui.PRIMARY}))
+	testing.expect(t, !ui.has_focus(node_box(s, app.SEARCH_PLACEHOLDER)))
+	open_search(t, s, &f)
 	library_frame(t, s, &f, text_at(&f, 0, "b"), key(.Escape), key(.Escape), key(.F, {ui.PRIMARY}), text_at(&f, 1, "c"))
 	testing.expect_value(t, ui.field_text(field), "c")
-	testing.expect(t, ui.has_focus(node_box(s, "Search")))
+	testing.expect(t, ui.has_focus(node_box(s, app.SEARCH_PLACEHOLDER)))
 }
 
 // The track menu belongs to the list and the track it opened on. When a
@@ -452,7 +453,7 @@ track_menu_closes_with_its_list :: proc(t: ^testing.T) {
 	fs := library_state(true)
 	defer library_state_free(fs)
 	library_frame(t, fs, &f)
-	library_frame(t, fs, &f, key(.F, {ui.PRIMARY}))
+	open_search(t, fs, &f)
 	library_frame(t, fs, &f, type_text(&f, "Jóga"))
 	library_frame(t, fs, &f, dt = 1)
 	// A new search waits for its debounce while the menu opens on the old
@@ -469,9 +470,10 @@ track_menu_closes_with_its_list :: proc(t: ^testing.T) {
 	testing.expect(t, !ui.menu_is_open("track_menu"))
 }
 
-// Search results stay in memory for a few minutes: searching for the same
-// words again after opening another list shows them without asking TIDAL,
-// tabs included. Older ones are asked for again.
+// Search results stay in memory for a few minutes: going back to the search
+// page after opening another list searches for the same words again and
+// shows them without asking TIDAL, tabs included. Older ones are asked for
+// again.
 @(test)
 search_results_come_back_from_memory :: proc(t: ^testing.T) {
 	arena: vmem.Arena
@@ -484,7 +486,7 @@ search_results_come_back_from_memory :: proc(t: ^testing.T) {
 	sr := &s.search
 	f: Frame
 	library_frame(t, s, &f)
-	library_frame(t, s, &f, {kind = .Key_Down, key = .F, modifiers = {ui.PRIMARY}})
+	open_search(t, s, &f)
 	library_frame(t, s, &f, type_text(&f, "abc"))
 	library_frame(t, s, &f, {kind = .Key_Down, key = .Return})
 	testing.expect_value(t, search_jobs(s), 1)
@@ -499,8 +501,7 @@ search_results_come_back_from_memory :: proc(t: ^testing.T) {
 
 	library_frame(t, s, &f, press(s, "Liked Songs"))
 	testing.expect_value(t, s.data.view.source, app.Source.Liked)
-	library_frame(t, s, &f, {kind = .Key_Down, key = .F, modifiers = {ui.PRIMARY}})
-	library_frame(t, s, &f, {kind = .Key_Down, key = .Return})
+	open_search(t, s, &f)
 	testing.expect_value(t, search_jobs(s), 0)
 	testing.expect(t, app.search_showing(s))
 	testing.expect_value(t, app.view_count(s), 2)
@@ -514,8 +515,7 @@ search_results_come_back_from_memory :: proc(t: ^testing.T) {
 	i := app.lru_find(&s.data, .Search, "abc")
 	testing.expect(t, i >= 0)
 	s.data.lists.entries[i].view.fetched -= app.SEARCH_MAX_AGE + 1
-	library_frame(t, s, &f, {kind = .Key_Down, key = .F, modifiers = {ui.PRIMARY}})
-	library_frame(t, s, &f, {kind = .Key_Down, key = .Return})
+	open_search(t, s, &f)
 	testing.expect_value(t, search_jobs(s), 1)
 	testing.expect(t, app.lru_find(&s.data, .Search, "abc") < 0)
 }
@@ -629,7 +629,7 @@ back_returns_to_the_last_search :: proc(t: ^testing.T) {
 	sr := &s.search
 	f: Frame
 	library_frame(t, s, &f)
-	library_frame(t, s, &f, key(.F, {ui.PRIMARY}))
+	open_search(t, s, &f)
 	for letter in ([]string{"J", "ó", "g", "a"}) {
 		library_frame(t, s, &f, type_text(&f, letter))
 		library_frame(t, s, &f, dt = 1)
@@ -648,16 +648,21 @@ back_returns_to_the_last_search :: proc(t: ^testing.T) {
 	testing.expect_value(t, app.view_title(s), "Liked Songs")
 	testing.expect(t, !enabled(s, "Back"))
 
-	// Emptying the field goes back to the playlist, which is a place too.
+	// Emptying the field leaves the search page empty in place of the
+	// results, with the playlist open under it.
 	library_frame(t, s, &f, press(s, "Forward"))
-	library_frame(t, s, &f, key(.F, {ui.PRIMARY}))
+	open_search(t, s, &f)
 	library_frame(t, s, &f, key(.Escape))
 	library_frame(t, s, &f)
 	testing.expect(t, !app.search_showing(s))
-	testing.expect_value(t, app.view_title(s), "Liked Songs")
+	testing.expect(t, app.search_page_showing(s))
+	_, empty := access_node(s, "Search TIDAL")
+	testing.expect(t, empty, "the empty search page")
+	testing.expect(t, !enabled(s, "Forward"))
 	library_frame(t, s, &f, press(s, "Back"))
 	library_frame(t, s, &f)
-	testing.expect_value(t, app.view_title(s), "Results for “Jóga”")
+	testing.expect(t, !app.search_page_showing(s))
+	testing.expect_value(t, app.view_title(s), "Liked Songs")
 }
 
 // With TIDAL's data a place is an album's or artist's id, opened again
@@ -764,7 +769,7 @@ sign_out_forgets_history_and_search :: proc(t: ^testing.T) {
 	library_frame(t, s, &f)
 	library_frame(t, s, &f)
 	go_to_first_album(t, s, &f)
-	library_frame(t, s, &f, key(.F, {ui.PRIMARY}))
+	open_search(t, s, &f)
 	library_frame(t, s, &f, type_text(&f, "abc"))
 	library_frame(t, s, &f, key(.Return))
 	res := app.Result {
@@ -800,7 +805,7 @@ return_on_a_full_queue_holds_one_search :: proc(t: ^testing.T) {
 	f: Frame
 	library_frame(t, s, &f)
 	for jobs.push(&d.queue, app.Job{payload = app.Cover_Job{}}, app.PRIORITY_COVER) {}
-	library_frame(t, s, &f, {kind = .Key_Down, key = .F, modifiers = {ui.PRIMARY}})
+	open_search(t, s, &f)
 	library_frame(t, s, &f, type_text(&f, "abc"))
 	for _ in 0 ..< app.HELD_JOBS + 4 {
 		library_frame(t, s, &f, {kind = .Key_Down, key = .Return})
@@ -847,4 +852,114 @@ sidebar_wants_only_visible_covers :: proc(t: ^testing.T) {
 	testing.expectf(t, s.data.covers.used < 30, "%d covers wanted for a window of about 12 rows", s.data.covers.used)
 	testing.expect(t, cover.lookup(&s.data.covers, cover.key_of("img-0", 40)) != nil, "the first playlist's cover is wanted")
 	testing.expect(t, cover.lookup(&s.data.covers, cover.key_of("img-499", 40)) == nil, "the last playlist's cover isn't")
+}
+
+// The sidebar's Search row opens the search page with the field focused
+// and nothing searched for, and is lit while the page shows. The results
+// show under the field, and Back leaves the page for the playlist.
+@(test)
+search_row_opens_the_search_page :: proc(t: ^testing.T) {
+	arena: vmem.Arena
+	_ = vmem.arena_init_growing(&arena)
+	defer vmem.arena_destroy(&arena)
+	context.allocator = vmem.arena_allocator(&arena)
+	s := library_state(true)
+	defer library_state_free(s)
+	s.titlebar_h = 28
+	f: Frame
+	library_frame(t, s, &f)
+	library_frame(t, s, &f)
+	row, _ := access_node(s, "Search")
+	testing.expect(t, .Selected not_in row.flags)
+	_, field := access_node(s, app.SEARCH_PLACEHOLDER)
+	testing.expect(t, !field, "no field off the search page")
+
+	library_frame(t, s, &f, press(s, "Search"))
+	library_frame(t, s, &f)
+	testing.expect(t, app.search_page_showing(s))
+	testing.expect(t, ui.has_focus(node_box(s, app.SEARCH_PLACEHOLDER)))
+	_, empty := access_node(s, "Search TIDAL")
+	testing.expect(t, empty, "the empty search page")
+	row, _ = access_node(s, "Search")
+	testing.expect(t, .Selected in row.flags)
+	// The field is in the room at the top, which moves the window, but a
+	// press on it goes to the field.
+	bar, _ := access_node(s, app.SEARCH_PLACEHOLDER)
+	testing.expectf(t, bar.frame[1] + bar.frame[3] <= app.nav_h(s), "the field at %v, under the room at the top", bar.frame)
+	mid := [2]f32{bar.frame[0] + bar.frame[2] / 2, bar.frame[1] + bar.frame[3] / 2}
+	for r in ui.drag_regions(&s.ui) {
+		inside := mid.x >= r.x && mid.x < r.x + r.w && mid.y >= r.y && mid.y < r.y + r.h
+		testing.expectf(t, !inside, "the field's middle %v moves the window (%v)", mid, r)
+	}
+	_, liked := access_node(s, "Liked Songs, ")
+	testing.expect(t, liked)
+	testing.expect(t, enabled(s, "Back"))
+
+	library_frame(t, s, &f, type_text(&f, "Jóga"))
+	library_frame(t, s, &f, dt = 1)
+	library_frame(t, s, &f)
+	testing.expect(t, app.search_showing(s))
+	_, results := access_node(s, "Results for “Jóga”")
+	testing.expect(t, results, "the results under the field")
+	testing.expect(t, ui.has_focus(node_box(s, app.SEARCH_PLACEHOLDER)))
+
+	library_frame(t, s, &f, press(s, "Back"))
+	library_frame(t, s, &f)
+	testing.expect(t, !app.search_page_showing(s))
+	testing.expect_value(t, app.view_title(s), "Liked Songs")
+	testing.expect(t, !enabled(s, "Back"))
+	row, _ = access_node(s, "Search")
+	testing.expect(t, .Selected not_in row.flags)
+}
+
+// Scrolled down, the search results' title goes under the room at the top
+// and the tabs and headings pin there, under Back, Forward and the field.
+// The albums found collapse the same way.
+@(test)
+search_header_collapses_as_the_results_scroll :: proc(t: ^testing.T) {
+	arena: vmem.Arena
+	_ = vmem.arena_init_growing(&arena)
+	defer vmem.arena_destroy(&arena)
+	context.allocator = vmem.arena_allocator(&arena)
+	f: Frame
+	s := searched_state(t, &f)
+	defer library_state_free(s)
+	library_frame(t, s, &f)
+	scroll_down :: proc(t: ^testing.T, s: ^app.State, f: ^Frame) {
+		library_frame(t, s, f, {kind = .Mouse_Move, x = 600, y = 400})
+		library_frame(t, s, f, {kind = .Scroll, x = 600, y = 400, dy = -600, precise = true, phase = .Began})
+		library_frame(t, s, f)
+	}
+	title_shown :: proc(s: ^app.State) -> bool {
+		nodes, _ := ui.access_tree(&s.ui)
+		for n in nodes {
+			if n.role == .Static_Text && string(n.label) == "Results for “Jóga”" {
+				return true
+			}
+		}
+		return false
+	}
+	tabs_at :: proc(s: ^app.State) -> f32 {
+		n, ok := access_node(s, "Songs  ")
+		return n.frame[1] if ok else -1
+	}
+	testing.expect(t, title_shown(s), "the title at the top")
+	top := tabs_at(s)
+	testing.expect(t, top > app.nav_h(s) + app.SEARCH_HEADER_H, "the tabs under the title")
+
+	scroll_down(t, s, &f)
+	testing.expect(t, !title_shown(s), "the title scrolled away")
+	testing.expect_value(t, tabs_at(s), app.nav_h(s) + 4)
+	_, field := access_node(s, app.SEARCH_PLACEHOLDER)
+	testing.expect(t, field, "the field still over the bar")
+
+	library_frame(t, s, &f, press(s, "Albums"))
+	library_frame(t, s, &f)
+	testing.expect_value(t, s.search.tab, app.Search_Tab.Albums)
+	scroll_down(t, s, &f)
+	testing.expect(t, !title_shown(s), "the albums' title scrolled away")
+	testing.expect_value(t, tabs_at(s), app.nav_h(s) + 4)
+	library_frame(t, s, &f, press(s, "Songs  "))
+	library_frame(t, s, &f)
+	testing.expect_value(t, s.search.tab, app.Search_Tab.Songs)
 }

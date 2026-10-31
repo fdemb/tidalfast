@@ -151,25 +151,33 @@ home_showing :: proc(s: ^State) -> bool {
 // Home shows.
 draw_home_entry :: proc(s: ^State) {
 	current := home_showing(s)
+	if sidebar_nav_row("##home", "Home", text.ICON_HOUSE_FILL if current else text.ICON_HOUSE, current) {
+		pending_set(s, Home_Place{})
+	}
+}
+
+// sidebar_nav_row is a row at the top of the sidebar, an icon and a name
+// that open a page, lit while the page shows. It returns whether it was
+// clicked.
+sidebar_nav_row :: proc(id, name, icon: string, current: bool) -> (clicked: bool) {
 	ui.row("", {}, ui.fill(), ui.px(SIDEBAR_ROW_H))
 	ui.spacer(ui.px(SIDEBAR_PAD))
 	{
 		ui.set_next_radius(6)
 		row_highlight(SIDEBAR_ROWS, current)
-		b := ui.row("##home", {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects}, ui.fill(), ui.fill())
-		ui.accessible(b, .Button, "Home", selected = current)
-		if ui.signal(b).clicked {
-			pending_set(s, Home_Place{})
-		}
+		b := ui.row(id, {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects}, ui.fill(), ui.fill())
+		ui.accessible(b, .Button, name, selected = current)
+		clicked = ui.signal(b).clicked
 		ui.spacer(ui.px(ROW_PAD))
 		ui.text_style(.Icon_Fill if current else .Icon, 20, TEXT)
 		ui.set_next_text_align(.Center)
-		ui.label(text.ICON_HOUSE_FILL if current else text.ICON_HOUSE, ui.px(40), ui.fill())
+		ui.label(icon, ui.px(40), ui.fill())
 		ui.spacer(ui.px(12))
 		ui.text_style(.Semibold, 15, TEXT)
-		ui.label("Home", ui.fill(), ui.fill())
+		ui.label(name, ui.fill(), ui.fill())
 	}
 	ui.spacer(ui.px(SIDEBAR_PAD))
+	return
 }
 
 // draw_home draws the page main_w wide and view_h tall: the greeting, the

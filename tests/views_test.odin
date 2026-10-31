@@ -65,7 +65,9 @@ views_reach_the_bottom_of_the_body :: proc(t: ^testing.T) {
 		settle_views(t, s, &f)
 		expect_views_fit(t, s, f.size, "Home", 2)
 
-		library_frame(t, s, &f, key(.F, {ui.PRIMARY}))
+		open_search(t, s, &f)
+		settle_views(t, s, &f)
+		expect_views_fit(t, s, f.size, "the empty search page", 1)
 		library_frame(t, s, &f, type_text(&f, "abc"))
 		library_frame(t, s, &f, dt = 1)
 		settle_views(t, s, &f)

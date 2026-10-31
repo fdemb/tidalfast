@@ -242,7 +242,8 @@ test_track_columns :: proc(t: ^testing.T) {
 // The header collapses as the list scrolls: the pinned bar's background
 // fades in as the hero's bottom reaches it, its Play and title as the
 // actions go under it, and the headings pin as they reach it. Search
-// results have no bar, so their headings pin at once.
+// results have their title as the hero and pin their tabs with the
+// headings once they reach the bar, which has nothing of its own.
 @(test)
 test_header_collapse :: proc(t: ^testing.T) {
 	h := app.list_header(.Album, 1000, 0)
@@ -265,11 +266,15 @@ test_header_collapse :: proc(t: ^testing.T) {
 	past := app.header_collapse(h, table - h.bar + 1)
 	testing.expect(t, past.pinned && past.bar == 1 && past.content == 1, "then the headings pin")
 
-	search := app.list_header(.Search, 1000, 0)
-	testing.expect_value(t, app.header_rows_top(search), f32(app.HEADER_H + 1 + app.LIST_PAD_Y))
-	testing.expect(t, !app.header_collapse(search, 0).pinned)
-	scrolled := app.header_collapse(search, 1)
-	testing.expect(t, scrolled.pinned && scrolled.bar == 0 && scrolled.content == 0, "search results pin their headings, with no bar")
+	search := app.list_header(.Search, 1000, app.NAV_H)
+	testing.expect_value(t, search.hero, f32(app.NAV_H + app.SEARCH_HEADER_H))
+	testing.expect_value(t, app.header_pinned_h(search), f32(app.NAV_H + app.SEARCH_TABS_H + app.HEADER_H + 1))
+	testing.expect_value(t, app.header_collapse(search, search.hero - search.bar - app.BAR_FADE / 2).bar, f32(0.5))
+	testing.expect(t, !app.header_collapse(search, search.hero - search.bar).pinned)
+	tabs := app.header_collapse(search, search.hero - search.bar + 1)
+	testing.expect(t, tabs.pinned && tabs.bar == 1 && tabs.content == 0, "the tabs pin under an opaque bar with nothing on it")
+	under_notice := app.list_header(.Search, 1000, 0)
+	testing.expect(t, app.header_collapse(under_notice, app.SEARCH_HEADER_H + 1).pinned, "without the room the tabs pin at the top")
 }
 
 @(test)

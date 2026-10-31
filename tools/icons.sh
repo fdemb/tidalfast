@@ -27,6 +27,8 @@ bold check e182
 bold house e2c2
 bold speaker-hifi ea08
 fill house e2c2
+bold magnifying-glass e30c
+fill magnifying-glass e30c
 "
 
 for weight in fill bold; do

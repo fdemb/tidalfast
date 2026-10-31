@@ -34,8 +34,9 @@ Field_Layout :: struct {
 // draws the caret, which blinks with a timer while the window has the
 // keyboard. The text scrolls sideways to keep the caret in view. Its
 // background, border and corners come from the style stacks; with the focus
-// its border is the accent.
-text_field :: proc(id: string, f: ^Text_Field, placeholder: string, width, height: Size) -> (sig: Field_Signal) {
+// its border is the accent. inset is room left of the text, for an icon the
+// caller puts there.
+text_field :: proc(id: string, f: ^Text_Field, placeholder: string, width, height: Size, inset: f32 = 0) -> (sig: Field_Signal) {
 	u := ctx
 	set_next_text_pad(FIELD_PAD)
 	b := box_make(id, {.Clickable, .Focusable, .Text_Input, .Draw_Background, .Draw_Border, .Clip}, width, height)
@@ -59,7 +60,7 @@ text_field :: proc(id: string, f: ^Text_Field, placeholder: string, width, heigh
 	f.had_focus = focused
 
 	// The mouse goes by where the text was drawn.
-	origin := b.rect.x + FIELD_PAD - f.scroll
+	origin := b.rect.x + FIELD_PAD + inset - f.scroll
 
 	// The frame's edits for this field, in order. They were queued while it
 	// had the focus, so text typed before a Tab still goes in. After Escape
@@ -158,7 +159,7 @@ text_field :: proc(id: string, f: ^Text_Field, placeholder: string, width, heigh
 		}
 		f.blink_start = u.time
 	}
-	avail := b.rect.w - 2 * FIELD_PAD
+	avail := b.rect.w - 2 * FIELD_PAD - inset
 	caret := field_caret_x(lay, f.cursor)
 	if !focused {
 		f.scroll = 0
@@ -174,7 +175,7 @@ text_field :: proc(id: string, f: ^Text_Field, placeholder: string, width, heigh
 
 	shown := clone_temp(t)
 	accessible(b, .Text_Field, placeholder, shown)
-	field_draw(u, b, f, lay, placeholder, shown, focused, caret)
+	field_draw(u, b, f, lay, placeholder, shown, focused, caret, inset)
 
 	if focused {
 		line_h := field_line_height(u, font, size)
@@ -199,7 +200,7 @@ text_field :: proc(id: string, f: ^Text_Field, placeholder: string, width, heigh
 			marked_start    = i32(f.marked_start) if f.marked else -1,
 			marked_end      = i32(f.marked_end) if f.marked else -1,
 			limit           = u32(field_limit(f)),
-			caret           = {b.rect.x + FIELD_PAD - f.scroll + cx, b.rect.y + ty, cw, line_h},
+			caret           = {b.rect.x + FIELD_PAD + inset - f.scroll + cx, b.rect.y + ty, cw, line_h},
 		}
 	}
 	return
@@ -215,6 +216,12 @@ focus_shortcut :: proc(b: ^Box, code: platform.Key, modifiers: platform.Modifier
 		u.shortcuts[u.shortcut_count] = {{code = code, modifiers = modifiers}, b.key}
 		u.shortcut_count += 1
 	}
+}
+
+// drop_shortcuts forgets this frame's focus_shortcut calls, for an app
+// that takes their field away before the next frame is built.
+drop_shortcuts :: proc() {
+	ctx.shortcut_count = 0
 }
 
 // focus_text_field gives b, a text field built for f, the focus with all
@@ -350,12 +357,12 @@ field_height :: proc(b: ^Box) -> f32 {
 // field_draw builds the field's insides as floating boxes: the selection,
 // the text or the placeholder, the marked text's underline and the caret.
 @(private)
-field_draw :: proc(u: ^State, b: ^Box, f: ^Text_Field, lay: Field_Layout, placeholder, shown: string, focused: bool, caret: f32) {
+field_draw :: proc(u: ^State, b: ^Box, f: ^Text_Field, lay: Field_Layout, placeholder, shown: string, focused: bool, caret, inset: f32) {
 	push_parent(b)
 	defer pop_parent()
 	line_h := field_line_height(u, b.font, b.font_size)
 	ty := (field_height(b) - line_h) / 2
-	x := FIELD_PAD - f.scroll
+	x := FIELD_PAD + inset - f.scroll
 	piece :: proc(pos, size: [2]f32, color: render.Color) -> ^Box {
 		p := box_make("", {.Floating_X, .Floating_Y, .Draw_Background}, px(size.x), px(size.y))
 		p.fixed_pos = pos
@@ -376,7 +383,7 @@ field_draw :: proc(u: ^State, b: ^Box, f: ^Text_Field, lay: Field_Layout, placeh
 		// As wide as the field in this frame's layout, less the padding.
 		set_next_text_pad(FIELD_PAD)
 		label = box_make("", {.Floating_X, .Floating_Y, .Draw_Text}, fill(), px(line_h))
-		label.fixed_pos = {0, ty}
+		label.fixed_pos = {inset, ty}
 		label.label = placeholder
 		label.text_color.a *= 0.45
 	} else {
