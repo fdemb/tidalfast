@@ -1165,15 +1165,6 @@ device_loss_reopens :: proc(t: ^testing.T) {
 	p := audio.create(no_wake_hires, 0.5, null_output = true, output = {bit_perfect = true})
 	defer audio.destroy(p)
 	audio.play(p, {kind = .Tone, serial = 1, gain = 1, seconds = 30, tone_hz = 440})
-	position :: proc(p: ^audio.Player, past: i64) -> (i64, bool) {
-		for start := time.tick_now(); time.tick_since(start) < 3 * time.Second; {
-			if st := audio.status(p); st.serial == 1 && st.state == .Playing && st.sample > past {
-				return st.sample, true
-			}
-			time.sleep(5 * time.Millisecond)
-		}
-		return 0, false
-	}
 	before, ok := position(p, 22050)
 	testing.expect(t, ok)
 	audio.simulate_device_loss(p)
@@ -1185,6 +1176,52 @@ device_loss_reopens :: proc(t: ^testing.T) {
 	testing.expect(t, ok2, "playback didn't go on after the device went away")
 	testing.expect(t, after - before < 3 * 44100, "it skipped ahead")
 	testing.expect_value(t, audio.status(p).device.rate, 44100)
+}
+
+// When another app sets the device to another rate (simulated here: the
+// null device has no rate to change), the player stops writing to it at
+// the old rate and plays on from where it was through the system mixer,
+// saying why. The next time the output opens, it tries bit-perfect again.
+@(test)
+device_taken_falls_back_to_the_mixer :: proc(t: ^testing.T) {
+	p := audio.create(no_wake_hires, 0.5, null_output = true, output = {bit_perfect = true})
+	defer audio.destroy(p)
+	audio.play(p, {kind = .Tone, serial = 1, gain = 1, seconds = 30, tone_hz = 440})
+	before, ok := position(p, 22050)
+	testing.expect(t, ok)
+	audio.simulate_device_taken(p, 96000)
+	for start := time.tick_now(); time.tick_since(start) < 2 * time.Second && audio.status(p).losses == 0; {
+		time.sleep(5 * time.Millisecond)
+	}
+	testing.expect_value(t, audio.status(p).losses, 1)
+	after, ok2 := position(p, before + 4410)
+	testing.expect(t, ok2, "playback didn't go on after the device was taken")
+	testing.expect(t, after - before < 3 * 44100, "it skipped ahead")
+	st := audio.status(p)
+	testing.expect(t, !st.device.bit_perfect)
+	testing.expect_value(t, audio.device_reason(&st.device), "another app set the device to 96 kHz")
+
+	audio.simulate_device_loss(p)
+	for start := time.tick_now(); time.tick_since(start) < 2 * time.Second && audio.status(p).losses == 1; {
+		time.sleep(5 * time.Millisecond)
+	}
+	_, ok3 := position(p, after + 4410)
+	testing.expect(t, ok3)
+	st = audio.status(p)
+	testing.expect_value(t, st.losses, 2)
+	testing.expect_value(t, audio.device_reason(&st.device), "")
+}
+
+// position waits up to 3 s for serial 1 to play past sample past.
+@(private = "file")
+position :: proc(p: ^audio.Player, past: i64) -> (i64, bool) {
+	for start := time.tick_now(); time.tick_since(start) < 3 * time.Second; {
+		if st := audio.status(p); st.serial == 1 && st.state == .Playing && st.sample > past {
+			return st.sample, true
+		}
+		time.sleep(5 * time.Millisecond)
+	}
+	return 0, false
 }
 
 // Four threads saving different settings at once, while another reads the

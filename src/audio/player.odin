@@ -122,7 +122,7 @@ Status :: struct {
 	bits:        int, // the audible source's bit depth, 0 if unknown
 	device:      Device_Info,
 	change:      Device_Change, // what bit-perfect output has changed on a device, rate 0 for nothing
-	losses:      u32, // times the output device went away or moved and the output reopened
+	losses:      u32, // times the output device went away, moved or was taken, and the output reopened
 }
 
 // Device_Info describes the open output.
@@ -180,9 +180,10 @@ wake_wait_for :: proc(w: ^Wake, d: time.Duration) {
 @(private)
 Device_Watch :: struct {
 	wake:            Wake, // the decode thread's: commands, fetch threads, listeners
-	device_changed:  bool, // the HAL device's alive state changed (atomic)
+	device_changed:  bool, // the HAL device's alive state, rate or format changed (atomic)
 	default_changed: bool, // the system's default output changed (atomic)
 	lost_for_test:   bool, // simulate_device_loss (atomic)
+	taken_for_test:  int, // simulate_device_taken's rate (atomic)
 }
 
 Error_Info :: struct {
@@ -280,6 +281,8 @@ Player :: struct {
 	hal_scratch:     []f32, // for devices whose buffers don't match the ring's layout
 	watch:           ^Device_Watch, // heap, never freed
 	watching_hal:    bool, // watch_device is on for hal
+	taken:           [64]u8, // why the next device_open skips hal: another app changed the device
+	taken_len:       int,
 	using_hal:       bool, // the open device is hal, not miniaudio's
 	device_open:     bool,
 	device_running:  bool,
@@ -490,6 +493,13 @@ when ODIN_TEST {
 	// device had gone away, as the alive listener would.
 	simulate_device_loss :: proc(p: ^Player) {
 		sync.atomic_store(&p.watch.lost_for_test, true)
+		wake_post(&p.watch.wake)
+	}
+
+	// simulate_device_taken makes the decode thread act as if another app
+	// had set the output device to rate, as the rate listener would.
+	simulate_device_taken :: proc(p: ^Player, rate: int) {
+		sync.atomic_store(&p.watch.taken_for_test, rate)
 		wake_post(&p.watch.wake)
 	}
 
@@ -859,6 +869,7 @@ do_set_next :: proc(p: ^Player, src: Source) {
 do_set_output :: proc(p: ^Player, o: Output) {
 	m, sample := published(p)
 	p.output = o
+	p.taken_len = 0
 	device_close(p, restore = true)
 	if m.serial != 0 && !m.end {
 		do_seek(p, m.serial, sample, m.seek_id, 0)
@@ -881,35 +892,53 @@ watch_note :: proc "contextless" (w: ^Device_Watch, default_changed, device_chan
 
 // check_device acts on what the listeners saw. If the HAL device went
 // away, its output closes with nothing restored: there's nothing left to
-// restore. If the system's default output moved to another device, the
-// device is put back and let go. miniaudio follows the default output by
-// itself. Either way the track plays on from the audible position on the
-// default output as it is now; if that can't open, the track fails and the
-// player bar says so.
+// restore. If another app changed its rate or format, the IOProc would
+// play at the wrong speed, so the output closes with nothing restored, as
+// the device is the other app's now, and the track plays on through the
+// system mixer until the device has to open again. Taking the rate back
+// would start a fight with the other app. If the system's default output
+// moved to another device, the device is put back and let go. miniaudio
+// follows the default output by itself. Each way the track plays on from
+// the audible position on the default output as it is now; if that can't
+// open, the track fails and the player bar says so.
 @(private = "file")
 check_device :: proc(p: ^Player) {
 	w := p.watch
 	changed := sync.atomic_exchange(&w.device_changed, false)
 	moved := sync.atomic_exchange(&w.default_changed, false)
 	lost := sync.atomic_exchange(&w.lost_for_test, false)
+	taken := ""
+	if rate := sync.atomic_exchange(&w.taken_for_test, 0); rate != 0 {
+		taken = device_taken_reason(rate)
+	}
 	if !p.device_open {
 		return
 	}
 	if p.using_hal {
 		lost = lost || (changed && !hal_alive(&p.hal))
+		if !lost && changed && taken == "" {
+			taken = hal_taken(&p.hal)
+		}
 		moved = moved && default_output_device() != p.hal.device
 	} else {
 		moved = false
 	}
-	if !lost && !moved {
+	if !lost && taken == "" && !moved {
 		return
 	}
 	m, sample := published(p)
-	if lost {
+	p.taken_len = 0
+	switch {
+	case lost:
 		log.warn("audio: the output device went away")
 		device_close(p)
 		p.hal = {}
-	} else {
+	case taken != "":
+		log.warnf("audio: %s; the system mixer converts it", taken)
+		device_close(p)
+		p.hal = {}
+		p.taken_len = copy(p.taken[:], taken)
+	case:
 		log.info("audio: the default output changed, moving to it")
 		device_close(p, restore = true)
 	}
@@ -1755,7 +1784,10 @@ device_open :: proc(p: ^Player, rate, channels, bits: int) -> bool {
 		float = true,
 	}
 	hal_ok, reason := false, ""
-	if p.output.bit_perfect && !p.null_output {
+	if p.taken_len > 0 {
+		reason = string(p.taken[:p.taken_len])
+		p.taken_len = 0
+	} else if p.output.bit_perfect && !p.null_output {
 		hal_ok, reason = hal_open(p, rate, channels, bits)
 	}
 	if hal_ok {

@@ -81,13 +81,37 @@ unwatch_default_output :: proc(w: ^Device_Watch) {
 	unlisten(SYSTEM_OBJECT, PROP_DEFAULT_OUTPUT, watch_listener, w)
 }
 
-// watch_device tells w whenever h's device comes or goes.
+// watch_device tells w whenever h's device comes or goes, or its nominal
+// rate or physical format changes.
 watch_device :: proc(h: ^Hal, w: ^Device_Watch) -> bool {
-	return listen(h.device, PROP_ALIVE, watch_listener, w)
+	ok := listen(h.device, PROP_ALIVE, watch_listener, w)
+	ok &= listen(h.device, PROP_NOMINAL_RATE, watch_listener, w)
+	ok &= listen(h.stream, PROP_PHYSICAL_FORMAT, watch_listener, w)
+	return ok
 }
 
 unwatch_device :: proc(h: ^Hal, w: ^Device_Watch) {
 	unlisten(h.device, PROP_ALIVE, watch_listener, w)
+	unlisten(h.device, PROP_NOMINAL_RATE, watch_listener, w)
+	unlisten(h.stream, PROP_PHYSICAL_FORMAT, watch_listener, w)
+}
+
+// hal_taken says how another app changed h's device since hal_configure
+// set it, "" if nobody did. The IOProc gets no rate conversion, so at
+// another rate its frames would play at the wrong speed. Compares the
+// device with what hal_configure set rather than trusting the listener,
+// which also fires for this app's own changes.
+hal_taken :: proc(h: ^Hal) -> string {
+	if h.rate == 0 {
+		return ""
+	}
+	if rate := device_nominal_rate(h.device); rate != f64(h.rate) {
+		return device_taken_reason(int(rate))
+	}
+	if f, ok := stream_physical_format(h.stream); ok && !same_format(f, h.format) {
+		return "another app changed the device's format"
+	}
+	return ""
 }
 
 // watch_listener runs on a HAL thread.

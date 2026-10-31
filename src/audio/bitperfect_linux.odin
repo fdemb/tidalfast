@@ -106,6 +106,12 @@ watch_device :: proc(h: ^Hal, w: ^Device_Watch) -> bool {
 	return true
 }
 
+// hal_taken is always "": a graph that leaves the stream's rate makes
+// hal_alive false instead.
+hal_taken :: proc(h: ^Hal) -> string {
+	return ""
+}
+
 unwatch_device :: proc(h: ^Hal, w: ^Device_Watch) {
 	if h.out != nil {
 		sync.atomic_store(&h.out.watch, nil)

@@ -226,6 +226,12 @@ hal_fill :: proc "contextless" (list: ^Audio_Buffer_List, ring: ^Pcm_Ring, scrat
 	return
 }
 
+// device_taken_reason is the Output menu's line for a device another app
+// set to rate while this one played to it.
+device_taken_reason :: proc(rate: int) -> string {
+	return fmt.tprintf("another app set the device to %s kHz", khz_text(rate))
+}
+
 khz_text :: proc(rate: int) -> string {
 	if rate % 1000 == 0 {
 		return fmt.tprintf("%d", rate / 1000)
