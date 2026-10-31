@@ -19,7 +19,7 @@
 // and /artists/<id>/toptracks list a dozen made-up tracks. Every fifth
 // made-up track has a second artist. /artists/<id> gives the artist, and
 // /bio, /albums (filter EPSANDSINGLES or COMPILATIONS too) and /similar
-// the rest of an artist page. /v2/home/feed/static is the home feed:
+// the rest of an artist page. /pages/home is the home feed:
 // shelves of albums, playlists and artists, with a shelf of mixes and one
 // of tracks the app leaves out. Artist 1 has 73 albums, so they take two
 // pages of 50; every fifth artist has no biography and every seventh no
@@ -667,7 +667,7 @@ route :: proc(req: ^Request) -> Response {
 		}
 		strings.write_string(&b, "]}")
 		return json_response(200, strings.to_string(b))
-	case path == "/v2/home/feed/static":
+	case path == "/pages/home":
 		return home_response()
 	case path == "/search":
 		return search_response(req.query["query"] or_else "", req.query["types"] or_else "", offset, limit)
@@ -1194,62 +1194,67 @@ hsv :: proc(h, s, v: f32) -> [3]f32 {
 	return out
 }
 
-// home_response is the v2 home feed: shelves of albums, playlists and
-// artists, a shelf of mixes and one of tracks, which the app leaves out.
+// home_response is pages/home: shelves of albums, playlists and artists,
+// a shelf of mixes and one of tracks, which the app leaves out.
 home_response :: proc() -> Response {
 	b := strings.builder_make(context.temp_allocator)
-	strings.write_string(&b, `{"items":[`)
+	strings.write_string(&b, `{"title":"Home","rows":[`)
 	album :: proc(b: ^strings.Builder, ar, i: int) {
 		id := 10_000 + (ar + 1) * 1000 + i
-		fmt.sbprintf(b, `{{"type":"ALBUM","data":{{"id":%d,"title":%q,"cover":"%s","numberOfTracks":12,"type":"ALBUM","artist":{{"id":%d,"name":%q}},"artists":[{{"id":%d,"name":%q}}]}}}}`,
+		fmt.sbprintf(b, `{{"id":%d,"title":%q,"cover":"%s","numberOfTracks":12,"type":"ALBUM","artist":{{"id":%d,"name":%q}},"artists":[{{"id":%d,"name":%q}}]}}`,
 			id, album_title(id), image_id(id), ar + 1, ARTISTS[ar], ar + 1, ARTISTS[ar])
 	}
-	module :: proc(b: ^strings.Builder, first: bool, title: string) {
+	module :: proc(b: ^strings.Builder, first: bool, type, title: string) {
 		if !first {
 			strings.write_byte(b, ',')
 		}
-		fmt.sbprintf(b, `{{"type":"HORIZONTAL_LIST","moduleId":%q,"title":%q,"items":[`, title, title)
+		fmt.sbprintf(b, `{{"modules":[{{"type":%q,"title":%q,"pagedList":{{"items":[`, type, title)
 	}
-	module(&b, true, "Recommended albums")
+	module_end :: proc(b: ^strings.Builder) {
+		strings.write_string(b, "]}}]}")
+	}
+	module(&b, true, "ALBUM_LIST", "Recommended albums")
 	for i in 0 ..< 16 {
 		if i > 0 {
 			strings.write_byte(&b, ',')
 		}
 		album(&b, i % len(ARTISTS), i)
 	}
-	strings.write_string(&b, "]}")
-	module(&b, false, "Playlists for you")
+	module_end(&b)
+	module(&b, false, "PLAYLIST_LIST", "Playlists for you")
 	{
 		sync.guard(&server.mutex)
 		for p in 1 ..< len(PLAYLISTS) {
 			if p > 1 {
 				strings.write_byte(&b, ',')
 			}
-			strings.write_string(&b, `{"type":"PLAYLIST","data":`)
 			write_playlist(&b, p)
-			strings.write_byte(&b, '}')
 		}
 	}
-	strings.write_string(&b, "]}")
-	module(&b, false, "Your mixes")
-	strings.write_string(&b, `{"type":"MIX","data":{"id":"mock-mix-1","title":"My Mix 1","mixType":"DISCOVERY_MIX"}}]}`)
-	module(&b, false, "Artists you might like")
+	module_end(&b)
+	module(&b, false, "MIX_LIST", "Your mixes")
+	strings.write_string(&b, `{"id":"mock-mix-1","title":"My Mix 1","mixType":"DISCOVERY_MIX"}`)
+	module_end(&b)
+	module(&b, false, "ARTIST_LIST", "Artists you might like")
 	for ar in 0 ..< len(ARTISTS) {
 		if ar > 0 {
 			strings.write_byte(&b, ',')
 		}
-		fmt.sbprintf(&b, `{{"type":"ARTIST","data":{{"id":%d,"name":%q,"picture":"%s"}}}}`, ar + 1, ARTISTS[ar], image_id(3000 + ar))
+		fmt.sbprintf(&b, `{{"id":%d,"name":%q,"picture":"%s"}}`, ar + 1, ARTISTS[ar], image_id(3000 + ar))
 	}
-	strings.write_string(&b, "]}")
-	strings.write_string(&b, `,{"type":"TRACK_LIST","title":"Recently played","items":[{"type":"TRACK","data":{"id":5000000,"title":"Skipped"}}]}`)
-	module(&b, false, "New albums")
+	module_end(&b)
+	module(&b, false, "TRACK_LIST", "Recently played")
+	strings.write_string(&b, `{"id":5000000,"title":"Skipped"}`)
+	module_end(&b)
+	module(&b, false, "ALBUM_LIST", "New albums")
 	for i in 0 ..< 24 {
 		if i > 0 {
 			strings.write_byte(&b, ',')
 		}
 		album(&b, (i * 5) % len(ARTISTS), 100 + i)
 	}
-	strings.write_string(&b, "]}]}")
+	module_end(&b)
+	strings.write_string(&b, "]}")
 	fmt.println("mock: home feed")
 	return json_response(200, strings.to_string(b))
 }

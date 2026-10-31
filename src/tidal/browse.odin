@@ -147,18 +147,9 @@ albums_by_barcode :: proc(s: ^Session, barcode: string, allocator := context.all
 	return out[:], nil
 }
 
-// home fetches the home page as seen on https://listen.tidal.com, from the
-// v2 feed or the legacy v1 page.
-home :: proc(s: ^Session, use_legacy_endpoint := false, allocator := context.allocator) -> (page: Page, err: Error) {
-	if use_legacy_endpoint {
-		return page_get(s, "pages/home", nil, allocator)
-	}
-	scratch_begin(allocator)
-	auth := session_auth(s, context.temp_allocator)
-	params := []Param{{"deviceType", "BROWSER"}, {"locale", auth.locale}, {"platform", "WEB"}}
-	obj := request_object(s, {method = .GET, path = "home/feed/static", base_url = s.config.api_v2_location, params = params}, context.temp_allocator) or_return
-	p := parser_make(s, allocator)
-	return parse_page(&p, obj), nil
+// https://listen.tidal.com/view/pages/home
+home :: proc(s: ^Session, allocator := context.allocator) -> (Page, Error) {
+	return page_get(s, "pages/home", nil, allocator)
 }
 
 // https://listen.tidal.com/view/pages/explore

@@ -4,8 +4,8 @@ package app
 // first playlists as shortcut tiles, then shelves of albums, playlists and
 // artists from TIDAL's home feed.
 //
-// The feed is one Home job: tidal.home's v2 feed, or the legacy pages/home
-// when that fails, mapped into shelves (home_shelves) on the worker. The
+// The feed is one Home job: TIDAL's pages/home, mapped into shelves
+// (home_shelves) on the worker. The
 // shelves are kept in memory with the arena they came in, for the account,
 // and fetched again when Home is shown and they're older than HOME_STALE.
 // Mixes are left out: their pictures are URLs rather than image ids, and
@@ -15,7 +15,6 @@ package app
 // playlists when Home is first shown, with no job.
 
 import "core:fmt"
-import "core:log"
 import "core:mem"
 import vmem "core:mem/virtual"
 import "core:strings"
@@ -293,11 +292,7 @@ shortcut :: proc(s: ^State, i: int, width: f32) -> ui.Signal {
 // The worker's side.
 
 run_home :: proc(s: ^tidal.Session, res: ^Result, a: mem.Allocator) {
-	page, err := tidal.home(s, false, context.temp_allocator)
-	if err != nil {
-		log.infof("home: the v2 feed failed (%s), asking for pages/home", tidal.error_summary(err, context.temp_allocator))
-		page, err = tidal.home(s, true, context.temp_allocator)
-	}
+	page, err := tidal.home(s, context.temp_allocator)
 	if err != nil {
 		fail(res, err)
 		return

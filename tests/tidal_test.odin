@@ -245,7 +245,7 @@ parse_pages :: proc(t: ^testing.T) {
 	allocator := arena_begin(&a)
 	defer vmem.arena_destroy(&a.arena)
 
-	v1 := strings.concatenate(
+	explore := strings.concatenate(
 		{
 			`{"title":"Explore","rows":[`,
 			`{"modules":[{"type":"ALBUM_LIST","title":"New albums","pagedList":{"items":[`, ALBUM_JSON, `]},"showMore":{"apiPath":"pages/albums","title":"More"}}]},`,
@@ -258,7 +258,7 @@ parse_pages :: proc(t: ^testing.T) {
 		allocator,
 	)
 	p := test_parser(allocator)
-	page := tidal.parse_page(&p, parse_obj(t, v1, allocator))
+	page := tidal.parse_page(&p, parse_obj(t, explore, allocator))
 	testing.expect_value(t, page.title, "Explore")
 	// The unknown module is skipped.
 	testing.expect_value(t, len(page.categories), 4)
@@ -280,31 +280,6 @@ parse_pages :: proc(t: ^testing.T) {
 
 	flat := tidal.page_flatten(page, allocator)
 	testing.expect_value(t, len(flat), 4)
-
-	v2 := strings.concatenate(
-		{
-			`{"items":[{"type":"HORIZONTAL_LIST","moduleId":"m1","title":"Because you liked","items":[`,
-			`{"type":"ALBUM","data":`, ALBUM_JSON, `},`,
-			`{"type":"MIX","data":{"id":"0123abc","type":"TRACK_MIX","mixImages":[{"url":"s"},{"url":"m"},{"url":"l"}],"detailMixImages":[],`,
-			`"titleTextInfo":{"text":"Mix title","color":"#fff"},"subtitleTextInfo":{"text":"sub","color":"#000"},"shortSubtitleTextInfo":{"text":"short","color":"#000"},"updated":1700000000000}},`,
-			`{"type":"UNKNOWN","data":{}}]},`,
-			`{"type":"TRACK_LIST","title":"Tracks","items":[{"type":"TRACK","data":`, TRACK_JSON, `}]},`,
-			`{"type":"NEW_V2_THING","items":[]}]}`,
-		},
-		allocator,
-	)
-	home := tidal.parse_page(&p, parse_obj(t, v2, allocator))
-	testing.expect_value(t, len(home.categories), 2)
-	row, _ := home.categories[0].(tidal.Item_List)
-	testing.expect_value(t, row.module_id, "m1")
-	testing.expect_value(t, row.description, "Because you liked")
-	testing.expect_value(t, len(row.items), 2)
-	mix, is_mix := row.items[1].(tidal.Mix_V2)
-	testing.expect(t, is_mix)
-	testing.expect_value(t, mix.title, "Mix title")
-	testing.expect_value(t, mix.short_subtitle, "short")
-	testing.expect_value(t, mix.images.?.large, "l")
-	testing.expect_value(t, time.time_to_unix(mix.updated.?), 1700000000)
 }
 
 MPD :: `<?xml version='1.0' encoding='UTF-8'?><MPD xmlns="urn:mpeg:dash:schema:mpd:2011" profiles="urn:mpeg:dash:profile:isoff-main:2011" type="static" minBufferTime="PT3.993S" mediaPresentationDuration="PT3M5.123S"><Period id="0"><AdaptationSet id="0" contentType="audio" mimeType="audio/mp4" segmentAlignment="true"><Representation id="FLAC,44100,16" codecs="flac" bandwidth="1000000" audioSamplingRate="44100"><SegmentTemplate timescale="44100" initialization="https://sp.example/0.mp4?a=1&amp;b=2" media="https://sp.example/$Number$.mp4?a=1&amp;b=2" startNumber="1"><SegmentTimeline><S d="176128" r="3"/><S d="12345"/></SegmentTimeline></SegmentTemplate></Representation></AdaptationSet></Period></MPD>`

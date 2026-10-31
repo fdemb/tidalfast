@@ -91,31 +91,20 @@ page_flatten :: proc(page: Page, allocator := context.allocator) -> []Item {
 	return out[:]
 }
 
-// parse_page parses a v1 page ("rows") or the v2 home feed ("items").
-// Unknown module types are skipped.
+// parse_page parses a page's rows. Unknown module types are skipped.
 parse_page :: proc(p: ^Parser, obj: json.Object) -> Page {
-	page: Page
+	page := Page{title = pstr(p, obj, "title")}
 	categories := make([dynamic]Page_Category, p.allocator)
-	if rows, ok := jarr(obj, "rows"); ok && len(rows) > 0 {
-		page.title = pstr(p, obj, "title")
-		for row in rows {
-			row_obj := row.(json.Object) or_continue
-			modules, _ := jarr(row_obj, "modules")
-			if len(modules) == 0 {
-				continue
-			}
-			module := modules[0].(json.Object) or_continue
-			if c, parsed := parse_category_v1(p, module); parsed {
-				append(&categories, c)
-			}
+	rows, _ := jarr(obj, "rows")
+	for row in rows {
+		row_obj := row.(json.Object) or_continue
+		modules, _ := jarr(row_obj, "modules")
+		if len(modules) == 0 {
+			continue
 		}
-	} else {
-		items, _ := jarr(obj, "items")
-		for v in items {
-			item := v.(json.Object) or_continue
-			if c, parsed := parse_category_v2(p, item); parsed {
-				append(&categories, c)
-			}
+		module := modules[0].(json.Object) or_continue
+		if c, parsed := parse_category(p, module); parsed {
+			append(&categories, c)
 		}
 	}
 	page.categories = categories[:]
@@ -173,7 +162,7 @@ parse_typed_list :: proc(p: ^Parser, list: json.Object, kind: Typed_Parser) -> [
 }
 
 @(private)
-parse_category_v1 :: proc(p: ^Parser, obj: json.Object) -> (category: Page_Category, ok: bool) {
+parse_category :: proc(p: ^Parser, obj: json.Object) -> (category: Page_Category, ok: bool) {
 	category_type := jstr(obj, "type")
 	paged, _ := jobj(obj, "pagedList")
 
@@ -308,38 +297,4 @@ parse_category_v1 :: proc(p: ^Parser, obj: json.Object) -> (category: Page_Categ
 
 	log.debugf("PageType %s not implemented", category_type)
 	return nil, false
-}
-
-@(private)
-parse_category_v2 :: proc(p: ^Parser, obj: json.Object) -> (category: Page_Category, ok: bool) {
-	category_type := jstr(obj, "type")
-	switch category_type {
-	case "TRACK_LIST", "SHORTCUT_LIST", "HORIZONTAL_LIST", "HORIZONTAL_LIST_WITH_CONTEXT":
-	case:
-		log.debugf("Category %s not implemented", category_type)
-		return nil, false
-	}
-
-	list := Item_List {
-		type      = pstr(p, obj, "type"),
-		module_id = pstr(p, obj, "moduleId"),
-		title     = pstr(p, obj, "title"),
-		subtitle  = pstr(p, obj, "subtitle"),
-		more      = parse_more(p, obj),
-	}
-	list.description = pstr(p, obj, "description") if "description" in obj else list.title
-
-	items, _ := jarr(obj, "items")
-	out := make([dynamic]Item, 0, len(items), p.allocator)
-	for v in items {
-		item := v.(json.Object) or_continue
-		data, _ := jobj(item, "data")
-		if category_type == "TRACK_LIST" {
-			append(&out, parse_track(p, data))
-		} else if parsed, parsed_ok := parse_item_by_type(p, jstr(item, "type"), data, mix_v2 = true); parsed_ok {
-			append(&out, parsed)
-		}
-	}
-	list.items = out[:]
-	return list, true
 }

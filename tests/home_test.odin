@@ -105,17 +105,17 @@ home_job :: proc(t: ^testing.T, s: ^app.State, loc := #caller_location) -> bool 
 	return false
 }
 
-// Home asks once for the v2 feed and shows its shelves; showing it again
-// while they're fresh asks for nothing.
+// Home asks once for pages/home, and nothing else, and shows its shelves;
+// showing it again while they're fresh asks for nothing.
 @(test)
 home_fetches_the_feed :: proc(t: ^testing.T) {
 	m: Mock
 	mock_start(&m)
 	defer mock_stop(&m)
-	m.answers["/v2/home/feed/static"] = {200, `{"items":[` +
-		`{"type":"HORIZONTAL_LIST","title":"For you","items":[{"type":"MIX","data":{"id":"m1"}},{"type":"PLAYLIST","data":{"uuid":"p1","title":"Mock Mix","numberOfTracks":3,"squareImage":"sq"}}]},` +
-		`{"type":"TRACK_LIST","title":"Tracks","items":[{"type":"TRACK","data":{"id":5,"title":"t"}}]},` +
-		`{"type":"HORIZONTAL_LIST","title":"Albums","items":[{"type":"ALBUM","data":{"id":12,"title":"Twelve","cover":"c","artists":[{"id":3,"name":"Three"}]}}]}]}`}
+	m.answers["/pages/home"] = {200, `{"title":"Home","rows":[` +
+		`{"modules":[{"type":"MIXED_TYPES_LIST","title":"For you","pagedList":{"items":[{"type":"MIX","item":{"id":"m1"}},{"type":"PLAYLIST","item":{"uuid":"p1","title":"Mock Mix","numberOfTracks":3,"squareImage":"sq"}}]}}]},` +
+		`{"modules":[{"type":"TRACK_LIST","title":"Tracks","pagedList":{"items":[{"id":5,"title":"t"}]}}]},` +
+		`{"modules":[{"type":"ALBUM_LIST","title":"Albums","pagedList":{"items":[{"id":12,"title":"Twelve","cover":"c","artists":[{"id":3,"name":"Three"}]}]}}]}]}`}
 	s := home_state(&m)
 	defer home_state_free(s)
 	d := &s.data
@@ -133,36 +133,24 @@ home_fetches_the_feed :: proc(t: ^testing.T) {
 		testing.expect_value(t, h.shelves[1].items[0].name, "Twelve")
 		testing.expect_value(t, h.shelves[1].items[0].subtitle, "Three")
 	}
+	testing.expect_value(t, mock_count(&m, "GET /pages/home"), 1)
+	testing.expect_value(t, mock_count(&m, "GET /v2/"), 0)
 	app.home_visit(s)
 	testing.expect_value(t, len(data_jobs(d)), 0)
 }
 
-// When the v2 feed fails, the legacy pages/home stands in. When both fail,
-// Home says so, and Retry asks again.
+// When pages/home fails, Home says so, and Retry asks again.
 @(test)
-home_falls_back_then_fails :: proc(t: ^testing.T) {
+home_fails_then_retries :: proc(t: ^testing.T) {
 	m: Mock
 	mock_start(&m)
 	defer mock_stop(&m)
-	m.answers["/v2/home/feed/static"] = {500, `{"userMessage":"down"}`}
-	m.answers["/pages/home"] = {200, `{"title":"Home","rows":[{"modules":[{"type":"ALBUM_LIST","title":"New albums","pagedList":{"items":[{"id":1,"title":"One","cover":"c"},{"id":2,"title":"Two","cover":"c"}]}}]}]}`}
+	m.answers["/pages/home"] = {500, `{"userMessage":"down"}`}
 	s := home_state(&m)
 	defer home_state_free(s)
 	d := &s.data
 	h := &d.home
 
-	app.home_visit(s)
-	if !home_job(t, s) {
-		return
-	}
-	testing.expect_value(t, h.status, app.Home_Status.Ready)
-	if testing.expect_value(t, len(h.shelves), 1) {
-		testing.expect_value(t, h.shelves[0].title, "New albums")
-		testing.expect_value(t, len(h.shelves[0].items), 2)
-	}
-
-	app.home_clear(d)
-	m.answers["/pages/home"] = {500, `{"userMessage":"down"}`}
 	app.home_visit(s)
 	if !home_job(t, s) {
 		return
@@ -260,7 +248,7 @@ home_empty_feed_says_so :: proc(t: ^testing.T) {
 	m: Mock
 	mock_start(&m)
 	defer mock_stop(&m)
-	m.answers["/v2/home/feed/static"] = {200, `{"items":[{"type":"TRACK_LIST","title":"Tracks","items":[{"type":"TRACK","data":{"id":5,"title":"t"}}]}]}`}
+	m.answers["/pages/home"] = {200, `{"title":"Home","rows":[{"modules":[{"type":"TRACK_LIST","title":"Tracks","pagedList":{"items":[{"id":5,"title":"t"}]}}]}]}`}
 	s := library_state(false, &m)
 	defer library_state_free(s)
 	f := Frame{fonts = &fonts, size = {1100, 900}}

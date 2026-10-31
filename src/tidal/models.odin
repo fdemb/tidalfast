@@ -374,7 +374,7 @@ More :: struct {
 	title:    string,
 }
 
-// A page from https://listen.tidal.com/view/pages/ or the v2 home feed.
+// A page from https://listen.tidal.com/view/pages/.
 Page :: struct {
 	title:      string,
 	categories: []Page_Category,
@@ -389,14 +389,11 @@ Page_Category :: union {
 	Item_Header,
 }
 
-// A row of items. v1 ALBUM_LIST, TRACK_LIST, MIXED_TYPES_LIST, ... and the v2
-// home feed lists (TRACK_LIST, SHORTCUT_LIST, HORIZONTAL_LIST,
-// HORIZONTAL_LIST_WITH_CONTEXT). `type` holds the module type.
+// A row of items: ALBUM_LIST, TRACK_LIST, MIXED_TYPES_LIST, ... `type` holds
+// the module type.
 Item_List :: struct {
 	type:        string,
-	module_id:   string,
 	title:       string,
-	subtitle:    string,
 	description: string,
 	more:        Maybe(More),
 	items:       []Item,

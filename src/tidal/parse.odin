@@ -629,8 +629,8 @@ parse_genre :: proc(p: ^Parser, obj: json.Object) -> Genre {
 }
 
 // parse_item_by_type parses obj by a TIDAL type name such as "TRACK",
-// "album" or "Playlist". mix_v2 selects the v2 mix shape.
-parse_item_by_type :: proc(p: ^Parser, type_name: string, obj: json.Object, mix_v2 := false) -> (item: Item, ok: bool) {
+// "album" or "Playlist".
+parse_item_by_type :: proc(p: ^Parser, type_name: string, obj: json.Object) -> (item: Item, ok: bool) {
 	// Search top hits use plural names ("ARTISTS"); no singular one ends in S.
 	t := strings.trim_suffix(strings.to_upper(type_name, context.temp_allocator), "S")
 	switch t {
@@ -645,9 +645,6 @@ parse_item_by_type :: proc(p: ^Parser, type_name: string, obj: json.Object, mix_
 	case "PLAYLIST":
 		return parse_playlist(p, obj), true
 	case "MIX":
-		if mix_v2 {
-			return parse_mix_v2(p, obj), true
-		}
 		return parse_mix(p, obj), true
 	}
 	log.debugf("Item type '%s' not implemented", type_name)
