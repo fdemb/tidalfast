@@ -1318,6 +1318,33 @@ test_ui_sized_view_builds_rows :: proc(t: ^testing.T) {
 	testing.expect(t, rows.last - rows.first >= 40, "the frame after a resize fills the taller view")
 }
 
+// No_Focus_Ring set through the style stack works as it does on the box.
+@(test)
+test_ui_no_focus_ring_from_the_style :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	now := 0.0
+	frame :: proc(u: ^ui.State, now: ^f64, events: ..platform.Event) -> (quiet: ^ui.Box) {
+		now^ += 1.0 / 120
+		ui.begin_frame(u, events, nil, nil, 300, 200, now^)
+		{
+			ui.flags({.No_Focus_Ring})
+			quiet = ui.box_make("quiet", {.Focusable}, ui.px(100), ui.px(40))
+		}
+		ui.end_frame()
+		return
+	}
+	frame(&u, &now)
+	frame(&u, &now, {kind = .Key_Down, key = .Tab})
+	quiet: ^ui.Box
+	for _ in 0 ..< 10 {
+		quiet = frame(&u, &now)
+	}
+	testing.expect(t, ui.has_focus(quiet))
+	testing.expect_value(t, quiet.focus_t, f32(0))
+}
+
 // A box with No_Focus_Ring draws none when the keyboard focuses it.
 @(test)
 test_ui_no_focus_ring :: proc(t: ^testing.T) {

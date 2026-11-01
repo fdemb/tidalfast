@@ -1255,10 +1255,10 @@ box_make :: proc(id: string, flags: Box_Flags = {}, width: Size = {}, height: Si
 	if b.key != 0 {
 		rate := u.ease
 		hot := u.hot == b.key || u.hot_parent == b.key
-		if .Focus_Is_Hot in flags {
+		if .Focus_Is_Hot in b.flags {
 			hot = u.focus == b.key
 		}
-		ring := u.focus == b.key && u.focus_visible && .No_Focus_Ring not_in flags
+		ring := u.focus == b.key && u.focus_visible && .No_Focus_Ring not_in b.flags
 		b.hot_t = approach(u, b.hot_t, 1 if hot else 0, rate, 0.002)
 		b.active_t = approach(u, b.active_t, 1 if u.active[.Left] == b.key else 0, rate, 0.002)
 		b.focus_t = approach(u, b.focus_t, 1 if ring else 0, rate, 0.002)
