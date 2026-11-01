@@ -511,7 +511,9 @@ coretext_shape :: proc(t: ^State, face: int, sh: ^Shaping, start, end: int, size
 			} else {
 				g.id = 0
 			}
-			append(&placed, Placed{g, rune_at[clamp(indices[j], 0, len(rune_at) - 1)]})
+			cp := rune_at[clamp(indices[j], 0, len(rune_at) - 1)]
+			g.space = is_space(runes[cp])
+			append(&placed, Placed{g, cp})
 			width = max(width, f32(positions[j].x + advances[j].width))
 		}
 	}

@@ -63,6 +63,17 @@ glyphs :: proc(n: int, spaces: ..int) -> []text.Glyph {
 	return out
 }
 
+// The shaper, peel and CoreText agree on what a space is.
+@(test)
+test_is_space :: proc(t: ^testing.T) {
+	for r in ([]rune{' ', 0xa0, 0x3000}) {
+		testing.expectf(t, text.is_space(r), "%x is a space", r)
+	}
+	for r in ([]rune{'a', '\t', 0x200b, '('}) {
+		testing.expectf(t, !text.is_space(r), "%x isn't a space", r)
+	}
+}
+
 @(test)
 test_truncate_ltr :: proc(t: ^testing.T) {
 	gs := glyphs(10)

@@ -586,7 +586,7 @@ kb_shape_once :: proc(t: ^State, font: Font, size: f32, sh: ^Shaping, stack: Fon
 				offset  = {f32(g.OffsetX) * scale, -f32(g.OffsetY) * scale},
 				id      = g.Id,
 				face    = u8(face),
-				space   = g.Codepoint == ' ' || g.Codepoint == 0xa0 || g.Codepoint == 0x3000,
+				space   = is_space(g.Codepoint),
 			}
 			// With the context API this is always the codepoint index.
 			shaping_append(sh, glyph, clamp(int(g.UserIdOrCodepointIndex), 0, len(sh.runes) - 1))
@@ -800,13 +800,20 @@ pictographic :: proc(r: rune) -> bool {
 	return false
 }
 
+// is_space says whether a glyph for r is a space that truncation trims
+// and peel splits off: the space, the no-break space and the ideographic
+// space.
+is_space :: proc(r: rune) -> bool {
+	return r == ' ' || r == 0xa0 || r == 0x3000
+}
+
 // peel splits spaces and brackets at either logical end of a run into
 // one-glyph runs of their own, as long as each is a glyph to itself. The
 // split glyphs stay where they are in sh.glyphs.
 @(private)
 peel :: proc(t: ^State, sh: ^Shaping) {
 	peelable :: proc(r: rune) -> bool {
-		return r == ' ' || r == 0xa0 || mirror(r) != r
+		return is_space(r) || mirror(r) != r
 	}
 	// edge says whether the glyph at the left or right end of [lo, hi) is
 	// codepoint cp's and no other glyph there is.
