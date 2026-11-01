@@ -1250,6 +1250,7 @@ draw_player_bar :: proc(s: ^State, w, h: f32) {
 TIME_PAD :: 8 // between the times and the progress bar
 OUTPUT_GAP :: 12
 VOLUME_W :: 110
+VOLUME_H :: 28 // the slider takes presses this far around its bar
 
 // clock formats seconds as m:ss, or h:mm:ss from an hour.
 clock :: proc(seconds: f64) -> string {
@@ -1329,19 +1330,24 @@ toggle_button :: proc(id, icon, name, value: string, on: bool) -> ui.Signal {
 // draw_volume is a slider: press or drag along it to set the volume. A
 // press and release in one frame still counts, at the release.
 draw_volume :: proc(s: ^State, width: f32) {
-	slider := ui.column("volume", {.Clickable}, ui.px(width), ui.fill())
-	ui.accessible(slider, .Slider, "Volume", cat(num(int(math.round(s.settings.volume * 100))), "%"))
-	sig := ui.signal(slider)
-	if (sig.held || sig.released) && slider.rect.w > 0 {
-		playback_set_volume(s, clamp((sig.mouse.x - slider.rect.x) / slider.rect.w, 0, 1), sig.released)
-	}
+	ui.column("", {}, ui.px(width), ui.fill())
 	ui.spacer(ui.fill())
 	{
-		ui.radius(2)
-		ui.set_next_background(SURFACE_ACTIVE)
-		ui.row("", {.Draw_Background}, ui.fill(), ui.px(4))
-		ui.set_next_background(mix(SECONDARY, ACCENT, max(slider.hot_t, slider.active_t)))
-		ui.box_make("", {.Draw_Background}, ui.pct(s.settings.volume, 1), ui.fill())
+		slider := ui.column("volume", {.Clickable}, ui.fill(), ui.px(VOLUME_H))
+		ui.accessible(slider, .Slider, "Volume", cat(num(int(math.round(s.settings.volume * 100))), "%"))
+		sig := ui.signal(slider)
+		if (sig.held || sig.released) && slider.rect.w > 0 {
+			playback_set_volume(s, clamp((sig.mouse.x - slider.rect.x) / slider.rect.w, 0, 1), sig.released)
+		}
+		ui.spacer(ui.fill())
+		{
+			ui.radius(2)
+			ui.set_next_background(SURFACE_ACTIVE)
+			ui.row("", {.Draw_Background}, ui.fill(), ui.px(4))
+			ui.set_next_background(mix(SECONDARY, ACCENT, max(slider.hot_t, slider.active_t)))
+			ui.box_make("", {.Draw_Background}, ui.pct(s.settings.volume, 1), ui.fill())
+		}
+		ui.spacer(ui.fill())
 	}
 	ui.spacer(ui.fill())
 }

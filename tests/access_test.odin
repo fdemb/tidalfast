@@ -35,3 +35,26 @@ rows_under_the_player_bar_are_cut :: proc(t: ^testing.T) {
 	testing.expect(t, rows > 0, "the list's rows are in the tree")
 }
 
+// The volume slider's frame is about its bar, not the player bar's height.
+@(test)
+volume_slider_is_its_own_height :: proc(t: ^testing.T) {
+	arena: mem.Dynamic_Arena
+	mem.dynamic_arena_init(&arena)
+	defer mem.dynamic_arena_destroy(&arena)
+	context.allocator = mem.dynamic_arena_allocator(&arena)
+	s := library_state(true)
+	defer library_state_free(s)
+	f := Frame{size = {1100, 700}}
+	for _ in 0 ..< 3 {
+		library_frame(t, s, &f)
+	}
+	nodes, _ := ui.access_tree(&s.ui)
+	found := false
+	for n in nodes {
+		if n.role == .Slider && string(n.label) == "Volume" {
+			found = true
+			testing.expectf(t, n.frame[3] <= 32, "the slider is %v tall", n.frame[3])
+		}
+	}
+	testing.expect(t, found, "a volume slider")
+}
