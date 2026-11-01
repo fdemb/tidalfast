@@ -3,28 +3,37 @@ package ui
 import "core:hash"
 
 import "../platform"
+import "../render"
 
 ACCESS_TEXT :: 4096 // bytes of labels and values taken from the frame's memory at a time
 
 @(private)
 Access_Walk :: struct {
-	nodes: [dynamic]platform.Access_Node,
-	h:     u64,
-	text:  []u8, // the rest of the chunk the strings are copied into
+	nodes:   [dynamic]platform.Access_Node,
+	h:       u64,
+	text:    []u8, // the rest of the chunk the strings are copied into
+	shields: [dynamic]^Box, // the Click_Shield boxes on screen, in drawing order
+	passed:  int, // how many of shields the walk has reached
 }
 
 // access_build flattens the boxes that have an access role into this
 // frame's accessibility tree, parents first. Only what is on screen goes
 // in: a box clipped away, or a box under a clipping box clipped away, is
 // left out with everything inside it, so a virtualized table gives only the
-// rows in view. A box without a key gets an id from its parent's and its
-// place among its siblings, which stays put while the tree does.
+// rows in view. A Click_Shield drawn over a box, such as the player bar
+// over the list's last rows, takes its part of the box's frame, and a box
+// it hides entirely is left out. A box without a key gets an id from its
+// parent's and its place among its siblings, which stays put while the
+// tree does.
 @(private)
 access_build :: proc(u: ^State) {
 	w := Access_Walk {
-		nodes = make([dynamic]platform.Access_Node, 0, 128, context.temp_allocator),
-		h     = 14695981039346656037,
+		nodes   = make([dynamic]platform.Access_Node, 0, 128, context.temp_allocator),
+		h       = 14695981039346656037,
+		shields = make([dynamic]^Box, 0, 8, context.temp_allocator),
 	}
+	access_shields(&w, u.root)
+	access_shields(&w, u.floating_root)
 	top: u64
 	access_walk(u, &w, u.root, -1, 0, &top)
 	access_walk(u, &w, u.floating_root, -1, 0, &top)
@@ -49,19 +58,78 @@ access_cstring :: proc(w: ^Access_Walk, s: string) -> cstring {
 	return c
 }
 
+// access_skips says whether the walk leaves out b and everything inside it.
+@(private)
+access_skips :: proc(b: ^Box) -> bool {
+	return b.opacity <= 0 || (.Clip in b.flags && (b.clip.w <= 0 || b.clip.h <= 0))
+}
+
+// access_shields collects the shields in the order access_walk reaches them.
+@(private)
+access_shields :: proc(w: ^Access_Walk, b: ^Box) {
+	if access_skips(b) {
+		return
+	}
+	if .Click_Shield in b.flags && b.clip.w > 0 && b.clip.h > 0 {
+		append(&w.shields, b)
+	}
+	for c := b.first; c != nil; c = c.next {
+		access_shields(w, c)
+	}
+}
+
+// access_uncovered is the part of r that the shields drawn after b leave
+// in view. A shield across r's whole width or height cuts r to the side
+// that sticks out; one over r's middle leaves r whole, since what's left
+// isn't a rect.
+@(private)
+access_uncovered :: proc(w: ^Access_Walk, b: ^Box, r: render.Rect) -> render.Rect {
+	r := r
+	shields: for shield in w.shields[w.passed:] {
+		for p := shield.parent; p != nil; p = p.parent {
+			if p == b {
+				continue shields
+			}
+		}
+		o := rect_intersect(r, shield.clip)
+		if o.w <= 0 || o.h <= 0 {
+			continue
+		}
+		above, below := o.y - r.y, r.y + r.h - (o.y + o.h)
+		left, right := o.x - r.x, r.x + r.w - (o.x + o.w)
+		if left < 0.5 && right < 0.5 {
+			if below < 0.5 {
+				r.h = max(above, 0)
+			} else if above < 0.5 {
+				r = {r.x, o.y + o.h, r.w, below}
+			}
+		} else if above < 0.5 && below < 0.5 {
+			if right < 0.5 {
+				r.w = max(left, 0)
+			} else if left < 0.5 {
+				r = {o.x + o.w, r.y, right, r.h}
+			}
+		}
+	}
+	return r
+}
+
 // siblings counts the nodes made so far under parent.
 @(private)
 access_walk :: proc(u: ^State, w: ^Access_Walk, b: ^Box, parent: i32, parent_id: u64, siblings: ^u64) {
-	if b.opacity <= 0 {
+	if access_skips(b) {
 		return
 	}
-	visible := b.clip.w > 0 && b.clip.h > 0
-	if !visible && .Clip in b.flags {
-		return
+	if w.passed < len(w.shields) && w.shields[w.passed] == b {
+		w.passed += 1
+	}
+	frame := b.clip
+	if b.access_role != .None && frame.w > 0 && frame.h > 0 {
+		frame = access_uncovered(w, b, frame)
 	}
 	parent, parent_id, siblings := parent, parent_id, siblings
 	children: u64
-	if b.access_role != .None && visible {
+	if b.access_role != .None && frame.w > 0 && frame.h > 0 {
 		siblings^ += 1
 		id := u64(b.key)
 		if id == 0 {
@@ -83,7 +151,7 @@ access_walk :: proc(u: ^State, w: ^Access_Walk, b: ^Box, parent: i32, parent_id:
 			parent = parent,
 			role   = b.access_role,
 			flags  = flags,
-			frame  = {b.clip.x, b.clip.y, b.clip.w, b.clip.h},
+			frame  = {frame.x, frame.y, frame.w, frame.h},
 			label  = access_cstring(w, label),
 			value  = access_cstring(w, b.access_value),
 		}

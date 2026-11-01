@@ -69,10 +69,20 @@ list_header_collapses_over_the_rows :: proc(t: ^testing.T) {
 	testing.expect(t, !hero, "the hero isn't built once it's scrolled away")
 	_, pinned := exact_node(s, fmt.tprintf("Play %s", title), .Button)
 	testing.expect(t, pinned, "Play in the pinned bar")
+	testing.expect_value(t, s.library.top_row, 50)
+	// Row 50 is under the pinned bar and headings, so the first row read
+	// out is the first one below them.
 	row := app.view_row(s, 50)
 	_, top := exact_node(s, fmt.tprintf("%s, %s, %s", row.title, row.artist, row.album), .Row)
-	testing.expect(t, top, "row 50 is at the top")
-	testing.expect_value(t, s.library.top_row, 50)
+	testing.expect(t, !top, "row 50 is hidden under the pinned header")
+	view, _ = list_view(t, s, title)
+	nodes, _ := ui.access_tree(&s.ui)
+	for n in nodes {
+		if n.role == .Row && n.frame[0] >= view.rect.x {
+			testing.expectf(t, n.frame[1] >= view.rect.y + app.header_pinned_h(h) - 0.5, "the first row starts at %v, under the pinned header", n.frame[1])
+			break
+		}
+	}
 
 	// A row is under the pinned headings: the click stops there.
 	view, _ = list_view(t, s, title)
