@@ -455,6 +455,7 @@ account_end :: proc(s: ^State) {
 	d.held_count = 0
 	jobs.remove_if(&d.queue, drop_account_job, nil)
 	tidal.session_clear_auth(d.session)
+	refresh_gate_open(d)
 	d.account = .Signed_Out
 	d.device_login = false
 	d.relogin = false

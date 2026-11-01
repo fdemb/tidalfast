@@ -29,6 +29,7 @@ Queue :: struct($T: typeid, $N: int) {
 	next_seq: u64,
 	busy:     int, // popped with pop_wait and not yet done or requeued
 	stopped:  bool,
+	kicks:    u64, // kick calls, which end every pop_wait_where waiting
 }
 
 // push adds item unless the queue is full or stopped. Full counts busy
@@ -103,11 +104,13 @@ try_pop :: proc(q: ^Queue($T, $N)) -> (item: T, ok: bool) {
 }
 
 // pop_wait_where is pop_wait for the items wanted says yes to, waiting at
-// most d for one. ok is false if none came in time or the queue stopped;
-// stopped says which. wanted runs with the queue locked.
+// most d for one. ok is false if none came in time, a kick ended the wait or
+// the queue stopped; stopped says if it stopped. wanted runs with the queue
+// locked.
 pop_wait_where :: proc(q: ^Queue($T, $N), wanted: proc(item: ^T) -> bool, d: time.Duration) -> (item: T, ticket: Ticket, ok, stopped: bool) {
 	sync.guard(&q.mutex)
 	deadline := time.tick_add(time.tick_now(), d)
+	kicks := q.kicks
 	for !q.stopped {
 		if at := next_where(q, wanted); at >= 0 {
 			item, ticket = take_at(q, at)
@@ -115,7 +118,7 @@ pop_wait_where :: proc(q: ^Queue($T, $N), wanted: proc(item: ^T) -> bool, d: tim
 			return item, ticket, true, false
 		}
 		left := time.tick_diff(time.tick_now(), deadline)
-		if left <= 0 {
+		if left <= 0 || q.kicks != kicks {
 			return
 		}
 		sync.cond_wait_with_timeout(&q.arrived, &q.mutex, left)
@@ -201,6 +204,14 @@ stop :: proc(q: ^Queue($T, $N)) {
 start :: proc(q: ^Queue($T, $N)) {
 	sync.guard(&q.mutex)
 	q.stopped = false
+}
+
+// kick ends the waits of pop_wait_where, for callers whose wanted would
+// now say yes to more.
+kick :: proc(q: ^Queue($T, $N)) {
+	sync.guard(&q.mutex)
+	q.kicks += 1
+	sync.cond_broadcast(&q.arrived)
 }
 
 // sleep waits for d or until the queue stops, whichever is first. True if

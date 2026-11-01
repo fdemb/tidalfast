@@ -1529,7 +1529,11 @@ add_track_job :: proc(t: ^testing.T) {
 	added := res.payload.(app.Add_Track_Result) or_else {}
 	testing.expect(t, added.added)
 	row, has_row := added.row.?
-	testing.expect(t, has_row && row.id == 33 && row.added == "Feb 3, 2026")
+	// The mock's dateAdded, 2026-02-03T10:00Z, on this machine's calendar.
+	liked_at, _ := time.datetime_to_time(2026, 2, 3, 10, 0, 0)
+	y, mo, day := app.local_date(liked_at)
+	want := fmt.tprintf("%s %d, %d", app.MONTHS[mo - 1], day, y)
+	testing.expectf(t, has_row && row.id == 33 && row.added == want, "%v %q", has_row, row.added)
 	testing.expect_value(t, added.version.count, 3)
 	testing.expect(t, added.version.updated != 0)
 	ids := mock_item_ids(&m, context.temp_allocator)
@@ -1812,6 +1816,19 @@ local_jobs_run_after_a_failed_refresh :: proc(t: ^testing.T) {
 	testing.expectf(t, launch_log, "%v %v", res.job, res.err)
 	app.result_free(&res)
 	testing.expect_value(t, sync.atomic_load(&d.refresh_errors), 1)
+
+	// A cover carries no token, so the gate doesn't hold its download.
+	jobs.push(&d.queue, app.Job{payload = app.Cover_Job{key = 7, image = {id = app.small("cover-id"), size = 80, fetch = 80, remote = true}}}, app.PRIORITY_COVER)
+	res, ok = wait_result(d, 1500 * time.Millisecond)
+	testing.expect(t, ok, "the cover waited for the refresh")
+	_, is_cover := res.job.payload.(app.Cover_Job)
+	testing.expectf(t, is_cover, "%v", res.job)
+	app.result_free(&res)
+
+	// The next account doesn't wait behind the old tokens' failures.
+	app.account_end(s)
+	testing.expect_value(t, sync.atomic_load(&d.refresh_gate), 0)
+	testing.expect_value(t, sync.atomic_load(&d.refresh_errors), 0)
 }
 
 // The approval got the tokens, then loading the session failed until
@@ -2535,8 +2552,8 @@ sidebar_count :: proc(t: ^testing.T, s: ^app.State) -> int {
 }
 
 // The sidebar reads pages up to TIDAL's count: an item skipped as broken
-// doesn't end them, and a server that ignores the offset doesn't keep
-// them going.
+// doesn't end them, and a server that ignores the offset, or never stops,
+// doesn't keep them going.
 @(test)
 sidebar_pages_follow_the_total :: proc(t: ^testing.T) {
 	m: Mock
@@ -2555,8 +2572,16 @@ sidebar_pages_follow_the_total :: proc(t: ^testing.T) {
 	delete_key(&m.answers, PATH + "?offset=0")
 	delete_key(&m.answers, PATH + "?offset=50")
 	m.answers[PATH] = {200, playlists_page(0, 50, 1_000_000)}
+	testing.expect_value(t, sidebar_count(t, s), 50)
+	testing.expect_value(t, mock_count(&m, "GET " + PATH), 4)
+
+	// Pages that differ but never end stop at the cap.
+	delete_key(&m.answers, PATH)
+	for i in 0 ..< app.PLAYLIST_PAGES_MAX + 1 {
+		m.answers[fmt.tprintf("%s?offset=%d", PATH, 50 * i)] = {200, playlists_page(50 * i, 50, 1_000_000)}
+	}
 	testing.expect_value(t, sidebar_count(t, s), 50 * app.PLAYLIST_PAGES_MAX)
-	testing.expect_value(t, mock_count(&m, "GET " + PATH), 2 + app.PLAYLIST_PAGES_MAX)
+	testing.expect_value(t, mock_count(&m, "GET " + PATH), 4 + app.PLAYLIST_PAGES_MAX)
 }
 
 // The Added column shows the day where the user is: a track liked at

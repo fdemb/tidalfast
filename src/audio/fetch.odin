@@ -243,7 +243,7 @@ stream_read :: proc(st: ^Stream, offset: i64, dst: []u8, wait: proc(data: rawptr
 			st.read_pos = pos
 			sync.cond_broadcast(&st.cond)
 		}
-		failed := st.failed
+		failed := st.failed || !st.running // no thread, no bytes
 		sync.unlock(&st.mutex)
 		if failed {
 			return n, .Failed
@@ -276,6 +276,9 @@ stream_done :: proc(st: ^Stream) -> bool {
 
 stream_error :: proc(st: ^Stream, buf: []u8) -> (status: int, msg: string) {
 	sync.guard(&st.mutex)
+	if !st.running {
+		return 0, "the download thread didn't start"
+	}
 	n := copy(buf, st.error[:])
 	for i in 0 ..< n {
 		if buf[i] == 0 {

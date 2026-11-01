@@ -363,17 +363,18 @@ worker_main :: proc "c" (arg: rawptr) -> rawptr {
 	for {
 		job: Job
 		ticket: jobs.Ticket
-		// A 429, an anti-abuse 403 or a failed token refresh holds back
-		// everything that would talk to TIDAL, cover downloads included,
-		// until the gate opens. Jobs that stay on this machine still run.
-		// A worker that may wait gives its scratch pages back first.
-		gate := gate_remaining(d)
+		// A 429 or an anti-abuse 403 holds back everything that would talk
+		// to TIDAL, cover downloads included, until its Retry-After has
+		// passed. A failed token refresh holds back the jobs that send the
+		// tokens. Other jobs still run. A worker that may wait gives its
+		// scratch pages back first.
+		gate, can_run := gate_remaining(d)
 		if queued, _ := jobs.pending(&d.queue); queued == 0 || gate > 0 {
 			temp_give_back(&temp_given)
 		}
 		if gate > 0 {
 			ok, stopped: bool
-			job, ticket, ok, stopped = jobs.pop_wait_where(&d.queue, is_local, gate)
+			job, ticket, ok, stopped = jobs.pop_wait_where(&d.queue, can_run, gate)
 			if stopped {
 				break
 			}
@@ -387,7 +388,7 @@ worker_main :: proc "c" (arg: rawptr) -> rawptr {
 			if !ok {
 				break
 			}
-			if !is_local(&job) && gate_remaining(d) > 0 {
+			if again, can := gate_remaining(d); again > 0 && !can(&job) {
 				// The gate closed while this worker waited.
 				jobs.requeue(&d.queue, job, ticket)
 				continue
@@ -426,13 +427,30 @@ worker_main :: proc "c" (arg: rawptr) -> rawptr {
 	return nil
 }
 
-// gate_remaining is how long jobs that talk to TIDAL wait: out a backoff,
-// or after a failed token refresh. 0 when they can go.
+// gate_remaining is how long until the gate opens, 0 if it's open, and
+// which jobs can run until then. A backoff holds every job that talks to
+// TIDAL; after a failed token refresh only those that send the tokens wait.
 @(private = "file")
-gate_remaining :: proc(d: ^Data) -> time.Duration {
-	backoff := time.Duration(tidal.backoff_remaining(d.session) * f64(time.Second))
+gate_remaining :: proc(d: ^Data) -> (wait: time.Duration, can_run: proc(job: ^Job) -> bool) {
+	if backoff := tidal.backoff_remaining(d.session); backoff > 0 {
+		return time.Duration(backoff * f64(time.Second)), is_local
+	}
 	refresh := time.tick_diff(time.tick_now(), time.Tick{sync.atomic_load(&d.refresh_gate)})
-	return max(backoff, refresh, 0)
+	return max(refresh, 0), sends_no_token
+}
+
+@(private = "file")
+sends_no_token :: proc(job: ^Job) -> bool {
+	return !ends_login(job^)
+}
+
+// refresh_gate_open opens the gate a failed refresh closed, after a refresh
+// worked or the account ended, and wakes the workers waiting behind it.
+refresh_gate_open :: proc(d: ^Data) {
+	sync.atomic_store(&d.refresh_errors, 0)
+	if sync.atomic_exchange(&d.refresh_gate, 0) != 0 {
+		jobs.kick(&d.queue)
+	}
 }
 
 // refresh_failed closes the gate for a wait that doubles with each failed
@@ -818,13 +836,21 @@ run_playlists :: proc(s: ^tidal.Session, res: ^Result, alloc: mem.Allocator) {
 	}
 	sidebar := Sidebar_Result{liked_count = int(liked.count), liked_newest = liked.newest}
 	// The pages go on to TIDAL's count of them. A page that came back
-	// short or empty, or the page cap, ends them early.
+	// short or empty, a page that starts as the one before it did, or the
+	// page cap ends them early.
 	items := make([dynamic]Sidebar_Item, 0, 64, alloc)
+	first_id := ""
 	for offset := 0; offset < PLAYLIST_PAGE * PLAYLIST_PAGES_MAX; offset += PLAYLIST_PAGE {
 		page, listed, total, perr := tidal.user_playlist_and_favorite_playlists(s, offset, PLAYLIST_PAGE, alloc)
 		if perr != nil {
 			fail(res, perr)
 			return
+		}
+		if len(page) > 0 && offset > 0 && page[0].id == first_id {
+			break // the same page again: TIDAL ignored the offset
+		}
+		if len(page) > 0 {
+			first_id = page[0].id
 		}
 		for pl in page {
 			item := Sidebar_Item{id = pl.id, name = pl.name, image = pl.square_picture, tracks = pl.num_tracks}

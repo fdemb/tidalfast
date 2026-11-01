@@ -175,8 +175,7 @@ auth_load :: proc(d: ^Data, res: ^Result) -> bool {
 // they were read in must still be the session's.
 auth_changed :: proc(s: ^tidal.Session, data: rawptr) {
 	d := (^Data)(data)
-	sync.atomic_store(&d.refresh_errors, 0)
-	sync.atomic_store(&d.refresh_gate, 0)
+	refresh_gate_open(d)
 	a := tidal.session_auth(s, context.temp_allocator)
 	if a.user_id == 0 || (a.access_token == "" && a.refresh_token == "") {
 		return
