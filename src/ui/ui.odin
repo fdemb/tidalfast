@@ -595,7 +595,7 @@ process_events :: proc(u: ^State, events: []platform.Event, text_bytes: []u8) {
 			if e.button in NAV_BUTTONS {
 				// They don't press anything under the mouse. With a menu open
 				// they only close it, as a click outside does.
-				if u.menu != 0 && u.menu_open {
+				if u.menu_open {
 					close_menu()
 				} else {
 					u.nav_buttons += {e.button}
@@ -650,11 +650,9 @@ process_events :: proc(u: ^State, events: []platform.Event, text_bytes: []u8) {
 				u.key_click = Key(e.target)
 			}
 		case .Access_Focus:
-			for h in u.hits[:u.hit_count] {
-				if h.key == Key(e.target) && .Focusable in h.flags {
-					move_focus(u, h.key, true)
-					u.focus_reveal = true
-				}
+			if h, at := find_hit(u, Key(e.target)); at >= 0 && .Focusable in h.flags {
+				move_focus(u, h.key, true)
+				u.focus_reveal = true
 			}
 		}
 	}
@@ -668,14 +666,9 @@ process_events :: proc(u: ^State, events: []platform.Event, text_bytes: []u8) {
 		u.hot_since = u.time
 		u.hot_by_mouse = moved
 	}
-	u.hot_parent = 0
-	for h in u.hits[:u.hit_count] {
-		if hot != 0 && h.key == hot {
-			u.hot_parent = h.click_parent
-			break
-		}
-	}
-	if moved && u.menu != 0 && u.menu_open {
+	h, _ := find_hit(u, hot)
+	u.hot_parent = h.click_parent
+	if moved && u.menu_open {
 		menu_hover(u, hot)
 	}
 }
@@ -687,11 +680,8 @@ process_events :: proc(u: ^State, events: []platform.Event, text_bytes: []u8) {
 @(private)
 menu_hover :: proc(u: ^State, hot: Key) {
 	item := Key(0)
-	for h in u.hits[:u.hit_count] {
-		if hot != 0 && h.key == hot && h.in_menu {
-			item = h.key if .Focusable in h.flags else h.focus_parent
-			break
-		}
+	if h, at := find_hit(u, hot); at >= 0 && h.in_menu {
+		item = h.key if .Focusable in h.flags else h.focus_parent
 	}
 	if item != u.focus {
 		move_focus(u, item, false)
@@ -701,7 +691,7 @@ menu_hover :: proc(u: ^State, hot: Key) {
 @(private)
 mouse_pressed :: proc(u: ^State, e: platform.Event) {
 	pos := u.input.mouse
-	if u.menu != 0 && u.menu_open {
+	if u.menu_open {
 		panel := box_lookup(u, u.menu)
 		if panel == nil || !rect_contains(panel.clip, pos) {
 			// A left click outside an open menu only closes it. A right click
@@ -727,12 +717,9 @@ mouse_pressed :: proc(u: ^State, e: platform.Event) {
 	// the focus to it, or its nearest focusable ancestor, or nowhere.
 	u.release_click[e.button] = false
 	focus := Key(0)
-	for h in u.hits[:u.hit_count] {
-		if h.key == hover {
-			u.release_click[e.button] = .Click_On_Release in h.flags
-			focus = h.key if .Focusable in h.flags else h.focus_parent
-			break
-		}
+	if h, at := find_hit(u, hover); at >= 0 {
+		u.release_click[e.button] = .Click_On_Release in h.flags
+		focus = h.key if .Focusable in h.flags else h.focus_parent
 	}
 	if hover != 0 && !u.release_click[e.button] {
 		u.clicked[e.button] = hover
@@ -778,7 +765,7 @@ key_down :: proc(u: ^State, e: platform.Event) {
 		return
 	case shortcut_for(u, {code = code, modifiers = mods}) != 0:
 		target := shortcut_for(u, {code = code, modifiers = mods})
-		if u.menu != 0 && u.menu_open {
+		if u.menu_open {
 			close_menu()
 		}
 		move_focus(u, target, false, select_all = true)
@@ -795,7 +782,7 @@ key_down :: proc(u: ^State, e: platform.Event) {
 			u.drag_cancelled = true
 			return
 		}
-		if u.menu != 0 && u.menu_open {
+		if u.menu_open {
 			close_menu()
 			return
 		}
@@ -809,7 +796,7 @@ key_down :: proc(u: ^State, e: platform.Event) {
 			u.key_click = u.focus
 		}
 		return
-	case code == .Space && mods == {} && u.menu != 0 && u.menu_open:
+	case code == .Space && mods == {} && u.menu_open:
 		// Space clicks only in a menu. Elsewhere it goes to the app, which
 		// plays and pauses with it.
 		if u.focus != 0 && !menu_blocks(u, u.focus) {
@@ -850,15 +837,8 @@ focus_takes_text :: proc(u: ^State) -> bool {
 
 @(private)
 takes_text :: proc(u: ^State, key: Key) -> bool {
-	if key == 0 {
-		return false
-	}
-	for h in u.hits[:u.hit_count] {
-		if h.key == key {
-			return .Text_Input in h.flags
-		}
-	}
-	return false
+	h, at := find_hit(u, key)
+	return at >= 0 && .Text_Input in h.flags
 }
 
 // text_event queues text from the shell for the focused text field.
@@ -895,13 +875,7 @@ focus_step :: proc(u: ^State, dir: int) {
 	if n == 0 {
 		return
 	}
-	at := -1
-	for h, i in u.hits[:n] {
-		if h.key == u.focus {
-			at = i
-			break
-		}
-	}
+	_, at := find_hit(u, u.focus)
 	start := at if at >= 0 else (-1 if dir > 0 else n)
 	for step in 1 ..= n {
 		i := ((start + dir * step) % n + n) % n
@@ -917,15 +891,11 @@ focus_step :: proc(u: ^State, dir: int) {
 // menu_blocks reports whether an open menu keeps the keyboard from key.
 @(private)
 menu_blocks :: proc(u: ^State, key: Key) -> bool {
-	if u.menu == 0 || !u.menu_open {
+	if !u.menu_open {
 		return false
 	}
-	for h in u.hits[:u.hit_count] {
-		if h.key == key {
-			return !h.in_menu
-		}
-	}
-	return true
+	h, at := find_hit(u, key)
+	return at < 0 || !h.in_menu
 }
 
 // focus_arrow moves the focus to the nearest focusable box with the same
@@ -938,13 +908,10 @@ menu_blocks :: proc(u: ^State, key: Key) -> bool {
 @(private)
 focus_arrow :: proc(u: ^State, axis: Axis, dir: int) -> bool {
 	group := Key(0)
-	for h in u.hits[:u.hit_count] {
-		if h.key == u.focus && .Focusable in h.flags {
-			group = h.group
-			break
-		}
+	if h, at := find_hit(u, u.focus); at >= 0 && .Focusable in h.flags {
+		group = h.group
 	}
-	if u.menu != 0 && u.menu_open && group != u.menu {
+	if u.menu_open && group != u.menu {
 		for i := 0 if dir > 0 else u.hit_count - 1; i >= 0 && i < u.hit_count; i += dir {
 			h := u.hits[i]
 			if .Focusable in h.flags && h.group == u.menu {
@@ -998,6 +965,18 @@ focus_arrow :: proc(u: ^State, axis: Axis, dir: int) -> bool {
 	move_focus(u, best, true)
 	u.focus_reveal = true
 	return true
+}
+
+// find_hit is key's hit from the last frame and where it is in u.hits,
+// -1 for none. Key 0 has none.
+@(private)
+find_hit :: proc(u: ^State, key: Key) -> (h: Hit, at: int) {
+	for hit, i in u.hits[:u.hit_count] {
+		if hit.key == key {
+			return hit, i
+		}
+	}
+	return {}, -1
 }
 
 // hit_at is the clickable box drawn last under pos in the last frame.

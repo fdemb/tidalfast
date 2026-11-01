@@ -462,7 +462,7 @@ menu_separator :: proc() {
 // the delay. It stays where it showed while the mouse moves over the box.
 tooltip :: proc(sig: Signal, label: string) {
 	u := ctx
-	if !sig.hovering || u.input.buttons != {} || (u.menu != 0 && u.menu_open) {
+	if !sig.hovering || u.input.buttons != {} || u.menu_open {
 		return
 	}
 	warm := u.hot_by_mouse && u.time - u.tooltip_seen < TOOLTIP_WARM
