@@ -1777,6 +1777,42 @@ local_jobs_run_during_a_backoff :: proc(t: ^testing.T) {
 	testing.expect_value(t, mock_count(&m, ""), 0)
 }
 
+// Requests whose token refresh failed wait behind a gate, as in a backoff,
+// so jobs that stay on this machine still run. A refresh that fails once
+// counts once, however many requests it fails.
+@(test)
+local_jobs_run_after_a_failed_refresh :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := mock_data_state(&m)
+	defer data_state_free(s)
+	d := &s.data
+	expired := TEST_LOGIN
+	expired.expiry_time = time.time_add(time.now(), -time.Hour)
+	sign_in(s, expired)
+	data_jobs(d)
+	m.token_status = 503
+	m.token_delay = 200 * time.Millisecond // the four refreshes overlap
+	m.answers["/users/123/favorites/tracks"] = {401, `{"status":401,"userMessage":"Unauthorized"}`}
+	path := fmt.tprintf("/tmp/tidalfast-refresh-%d.log", time.tick_now()._nsec)
+	defer os.remove(path)
+	d.launch_log_path = path
+	defer d.launch_log_path = ""
+
+	for _ in 0 ..< app.WORKERS {
+		jobs.push(&d.queue, app.Job{auth = d.auth_gen, payload = app.Playlists_Job{}})
+	}
+	jobs.push(&d.queue, app.Job{payload = app.Launch_Log_Job{}})
+	app.workers_start(d)
+	res, ok := wait_result(d, 1500 * time.Millisecond)
+	testing.expect(t, ok, "the launch log waited for the refresh")
+	_, launch_log := res.job.payload.(app.Launch_Log_Job)
+	testing.expectf(t, launch_log, "%v %v", res.job, res.err)
+	app.result_free(&res)
+	testing.expect_value(t, sync.atomic_load(&d.refresh_errors), 1)
+}
+
 // The approval got the tokens, then loading the session failed until
 // after the code expired. The tokens still finish the login, without
 // polling the spent code again.

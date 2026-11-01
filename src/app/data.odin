@@ -169,6 +169,7 @@ Data :: struct {
 	held:           [HELD_JOBS]Held_Job,
 	held_count:     int,
 	refresh_errors: int, // token refreshes in a row that failed without ending the login (atomic)
+	refresh_gate:   i64, // time.Tick until which jobs that talk to TIDAL wait after a failed refresh (atomic)
 	keychain_mutex: sync.Mutex, // orders a sign-out's delete against the workers' saves
 	keychain_saved: u64, // the auth epoch of the login last saved, under keychain_mutex
 	session:        ^tidal.Session,
@@ -602,6 +603,7 @@ auth_load :: proc(d: ^Data, res: ^Result) -> bool {
 auth_changed :: proc(s: ^tidal.Session, data: rawptr) {
 	d := (^Data)(data)
 	sync.atomic_store(&d.refresh_errors, 0)
+	sync.atomic_store(&d.refresh_gate, 0)
 	a := tidal.session_auth(s, context.temp_allocator)
 	if a.user_id == 0 || (a.access_token == "" && a.refresh_token == "") {
 		return

@@ -356,12 +356,17 @@ worker_main :: proc "c" (arg: rawptr) -> rawptr {
 	for {
 		job: Job
 		ticket: jobs.Ticket
-		// A 429 or an anti-abuse 403 holds back everything that would talk
-		// to TIDAL, cover downloads included, until its Retry-After has
-		// passed. Jobs that stay on this machine still run.
-		if wait := tidal.backoff_remaining(d.session); wait > 0 {
+		// A 429, an anti-abuse 403 or a failed token refresh holds back
+		// everything that would talk to TIDAL, cover downloads included,
+		// until the gate opens. Jobs that stay on this machine still run.
+		// A worker that may wait gives its scratch pages back first.
+		gate := gate_remaining(d)
+		if queued, _ := jobs.pending(&d.queue); queued == 0 || gate > 0 {
+			temp_give_back(&temp_given)
+		}
+		if gate > 0 {
 			ok, stopped: bool
-			job, ticket, ok, stopped = jobs.pop_wait_where(&d.queue, is_local, time.Duration(wait * f64(time.Second)))
+			job, ticket, ok, stopped = jobs.pop_wait_where(&d.queue, is_local, gate)
 			if stopped {
 				break
 			}
@@ -375,6 +380,11 @@ worker_main :: proc "c" (arg: rawptr) -> rawptr {
 			if !ok {
 				break
 			}
+			if !is_local(&job) && gate_remaining(d) > 0 {
+				// The gate closed while this worker waited.
+				jobs.requeue(&d.queue, job, ticket)
+				continue
+			}
 		}
 		temp_take_back(&temp_given)
 		res := run_job(d, job)
@@ -387,16 +397,11 @@ worker_main :: proc "c" (arg: rawptr) -> rawptr {
 			continue
 		}
 		if e, failed := res.err.?; failed && e == .Refresh_Failed {
-			// The tokens are kept, so the job goes back after a wait that
-			// doubles with each failed refresh until one works.
+			// The tokens are kept, so the job goes back and waits behind
+			// the gate.
 			result_free(&res)
-			n := sync.atomic_add(&d.refresh_errors, 1) + 1
-			wait := min(1 << uint(min(n, 5)), LOGIN_RETRY_MAX)
-			stopping := jobs.sleep(&d.queue, time.Duration(wait) * time.Second)
+			refresh_failed(d)
 			jobs.requeue(&d.queue, job, ticket)
-			if stopping {
-				break
-			}
 			continue
 		}
 		if !jobs.push_wait(&d.results, res) {
@@ -408,13 +413,36 @@ worker_main :: proc "c" (arg: rawptr) -> rawptr {
 		job_free(&job)
 		jobs.done(&d.queue)
 		d.wake()
-		if queued, _ := jobs.pending(&d.queue); queued == 0 {
-			temp_give_back(&temp_given)
-		}
 	}
 	sync.atomic_store(&temp.base, 0)
 	runtime.default_temp_allocator_destroy(&runtime.global_default_temp_allocator_data)
 	return nil
+}
+
+// gate_remaining is how long jobs that talk to TIDAL wait: out a backoff,
+// or after a failed token refresh. 0 when they can go.
+@(private = "file")
+gate_remaining :: proc(d: ^Data) -> time.Duration {
+	backoff := time.Duration(tidal.backoff_remaining(d.session) * f64(time.Second))
+	refresh := time.tick_diff(time.tick_now(), time.Tick{sync.atomic_load(&d.refresh_gate)})
+	return max(backoff, refresh, 0)
+}
+
+// refresh_failed closes the gate for a wait that doubles with each failed
+// refresh, until one works. Jobs that fail while it's closed, such as
+// those that waited on the same refresh, don't count again.
+@(private = "file")
+refresh_failed :: proc(d: ^Data) {
+	now := time.tick_now()
+	gate := sync.atomic_load(&d.refresh_gate)
+	if time.tick_diff(now, time.Tick{gate}) > 0 {
+		return
+	}
+	n := sync.atomic_load(&d.refresh_errors) + 1
+	wait := time.Duration(min(1 << uint(min(n, 5)), LOGIN_RETRY_MAX)) * time.Second
+	if _, ok := sync.atomic_compare_exchange_strong(&d.refresh_gate, gate, time.tick_add(now, wait)._nsec); ok {
+		sync.atomic_add(&d.refresh_errors, 1)
+	}
 }
 
 // A worker's temp arena is one 4 MB block, and parsing a page of tracks
