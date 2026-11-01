@@ -1,11 +1,8 @@
-// Mirror of src/platform/platform.odin. Change both together and bump
-// PLATFORM_ABI_VERSION.
+// Mirror of src/platform/platform.odin. Change both together.
 #pragma once
 
 #include <stdint.h>
 #include <stddef.h>
-
-#define PLATFORM_ABI_VERSION 9
 
 typedef enum {
   EVENT_NONE,
@@ -281,14 +278,11 @@ typedef struct {
 } Frame_Result;
 _Static_assert(sizeof(Frame_Result) == 8, "Frame_Result size must match platform.odin");
 
-typedef struct {
-  uint32_t abi_version;
-  uint32_t _pad;
-  void (*init)(Memory *mem, Shell *shell);
-  void (*shutdown)(Memory *mem);
-  Frame_Result (*frame)(Memory *mem, Shell *shell, Frame_Input *input);
-} App_API;
-_Static_assert(sizeof(App_API) == 32, "App_API size must match platform.odin");
+// The app's entry points, exported by src/app. The shell calls app_init
+// once at start, app_frame for every frame and app_shutdown on quit.
+void app_init(Memory *mem, Shell *shell);
+Frame_Result app_frame(Memory *mem, Shell *shell, Frame_Input *input);
+void app_shutdown(Memory *mem);
 
-typedef App_API *(*App_Get_API)(void);
-#define APP_GET_API_SYMBOL "app_get_api"
+// The shell's own main, which src/app's main calls.
+int shell_main(int argc, char **argv);

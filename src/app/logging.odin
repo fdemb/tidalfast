@@ -7,9 +7,9 @@ package app
 // Info and up by default. TIDALFAST_LOG_HTTP=1 adds debug, which is mostly
 // the TIDAL library: a line per request and its token refreshes.
 //
-// app_logger builds the logger from globals that log_init fills when the
-// dylib loads. Threads the app starts set it in their context; the audio
-// player keeps the one it was created with.
+// app_logger builds the logger from globals that log_init fills at start.
+// Threads the app starts set it in their context; the audio player keeps
+// the one it was created with.
 
 import "base:runtime"
 import "core:log"

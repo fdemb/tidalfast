@@ -304,7 +304,7 @@ premultiplied_exact :: proc(c, a: u8) -> u8 {
 }
 
 // premultiplied_lut[a][c] is premultiplied_exact(c, a) for translucent a.
-// Built when the image loads; each loaded dylib has its own.
+// Built at start.
 premultiplied_lut: [256][256]u8
 
 @(init, private)

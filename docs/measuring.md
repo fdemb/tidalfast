@@ -12,7 +12,7 @@
 ./build/measure/measure html         # the app's memory snapshots as a page
 ```
 
-`./build.sh measure` builds an optimized app in `build/measure/app` (its own shell and dylib), `tests/mock_tidal` and the tool. The app is the release build plus `TIDALFAST_MOCK_API`, which keeps the test screens and the text bench and lets it read `TIDALFAST_API` and `TIDALFAST_PKCE_REDIRECT`. The real release build doesn't take them, so it can't run against the mock. With either one set it shows the fake data, as every build does without a mock URL it takes (see [Building](building.md)).
+`./build.sh measure` builds an optimized app in `build/measure/app` (its own executable), `tests/mock_tidal` and the tool. The app is the release build plus `TIDALFAST_MOCK_API`, which keeps the test screens and the text bench and lets it read `TIDALFAST_API` and `TIDALFAST_PKCE_REDIRECT`. The real release build doesn't take them, so it can't run against the mock. With either one set it shows the fake data, as every build does without a mock URL it takes (see [Building](building.md)).
 
 Each run is a cold launch with `TIDALFAST_MEASURE` set, `TIDALFAST_AUDIO_NULL=1` and a settings file of its own, so bit-perfect output is off and your settings stay as they are. The runs share a list cache folder in the logs folder: the mock's first run starts with an empty cache, and later runs read the sidebar and Liked Songs from it. Other `TIDALFAST_` variables in your environment are dropped. The tool prints a table per scenario and setup, writes `build/measure/<time>.json`, and keeps each run's stderr in `build/measure/logs-<time>/`. Flags: `-runs=N`, `-setup=fake` or `mock` or `fake,mock`, `-app=path`, `-timeout=seconds` and `-out=path`.
 
@@ -89,9 +89,8 @@ The startup marks, in order:
 
 | mark | what has happened |
 |---|---|
-| `main` | the shell's `main` started: dyld has loaded the executable and its frameworks |
+| `main` | `shell_main` started: dyld has loaded the executable and its frameworks, and the Odin runtime has run its `@(init)` procedures |
 | `launched` | `applicationDidFinishLaunching`: AppKit is set up |
-| `dylib` | the app dylib is copied and opened |
 | `init` | the app's `init` returned: renderer, shaders, fonts, caches, workers |
 | `window` | the window is ordered front |
 | `first_frame` | the first frame is committed and its drawable presented |
@@ -135,7 +134,6 @@ Startup, in ms since the process started. Run 1 is on its own. The other 9 runs 
 |---|---|---|---|---|
 | main | 7.5 | 4.8 (4.8 to 4.9) | 7.4 | 4.8 (4.7 to 7.1) |
 | launched | 79.6 | 76.9 (76.1 to 77.9) | 87.9 | 77.7 (76.7 to 87.7) |
-| dylib | 364.7 | 118.3 (115.9 to 122.6) | 129.3 | 118.8 (113.9 to 130.1) |
 | init | 397.9 | 130.2 (127.9 to 134.5) | 137.5 | 126.8 (121.9 to 138.1) |
 | window | 401.2 | 132.1 (129.7 to 137.1) | 139.3 | 128.7 (123.7 to 139.9) |
 | first_frame | 433.0 | 154.2 (152.0 to 158.9) | 159.5 | 150.4 (144.9 to 161.4) |
@@ -144,7 +142,7 @@ Startup, in ms since the process started. Run 1 is on its own. The other 9 runs 
 
 At `tracks` the footprint is 50 MB with the fake data and 70 MB with the mock, gpu 27 and 29 MB.
 
-The fake run 1 came straight after a build, so it includes macOS checking the new dylib's signature: `dylib` at 365 ms instead of 118. Later launches open the same file and skip that. The mock's run 1 also logs in, and starts with an empty list cache. The later mock runs read the sidebar, Liked Songs and its covers from the cache (see [The list cache](tidal-data.md#the-list-cache)), so their `tracks` came at 182 ms. Before the cache it was 417 ms, about what run 1 still takes: on the mock most of it was waiting for covers.
+The fake run 1 came straight after a build, so it includes macOS checking the new binary's signature. The app was then a shell that opened a dylib after `launched`, which took 365 ms instead of 118 in this run. It is one executable now, so the check comes before `main`: 1.1 s in a run 1 on 2026-11-01. Later launches skip it. The mock's run 1 also logs in, and starts with an empty list cache. The later mock runs read the sidebar, Liked Songs and its covers from the cache (see [The list cache](tidal-data.md#the-list-cache)), so their `tracks` came at 182 ms. Before the cache it was 417 ms, about what run 1 still takes: on the mock most of it was waiting for covers.
 
 Memory, MB. `-runs` applies to startup; the memory scenario ran once with each setup, and earlier runs of the same build with two or three runs each were within 1 MB of these:
 

@@ -4,7 +4,7 @@ package app
 // line each, as `measure: {json}`, for tools/measure to read. Times are
 // milliseconds since the process started, read from the kernel, so dyld and
 // everything before main count. The shell prints its own marks (main,
-// launched, dylib, window) the same way.
+// launched, window) the same way.
 //
 //   1        marks and a sample at each mark, nothing else
 //   startup  the same, then quit once the first track rows and their covers are drawn

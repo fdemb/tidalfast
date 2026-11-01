@@ -4,7 +4,7 @@
 # (default /tmp/tidalfast-verify), so build/ and the user's running app are
 # never touched. See SKILL.md next to this file.
 #
-#   verify.sh build                      shell, dylib and mock into $ROOT/bin
+#   verify.sh build                      app and mock into $ROOT/bin
 #   verify.sh doctor                     read-only health check
 #   verify.sh mock-start | mock-stop     tests/mock_tidal on a free port
 #   verify.sh run <label> <fake|mock> <steps>
@@ -31,19 +31,19 @@ newest_source() {
 cmd_build() {
 	mkdir -p "$BIN"
 	cd "$REPO" || die "no repo at $REPO"
-	# The dylib links the C libraries in build/kbts and build/miniaudio.
+	# The app links the C libraries in build/kbts and build/miniaudio.
 	./build.sh libs || die "C library build failed"
 	echo "verify: building shell"
-	clang shell/shell.m -o "$BIN/tidalfast" -fobjc-arc -mmacosx-version-min=14.0 \
-		-Wall -Wno-unused-parameter -O2 \
-		-framework Cocoa -framework Metal -framework QuartzCore -framework MediaPlayer ||
-		die "shell build failed"
+	clang -c shell/shell.m -o "$BIN/shell.o" -fobjc-arc -mmacosx-version-min=14.0 \
+		-Wall -Wno-unused-parameter -O2 || die "shell build failed"
 	# MOCK_API makes an optimized build honour TIDALFAST_API and
 	# TIDALFAST_PKCE_REDIRECT, as ./build.sh measure does.
-	echo "verify: building app dylib"
-	odin build src/app -build-mode:dll -out:"$BIN/app.tmp.dylib" -vet -strict-style -o:speed \
-		-define:TIDALFAST_MOCK_API=true || die "dylib build failed"
-	mv -f "$BIN/app.tmp.dylib" "$BIN/app.dylib"
+	echo "verify: building app"
+	odin build src/app -out:"$BIN/tidalfast.tmp" -vet -strict-style -o:speed -minimum-os-version:14.0 \
+		-define:TIDALFAST_MOCK_API=true \
+		-extra-linker-flags:"$BIN/shell.o -framework Cocoa -framework Metal -framework QuartzCore -framework MediaPlayer" ||
+		die "app build failed"
+	mv -f "$BIN/tidalfast.tmp" "$BIN/tidalfast"
 	echo "verify: building mock"
 	odin build tests/mock_tidal -out:"$BIN/mock_tidal" -o:speed || die "mock build failed"
 	echo "verify: built into $BIN"
@@ -64,11 +64,11 @@ ours() {
 
 cmd_doctor() {
 	ok=1
-	for f in tidalfast app.dylib mock_tidal; do
+	for f in tidalfast mock_tidal; do
 		[ -x "$BIN/$f" ] || { echo "FAIL $BIN/$f missing: run verify.sh build"; ok=0; }
 	done
-	if [ -f "$BIN/app.dylib" ]; then
-		built=$(stat -f '%m' "$BIN/app.dylib")
+	if [ -f "$BIN/tidalfast" ]; then
+		built=$(stat -f '%m' "$BIN/tidalfast")
 		[ "$built" -ge "$(newest_source)" ] && echo "ok   build is newer than src/ and shell/" ||
 			{ echo "FAIL src/ or shell/ changed after the last build: run verify.sh build"; ok=0; }
 	fi

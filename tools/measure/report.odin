@@ -56,9 +56,9 @@ Line :: struct {
 	drawable_wait_p95:  f64,
 }
 
-// The marks in the order they happen. The shell prints main, launched,
-// dylib and window; the app the rest.
-MARKS := [?]string{"main", "launched", "dylib", "init", "window", "first_frame", "library", "tracks"}
+// The marks in the order they happen. The shell prints main, launched and
+// window; the app the rest.
+MARKS := [?]string{"main", "launched", "init", "window", "first_frame", "library", "tracks"}
 
 // The memory scenario's samples in order.
 STAGES := [?]string{"startup_idle", "list_open", "scrolled", "playing", "idle_after"}

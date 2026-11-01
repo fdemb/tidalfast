@@ -28,7 +28,6 @@ platform_h_matches_platform_odin :: proc(t: ^testing.T) {
 		{"Shell", platform.Shell},
 		{"Frame_Input", platform.Frame_Input},
 		{"Frame_Result", platform.Frame_Result},
-		{"App_API", platform.App_API},
 	}
 	want, c := strings.builder_make(context.temp_allocator), strings.builder_make(context.temp_allocator)
 	fmt.sbprintln(&c, "#include <stdio.h>\n#include \"platform.h\"\nint main(void) {")

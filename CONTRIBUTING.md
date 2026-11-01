@@ -1,12 +1,11 @@
 # Contributing to TIDALfast
 
-TIDALfast is written in Odin. A small shell owns the window and talks to the OS: Obj-C on macOS, C on Linux (Wayland). Everything else is an Odin dylib that the shell loads at start. [docs/architecture.md](docs/architecture.md) has the layout and the main decisions, and the other files in `docs/` describe each part in detail. [AGENTS.md](AGENTS.md) lists the ways to check your work without looking at the window: frame captures, scripted input, fake data, a mock TIDAL server and audio captures.
+TIDALfast is written in Odin. A small shell owns the window and talks to the OS: Obj-C on macOS, C on Linux (Wayland). Everything else is Odin, linked with the shell into one executable. [docs/architecture.md](docs/architecture.md) has the layout and the main decisions, and the other files in `docs/` describe each part in detail. [AGENTS.md](AGENTS.md) lists the ways to check your work without looking at the window: frame captures, scripted input, fake data, a mock TIDAL server and audio captures.
 
 ## Building and running
 
 ```
-./build.sh              # debug: build/tidalfast and build/app.dylib
-./build.sh app          # rebuild only the dylib
+./build.sh              # debug: build/tidalfast
 ./build.sh release      # optimized
 ./build.sh dist         # TIDALfast.app and a .dmg on macOS, an AppImage on Linux
 ./build/tidalfast
@@ -23,10 +22,10 @@ odin check src/app -no-entry-point -vet -strict-style -target:linux_amd64
 ## Layout
 
 ```
-shell/          the executable: window, event queue, dylib loader, input methods and clipboard. shell.m is
+shell/          the platform side: window, event queue, input methods and clipboard. shell.m is
                 the macOS one (CAMetalLayer, media keys, Now Playing, accessibility), shell_wayland.c the Linux one
 src/platform/   the ABI between shell and app (shell/platform.h mirrors it)
-src/app/        the app dylib
+src/app/        the app, with main
 src/render/     renderer, with Metal (metal_darwin.odin) or Vulkan (vulkan_linux.odin) as its backend
 src/text/       fonts, shaping (kb_text_shape), rasterizing (CoreText or FreeType), glyph atlas
 src/ui/         box tree, layout, input, animation, menus, tooltips and the text field

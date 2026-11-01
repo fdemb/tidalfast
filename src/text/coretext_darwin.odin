@@ -1,8 +1,7 @@
 package text
 
 // The parts of CoreFoundation, CoreGraphics and CoreText the text code uses.
-// They are plain C APIs, so they don't hit the compiler's Obj-C bug. Every
-// Ref is a CF object owned by the CF runtime, so it may outlive the dylib.
+// They are plain C APIs, so they don't hit the compiler's Obj-C bug.
 
 foreign import CoreFoundation "system:CoreFoundation.framework"
 foreign import CoreGraphics "system:CoreGraphics.framework"

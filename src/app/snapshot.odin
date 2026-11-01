@@ -32,8 +32,7 @@ SNAPSHOT_ASK :: 's' // from the signal handler
 SNAPSHOT_WRITE :: 'w' // Measure.snapshot is ready
 SNAPSHOT_QUIT :: 'q'
 
-// The pipe's write end, for the handler. A global, so each dylib's handler
-// has the end its own snapshot_start made.
+// The pipe's write end, a global so the signal handler can reach it.
 @(private = "file")
 snapshot_fd: posix.FD = -1
 

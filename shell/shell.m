@@ -1,6 +1,7 @@
-// The executable. Owns NSApplication, the window and the CAMetalLayer,
-// collects input into an event array, and drives the app dylib through the
-// App_API table in platform.h. It redraws only when something asks for it:
+// The platform side of the executable. Owns NSApplication, the window and
+// the CAMetalLayer, collects input into an event array, and drives the app
+// through the entry points in platform.h. src/app's main calls shell_main.
+// It redraws only when something asks for it:
 // input, resize or request_redraw from any thread. While the app
 // reports it is animating and the window is visible, the display link adds a
 // frame every vsync, and other redraws wait for the next tick. A frame can
@@ -16,7 +17,6 @@
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
 #include <copyfile.h>
-#include <dlfcn.h>
 #include <stdatomic.h>
 #include <sys/mman.h>
 #include <sys/sysctl.h>
@@ -27,8 +27,7 @@
 #define PERSISTENT_SIZE (256ull << 20)
 #define FRAME_SIZE (64ull << 20)
 
-static App_API g_app;
-static NSString *g_app_path;
+static bool g_app_started; // app_init has run, so frames can be drawn
 
 static Memory g_memory;
 static Shell g_shell;
@@ -101,7 +100,7 @@ static uint32_t held_mouse_buttons(void) {
 }
 
 static void draw_frame(void) {
-  if (!g_app.frame) return;
+  if (!g_app_started) return;
   atomic_store(&g_needs_redraw, false);
 
   NSSize size = g_view.bounds.size;
@@ -130,7 +129,7 @@ static void draw_frame(void) {
   };
   Frame_Result result;
   @autoreleasepool {
-    result = g_app.frame(&g_memory, &g_shell, &input);
+    result = app_frame(&g_memory, &g_shell, &input);
     access_frame_done();
   }
   g_event_count = 0;
@@ -230,26 +229,6 @@ static void before_waiting(CFRunLoopObserverRef observer, CFRunLoopActivity acti
 // Firing is all the fallback timer does: the run loop pass it causes ends in
 // before_waiting, which draws if the tick still hasn't come.
 static void tick_fallback_fired(CFRunLoopTimerRef timer, void *info) {}
-
-// The app dylib
-
-// Opens the dylib in place. dlopen runs the Odin runtime's startup in it.
-static bool open_app(App_API *out) {
-  void *handle = dlopen(g_app_path.fileSystemRepresentation, RTLD_NOW | RTLD_LOCAL);
-  if (!handle) {
-    fprintf(stderr, "shell: dlopen failed: %s\n", dlerror());
-    return false;
-  }
-  App_Get_API get_api = (App_Get_API)dlsym(handle, APP_GET_API_SYMBOL);
-  App_API *api = get_api ? get_api() : NULL;
-  if (!api || api->abi_version != PLATFORM_ABI_VERSION) {
-    fprintf(stderr, "shell: app ABI %u, shell ABI %u, not loading\n", api ? api->abi_version : 0, PLATFORM_ABI_VERSION);
-    dlclose(handle);
-    return false;
-  }
-  *out = *api;
-  return true;
-}
 
 // Now Playing and media keys
 //
@@ -1543,17 +1522,13 @@ static void setup_blur_reference(void) {
   };
   setup_remote_commands();
 
-  if (!open_app(&g_app)) {
-    [NSApp terminate:nil];
-    return;
-  }
-  measure_mark("dylib");
   g_wake_timer = CFRunLoopTimerCreate(NULL, CFAbsoluteTimeGetCurrent() + 1e9, 1e9, 0, 0, wake_timer_fired, NULL);
   CFRunLoopAddTimer(g_main_run_loop, g_wake_timer, kCFRunLoopCommonModes);
   [(Metal_View *)g_view update_drawable_size];
   @autoreleasepool {
-    g_app.init(&g_memory, &g_shell);
+    app_init(&g_memory, &g_shell);
   }
+  g_app_started = true;
 
   CFRunLoopObserverRef observer =
       CFRunLoopObserverCreate(NULL, kCFRunLoopBeforeWaiting, true, 0, before_waiting, NULL);
@@ -1572,7 +1547,7 @@ static void setup_blur_reference(void) {
 }
 
 - (void)applicationWillTerminate:(NSNotification *)notification {
-  if (g_app.shutdown) g_app.shutdown(&g_memory);
+  if (g_app_started) app_shutdown(&g_memory);
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender {
@@ -1609,7 +1584,7 @@ static NSMenu *main_menu(void) {
   return bar;
 }
 
-int main(int argc, const char *argv[]) {
+int shell_main(int argc, char **argv) {
   // SIGUSR1 asks the app for a memory snapshot (src/app/snapshot.odin),
   // and the app sets its handler once it's loaded. Until then it's
   // ignored, so the menu item can't quit the app.
@@ -1619,9 +1594,6 @@ int main(int argc, const char *argv[]) {
     measure_mark("main");
     g_start_time = CACurrentMediaTime();
     g_main_run_loop = CFRunLoopGetMain();
-
-    NSString *exe_dir = NSBundle.mainBundle.executablePath.stringByDeletingLastPathComponent;
-    g_app_path = [exe_dir stringByAppendingPathComponent:@"app.dylib"];
 
     // mmap memory starts zeroed and is only backed by pages as they are touched.
     g_memory = (Memory){

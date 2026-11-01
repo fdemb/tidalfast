@@ -424,7 +424,7 @@ is_loopback_url :: proc(url: string) -> bool {
 	return host == "127.0.0.1" || host == "::1" || strings.equal_fold(host, "localhost")
 }
 
-// session_open makes the session for this dylib, pointed at d.api if set.
+// session_open makes the session, pointed at d.api if set.
 session_open :: proc(d: ^Data) {
 	s := tidal.session_create(allocator = runtime.heap_allocator())
 	if api := small_str(&d.api); api != "" {

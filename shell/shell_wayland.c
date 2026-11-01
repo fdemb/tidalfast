@@ -1,7 +1,8 @@
-// The Linux executable. Owns the Wayland connection, the window and its
-// surface, collects input into an event array, and drives the app library
-// through the App_API table in platform.h, as shell.m does on macOS. The
-// renderer makes its own Vulkan surface from the Wayland_Surface it gets.
+// The platform side of the Linux executable. Owns the Wayland connection,
+// the window and its surface, collects input into an event array, and
+// drives the app through the entry points in platform.h, as shell.m does on
+// macOS. src/app's main calls shell_main. The renderer makes its own Vulkan
+// surface from the Wayland_Surface it gets.
 //
 // It redraws only when something asks for it: input, a resize or
 // request_redraw from any thread. While the app reports it is animating, a
@@ -20,7 +21,6 @@
 // ax-press, and media keys reach the app while the window has the keyboard.
 
 #define _GNU_SOURCE
-#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -59,8 +59,7 @@
 #define DEFAULT_WIDTH 1100
 #define DEFAULT_HEIGHT 700
 
-static App_API g_app;
-static char g_app_path[PATH_MAX];
+static bool g_app_started; // app_init has run, so frames can be drawn
 
 static Memory g_memory;
 static Shell g_shell;
@@ -211,7 +210,7 @@ static void apply_scale(void) {
 }
 
 static void draw_frame(void) {
-  if (!g_app.frame || !g_configured) return;
+  if (!g_app_started || !g_configured) return;
   atomic_store(&g_needs_redraw, false);
   g_configure_unanswered = false;
   // The callback goes with the commit the renderer's present makes.
@@ -233,7 +232,7 @@ static void draw_frame(void) {
       .key_window = g_key_window,
       .mouse_buttons = g_buttons,
   };
-  Frame_Result result = g_app.frame(&g_memory, &g_shell, &input);
+  Frame_Result result = app_frame(&g_memory, &g_shell, &input);
   access_frame_done();
   g_event_count = 0;
   g_text_len = 0;
@@ -311,7 +310,7 @@ static void push_event(Event e) {
   atomic_store(&g_needs_redraw, true);
 }
 
-// Files and the app library
+// Files
 
 static bool copy_file(const char *from, const char *to) {
   int in = open(from, O_RDONLY | O_CLOEXEC);
@@ -333,23 +332,6 @@ static bool copy_file(const char *from, const char *to) {
   close(in);
   close(out);
   return ok && n == 0;
-}
-
-static bool open_app(App_API *out) {
-  void *handle = dlopen(g_app_path, RTLD_NOW | RTLD_LOCAL);
-  if (!handle) {
-    fprintf(stderr, "shell: dlopen failed: %s\n", dlerror());
-    return false;
-  }
-  App_Get_API get_api = (App_Get_API)dlsym(handle, APP_GET_API_SYMBOL);
-  App_API *api = get_api ? get_api() : NULL;
-  if (!api || api->abi_version != PLATFORM_ABI_VERSION) {
-    fprintf(stderr, "shell: app ABI %u, shell ABI %u, not loading\n", api ? api->abi_version : 0, PLATFORM_ABI_VERSION);
-    dlclose(handle);
-    return false;
-  }
-  *out = *api;
-  return true;
 }
 
 // Now Playing
@@ -2023,21 +2005,10 @@ lost:
   fprintf(stderr, "shell: lost the Wayland connection\n");
 }
 
-int main(int argc, char **argv) {
+int shell_main(int argc, char **argv) {
   measure_init();
   measure_mark("main");
   g_start_time = now_seconds();
-
-  char exe[PATH_MAX - 16];
-  ssize_t len = readlink("/proc/self/exe", exe, sizeof exe - 1);
-  if (len <= 0) {
-    fprintf(stderr, "shell: can't find the executable's folder\n");
-    return 1;
-  }
-  exe[len] = 0;
-  char *slash = strrchr(exe, '/');
-  if (slash) *slash = 0;
-  snprintf(g_app_path, sizeof g_app_path, "%s/app.so", exe);
 
   // mmap memory starts zeroed and is only backed by pages as they are touched.
   g_memory = (Memory){
@@ -2086,9 +2057,8 @@ int main(int argc, char **argv) {
       .set_accessibility = getenv("TIDALFAST_SHELL_TEST") ? set_accessibility : NULL,
   };
 
-  if (!open_app(&g_app)) return 1;
-  measure_mark("dylib");
-  g_app.init(&g_memory, &g_shell);
+  app_init(&g_memory, &g_shell);
+  g_app_started = true;
   while (!g_configured && wl_display_dispatch(g_display) >= 0) {
   }
   draw_frame();
@@ -2096,7 +2066,7 @@ int main(int argc, char **argv) {
   setup_shell_test();
   request_redraw();
   main_loop();
-  if (g_app.shutdown) g_app.shutdown(&g_memory);
+  app_shutdown(&g_memory);
   wl_display_disconnect(g_display);
   return 0;
 }

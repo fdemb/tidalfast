@@ -1,12 +1,11 @@
 # Working on TIDALfast
 
-TIDALfast is a native TIDAL client in Odin for macOS and Linux, with a small shell that owns the window and loads the app as a dylib (`src/app`): Obj-C on macOS (`shell/shell.m`), C on Wayland (`shell/shell_wayland.c`). `docs/architecture.md` has the layout and the main decisions, and the other files in `docs/` have the details of every part. This file covers what an agent needs to check its own work, since you can't see the window or hear the audio.
+TIDALfast is a native TIDAL client in Odin for macOS and Linux, with a small shell that owns the window: Obj-C on macOS (`shell/shell.m`), C on Wayland (`shell/shell_wayland.c`). Odin links the two into one executable, whose `main` in `src/app` hands the process to the shell. `docs/architecture.md` has the layout and the main decisions, and the other files in `docs/` have the details of every part. This file covers what an agent needs to check its own work, since you can't see the window or hear the audio.
 
 ## Build and test
 
 ```
-./build.sh              # debug shell + dylib in build/
-./build.sh app          # dylib only; doesn't relink the shell
+./build.sh              # debug build/tidalfast
 ./build.sh release      # optimized
 ./build.sh measure      # the measurement app, mock server and tool in build/measure/
 ./build.sh dist         # TIDALfast.app and .dmg, or the AppImage, in build/dist/
@@ -67,5 +66,5 @@ The app draws only on input, worker results or a running animation. After any ch
 - Code: plain handmade Odin, procedures and structs, comments only where they say something the code doesn't.
 - First frames: a page's first frame must look like its second. While building, a box's `rect` and `view_bounds` are the last layout's, and zero on the frame the box first appears. Don't place or size anything from them. Give the build the sizes it needs in points (a scroll view's size, a text field's height) and let draw do the rest, as `draw_label` centres text in the final rect. Settle any state the frame depends on before the boxes that read it: send the search before choosing the view's top room, and pass `focus` to `text_field` instead of focusing it after. Reading `rect` is fine for input on a box already on screen, such as a click, a drag or a menu opened from a button. `tests/first_frame_test.odin` compares each page's first frame with the next, so add a new page to it.
 - Docs and comments: plain direct English, sentence-case headings, no em dashes.
-- `shell/platform.h` and `src/platform/platform.odin` are one ABI. Change both, keep their size checks, and bump the ABI version together. `tests/abi_test.odin` compares every field's offset across the two; add a new shared struct to its list.
+- `shell/platform.h` and `src/platform/platform.odin` are one ABI. Change both together and keep their size checks. `tests/abi_test.odin` compares every field's offset across the two; add a new shared struct to its list.
 - Prove a bug fix with a test that fails on the commit before it.

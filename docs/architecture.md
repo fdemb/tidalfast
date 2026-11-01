@@ -5,9 +5,9 @@ A native TIDAL client for macOS and Linux. Odin for the app, a small shell for t
 ## Layout
 
 ```
-shell/            the shell: window, GPU layer, event queue, dylib loader, IME, media keys, secrets. shell.m on macOS, shell_wayland.c on Linux
-src/platform/     types shared by the shell and Odin (events, the app API table, shell callbacks)
-src/app/          the app dylib: frame loop, views, app state
+shell/            the shell: window, GPU layer, event queue, IME, media keys, secrets. shell.m on macOS, shell_wayland.c on Linux
+src/platform/     types shared by the shell and Odin (events, frame input, shell callbacks)
+src/app/          the app: main, frame loop, views, app state
 src/render/       instanced rect renderer, Metal on macOS and Vulkan on Linux
 src/text/         font loading, shaping (kb_text_shape), rasterizing (CoreText, FreeType), glyph atlas
 src/ui/           box tree, layout, interaction, animation
@@ -26,7 +26,7 @@ tools/audio_top/  macOS's pw-top: each output device's rate and formats, and the
 tools/icons.sh    cuts the Phosphor icon fonts down to the icons the app draws
 tools/icon.sh     renders the app icon in packaging/ for macOS and Linux
 packaging/        Info.plist, the .desktop file and the app icon for `./build.sh dist`
-build.sh          builds everything; `./build.sh app` rebuilds only the dylib, `./build.sh dist` packages a release
+build.sh          builds everything; `./build.sh dist` packages a release
 .github/          the release workflow: a v* tag publishes the .dmg and the AppImage
 ```
 
@@ -45,7 +45,7 @@ Read-only checkouts in `~/.t3/scratch/2026-10-14-please-analyze-how-spotifast-is
 ## Decisions
 
 - **Platform shell.** The shell owns the window and the GPU layer. On macOS that's `NSApplication` and a `CAMetalLayer`, with IME (`NSTextInputClient`), media keys and Now Playing (`MPRemoteCommandCenter`, `MPNowPlayingInfoCenter`), Keychain, clipboard and drag and drop in `shell.m` too. `docs/linux.md` covers the Wayland shell.
-- **App dylib.** The shell opens `app.dylib` once at start, calls it through `App_API` and never closes it. State lives in memory the shell maps, see [Memory](memory.md).
+- **One executable.** `build.sh` compiles the shell to an object and Odin links it into the app. The app's `main` calls `shell_main`, and the shell calls `app_init`, `app_frame` and `app_shutdown`, declared in `platform.h`. State lives in memory the shell maps, see [Memory](memory.md).
 - **Memory.** Arenas. A per-frame arena holds the box tree and temporary strings and resets every frame. Persistent arenas hold caches and app data.
 - **Renderer.** One instanced pipeline. Each instance is a rect with corner radii, border width, edge softness (shadows), two colours for gradients, a clip rect, and a texture and UV rect. Glyphs, cover art, rounded boxes and shadows all go through it. Fleury's `R_Rect2DInst` in raddebugger's `src/render/` is the reference.
 - **Threads.** The main thread runs UI and rendering. Workers handle network and image decoding; miniaudio runs its own audio thread. Workers send results over queues and wake the main thread with `CFRunLoopWakeUp` on macOS and an eventfd on Linux.

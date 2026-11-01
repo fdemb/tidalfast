@@ -199,8 +199,7 @@ load_face :: proc(face: ^Face, ct: Font_Ref, data: []byte, index: int, mapped: b
 }
 
 // load_kb_font parses a font into kb_text_shape, placing its blob in
-// malloc'd memory, which the face owns. Not Odin allocators: those carry a
-// procedure pointer into one dylib, and this runs on the worker.
+// malloc'd memory, which the face owns.
 @(private)
 load_kb_font :: proc(f: ^kbts.font, data: []byte, index: int) -> (blob: rawptr, ok: bool) {
 	state: kbts.load_font_state
@@ -219,8 +218,7 @@ load_kb_font :: proc(f: ^kbts.font, data: []byte, index: int) -> (blob: rawptr, 
 	return blob, true
 }
 
-// free_face releases what a face owns. The face may come from any loaded
-// copy of the dylib.
+// free_face releases what a face owns.
 @(private)
 free_face :: proc(face: ^Face) {
 	face_native_free(face)

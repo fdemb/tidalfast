@@ -136,9 +136,8 @@ load_system :: proc(t: ^State, font: Font) -> bool {
 	return true
 }
 
-// load_embedded loads one of the built-in faces from its #load data. The
-// shell never closes the dylib, so CoreText and kb_text_shape read the
-// image's bytes in place.
+// load_embedded loads one of the built-in faces from its #load data.
+// CoreText and kb_text_shape read the executable's bytes in place.
 @(private)
 load_embedded :: proc(t: ^State, font: Font, data: []byte) -> bool {
 	cf_data := CFDataCreateWithBytesNoCopy(nil, raw_data(data), len(data), kCFAllocatorNull)

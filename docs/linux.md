@@ -11,7 +11,7 @@ The text is in Noto Sans, which the app has built in (see [Text](text.md#text-fo
 
 Odin's `vendor:stb` links static libraries that Odin doesn't ship built for Linux. Build them once in the Odin install by running `build_stb.sh` in `$(odin root)/vendor/stb/src`. `build.sh` builds miniaudio and dr_flac itself. libsecret is opened with `dlopen` when the login is first saved or read, so it's only needed at run time, and only to keep the login. libpipewire is opened the same way when bit-perfect output first plays ([Playback](playback.md#bit-perfect-output-on-linux)).
 
-`./build.sh` takes the same arguments as on macOS and writes `build/tidalfast` and `build/app.so`. It generates the Wayland protocol code into `build/wayland` and compiles the shaders in `src/render/shaders` to SPIR-V in `build/shaders`, which the app `#load`s, so a shader change goes out with `./build.sh app`.
+`./build.sh` takes the same arguments as on macOS and writes `build/tidalfast`. It generates the Wayland protocol code into `build/wayland` and compiles the shaders in `src/render/shaders` to SPIR-V in `build/shaders`, which the app `#load`s. The shell and the protocol code are compiled to objects in `build/shell`, which Odin links into the app with the Wayland and xkbcommon libraries.
 
 What's different from macOS:
 

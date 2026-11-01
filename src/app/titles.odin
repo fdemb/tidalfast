@@ -5,8 +5,7 @@ import "core:strings"
 
 // Fake tracks for the test screens and the library table: song titles and
 // artists in several scripts, mixed into ROW_COUNT rows with made-up albums,
-// dates and durations. The strings are copied into the persistent arena,
-// since literals live in the dylib's image.
+// dates and durations. The strings are copied into the persistent arena.
 
 ROW_COUNT :: 10_000
 

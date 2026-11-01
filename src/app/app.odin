@@ -1,6 +1,6 @@
-// The app. The shell loads this package as a dylib and calls the procs in
-// `api` through app_get_api. State lives at the start of the shell's
-// persistent memory block, and the rest of the block is its arena.
+// The app. main hands the process to the shell, which calls app_init,
+// app_frame and app_shutdown (platform.h). State lives at the start of the
+// shell's persistent memory block, and the rest of the block is its arena.
 package app
 
 import "base:runtime"
@@ -67,19 +67,17 @@ State :: struct {
 	spall_buf:    spall.Buffer,
 }
 
-@(private = "file")
-api := platform.App_API {
-	abi_version = platform.ABI_VERSION,
-	init        = app_init,
-	shutdown    = app_shutdown,
-	frame       = app_frame,
+main :: proc() {
+	os.exit(int(shell_main(i32(len(runtime.args__)), raw_data(runtime.args__))))
+}
+
+// Linked in by build.sh: shell/shell.m on macOS, shell/shell_wayland.c on
+// Linux.
+foreign {
+	shell_main :: proc "c" (argc: i32, argv: [^]cstring) -> i32 ---
 }
 
 @(export)
-app_get_api :: proc "c" () -> ^platform.App_API {
-	return &api
-}
-
 app_init :: proc "c" (m: ^platform.Memory, shell: ^platform.Shell) {
 	context = runtime.default_context()
 	s := state_init(m)
@@ -87,6 +85,7 @@ app_init :: proc "c" (m: ^platform.Memory, shell: ^platform.Shell) {
 	start(s, shell)
 }
 
+@(export)
 app_shutdown :: proc "c" (m: ^platform.Memory) {
 	context = runtime.default_context()
 	s := (^State)(m.persistent)
@@ -107,6 +106,7 @@ app_shutdown :: proc "c" (m: ^platform.Memory) {
 	render.destroy(&s.renderer)
 }
 
+@(export)
 app_frame :: proc "c" (m: ^platform.Memory, shell: ^platform.Shell, input: ^platform.Frame_Input) -> platform.Frame_Result {
 	context = runtime.default_context()
 	s := (^State)(m.persistent)
@@ -218,8 +218,7 @@ start :: proc(s: ^State, shell: ^platform.Shell) {
 	s.status_bar = os.get_env("TIDALFAST_STATUS_BAR", context.temp_allocator) != ""
 
 	// TIDALFAST_SPALL=path writes a spall trace of every frame to path. Only
-	// the fd is used after this; the os.File it came from is dropped so State
-	// holds no pointer into this dylib's runtime.
+	// the fd is used after this.
 	if path := os.get_env("TIDALFAST_SPALL", context.temp_allocator); path != "" {
 		ctx, ok := spall.context_create_with_scale(path, false, 1)
 		if ok {

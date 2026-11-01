@@ -216,6 +216,6 @@ odin run tests/audio_check -o:speed -- /tmp/cap.wav /tmp/tidalfast-mock-audio/al
 
 ## CPU
 
-Apple M1, the mock album playing to the null device: 1.5% with an optimized dylib and about 4% with a debug one, mostly the four UI frames a second for the progress bar. Paused, the device is stopped and the decode thread sleeps on its semaphore: 0.0%.
+Apple M1, the mock album playing to the null device: 1.5% with an optimized build and about 4% with a debug one, mostly the four UI frames a second for the progress bar. Paused, the device is stopped and the decode thread sleeps on its semaphore: 0.0%.
 
-Measured again after the callback stopped waking the decode thread, with CPU time from `ps`: the fake tones with an optimized dylib use 0.20 s in 15 s of playing (1.3%), and nothing in 7 s idle before playing or 20 s paused. The mock album with a debug dylib uses 2.3 to 3.6%, and nothing in 20 s paused once the next track's download has filled its window.
+Measured again after the callback stopped waking the decode thread, with CPU time from `ps`: the fake tones with an optimized build use 0.20 s in 15 s of playing (1.3%), and nothing in 7 s idle before playing or 20 s paused. The mock album with a debug build uses 2.3 to 3.6%, and nothing in 20 s paused once the next track's download has filled its window.

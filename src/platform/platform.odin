@@ -1,9 +1,7 @@
-// Types shared by the Obj-C shell and the app dylib. shell/platform.h mirrors
-// this file field for field. Change both together and bump ABI_VERSION;
-// tests/abi_test.odin compares their field offsets.
+// Types shared by the shell and the app. shell/platform.h mirrors this file
+// field for field. Change both together; tests/abi_test.odin compares their
+// field offsets.
 package platform
-
-ABI_VERSION :: 9
 
 Event_Kind :: enum u32 {
 	None,
@@ -128,8 +126,8 @@ Event :: struct {
 }
 #assert(size_of(Event) == 88)
 
-// Memory the shell allocates once and passes to every app call. It outlives
-// any one dylib, so it is where all app state goes. Both blocks start zeroed.
+// Memory the shell allocates once and passes to every app call. All app
+// state goes in it. Both blocks start zeroed.
 Memory :: struct {
 	persistent:      [^]u8,
 	persistent_size: uint,
@@ -273,17 +271,5 @@ Frame_Result :: struct {
 	wake_after: f32,
 }
 
-// Returned by app_get_api. The shell calls init once after loading the
-// dylib, frame for every frame and shutdown on quit.
-App_API :: struct {
-	abi_version: u32,
-	_:           u32,
-	init:        proc "c" (mem: ^Memory, shell: ^Shell),
-	shutdown:    proc "c" (mem: ^Memory),
-	frame:       proc "c" (mem: ^Memory, shell: ^Shell, input: ^Frame_Input) -> Frame_Result,
-}
 #assert(size_of(Frame_Input) == 64)
 #assert(size_of(Frame_Result) == 8)
-#assert(size_of(App_API) == 32)
-
-GET_API_SYMBOL :: "app_get_api"

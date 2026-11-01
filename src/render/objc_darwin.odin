@@ -55,10 +55,10 @@ send_uint :: proc "contextless" (obj: id, sel: SEL, arg: uint) -> id {
 	return msg_proc(proc "c" (id, SEL, uint) -> id)(obj, sel, arg)
 }
 
-// The selectors a frame sends, registered once when the dylib loads, and the
-// one class it sends to. A sel_registerName is a lookup of about 400
-// instructions, and a frame sends about 45 messages. Metal is a load-time
-// dependency of the dylib, so its classes exist by then.
+// The selectors a frame sends, registered once at start, and the one class
+// it sends to. A sel_registerName is a lookup of about 400 instructions, and
+// a frame sends about 45 messages. Metal is a load-time dependency of the
+// executable, so its classes exist by then.
 Selectors :: struct {
 	render_pass_descriptor_class: id,
 	command_buffer, commit, present_drawable, retain, release, wait_until_completed: SEL,
