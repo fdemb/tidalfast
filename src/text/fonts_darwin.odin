@@ -364,7 +364,7 @@ collection_index :: proc(data: []byte, ct: CTFontRef) -> int {
 		return 0
 	}
 	want := CFDataGetBytePtr(name)[:CFDataGetLength(name)]
-	return collection_index_of_table(data, table_tag("name"), want)
+	return collection_index_of_table(data, "name", want)
 }
 
 @(private)

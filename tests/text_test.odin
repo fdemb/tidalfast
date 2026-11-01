@@ -229,9 +229,9 @@ test_collection_index :: proc(t: ^testing.T) {
 	}
 	copy(data[100:], "AAAA")
 	copy(data[108:], "BBBB")
-	testing.expect_value(t, text.collection_index_of_table(data, text.table_tag("name"), transmute([]byte)string("BBBB")), 1)
-	testing.expect_value(t, text.collection_index_of_table(data, text.table_tag("name"), transmute([]byte)string("AAAA")), 0)
-	testing.expect_value(t, text.collection_index_of_table(data, text.table_tag("name"), transmute([]byte)string("CCCC")), 0)
+	testing.expect_value(t, text.collection_index_of_table(data, "name", transmute([]byte)string("BBBB")), 1)
+	testing.expect_value(t, text.collection_index_of_table(data, "name", transmute([]byte)string("AAAA")), 0)
+	testing.expect_value(t, text.collection_index_of_table(data, "name", transmute([]byte)string("CCCC")), 0)
 }
 
 @(test)

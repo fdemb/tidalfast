@@ -772,9 +772,7 @@ do_play :: proc(p: ^Player, src: Source, at: i64, paused: bool) {
 	other := &p.slots[1 - p.cur]
 	// The preloaded next track: keep its bytes.
 	if !p.prev_alive && other.source.kind != .None && other.source.serial == src.serial {
-		slot_close(&p.slots[p.cur])
-		stream_clear(&p.slots[p.cur].stream)
-		p.slots[p.cur].source = {}
+		slot_assign(&p.slots[p.cur], {})
 		p.cur = 1 - p.cur
 	} else {
 		for &sl in p.slots {
@@ -1170,10 +1168,7 @@ after_step :: proc(p: ^Player) {
 	m := current_mark(p)
 	cur := &p.slots[p.cur]
 	if p.prev_alive && m.serial == cur.source.serial {
-		other := &p.slots[1 - p.cur]
-		slot_close(other)
-		stream_clear(&other.stream)
-		other.source = {}
+		slot_assign(&p.slots[1 - p.cur], {})
 		p.prev_alive = false
 		if p.has_pending {
 			pn := p.pending_next
@@ -1241,6 +1236,13 @@ slot_fail :: proc(p: ^Player, sl: ^Slot, http_status: int, msg: string) {
 	sync.unlock(&p.status_mutex)
 	log.errorf("audio: track %d failed: %s", sl.source.serial, msg)
 	p.wake_ui()
+}
+
+// fail_download fails the slot with what its download's failure was.
+@(private = "file")
+fail_download :: proc(p: ^Player, sl: ^Slot) {
+	status, msg := stream_error(&sl.stream, make([]u8, 96, context.temp_allocator))
+	slot_fail(p, sl, status, fmt.tprintf("download failed: %s", msg))
 }
 
 // slot_open reads the FLAC header, finds the frame to start from for
@@ -1360,8 +1362,7 @@ read_init :: proc(p: ^Player, sl: ^Slot) -> bool {
 		case .Interrupted:
 			return false
 		case .Failed:
-			status, msg := stream_error(st, chunk[:96])
-			slot_fail(p, sl, status, fmt.tprintf("download failed: %s", msg))
+			fail_download(p, sl)
 			return false
 		}
 		init, used, ist := parse_mp4_init(buf[:], vmem.arena_allocator(&sl.track))
@@ -1574,8 +1575,7 @@ read_header :: proc(p: ^Player, sl: ^Slot) -> bool {
 		case .Interrupted:
 			return false
 		case .Failed:
-			status, msg := stream_error(st, chunk[:96])
-			slot_fail(p, sl, status, fmt.tprintf("download failed: %s", msg))
+			fail_download(p, sl)
 			return false
 		}
 		switch parse_flac_header(buf[:], &st.header) {
@@ -1631,8 +1631,7 @@ find_start :: proc(p: ^Player, sl: ^Slot, target: i64) -> (offset, sample: i64, 
 				return 0, 0, false
 			}
 			if res == .Failed {
-				status, msg := stream_error(st, chunk[:96])
-				slot_fail(p, sl, status, fmt.tprintf("download failed: %s", msg))
+				fail_download(p, sl)
 				return 0, 0, false
 			}
 			rel, s, fst := find_frame(buf[:], h.info, res == .Eof)
@@ -1717,8 +1716,7 @@ vread :: proc "c" (user: rawptr, out: rawptr, n: c.size_t) -> c.size_t {
 			sl.interrupted = true
 		case .Failed:
 			if !sl.failed {
-				status, msg := stream_error(st, make([]u8, 96, context.temp_allocator))
-				slot_fail(sl.player, sl, status, fmt.tprintf("download failed: %s", msg))
+				fail_download(sl.player, sl)
 			}
 		}
 	} else if done < len(dst) {
@@ -1729,8 +1727,7 @@ vread :: proc "c" (user: rawptr, out: rawptr, n: c.size_t) -> c.size_t {
 		case .Interrupted:
 			sl.interrupted = true
 		case .Failed:
-			status, msg := stream_error(st, make([]u8, 96, context.temp_allocator))
-			slot_fail(sl.player, sl, status, fmt.tprintf("download failed: %s", msg))
+			fail_download(sl.player, sl)
 		}
 	}
 	return c.size_t(done)

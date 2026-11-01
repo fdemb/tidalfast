@@ -806,17 +806,12 @@ fail_login :: proc(res: ^Result, err: tidal.Error) {
 
 @(private = "file")
 run_playlists :: proc(s: ^tidal.Session, res: ^Result, alloc: mem.Allocator) {
-	// One liked track gives the count and the newest, which tell whether
-	// Liked Songs changed.
-	newest, count, err := tidal.favorites_tracks(s, 1, 0, .Date, .Descending, context.temp_allocator)
+	liked, _, err := liked_version(s, context.temp_allocator)
 	if err != nil {
 		fail(res, err)
 		return
 	}
-	sidebar := Sidebar_Result{liked_count = count}
-	if len(newest) > 0 {
-		sidebar.liked_newest = newest[0].id
-	}
+	sidebar := Sidebar_Result{liked_count = int(liked.count), liked_newest = liked.newest}
 	// The pages go on to TIDAL's count of them. A page that came back
 	// short or empty, or the page cap, ends them early.
 	items := make([dynamic]Sidebar_Item, 0, 64, alloc)
@@ -839,6 +834,25 @@ run_playlists :: proc(s: ^tidal.Session, res: ^Result, alloc: mem.Allocator) {
 	}
 	sidebar.playlists = items[:]
 	res.payload = sidebar
+}
+
+// liked_version asks for one liked track, which gives Liked Songs' count
+// and its newest track: together they tell whether it changed. A failed ask
+// gives a zero version.
+@(private = "file")
+liked_version :: proc(s: ^tidal.Session, alloc: mem.Allocator) -> (version: List_Version, newest: Maybe(tidal.Track), err: tidal.Error) {
+	tracks: []tidal.Track
+	count: int
+	tracks, count, err = tidal.favorites_tracks(s, 1, 0, .Date, .Descending, alloc)
+	if err != nil {
+		return
+	}
+	version.count = i64(count)
+	if len(tracks) > 0 {
+		version.newest = tracks[0].id
+		newest = tracks[0]
+	}
+	return
 }
 
 // run_liked_ids reads every liked track's id and followed artist's in one
@@ -870,14 +884,10 @@ run_add_track :: proc(s: ^tidal.Session, job: Add_Track_Job, res: ^Result, alloc
 				fail(res, err)
 				return
 			}
-			// One track gives the count and the newest, which list_edited
-			// takes; the set holds the truth about the track itself.
-			newest, count, _ := tidal.favorites_tracks(s, 1, 0, .Date, .Descending, context.temp_allocator)
-			out := Add_Track_Result{version = {count = i64(count)}}
-			if len(newest) > 0 {
-				out.version.newest = newest[0].id
-			}
-			res.payload = out
+			// list_edited takes the version; the set holds the truth about
+			// the track itself.
+			version, _, _ := liked_version(s, context.temp_allocator)
+			res.payload = Add_Track_Result{version = version}
 			return
 		}
 		if err := tidal.favorites_add_track(s, {track}); err != nil {
@@ -885,10 +895,10 @@ run_add_track :: proc(s: ^tidal.Session, job: Add_Track_Job, res: ^Result, alloc
 			return
 		}
 		out := Add_Track_Result{added = true} // add_result tells from the count whether it was there
-		newest, count, err := tidal.favorites_tracks(s, 1, 0, .Date, .Descending, alloc)
-		if err == nil && len(newest) == 1 && newest[0].id == job.track {
-			out.version = {count = i64(count), newest = newest[0].id}
-			out.row = row_from_track(newest[0], alloc)
+		version, newest, err := liked_version(s, alloc)
+		if t, ok := newest.?; ok && err == nil && t.id == job.track {
+			out.version = version
+			out.row = row_from_track(t, alloc)
 		}
 		res.payload = out
 		return

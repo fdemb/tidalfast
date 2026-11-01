@@ -1303,24 +1303,11 @@ be32 :: proc(data: []byte, at: int) -> int {
 }
 
 // collection_index_of_table returns the index of the first face in a font
-// collection whose table `tag` equals want, or 0.
-collection_index_of_table :: proc(data: []byte, tag: u32, want: []byte) -> int {
-	count := be32(data, 8)
-	for i in 0 ..< count {
-		offset := be32(data, 12 + 4 * i)
-		if offset < 0 || offset + 12 > len(data) {
-			break
-		}
-		tables := int(data[offset + 4]) << 8 | int(data[offset + 5])
-		for j in 0 ..< tables {
-			record := offset + 12 + 16 * j
-			if be32(data, record) != int(tag) {
-				continue
-			}
-			at, size := be32(data, record + 8), be32(data, record + 12)
-			if at >= 0 && size == len(want) && at + size <= len(data) && mem.compare(data[at:][:size], want) == 0 {
-				return i
-			}
+// collection whose table tag equals want, or 0.
+collection_index_of_table :: proc(data: []byte, tag: string, want: []byte) -> int {
+	for i in 0 ..< be32(data, 8) {
+		if table := font_table(data, i, tag); table != nil && mem.compare(table, want) == 0 {
+			return i
 		}
 	}
 	return 0
