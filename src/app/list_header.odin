@@ -124,9 +124,9 @@ header_collapse :: proc(h: List_Header, offset: f32) -> (c: Header_Collapse) {
 list_duration :: proc(seconds: int) -> string {
 	t := max(seconds, 0)
 	if t >= 3600 {
-		return fmt.tprintf("%d hr %d min", t / 3600, t / 60 % 60)
+		return cat(num(t / 3600), " hr ", num(t / 60 % 60), " min")
 	}
-	return fmt.tprintf("%d min %d sec", t / 60, t % 60)
+	return cat(num(t / 60), " min ", num(t % 60), " sec")
 }
 
 // Hero_Art is the hero's cover: an image id, or "" for the gradient from
@@ -211,13 +211,13 @@ draw_list_meta :: proc(s: ^State, kind: List_Kind, artist: ^Artist_Page) {
 		if f := album_found(s, artist); f != nil && f.released != 0 {
 			year, _ := release_date(f.released)
 			ui.text_style(.Regular, 13, color)
-			ui.label(fmt.tprintf("%s%d", sep, year), ui.text_size(), ui.fill())
+			ui.label(cat(sep, num(year)), ui.text_size(), ui.fill())
 			sep = " • "
 		}
 	}
 	ui.text_style(.Regular, 13, color)
 	songs := list_songs(s, kind)
-	ui.accessible(ui.label(fmt.tprintf("%s%s", sep, songs), ui.fill(), ui.fill()), .Static_Text, songs)
+	ui.accessible(ui.label(cat(sep, songs), ui.fill(), ui.fill()), .Static_Text, songs)
 }
 
 // list_songs is how many songs the open list has and how long they play
@@ -230,7 +230,7 @@ list_songs :: proc(s: ^State, kind: List_Kind) -> string {
 			return view_subtitle(s)
 		}
 		if !v.done {
-			return fmt.tprintf("Loading, %d songs so far", v.loaded_rows)
+			return cat("Loading, ", num(v.loaded_rows), " songs so far")
 		}
 	}
 	n := view_count(s)
@@ -245,8 +245,10 @@ list_songs :: proc(s: ^State, kind: List_Kind) -> string {
 			}
 		}
 	}
-	songs := "1 song" if n == 1 else fmt.tprintf("%d songs", n)
-	return fmt.tprintf("%s, %s", songs, list_duration(total.seconds))
+	if n == 1 {
+		return cat("1 song, ", list_duration(total.seconds))
+	}
+	return cat(num(n), " songs, ", list_duration(total.seconds))
 }
 
 MONTH_NAMES := [12]string{"January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"}
@@ -269,7 +271,7 @@ draw_list_actions :: proc(s: ^State, kind: List_Kind, h: List_Header) {
 		ours, playing, enabled := list_play_state(s)
 		label := "Pause" if playing else "Play"
 		icon := text.ICON_PAUSE if playing else text.ICON_PLAY
-		if pill("list_play", icon, label, true, enabled, fmt.tprintf("%s %s", label, title)).clicked {
+		if pill("list_play", icon, label, true, enabled, cat(label, " ", title)).clicked {
 			list_play(s, ours)
 		}
 		ui.spacer(ui.fill())
@@ -278,14 +280,14 @@ draw_list_actions :: proc(s: ^State, kind: List_Kind, h: List_Header) {
 	{
 		ui.column("", {}, ui.children_sum(), ui.fill())
 		ui.spacer(ui.fill())
-		if pill("list_shuffle", text.ICON_SHUFFLE, "Shuffle", false, row_playable(s, 0), fmt.tprintf("Shuffle %s", title)).clicked {
+		if pill("list_shuffle", text.ICON_SHUFFLE, "Shuffle", false, row_playable(s, 0), cat("Shuffle ", title)).clicked {
 			pending_set(s, Play_Row{order = .Shuffled})
 		}
 		ui.spacer(ui.fill())
 	}
 	ui.spacer(ui.px(8))
 	ui.radius(20)
-	more, more_sig := icon_button("list_more", text.ICON_DOTS_THREE, .Icon, fmt.tprintf("More options for %s", title), TEXT, 1, 40, {.Focusable})
+	more, more_sig := icon_button("list_more", text.ICON_DOTS_THREE, .Icon, cat("More options for ", title), TEXT, 1, 40, {.Focusable})
 	if more_sig.clicked {
 		ui.open_menu("list_menu", {more.rect.x, more.rect.y + more.rect.h})
 	}
@@ -330,9 +332,10 @@ list_play_button :: proc(s: ^State, id: string, side: f32) {
 	ui.set_next_radius(side / 2)
 	ui.set_next_hover_color(SECONDARY)
 	ui.set_next_active_color({0, 0, 0, 0.15})
-	b := ui.box_make(fmt.tprintf("%s###%s", icon, id), flags, ui.px(side), ui.px(side))
+	b := ui.box_make(id, flags, ui.px(side), ui.px(side))
+	b.label = icon
 	b.opacity = 1 if enabled else 0.5
-	ui.accessible(b, .Button, fmt.tprintf("%s %s", "Pause" if playing else "Play", view_title(s)))
+	ui.accessible(b, .Button, cat("Pause " if playing else "Play ", view_title(s)))
 	ui.spacer(ui.fill())
 	sig := ui.signal(b)
 	if sig.clicked {

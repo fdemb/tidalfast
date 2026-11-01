@@ -45,6 +45,7 @@ import "core:fmt"
 import "core:hash"
 import "core:log"
 import "core:math"
+import "core:math/bits"
 import "core:os"
 
 FRAMES_IN_FLIGHT :: 3
@@ -520,15 +521,28 @@ backdrop_hash :: proc(r: ^Renderer, batch: int, region: [4]f32, levels: int) -> 
 	h = hash.fnv64a(bytes(&scale), h)
 	h = hash.fnv64a(bytes(&clear), h)
 	for &b in r.batches[:batch] {
-		h = hash.fnv64a(bytes(&b.textures), h)
+		h = hash_words(&b.textures, h)
 		for &inst in r.instances[b.first:b.first + b.count] {
 			pad := inst.softness + 1
 			x0, y0 := max(inst.dst.x - pad, inst.clip.x), max(inst.dst.y - pad, inst.clip.y)
 			x1, y1 := min(inst.dst.z + pad, inst.clip.z), min(inst.dst.w + pad, inst.clip.w)
 			if x0 < region.z && x1 > region.x && y0 < region.w && y1 > region.y {
-				h = hash.fnv64a(bytes(&inst), h)
+				h = hash_words(&inst, h)
 			}
 		}
+	}
+	return h if h != 0 else 1
+}
+
+// hash_words folds v into h eight bytes at a time, where fnv64a goes a byte
+// at a time, which made hashing a frame's instances a third of drawing it.
+// Each step is a bijection of h, so changing any one word of v always
+// changes the result.
+@(private)
+hash_words :: proc(v: ^$T, h: u64) -> u64 where size_of(T) % 8 == 0 {
+	h := h
+	for w in transmute([size_of(T) / 8]u64)v^ {
+		h = bits.rotate_left64((h ~ w) * 0x9e3779b97f4a7c15, 29)
 	}
 	return h
 }
@@ -553,6 +567,35 @@ push_gradient :: proc(r: ^Renderer, rect: Rect, from, to: Color, horizontal := f
 // radius is set. src is in texels; zero means the whole texture.
 push_image :: proc(r: ^Renderer, rect: Rect, texture: Texture, src: Rect = {}, tint := WHITE, radius: f32 = 0, nearest := false) {
 	push(r, rect, {colors = corners(tint), radii = corners(radius), texture = texture, src = src, nearest = nearest})
+}
+
+// push_sprite draws the texels src of texture into dst, the pixel edges x0
+// y0 x1 y1, tinted by tint. For a rect on whole pixels, as a glyph is, it
+// writes the instance push_image would, without converting to points and
+// rounding back.
+push_sprite :: proc(r: ^Renderer, dst: [4]f32, texture: Texture, src: Rect, tint: Color) {
+	if dst.x >= dst.z || dst.y >= dst.w {
+		return
+	}
+	slot := texture_slot(r, texture)
+	if slot == nil || texture == 0 {
+		push(r, {dst.x / r.scale, dst.y / r.scale, (dst.z - dst.x) / r.scale, (dst.w - dst.y) / r.scale}, {colors = corners(tint)})
+		return
+	}
+	inst := Instance {
+		dst    = dst,
+		colors = {tint, tint, tint, tint},
+		flags  = {.Textured},
+		clip   = r.clips[min(r.clip_depth, MAX_CLIP_DEPTH) - 1],
+	}
+	kind := 0
+	if slot.format == .R8 {
+		inst.flags += {.Coverage}
+		kind = 1
+	}
+	tw, th := f32(slot.width), f32(slot.height)
+	inst.src = {src.x / tw, src.y / th, (src.x + src.w) / tw, (src.y + src.h) / th}
+	#force_inline append_instance(r, inst, texture, kind)
 }
 
 // Rim is how a rim changes the linear colour c under it: c * (1 - darken)

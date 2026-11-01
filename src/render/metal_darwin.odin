@@ -450,7 +450,7 @@ gpu_frame_begin :: proc(r: ^Renderer) -> [^]Instance {
 	r.slot_wait_ms = 0
 	if cmd := g.in_flight[r.slot]; cmd != nil {
 		wait := time.tick_now()
-		msg(cmd, "waitUntilCompleted")
+		send(cmd, sels.wait_until_completed)
 		r.slot_wait_ms = f32(time.duration_milliseconds(time.tick_since(wait)))
 		release(cmd)
 		g.in_flight[r.slot] = nil
@@ -459,7 +459,7 @@ gpu_frame_begin :: proc(r: ^Renderer) -> [^]Instance {
 		g.buffers[r.slot] = new_instance_buffer(r, INITIAL_INSTANCES)
 		r.capacity[r.slot] = INITIAL_INSTANCES
 	}
-	return ([^]Instance)(msg(g.buffers[r.slot], "contents"))
+	return ([^]Instance)(send(g.buffers[r.slot], sels.contents))
 }
 
 // read_gpu_time sets gpu_ms from the newest command buffer the GPU has
@@ -473,7 +473,7 @@ read_gpu_time :: proc(r: ^Renderer) {
 		if cmd == nil || g.in_flight_frame[i] < g.timed_frame {
 			continue
 		}
-		if msg_proc(proc "c" (id, SEL) -> uint)(cmd, sel_registerName("status")) != MTL_COMMAND_BUFFER_STATUS_COMPLETED {
+		if msg_proc(proc "c" (id, SEL) -> uint)(cmd, sels.status) != MTL_COMMAND_BUFFER_STATUS_COMPLETED {
 			continue
 		}
 		if newest < 0 || g.in_flight_frame[i] > g.in_flight_frame[newest] {
@@ -484,8 +484,8 @@ read_gpu_time :: proc(r: ^Renderer) {
 		return
 	}
 	cmd := g.in_flight[newest]
-	start := msg_proc(proc "c" (id, SEL) -> f64)(cmd, sel_registerName("GPUStartTime"))
-	end := msg_proc(proc "c" (id, SEL) -> f64)(cmd, sel_registerName("GPUEndTime"))
+	start := msg_proc(proc "c" (id, SEL) -> f64)(cmd, sels.gpu_start_time)
+	end := msg_proc(proc "c" (id, SEL) -> f64)(cmd, sels.gpu_end_time)
 	r.gpu_ms = f32((end - start) * 1000)
 	g.timed_frame = g.in_flight_frame[newest] + 1
 }
@@ -523,16 +523,16 @@ end_frame :: proc(r: ^Renderer) {
 		return
 	}
 	wait := time.tick_now()
-	drawable := msg(g.layer, "nextDrawable")
+	drawable := send(g.layer, sels.next_drawable)
 	r.drawable_wait_ms = f32(time.duration_milliseconds(time.tick_since(wait)))
 	if drawable == nil {
 		return
 	}
-	texture := msg(drawable, "texture")
-	tex_w := msg_proc(proc "c" (id, SEL) -> uint)(texture, sel_registerName("width"))
-	tex_h := msg_proc(proc "c" (id, SEL) -> uint)(texture, sel_registerName("height"))
+	texture := send(drawable, sels.texture)
+	tex_w := msg_proc(proc "c" (id, SEL) -> uint)(texture, sels.width)
+	tex_h := msg_proc(proc "c" (id, SEL) -> uint)(texture, sels.height)
 
-	cmd := msg(g.queue, "commandBuffer")
+	cmd := send(g.queue, sels.command_buffer)
 	draw_calls := 0
 	blurred: id
 	if r.backdrop.batch >= 0 {
@@ -541,18 +541,18 @@ end_frame :: proc(r: ^Renderer) {
 
 	enc := begin_pass(cmd, texture, r.clear)
 	draw_calls += draw_batches(r, enc, r.batches[:r.batch_count], {0, 0, f32(tex_w), f32(tex_h)}, 1, blurred)
-	msg(enc, "endEncoding")
+	send(enc, sels.end_encoding)
 
 	capture: id
 	if r.capture_path != "" {
 		capture = encode_capture(r, cmd, texture, tex_w, tex_h)
 	}
 
-	msg_id(cmd, "presentDrawable:", drawable)
-	msg(cmd, "commit")
+	send_id(cmd, sels.present_drawable, drawable)
+	send(cmd, sels.commit)
 	// commandBuffer returns an autoreleased object; keep it until begin_frame
 	// comes back to this slot.
-	g.in_flight[r.slot] = msg(cmd, "retain")
+	g.in_flight[r.slot] = send(cmd, sels.retain)
 	g.in_flight_frame[r.slot] = r.frame_index
 	r.stats = {draw_calls, r.instance_count}
 
@@ -566,15 +566,15 @@ end_frame :: proc(r: ^Renderer) {
 // begin_pass starts a render pass on texture, cleared to clear.
 @(private)
 begin_pass :: proc(cmd, texture: id, clear: Color) -> id {
-	pass := msg(objc_getClass("MTLRenderPassDescriptor"), "renderPassDescriptor")
-	color := msg_uint(msg(pass, "colorAttachments"), "objectAtIndexedSubscript:", 0)
-	msg_id(color, "setTexture:", texture)
-	msg_uint(color, "setLoadAction:", uint(MTL.LoadAction.Clear))
-	msg_uint(color, "setStoreAction:", uint(MTL.StoreAction.Store))
+	pass := send(sels.render_pass_descriptor_class, sels.render_pass_descriptor)
+	color := send_uint(send(pass, sels.color_attachments), sels.object_at_indexed_subscript, 0)
+	send_id(color, sels.set_texture, texture)
+	send_uint(color, sels.set_load_action, uint(MTL.LoadAction.Clear))
+	send_uint(color, sels.set_store_action, uint(MTL.StoreAction.Store))
 	// The targets are sRGB, so the clear colour is given in linear.
 	c := MTL.ClearColor{f64(linear_from_srgb(clear.r)), f64(linear_from_srgb(clear.g)), f64(linear_from_srgb(clear.b)), f64(clear.a)}
-	msg_proc(proc "c" (id, SEL, MTL.ClearColor))(color, sel_registerName("setClearColor:"), c)
-	return msg_id(cmd, "renderCommandEncoderWithDescriptor:", pass)
+	msg_proc(proc "c" (id, SEL, MTL.ClearColor))(color, sels.set_clear_color, c)
+	return send_id(cmd, sels.render_command_encoder, pass)
 }
 
 // draw_batches draws batches into a target covering target (x, y, w, h) of
@@ -589,12 +589,12 @@ draw_batches :: proc(r: ^Renderer, enc: id, batches: []Batch, target: [4]f32, sc
 	target, origin := target, [4]f32{target.x, target.y, scale.x, scale.y}
 	buf := g.buffers[r.slot]
 	white := r.textures[0].gpu.texture
-	msg_id(enc, "setRenderPipelineState:", g.pipeline)
-	msg_proc(proc "c" (id, SEL, id, uint, uint))(enc, sel_registerName("setVertexBuffer:offset:atIndex:"), buf, 0, 0)
-	msg_proc(proc "c" (id, SEL, id, uint, uint))(enc, sel_registerName("setFragmentBuffer:offset:atIndex:"), buf, 0, 0)
-	msg_proc(proc "c" (id, SEL, rawptr, uint, uint))(enc, sel_registerName("setVertexBytes:length:atIndex:"), &target, size_of(target), 1)
-	msg_proc(proc "c" (id, SEL, rawptr, uint, uint))(enc, sel_registerName("setFragmentBytes:length:atIndex:"), &origin, size_of(origin), 1)
-	msg_proc(proc "c" (id, SEL, id, uint))(enc, sel_registerName("setFragmentTexture:atIndex:"), blurred if blurred != nil else white, 2)
+	send_id(enc, sels.set_render_pipeline_state, g.pipeline)
+	msg_proc(proc "c" (id, SEL, id, uint, uint))(enc, sels.set_vertex_buffer, buf, 0, 0)
+	msg_proc(proc "c" (id, SEL, id, uint, uint))(enc, sels.set_fragment_buffer, buf, 0, 0)
+	msg_proc(proc "c" (id, SEL, rawptr, uint, uint))(enc, sels.set_vertex_bytes, &target, size_of(target), 1)
+	msg_proc(proc "c" (id, SEL, rawptr, uint, uint))(enc, sels.set_fragment_bytes, &origin, size_of(origin), 1)
+	msg_proc(proc "c" (id, SEL, id, uint))(enc, sels.set_fragment_texture, blurred if blurred != nil else white, 2)
 	draw_calls := 0
 	for b in batches {
 		if b.count == 0 {
@@ -603,9 +603,9 @@ draw_batches :: proc(r: ^Renderer, enc: id, batches: []Batch, target: [4]f32, sc
 		for t, index in b.textures {
 			slot := texture_slot(r, t)
 			tex := slot.gpu.texture if slot != nil else white
-			msg_proc(proc "c" (id, SEL, id, uint))(enc, sel_registerName("setFragmentTexture:atIndex:"), tex, uint(index))
+			msg_proc(proc "c" (id, SEL, id, uint))(enc, sels.set_fragment_texture, tex, uint(index))
 		}
-		msg_proc(proc "c" (id, SEL, uint, uint, uint, uint, uint))(enc, sel_registerName("drawPrimitives:vertexStart:vertexCount:instanceCount:baseInstance:"), uint(MTL.PrimitiveType.TriangleStrip), 0, 4, uint(b.count), uint(b.first))
+		msg_proc(proc "c" (id, SEL, uint, uint, uint, uint, uint))(enc, sels.draw_primitives_instanced, uint(MTL.PrimitiveType.TriangleStrip), 0, 4, uint(b.count), uint(b.first))
 		draw_calls += 1
 	}
 	return draw_calls
@@ -631,7 +631,7 @@ encode_backdrop :: proc(r: ^Renderer, cmd: id) -> (blurred: id, draw_calls: int)
 	enc := begin_pass(cmd, g.scene, r.clear)
 	scale := [2]f32{f32(w) / f32(scene.x), f32(h) / f32(scene.y)}
 	draw_calls = draw_batches(r, enc, r.batches[:bd.batch], {bd.region.x, bd.region.y, f32(w), f32(h)}, scale, nil)
-	msg(enc, "endEncoding")
+	send(enc, sels.end_encoding)
 
 	// Drawing the scene at half size was the first halving.
 	src := g.scene
@@ -650,18 +650,18 @@ encode_backdrop :: proc(r: ^Renderer, cmd: id) -> (blurred: id, draw_calls: int)
 // into dst.
 @(private)
 blur_pass :: proc(cmd, pipeline, src, dst: id, src_size: [2]int) {
-	pass := msg(objc_getClass("MTLRenderPassDescriptor"), "renderPassDescriptor")
-	color := msg_uint(msg(pass, "colorAttachments"), "objectAtIndexedSubscript:", 0)
-	msg_id(color, "setTexture:", dst)
-	msg_uint(color, "setLoadAction:", uint(MTL.LoadAction.DontCare))
-	msg_uint(color, "setStoreAction:", uint(MTL.StoreAction.Store))
-	enc := msg_id(cmd, "renderCommandEncoderWithDescriptor:", pass)
+	pass := send(sels.render_pass_descriptor_class, sels.render_pass_descriptor)
+	color := send_uint(send(pass, sels.color_attachments), sels.object_at_indexed_subscript, 0)
+	send_id(color, sels.set_texture, dst)
+	send_uint(color, sels.set_load_action, uint(MTL.LoadAction.DontCare))
+	send_uint(color, sels.set_store_action, uint(MTL.StoreAction.Store))
+	enc := send_id(cmd, sels.render_command_encoder, pass)
 	half_pixel := [2]f32{0.5 / f32(src_size.x), 0.5 / f32(src_size.y)}
-	msg_id(enc, "setRenderPipelineState:", pipeline)
-	msg_proc(proc "c" (id, SEL, id, uint))(enc, sel_registerName("setFragmentTexture:atIndex:"), src, 0)
-	msg_proc(proc "c" (id, SEL, rawptr, uint, uint))(enc, sel_registerName("setFragmentBytes:length:atIndex:"), &half_pixel, size_of(half_pixel), 0)
-	msg_proc(proc "c" (id, SEL, uint, uint, uint))(enc, sel_registerName("drawPrimitives:vertexStart:vertexCount:"), uint(MTL.PrimitiveType.Triangle), 0, 3)
-	msg(enc, "endEncoding")
+	send_id(enc, sels.set_render_pipeline_state, pipeline)
+	msg_proc(proc "c" (id, SEL, id, uint))(enc, sels.set_fragment_texture, src, 0)
+	msg_proc(proc "c" (id, SEL, rawptr, uint, uint))(enc, sels.set_fragment_bytes, &half_pixel, size_of(half_pixel), 0)
+	msg_proc(proc "c" (id, SEL, uint, uint, uint))(enc, sels.draw_primitives, uint(MTL.PrimitiveType.Triangle), 0, 3)
+	send(enc, sels.end_encoding)
 }
 
 // backdrop_textures makes the scene texture for a region w by h pixels

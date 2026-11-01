@@ -1562,14 +1562,25 @@ sidebar_entry :: proc(s: ^State, i: int) -> Sidebar_Entry {
 	d := &s.data
 	seed := u32(i) * 7919 + 13
 	if d.fake {
-		return {PLAYLISTS[i], fmt.tprintf("%d songs", ROW_COUNT if i == 0 else 20 + i * 37 % 300), "", seed}
+		return {PLAYLISTS[i], playlist_songs(ROW_COUNT if i == 0 else 20 + i * 37 % 300), "", seed}
 	}
 	if i == 0 {
-		songs := fmt.tprintf("%d songs", d.sidebar.liked_count) if d.sidebar.loaded else ""
-		return {"Liked Songs", songs, "", seed}
+		return {"Liked Songs", playlist_songs(d.sidebar.liked_count) if d.sidebar.loaded else "", "", seed}
 	}
 	pl := d.sidebar.items[i - 1]
-	return {pl.name, fmt.tprintf("%d songs", pl.tracks), pl.image, seed}
+	return {pl.name, playlist_songs(pl.tracks), pl.image, seed}
+}
+
+// sidebar_image is sidebar_entry's image alone, for prefetching covers.
+sidebar_image :: proc(s: ^State, i: int) -> string {
+	if s.data.fake || i == 0 {
+		return ""
+	}
+	return s.data.sidebar.items[i - 1].image
+}
+
+playlist_songs :: proc(n: int) -> string {
+	return cat(num(n), " songs")
 }
 
 view_title :: proc(s: ^State) -> string {

@@ -1,4 +1,4 @@
-// Layout runs five passes over the tree for each axis, after Fleury:
+// Layout solves five passes for each axis, after Fleury:
 //
 // 1. Standalone: Pixels and Text sizes, which need nothing else.
 // 2. Upwards-dependent: Parent_Pct, from the nearest ancestor that has a
@@ -16,30 +16,62 @@
 //    A box's gutter and pad come off its size before its children get any.
 // 5. Positions: children are placed one after another along the child axis,
 //    shifted by the parent's view_off, and the parent's view_bounds is set
-//    to the size of its content.
+//    to the size of its content. With Center_Children they move in by half
+//    the room they leave, where two fill() spacers around them would put
+//    them, without the two boxes.
+//
+// The axes don't depend on each other, and each pass only reads what the
+// ones before it wrote for the box, its ancestors or its children, so two
+// walks over the tree do all ten: sizes does 1 and 2 on the way down and 3
+// on the way up, and place does 4 and 5 for a box's children before going
+// into them.
 package ui
 
 import "core:math"
 
-layout :: proc(root: ^Box) {
+import "../text"
+
+// layout lays out the tree under root. With texts it first shapes the
+// labels of boxes sized by their text, so it knows their sizes. Other
+// labels are shaped when drawn, if they're on screen.
+layout :: proc(root: ^Box, texts: ^text.State = nil) {
+	sizes(root, texts)
+	root.rect = {root.fixed_pos.x, root.fixed_pos.y, root.fixed_size.x, root.fixed_size.y}
+	place(root)
+}
+
+@(private)
+sizes :: proc(b: ^Box, texts: ^text.State) {
+	if texts != nil && b.label != "" && (b.pref_size[.X].kind == .Text || b.pref_size[.Y].kind == .Text) {
+		b.run = text.shape(texts, b.font, b.font_size, b.label)
+		b.text_size = {b.run.width + 2 * b.text_pad, b.run.ascent + b.run.descent}
+	}
 	for axis in Axis {
-		layout_axis(root, axis)
+		size_standalone(b, axis)
+		size_upwards(b, axis)
+	}
+	for c := b.first; c != nil; c = c.next {
+		sizes(c, texts)
+	}
+	for axis in Axis {
+		size_downwards(b, axis)
 	}
 }
 
-layout_axis :: proc(root: ^Box, axis: Axis) {
-	sizes_standalone(root, axis)
-	sizes_upwards(root, axis)
-	sizes_downwards(root, axis)
-	solve_violations(root, axis)
-	if axis == .X {
-		root.rect.x = root.fixed_pos.x
-		root.rect.w = root.fixed_size.x
-	} else {
-		root.rect.y = root.fixed_pos.y
-		root.rect.h = root.fixed_size.y
+@(private)
+place :: proc(b: ^Box) {
+	if b.first == nil {
+		// What position would work out for a box without children.
+		b.view_bounds = {2 * b.pad.x, 2 * b.pad.y + b.inset_end}
+		return
 	}
-	position(root, axis)
+	for axis in Axis {
+		solve_violations(b, axis)
+		position(b, axis)
+	}
+	for c := b.first; c != nil; c = c.next {
+		place(c)
+	}
 }
 
 @(private)
@@ -59,7 +91,8 @@ content_size :: proc(b: ^Box, axis: Axis) -> f32 {
 	return max(b.fixed_size[axis] - gutter - 2 * b.pad[axis], 0)
 }
 
-sizes_standalone :: proc(b: ^Box, axis: Axis) {
+@(private)
+size_standalone :: proc(b: ^Box, axis: Axis) {
 	size := b.pref_size[axis]
 	#partial switch size.kind {
 	case .Pixels:
@@ -67,12 +100,10 @@ sizes_standalone :: proc(b: ^Box, axis: Axis) {
 	case .Text:
 		b.fixed_size[axis] = size.value + b.text_size[axis]
 	}
-	for c := b.first; c != nil; c = c.next {
-		sizes_standalone(c, axis)
-	}
 }
 
-sizes_upwards :: proc(b: ^Box, axis: Axis) {
+@(private)
+size_upwards :: proc(b: ^Box, axis: Axis) {
 	size := b.pref_size[axis]
 	if size.kind == .Parent_Pct {
 		known: f32
@@ -87,15 +118,10 @@ sizes_upwards :: proc(b: ^Box, axis: Axis) {
 		}
 		b.fixed_size[axis] = known * size.value
 	}
-	for c := b.first; c != nil; c = c.next {
-		sizes_upwards(c, axis)
-	}
 }
 
-sizes_downwards :: proc(b: ^Box, axis: Axis) {
-	for c := b.first; c != nil; c = c.next {
-		sizes_downwards(c, axis)
-	}
+@(private)
+size_downwards :: proc(b: ^Box, axis: Axis) {
 	if b.pref_size[axis].kind == .Children_Sum {
 		sum: f32
 		for c := b.first; c != nil; c = c.next {
@@ -112,6 +138,8 @@ sizes_downwards :: proc(b: ^Box, axis: Axis) {
 	}
 }
 
+// solve_violations fits b's children into it along axis.
+@(private)
 solve_violations :: proc(b: ^Box, axis: Axis) {
 	allowed := content_size(b, axis)
 	// Pass 2 took them from the size before b's parent shrank it. A fill
@@ -125,47 +153,56 @@ solve_violations :: proc(b: ^Box, axis: Axis) {
 			}
 		}
 	}
-	if !overflow_on(b, axis) {
-		if axis != b.child_axis {
+	if overflow_on(b, axis) {
+		return
+	}
+	if axis != b.child_axis {
+		for c := b.first; c != nil; c = c.next {
+			if !floating_on(c, axis) {
+				c.fixed_size[axis] = min(c.fixed_size[axis], allowed)
+			}
+		}
+	} else if .Shrink_From_End in b.flags {
+		left := allowed
+		for c := b.first; c != nil; c = c.next {
+			if !floating_on(c, axis) {
+				c.fixed_size[axis] = min(c.fixed_size[axis], left)
+				left -= c.fixed_size[axis]
+			}
+		}
+	} else {
+		total, giveable: f32
+		for c := b.first; c != nil; c = c.next {
+			if !floating_on(c, axis) {
+				total += c.fixed_size[axis]
+				giveable += c.fixed_size[axis] * (1 - c.pref_size[axis].strictness)
+			}
+		}
+		violation := total - allowed
+		if violation > 0 && giveable > 0 {
+			take := clamp(violation / giveable, 0, 1)
 			for c := b.first; c != nil; c = c.next {
 				if !floating_on(c, axis) {
-					c.fixed_size[axis] = min(c.fixed_size[axis], allowed)
-				}
-			}
-		} else if .Shrink_From_End in b.flags {
-			left := allowed
-			for c := b.first; c != nil; c = c.next {
-				if !floating_on(c, axis) {
-					c.fixed_size[axis] = min(c.fixed_size[axis], left)
-					left -= c.fixed_size[axis]
-				}
-			}
-		} else {
-			total, giveable: f32
-			for c := b.first; c != nil; c = c.next {
-				if !floating_on(c, axis) {
-					total += c.fixed_size[axis]
-					giveable += c.fixed_size[axis] * (1 - c.pref_size[axis].strictness)
-				}
-			}
-			violation := total - allowed
-			if violation > 0 && giveable > 0 {
-				take := clamp(violation / giveable, 0, 1)
-				for c := b.first; c != nil; c = c.next {
-					if !floating_on(c, axis) {
-						c.fixed_size[axis] -= c.fixed_size[axis] * (1 - c.pref_size[axis].strictness) * take
-					}
+					c.fixed_size[axis] -= c.fixed_size[axis] * (1 - c.pref_size[axis].strictness) * take
 				}
 			}
 		}
 	}
-	for c := b.first; c != nil; c = c.next {
-		solve_violations(c, axis)
-	}
 }
 
+// position places b's children along axis and sets b's view_bounds.
+@(private)
 position :: proc(b: ^Box, axis: Axis) {
 	at := b.pad[axis]
+	if .Center_Children in b.flags && axis == b.child_axis {
+		used: f32
+		for c := b.first; c != nil; c = c.next {
+			if !floating_on(c, axis) {
+				used += c.fixed_size[axis]
+			}
+		}
+		at += max(content_size(b, axis) - used, 0) / 2
+	}
 	bounds: f32
 	origin := b.rect.x if axis == .X else b.rect.y
 	for c := b.first; c != nil; c = c.next {
@@ -192,9 +229,6 @@ position :: proc(b: ^Box, axis: Axis) {
 		bounds += b.inset_end
 	}
 	b.view_bounds[axis] = bounds
-	for c := b.first; c != nil; c = c.next {
-		position(c, axis)
-	}
 }
 
 // add_child links c under parent, for building trees by hand.

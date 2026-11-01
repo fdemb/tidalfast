@@ -88,7 +88,7 @@ track_format :: proc(s: ^State) -> string {
 		return ""
 	}
 	codec := "" if pb.fake else "FLAC, "
-	return fmt.tprintf("%s%d-bit, %s kHz", codec, st.bits, audio.khz_text(st.rate))
+	return cat(codec, num(int(st.bits)), "-bit, ", audio.khz_text(st.rate), " kHz")
 }
 
 // signal_path is each step from the track to the device.

@@ -37,14 +37,14 @@ test_cache_keys :: proc(t: ^testing.T) {
 	testing.expect(t, text.run_key("Blue in Green ", .Regular, 13) != a)
 	testing.expect(t, text.run_key("", .Regular, 13) != 0)
 
-	g := text.glyph_key(0, 0, 26, 13, 0)
+	g := text.glyph_key(0, 0, text.glyph_sizes(26, 13), 0)
 	testing.expect(t, g != 0)
-	testing.expect(t, text.glyph_key(0, 0, 26, 13, 1) != g)
-	testing.expect(t, text.glyph_key(1, 0, 26, 13, 0) != g)
-	testing.expect(t, text.glyph_key(0, 1, 26, 13, 0) != g)
-	testing.expect(t, text.glyph_key(0, 0, 26.25, 13, 0) != g)
-	testing.expect(t, text.glyph_key(0, 0, 26, 26, 0) != g) // 26 px at 1x
-	testing.expect_value(t, text.glyph_key(0, 0, 26.01, 13, 0), g) // quarter pixel steps
+	testing.expect(t, text.glyph_key(0, 0, text.glyph_sizes(26, 13), 1) != g)
+	testing.expect(t, text.glyph_key(1, 0, text.glyph_sizes(26, 13), 0) != g)
+	testing.expect(t, text.glyph_key(0, 1, text.glyph_sizes(26, 13), 0) != g)
+	testing.expect(t, text.glyph_key(0, 0, text.glyph_sizes(26.25, 13), 0) != g)
+	testing.expect(t, text.glyph_key(0, 0, text.glyph_sizes(26, 26), 0) != g) // 26 px at 1x
+	testing.expect_value(t, text.glyph_key(0, 0, text.glyph_sizes(26.01, 13), 0), g) // quarter pixel steps
 }
 
 // glyphs makes a run of n glyphs, each 10 wide, with spaces at the given

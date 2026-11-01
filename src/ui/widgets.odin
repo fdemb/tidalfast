@@ -98,9 +98,14 @@ button :: proc(id: string, width: Size = {}, height: Size = {}) -> Signal {
 // link is text that does something when clicked, underlined while the
 // mouse is over it. It's as wide as its text and gives way to an ellipsis
 // when there's less room, so only the text takes the click. The text goes
-// from the text colour to hot_color as it lights.
-link :: proc(id: string, hot_color: render.Color, height: Size = {}) -> Signal {
+// from the text colour to hot_color as it lights. A label given apart from
+// id is the text, and id only the key, as label###id would be without
+// joining them.
+link :: proc(id: string, hot_color: render.Color, height: Size = {}, label := "") -> Signal {
 	b := box_make(id, {.Clickable, .Draw_Text, .Draw_Hot_Underline}, text_size(0, 0), height)
+	if label != "" {
+		b.label = label
+	}
 	b.text_color += (hot_color - b.text_color) * b.hot_t
 	accessible(b, .Button, b.label)
 	return signal(b)

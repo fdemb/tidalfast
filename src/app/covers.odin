@@ -19,34 +19,29 @@ COVER_RIM :: render.Rim{lift = 0.025, darken = 0.025} // the 1 pt rim around a c
 // cell_w. Without an image id it draws the fake data's gradient for seed.
 // A radius of half the size draws it round, as artist pictures are.
 cover_art :: proc(s: ^State, kind: cover.Kind, id: string, seed: u32, size: f32, cell_w: ui.Size, radius: f32 = 4) {
-	ui.column("", {}, cell_w, ui.fill())
-	ui.spacer(ui.fill())
-	{
-		ui.row("", {}, ui.fill(), ui.px(size))
-		ui.radius(radius)
-		hue := f32(seed % 997) / 997
-		ui.set_next_background(hsv(hue, 0.55, 0.75) if id == "" else SURFACE_ACTIVE)
-		b := ui.box_make("", {.Draw_Background}, ui.px(size), ui.px(size))
-		b.rim = COVER_RIM
-		if id == "" {
-			b.gradient = hsv(hue + 0.08, 0.7, 0.35)
-		} else {
-			e := cover_want(s, kind, id, size, PRIORITY_COVER)
-			measure_count_cover(s, e != nil && e.state == .Ready)
-			if e != nil && e.state == .Ready {
-				ui.parent(b)
-				img := ui.box_make("", {}, ui.fill(), ui.fill())
-				img.texture = cover.texture(&s.data.covers, e)
-				img.texture_src = cover.src(&s.data.covers, e)
-				img.rim = COVER_RIM
-				img.opacity = cover.alpha(e, s.ui.time)
-				if img.opacity < 1 {
-					ui.request_frame()
-				}
-			}
+	ui.column("", {.Center_Children}, cell_w, ui.fill())
+	ui.radius(radius)
+	hue := f32(seed % 997) / 997
+	ui.set_next_background(hsv(hue, 0.55, 0.75) if id == "" else SURFACE_ACTIVE)
+	b := ui.box_make("", {.Draw_Background}, ui.px(size), ui.px(size))
+	b.rim = COVER_RIM
+	if id == "" {
+		b.gradient = hsv(hue + 0.08, 0.7, 0.35)
+		return
+	}
+	e := cover_want(s, kind, id, size, PRIORITY_COVER)
+	measure_count_cover(s, e != nil && e.state == .Ready)
+	if e != nil && e.state == .Ready {
+		ui.parent(b)
+		img := ui.box_make("", {}, ui.fill(), ui.fill())
+		img.texture = cover.texture(&s.data.covers, e)
+		img.texture_src = cover.src(&s.data.covers, e)
+		img.rim = COVER_RIM
+		img.opacity = cover.alpha(e, s.ui.time)
+		if img.opacity < 1 {
+			ui.request_frame()
 		}
 	}
-	ui.spacer(ui.fill())
 }
 
 cover_want :: proc(s: ^State, kind: cover.Kind, id: string, points: f32, priority: u8) -> ^cover.Entry {

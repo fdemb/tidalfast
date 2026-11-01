@@ -163,6 +163,29 @@ test_ui_layout_scroll_and_floating :: proc(t: ^testing.T) {
 
 // Shrink_From_End keeps the first children whole and cuts the one that
 // crosses the edge, inside the padding, leaving none for the rest.
+// Center_Children puts children where two fill() spacers around them
+// would, and at the start when they don't fit.
+@(test)
+test_ui_layout_center_children :: proc(t: ^testing.T) {
+	for height in ([]f32{56, 87, 30}) {
+		spaced := node(ui.px(40), ui.px(height), .Y)
+		before := node(ui.px(0), ui.fill())
+		a := node(ui.px(36), ui.px(36))
+		after := node(ui.px(0), ui.fill())
+		ui.add_child(&spaced, &before)
+		ui.add_child(&spaced, &a)
+		ui.add_child(&spaced, &after)
+		ui.layout(&spaced)
+
+		centred := node(ui.px(40), ui.px(height), .Y)
+		centred.flags = {.Center_Children}
+		b := node(ui.px(36), ui.px(36))
+		ui.add_child(&centred, &b)
+		ui.layout(&centred)
+		expect_rect(t, &b, a.rect)
+	}
+}
+
 @(test)
 test_ui_layout_shrink_from_end :: proc(t: ^testing.T) {
 	root := node(ui.px(100), ui.px(20))
@@ -1579,6 +1602,44 @@ test_ui_pool_full :: proc(t: ^testing.T) {
 	testing.expect_value(t, used, ui.MAX_BOXES)
 	testing.expect_value(t, capacity, ui.MAX_BOXES)
 	testing.expect_value(t, misses, 5)
+}
+
+// Boxes not built for a frame are freed and others keep their state, with
+// more boxes than buckets so that chains share buckets. Freed boxes are
+// taken again before the pool grows.
+@(test)
+test_ui_prune_keeps_built_boxes :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	N :: ui.BOX_TABLE + 1000
+	build :: proc(u: ^ui.State, frame_time: f64, keep: proc(i: int) -> bool) {
+		ui.begin_frame(u, {}, nil, nil, 300, 200, frame_time)
+		for i in 0 ..< N {
+			if keep(i) {
+				b := ui.box_make(fmt.tprintf("##%d", i))
+				b.view_off.x += 1
+			}
+		}
+		ui.end_frame()
+	}
+	all :: proc(i: int) -> bool {return true}
+	odd :: proc(i: int) -> bool {return i % 2 == 1}
+	build(&u, 1, all)
+	build(&u, 2, odd)
+	build(&u, 3, odd)
+	used, _, _ := ui.pool_stats(&u)
+	testing.expect_value(t, used, N / 2)
+	for i in 0 ..< N {
+		b := ui.box_lookup(&u, ui.key_from_string(0, fmt.tprintf("##%d", i)))
+		if i % 2 == 0 {
+			testing.expectf(t, b == nil, "box %d was freed", i)
+		} else if testing.expectf(t, b != nil, "box %d is kept", i) {
+			testing.expect_value(t, b.view_off.x, 3)
+		}
+	}
+	build(&u, 4, all)
+	testing.expect_value(t, u.boxes_used, N)
 }
 
 @(test)

@@ -20,13 +20,13 @@ package ui
 import "core:hash"
 import "core:log"
 import "core:math"
-import "core:strings"
 
 import "../platform"
 import "../render"
 import "../text"
 
 MAX_BOXES :: 8192
+TEMP_BOXES :: 64 // boxes without a key are taken from the frame's memory this many at a time
 BOX_TABLE :: 4096 // buckets, a power of two
 MAX_KEY_PRESSES :: 32
 NAV_BUTTONS :: platform.Mouse_Buttons{.Back, .Forward}
@@ -92,6 +92,7 @@ Box_Flag :: enum u32 {
 	Focus_Is_Hot, // hot while it has the focus, for menu items: hover and the keyboard move one highlight
 	No_Focus_Ring, // shows the focus itself, as a table does with its selected row
 	Shrink_From_End, // children that don't fit give up room from the end, not in proportion: the one crossing the edge is cut short and those after it get none
+	Center_Children, // children sit in the middle of the room along the child axis, as between two fill() spacers, for a box that's only there to centre something
 }
 Box_Flags :: bit_set[Box_Flag; u32]
 
@@ -233,6 +234,7 @@ State :: struct {
 	free:           ^Box,
 	table:          []^Box,
 	box_count:      int,
+	temp_boxes:     []Box, // the rest of this frame's last chunk of TEMP_BOXES
 	hits:           []Hit,
 	hit_count:      int,
 	drag_rects:     [8]render.Rect, // the Window_Drag boxes, from end_frame
@@ -242,6 +244,7 @@ State :: struct {
 	frame:          u64,
 	time:           f64,
 	dt:             f32,
+	ease:           f32, // how far this frame's dt takes hot_t, active_t and focus_t to their targets
 	width, height:  f32,
 	renderer:       ^render.Renderer, // this frame's
 	texts:          ^text.State,
@@ -366,22 +369,45 @@ fill :: proc() -> Size {
 // Keys
 
 key_from_string :: proc(seed: Key, id: string) -> Key {
-	if id == "" {
-		return 0
-	}
-	part := id
-	if i := strings.index(id, "###"); i >= 0 {
-		part = id[i:]
-	}
-	h := hash.fnv64a(transmute([]byte)part) if seed == 0 else hash.fnv64a(transmute([]byte)part, u64(seed))
-	return Key(h if h != 0 else 1)
+	_, hashed := split_id(id)
+	return key_of(seed, hashed)
 }
 
 label_from_string :: proc(id: string) -> string {
-	if i := strings.index(id, "##"); i >= 0 {
-		return id[:i]
+	label, _ := split_id(id)
+	return label
+}
+
+// split_id finds in one pass what box_make needs from an id: the label,
+// up to the first "##", and the part the key hashes, from the first "###"
+// on or else all of it. Every "###" is a "##", so the first comes no
+// earlier.
+@(private)
+split_id :: proc(id: string) -> (label, hashed: string) {
+	label, hashed = id, id
+	for i in 0 ..< len(id) - 1 {
+		if id[i] != '#' || id[i + 1] != '#' {
+			continue
+		}
+		label = id[:i]
+		for j in i ..< len(id) - 2 {
+			if id[j] == '#' && id[j + 1] == '#' && id[j + 2] == '#' {
+				hashed = id[j:]
+				break
+			}
+		}
+		break
 	}
-	return id
+	return
+}
+
+@(private)
+key_of :: proc(seed: Key, hashed: string) -> Key {
+	if hashed == "" {
+		return 0
+	}
+	h := hash.fnv64a(transmute([]byte)hashed) if seed == 0 else hash.fnv64a(transmute([]byte)hashed, u64(seed))
+	return Key(h if h != 0 else 1)
 }
 
 // seed_key is the key of the nearest keyed box from b up.
@@ -420,6 +446,7 @@ begin_frame :: proc(u: ^State, events: []platform.Event, r: ^render.Renderer, t:
 		u.settle_frames = 0
 	}
 	u.dt = f32(clamp(time - u.time, 0, 1.0 / 30))
+	u.ease = 1 - math.exp(-u.dt * 18)
 	u.time = time
 	u.width = width
 	u.height = height
@@ -431,6 +458,7 @@ begin_frame :: proc(u: ^State, events: []platform.Event, r: ^render.Renderer, t:
 	u.wake = 0
 	u.text_claimed = false
 	u.access_nodes = nil
+	u.temp_boxes = nil
 	prune(u)
 	if held, ok := hardware.?; ok {
 		release_stale(u, events, held)
@@ -456,23 +484,24 @@ begin_frame :: proc(u: ^State, events: []platform.Event, r: ^render.Renderer, t:
 }
 
 // prune frees keyed boxes that weren't built in the last frame and drops
-// interaction state that points at them.
+// interaction state that points at them. It goes through the part of the
+// pool ever used rather than the table, which has many more buckets than a
+// frame has boxes. A free box has no key.
 @(private)
 prune :: proc(u: ^State) {
-	for &bucket in u.table {
-		link := &bucket
-		for link^ != nil {
-			b := link^
-			if b.last_frame + 1 >= u.frame {
-				link = &b.hash_next
-				continue
-			}
-			link^ = b.hash_next
-			b^ = {}
-			b.hash_next = u.free
-			u.free = b
-			u.box_count -= 1
+	for &b in u.boxes[:u.boxes_used] {
+		if b.key == 0 || b.last_frame + 1 >= u.frame {
+			continue
 		}
+		link := &u.table[int(u64(b.key) & (BOX_TABLE - 1))]
+		for link^ != &b {
+			link = &link^.hash_next
+		}
+		link^ = b.hash_next
+		b = {}
+		b.hash_next = u.free
+		u.free = &b
+		u.box_count -= 1
 	}
 	for &k in u.active {
 		if box_lookup(u, k) == nil {
@@ -1013,10 +1042,8 @@ scroll_hit_at :: proc(u: ^State, pos: [2]f32, axis: Axis) -> Key {
 // still animating, which the app passes to the shell.
 end_frame :: proc() -> bool {
 	u := ctx
-	measure(u, u.root)
-	measure(u, u.floating_root)
-	layout(u.root)
-	layout(u.floating_root)
+	layout(u.root, u.texts)
+	layout(u.floating_root, u.texts)
 	fit_floating(u)
 	u.hit_count = 0
 	u.drag_count = 0
@@ -1063,19 +1090,6 @@ end_frame :: proc() -> bool {
 		u.animating = true
 	}
 	return u.animating
-}
-
-// measure shapes the labels of boxes sized by their text, so layout knows
-// their sizes. Other labels are shaped when drawn, if they're on screen.
-@(private)
-measure :: proc(u: ^State, b: ^Box) {
-	if b.label != "" && (b.pref_size[.X].kind == .Text || b.pref_size[.Y].kind == .Text) && u.texts != nil {
-		b.run = text.shape(u.texts, b.font, b.font_size, b.label)
-		b.text_size = {b.run.width + 2 * b.text_pad, b.run.ascent + b.run.descent}
-	}
-	for c := b.first; c != nil; c = c.next {
-		measure(u, c)
-	}
 }
 
 // fit_floating moves the floating boxes that keep_in_window into the
@@ -1213,27 +1227,29 @@ reveal_focus :: proc(u: ^State) {
 box_make :: proc(id: string, flags: Box_Flags = {}, width: Size = {}, height: Size = {}) -> ^Box {
 	u := ctx
 	parent := top_parent()
-	key := key_from_string(seed_key(parent), id)
+	label, hashed := split_id(id)
+	key := key_of(seed_key(parent), hashed)
 	b := box_lookup(u, key)
 	if b != nil && b.last_frame == u.frame {
 		// Built twice in a frame: the second one lives for this frame only.
 		key = 0
 		b = nil
 	}
-	if key != 0 && b == nil {
+	if b != nil {
+		b.build = {}
+	} else if key != 0 {
 		b = box_alloc(u, key)
 		if b == nil {
 			u.pool_misses += 1
 		}
 	}
 	if b == nil {
-		b = new(Box, context.temp_allocator)
+		b = temp_box(u)
 	}
-	b.build = {}
 	b.last_frame = u.frame
 	b.flags = flags
 	b.id = id
-	b.label = label_from_string(id)
+	b.label = label
 	b.opacity = 1
 	style_take(&u.styles, b)
 	is_text := .Draw_Text in b.flags && b.label != ""
@@ -1244,7 +1260,7 @@ box_make :: proc(id: string, flags: Box_Flags = {}, width: Size = {}, height: Si
 	}
 
 	if b.key != 0 {
-		rate := 1 - math.exp(-u.dt * 18)
+		rate := u.ease
 		hot := u.hot == b.key || u.hot_parent == b.key
 		if .Focus_Is_Hot in flags {
 			hot = u.focus == b.key
@@ -1258,6 +1274,18 @@ box_make :: proc(id: string, flags: Box_Flags = {}, width: Size = {}, height: Si
 		scroll_box(u, b)
 		b.built_size = build_size(b)
 	}
+	return b
+}
+
+// temp_box is a zeroed box that lives until the end of the frame. One
+// allocation per TEMP_BOXES boxes costs less than one per box.
+@(private)
+temp_box :: proc(u: ^State) -> ^Box {
+	if len(u.temp_boxes) == 0 {
+		u.temp_boxes = make([]Box, TEMP_BOXES, context.temp_allocator)
+	}
+	b := &u.temp_boxes[0]
+	u.temp_boxes = u.temp_boxes[1:]
 	return b
 }
 

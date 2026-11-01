@@ -59,6 +59,7 @@ static double g_last_tick; // CACurrentMediaTime of the last display link frame
 static double g_tick_interval = 1.0 / 60;
 static CFRunLoopTimerRef g_tick_fallback;
 static CFRunLoopTimerRef g_wake_timer; // fires when a frame asked for wake_after
+static bool g_wake_armed; // g_wake_timer is set to fire, see draw_frame
 static uint8_t *g_text; // bytes text events point into, reset with the events
 static uint32_t g_text_len;
 static uint32_t g_text_cap;
@@ -152,13 +153,21 @@ static void draw_frame(void) {
   g_text_len = 0;
   g_animating = result.animating;
   update_display_link();
-  if (g_wake_timer) {
+  // Moving a timer in the common modes costs about 13,000 instructions even
+  // to the far future, so a frame that asks for no wake leaves an unarmed
+  // timer alone.
+  if (g_wake_timer && (result.wake_after > 0 || g_wake_armed)) {
     double after = result.wake_after > 0 ? result.wake_after : 1e9;
     CFRunLoopTimerSetNextFireDate(g_wake_timer, CFAbsoluteTimeGetCurrent() + after);
+    g_wake_armed = result.wake_after > 0;
   }
 }
 
-static void wake_timer_fired(CFRunLoopTimerRef timer, void *info) { request_redraw(); }
+// The timer repeats 1e9 s later, so once it fires it's unarmed.
+static void wake_timer_fired(CFRunLoopTimerRef timer, void *info) {
+  g_wake_armed = false;
+  request_redraw();
+}
 
 // push_text copies text for an event into the frame's text buffer.
 static void push_text(Event *e, const char *text, size_t n) {

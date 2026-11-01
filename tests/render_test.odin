@@ -63,3 +63,65 @@ batches_bind_a_colour_and_a_coverage_texture :: proc(t: ^testing.T) {
 	testing.expect_value(t, r.batches[1].textures, [2]render.Texture{other_page, glyphs})
 	testing.expect_value(t, r.batches[1].first, 30)
 }
+
+// push_sprite is push_image for a rect already on whole pixels, as glyphs
+// are: at any scale it must write the instance push_image does.
+@(test)
+sprites_match_images :: proc(t: ^testing.T) {
+	r := new(render.Renderer, context.temp_allocator)
+	glyphs, emoji, stale := render.Texture(1), render.Texture(2), render.Texture(3 | 5 << 16)
+	r.textures[1] = {width = 512, height = 512, format = .R8}
+	r.textures[2] = {width = 256, height = 256, format = .BGRA8}
+	instances := make([]render.Instance, 64, context.temp_allocator)
+	r.instances = raw_data(instances)
+	r.capacity[0] = len(instances)
+	r.clip_depth = 1
+	r.clips[0] = {-1e9, -1e9, 1e9, 1e9}
+	for scale in ([]f32{1, 2, 1.5, 1.25}) {
+		r.scale = scale
+		for texture in ([]render.Texture{glyphs, emoji, stale}) {
+			for dst in ([][4]f32{{10, 20, 17, 31}, {-3, 7, 0, 19}, {1023, 2047, 1030, 2060}}) {
+				src := render.Rect{5, 9, dst.z - dst.x, dst.w - dst.y}
+				tint := render.Color{0.9, 0.8, 0.7, 0.6}
+				r.instance_count, r.batch_count = 0, 0
+				render.push_clip(r, {2, 3, 400, 500})
+				rect := render.Rect{dst.x / scale, dst.y / scale, (dst.z - dst.x) / scale, (dst.w - dst.y) / scale}
+				render.push_image(r, rect, texture, src, tint)
+				render.push_sprite(r, dst, texture, src, tint)
+				render.pop_clip(r)
+				testing.expect_value(t, r.instance_count, 2)
+				testing.expectf(t, instances[0] == instances[1], "scale %v texture %v dst %v: %v, want %v", scale, texture, dst, instances[1], instances[0])
+			}
+		}
+	}
+}
+
+// The backdrop blurs again only when its hash changes, so a change to an
+// instance under it must change the hash, and the same frame must not.
+@(test)
+backdrop_hash_follows_what_it_blurs :: proc(t: ^testing.T) {
+	if !render.BACKDROPS {
+		return
+	}
+	r := new(render.Renderer, context.temp_allocator)
+	instances := make([]render.Instance, 64, context.temp_allocator)
+	r.instances = raw_data(instances)
+	r.capacity[0] = len(instances)
+	r.scale = 2
+	r.width, r.height = 400, 300
+	frame :: proc(r: ^render.Renderer, under: render.Color, x: f32) -> u64 {
+		r.instance_count, r.batch_count = 0, 0
+		r.clip_depth = 1
+		r.clips[0] = {-1e9, -1e9, 1e9, 1e9}
+		r.backdrop = {batch = -1}
+		render.push_rect(r, {0, 0, 400, 30}, {1, 1, 1, 1}) // far above the bar
+		render.push_rect(r, {x, 240, 100, 20}, under)
+		render.push_backdrop(r, {0, 250, 400, 50}, 20, 1.5, {0, 0, 0, 0.5})
+		return r.backdrop.hash
+	}
+	h := frame(r, {0.2, 0.3, 0.4, 1}, 10)
+	testing.expect(t, h != 0)
+	testing.expect_value(t, frame(r, {0.2, 0.3, 0.4, 1}, 10), h)
+	testing.expect(t, frame(r, {0.2, 0.3, 0.41, 1}, 10) != h)
+	testing.expect(t, frame(r, {0.2, 0.3, 0.4, 1}, 10.5) != h)
+}

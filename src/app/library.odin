@@ -7,6 +7,7 @@ package app
 import "core:fmt"
 import "core:math"
 import "core:math/rand"
+import "core:strconv"
 import "core:strings"
 
 import "../audio"
@@ -463,8 +464,8 @@ draw_playlist_row :: proc(s: ^State, i: int) {
 	queued := sidebar_queued(s, i)
 	ui.set_next_radius(10)
 	sidebar_selected(current)
-	item := ui.row(fmt.tprintf("##playlist%d", i), {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects, .Draw_Border}, ui.fill(), ui.px(PLAYLIST_ROW_H - PLAYLIST_GAP))
-	ui.accessible(item, .Row, fmt.tprintf("%s, %s", entry.name, entry.subtitle), selected = current)
+	item := ui.row(cat("##playlist", num(i)), {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects, .Draw_Border}, ui.fill(), ui.px(PLAYLIST_ROW_H - PLAYLIST_GAP))
+	ui.accessible(item, .Row, cat(entry.name, ", ", entry.subtitle), selected = current)
 	if ui.drop_hover(item) {
 		item.border_color = ACCENT
 		lib.drop_target = i
@@ -483,14 +484,13 @@ draw_playlist_row :: proc(s: ^State, i: int) {
 	cover_art(s, .Playlist, entry.image, entry.seed, PLAYLIST_COVER, ui.px(PLAYLIST_COVER), radius = 6)
 	ui.spacer(ui.px(10))
 	{
-		ui.column("", {}, ui.fill(), ui.fill())
-		ui.spacer(ui.fill())
+		// The two lines, 33 pt, centred in the row.
+		ui.column("", {}, ui.fill(), ui.fill()).pad.y = (PLAYLIST_ROW_H - PLAYLIST_GAP - 33) / 2
 		ui.text_style(.Medium, 13, ACCENT if queued else TEXT)
 		ui.label(entry.name, ui.fill(), ui.px(16))
 		ui.spacer(ui.px(2))
 		ui.text_style(.Regular, 12, QUIET)
 		ui.label(entry.subtitle, ui.fill(), ui.px(15))
-		ui.spacer(ui.fill())
 	}
 	if queued && playback_playing(s) {
 		draw_level_bars()
@@ -527,7 +527,7 @@ draw_level_bars :: proc() {
 @(private = "file")
 sidebar_prefetch :: proc(s: ^State, first, last: int) {
 	for i in max(first, 0) ..< min(last, sidebar_count(s)) {
-		cover_want(s, .Playlist, sidebar_entry(s, i).image, PLAYLIST_COVER, PRIORITY_COVER_NEAR)
+		cover_want(s, .Playlist, sidebar_image(s, i), PLAYLIST_COVER, PRIORITY_COVER_NEAR)
 	}
 }
 
@@ -610,7 +610,7 @@ draw_track_list :: proc(s: ^State, main_w, view_h: f32) {
 	cols := track_columns(main_w - 2 * LIST_PAD, kind)
 	// Durations are m:ss however long, so the widest has the longest
 	// track's count of minute digits.
-	cols.duration = max(cols.duration, ui.counter_width(.Regular, 13, fmt.tprintf("%d:00", max(s.data.view.longest / 60, 10))) + 2 * CELL_PAD)
+	cols.duration = max(cols.duration, ui.counter_width(.Regular, 13, cat(num(max(s.data.view.longest / 60, 10)), ":00")) + 2 * CELL_PAD)
 	h := list_header(kind, main_w, nav_reserve(s))
 	rows_top := header_rows_top(h)
 	n := view_count(s)
@@ -762,8 +762,8 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 	ui.radius(6)
 	selected := lib.selected == i
 	row_highlight(LIST_ROWS, selected)
-	row := ui.row(fmt.tprintf("##track%d", i), {.Clickable, .Draw_Background, .Draw_Hot_Effects}, ui.fill(), ui.px(TRACK_ROW_H))
-	ui.accessible(row, .Row, fmt.tprintf("%s, %s, %s", track.title, track.artist, track.album), selected = selected)
+	row := ui.row(cat("##track", num(i)), {.Clickable, .Draw_Background, .Draw_Hot_Effects}, ui.fill(), ui.px(TRACK_ROW_H))
+	ui.accessible(row, .Row, cat(track.title, ", ", track.artist, ", ", track.album), selected = selected)
 	sig := ui.signal(row)
 	if sig.pressed || sig.right_clicked {
 		lib.selected = i
@@ -785,14 +785,13 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 	{
 		ui.text_style(.Regular, 14, ACCENT if current else SECONDARY)
 		ui.set_next_text_align(.Center)
-		ui.label(fmt.tprint(i + 1), ui.px(cols.number), ui.fill())
+		ui.label(num(i + 1), ui.px(cols.number), ui.fill())
 		if cols.cover > 0 {
 			cover_art(s, .Album, track.cover, u32(i) * 2654435761 >> 7, 40, ui.px(cols.cover))
 		}
 	}
 	{
-		ui.column("", {}, ui.fill(), ui.fill())
-		ui.spacer(ui.px(9))
+		ui.column("", {}, ui.fill(), ui.fill()).pad.y = 9
 		ui.set_next_text_pad(4)
 		ui.set_next_font(.Medium)
 		ui.set_next_font_size(14)
@@ -818,7 +817,7 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 	cell(track.added, cols.added, .Left)
 	key := i64(fake_row_index(s, i)) if s.data.fake else track.id
 	liked := liked_has(&s.data, key)
-	heart_sig := heart_button(fmt.tprintf("heart%d", i), liked, fmt.tprintf("%s %s", "Unlike" if liked else "Like", track.title), TEXT, max(row.hot_t, 1 if selected else 0), cols.heart)
+	heart_sig := heart_button("heart", liked, cat("Unlike " if liked else "Like ", track.title), TEXT, max(row.hot_t, 1 if selected else 0), cols.heart)
 	if heart_sig.clicked {
 		lib.selected = i
 		liked_toggle(s, key)
@@ -826,7 +825,7 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 	}
 	cell(track.duration, cols.duration, .Right)
 
-	more, more_sig := icon_button("more", text.ICON_DOTS_THREE, .Icon, fmt.tprintf("More options for %s", track.title), TEXT, max(row.hot_t, 1 if selected else 0), cols.more)
+	more, more_sig := icon_button("more", text.ICON_DOTS_THREE, .Icon, cat("More options for ", track.title), TEXT, max(row.hot_t, 1 if selected else 0), cols.more)
 	if more_sig.clicked {
 		lib.selected = i
 		open_track_menu(s, i, {more.rect.x, more.rect.y + more.rect.h})
@@ -836,22 +835,22 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 }
 
 // icon_button is a square icon button of side, centred in the cell it sits
-// in: the square is the click and hover area. hot is its opacity, so 0
+// in: the square is the click and hover area. id is its key, and the icon
+// its label, so the icon can change. hot is its opacity, so 0
 // hides it while it still clicks. Returns the button's box for anything
 // anchored to it, such as a menu. flags adds to the button's, such as
 // Focusable for one outside a row. Its corners, background and hover colour
 // come from the style stacks.
 icon_button :: proc(id, icon: string, font: text.Font, name: string, color: render.Color, hot: f32, side: f32, flags: ui.Box_Flags = {}, size: f32 = 16) -> (^ui.Box, ui.Signal) {
-	ui.column("", {}, ui.px(side), ui.fill())
-	ui.spacer(ui.fill())
+	ui.column("", {.Center_Children}, ui.px(side), ui.fill())
 	ui.set_next_text_align(.Center)
 	ui.set_next_font(font)
 	ui.set_next_font_size(size)
 	ui.set_next_text_color(color)
-	b := ui.box_make(fmt.tprintf("%s###%s", icon, id), {.Clickable, .Draw_Text, .Draw_Hot_Effects} + flags, ui.px(side), ui.px(side))
+	b := ui.box_make(id, {.Clickable, .Draw_Text, .Draw_Hot_Effects} + flags, ui.px(side), ui.px(side))
+	b.label = icon
 	b.opacity = hot
 	ui.accessible(b, .Button, name)
-	ui.spacer(ui.fill())
 	sig := ui.signal(b)
 	return b, sig
 }
@@ -898,7 +897,7 @@ text_link :: proc(s: ^State, label, id: string, has_id: bool, height: ui.Size) -
 		ui.accessible(b, .Static_Text, label)
 		return {}
 	}
-	return ui.link(fmt.tprintf("%s%s", label, id), TEXT, height)
+	return ui.link(id, TEXT, height, label)
 }
 
 // artist_links shows the artists in joined, each a link to its top tracks,
@@ -921,7 +920,7 @@ artist_links :: proc(s: ^State, joined: string, refs: []Artist_Ref, pad: f32, he
 			ui.label(joined[refs[j - 1].end:refs[j].start], ui.text_size(0, 0), ui.fill())
 		}
 		if linked {
-			link := ui.link(fmt.tprintf("%s###artist%d", name, j), TEXT, ui.fill())
+			link := ui.link(ARTIST_LINKS[j] if j < len(ARTIST_LINKS) else cat("###artist", num(j)), TEXT, ui.fill(), name)
 			if link.clicked || link.pressed || link.right_clicked || link.dragging {
 				k, sig = j, link
 			}
@@ -933,14 +932,17 @@ artist_links :: proc(s: ^State, joined: string, refs: []Artist_Ref, pad: f32, he
 	return
 }
 
+@(private = "file")
+ARTIST_LINKS := [?]string{"###artist0", "###artist1", "###artist2", "###artist3", "###artist4", "###artist5", "###artist6", "###artist7"}
+
 // loading_row stands in for a row whose page hasn't arrived: its number
 // and grey bars where the cover and text go.
 loading_row :: proc(i: int, cols: Track_Columns) {
-	ui.row(fmt.tprintf("##track%d", i), {}, ui.fill(), ui.px(TRACK_ROW_H))
+	ui.row(cat("##track", num(i)), {}, ui.fill(), ui.px(TRACK_ROW_H))
 	ui.spacer(ui.px(8))
 	ui.text_style(.Regular, 14, DIM)
 	ui.set_next_text_align(.Center)
-	ui.label(fmt.tprint(i + 1), ui.px(cols.number), ui.fill())
+	ui.label(num(i + 1), ui.px(cols.number), ui.fill())
 	bar :: proc(w, h: f32, cell: ui.Size, color: render.Color) {
 		ui.column("", {}, cell, ui.fill())
 		ui.spacer(ui.fill())
@@ -966,6 +968,17 @@ cell :: proc(s: string, width: f32, align: ui.Align) -> ^ui.Box {
 }
 
 CELL_PAD :: 12
+
+// cat joins parts in the frame's memory. The views build ids and labels
+// with it every frame, where fmt.tprintf costs several times as much.
+cat :: proc(parts: ..string) -> string {
+	return strings.concatenate(parts, context.temp_allocator)
+}
+
+// num is n in decimal, in the frame's memory.
+num :: proc(n: int) -> string {
+	return strconv.write_int(make([]u8, 24, context.temp_allocator), i64(n), 10)
+}
 
 // list_gen tells the open list from the lists before it.
 list_gen :: proc(s: ^State) -> u64 {
@@ -1131,7 +1144,7 @@ draw_player_bar :: proc(s: ^State, w, h: f32) {
 			if format := track_format(s); format != "" {
 				ui.text_style(.Regular, 11, DIM)
 				ui.text_pad(0)
-				if sig := ui.link(fmt.tprintf("%s###track_format", format), SECONDARY, ui.px(16)); sig.clicked {
+				if sig := ui.link("###track_format", SECONDARY, ui.px(16), format); sig.clicked {
 					open_output_menu(sig.box.rect.x, sig.box.rect.y - 8)
 				}
 			}
@@ -1214,9 +1227,9 @@ draw_player_bar :: proc(s: ^State, w, h: f32) {
 			draw_progress(s, position, duration, item != nil)
 			left := "0:00"
 			if item != nil {
-				left = fmt.tprintf("-%s", clock(max(duration - position, 0)))
+				left = cat("-", clock(max(duration - position, 0)))
 			}
-			ui.label(left, ui.px(ui.counter_width(.Regular, 11, fmt.tprintf("-%s", longest)) + 2 * TIME_PAD), ui.fill())
+			ui.label(left, ui.px(ui.counter_width(.Regular, 11, cat("-", longest)) + 2 * TIME_PAD), ui.fill())
 		}
 	}
 
@@ -1241,10 +1254,12 @@ VOLUME_W :: 110
 // clock formats seconds as m:ss, or h:mm:ss from an hour.
 clock :: proc(seconds: f64) -> string {
 	t := int(max(seconds, 0))
+	sec := [2]u8{'0' + u8(t % 60 / 10), '0' + u8(t % 10)}
 	if t >= 3600 {
-		return fmt.tprintf("%d:%02d:%02d", t / 3600, t / 60 % 60, t % 60)
+		mins := [2]u8{'0' + u8(t / 60 % 60 / 10), '0' + u8(t / 60 % 10)}
+		return cat(num(t / 3600), ":", string(mins[:]), ":", string(sec[:]))
 	}
-	return fmt.tprintf("%d:%02d", t / 60, t % 60)
+	return cat(num(t / 60), ":", string(sec[:]))
 }
 
 // progress_fraction is how much of the bar is filled: position over
@@ -1261,7 +1276,7 @@ progress_fraction :: proc(position, duration: f64) -> f32 {
 draw_progress :: proc(s: ^State, position, duration: f64, active: bool) {
 	pb := &s.playback
 	slider := ui.column("progress", {.Clickable} if active else {}, ui.fill(), ui.fill())
-	ui.accessible(slider, .Slider, "Position", fmt.tprintf("%s of %s", clock(position), clock(duration)))
+	ui.accessible(slider, .Slider, "Position", cat(clock(position), " of ", clock(duration)))
 	sig := ui.signal(slider)
 	if active && duration > 0 && slider.rect.w > 0 && (sig.held || sig.released) {
 		frac := clamp((sig.mouse.x - slider.rect.x) / slider.rect.w, 0, 1)
@@ -1296,7 +1311,8 @@ play_button :: proc(playing: bool) -> ui.Signal {
 skip_button :: proc(id: string, forward: bool) -> ui.Signal {
 	ui.text_style(.Icon_Fill, 18, SECONDARY)
 	icon := text.ICON_SKIP_FORWARD if forward else text.ICON_SKIP_BACK
-	b := ui.box_make(fmt.tprintf("%s###%s", icon, id), {.Clickable, .Focusable, .Draw_Text, .Draw_Hot_Effects, .Draw_Active_Effects}, ui.px(36), ui.px(36))
+	b := ui.box_make(id, {.Clickable, .Focusable, .Draw_Text, .Draw_Hot_Effects, .Draw_Active_Effects}, ui.px(36), ui.px(36))
+	b.label = icon
 	ui.accessible(b, .Button, "Next" if forward else "Previous")
 	return ui.signal(b)
 }
@@ -1304,7 +1320,8 @@ skip_button :: proc(id: string, forward: bool) -> ui.Signal {
 // toggle_button is a transport button lit while on.
 toggle_button :: proc(id, icon, name, value: string, on: bool) -> ui.Signal {
 	ui.text_style(.Icon, 18, ACCENT if on else SECONDARY)
-	b := ui.box_make(fmt.tprintf("%s###%s", icon, id), {.Clickable, .Focusable, .Draw_Text, .Draw_Hot_Effects, .Draw_Active_Effects}, ui.px(36), ui.px(36))
+	b := ui.box_make(id, {.Clickable, .Focusable, .Draw_Text, .Draw_Hot_Effects, .Draw_Active_Effects}, ui.px(36), ui.px(36))
+	b.label = icon
 	ui.accessible(b, .Button, name, value)
 	return ui.signal(b)
 }
@@ -1313,7 +1330,7 @@ toggle_button :: proc(id, icon, name, value: string, on: bool) -> ui.Signal {
 // press and release in one frame still counts, at the release.
 draw_volume :: proc(s: ^State, width: f32) {
 	slider := ui.column("volume", {.Clickable}, ui.px(width), ui.fill())
-	ui.accessible(slider, .Slider, "Volume", fmt.tprintf("%d%%", int(math.round(s.settings.volume * 100))))
+	ui.accessible(slider, .Slider, "Volume", cat(num(int(math.round(s.settings.volume * 100))), "%"))
 	sig := ui.signal(slider)
 	if (sig.held || sig.released) && slider.rect.w > 0 {
 		playback_set_volume(s, clamp((sig.mouse.x - slider.rect.x) / slider.rect.w, 0, 1), sig.released)
