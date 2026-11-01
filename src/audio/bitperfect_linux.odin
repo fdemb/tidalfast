@@ -417,7 +417,7 @@ pw: Pw_Api
 pw_loaded: Maybe(bool)
 
 // pw_load loads libpipewire once. It's never unloaded: the stream's
-// threads may outlive a hot reload's teardown by a moment.
+// threads may outlive the player's teardown by a moment.
 @(private = "file")
 pw_load :: proc() -> bool {
 	if loaded, tried := pw_loaded.?; tried {

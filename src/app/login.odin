@@ -253,8 +253,7 @@ draw_login_notice :: proc(s: ^State) {
 }
 
 // pkce_prepare makes the PKCE verifier and client key for the next login
-// page, if there are none. They're kept in Data, so a hot reload doesn't
-// lose them.
+// page, if there are none, and gives them to the session.
 pkce_prepare :: proc(d: ^Data) {
 	if d.pkce_verifier.len == 0 {
 		verifier, key := tidal.pkce_new_state(context.temp_allocator)

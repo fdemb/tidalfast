@@ -14,9 +14,8 @@ import "../../third_party/kbts"
 // thread shapes without the font and marks the run pending; begin_frame
 // takes finished faces and pending runs get reshaped when next asked for.
 //
-// The thread runs this dylib's code, so unload stops and joins it and
-// reload starts it again. Everything it shares with the UI thread is plain
-// data in Loader, guarded by mutex.
+// Everything the thread shares with the UI thread is in Loader, guarded by
+// mutex.
 
 LOAD_QUEUE :: 256
 LOAD_RESULTS :: 16
@@ -52,9 +51,7 @@ Loader :: struct {
 	running:       bool,
 	busy:          bool, // the worker is loading a request
 	thread:        posix.pthread_t,
-	// The shell's request_redraw. It lives in the shell, not the dylib, so
-	// it stays valid across reloads.
-	wake:          proc "c" (),
+	wake:          proc "c" (), // the shell's request_redraw
 	requests:      [LOAD_QUEUE]Load_Request, // a ring
 	request_head:  int,
 	request_count: int,

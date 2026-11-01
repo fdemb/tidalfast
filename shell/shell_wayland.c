@@ -3,13 +3,13 @@
 // through the App_API table in platform.h, as shell.m does on macOS. The
 // renderer makes its own Vulkan surface from the Wayland_Surface it gets.
 //
-// It redraws only when something asks for it: input, a resize, a reload or
+// It redraws only when something asks for it: input, a resize or
 // request_redraw from any thread. While the app reports it is animating, a
 // frame callback adds a frame each time the compositor wants one, and other
 // redraws wait for it; a hidden window gets no callbacks and stops drawing.
 // A frame can also ask to be woken after a delay, which a timerfd does.
 // Everything waits in one poll: the Wayland socket, an eventfd for
-// request_redraw, timerfds and inotify for hot reload.
+// request_redraw and timerfds.
 //
 // Text input goes through text-input-unstable-v3 when the compositor runs
 // an input method, and otherwise from the keyboard through xkbcommon, with
@@ -33,7 +33,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/eventfd.h>
-#include <sys/inotify.h>
 #include <sys/mman.h>
 #include <sys/random.h>
 #include <sys/signalfd.h>
@@ -55,25 +54,13 @@
 
 #include "platform.h"
 
-#ifndef HOT_RELOAD
-#define HOT_RELOAD 1
-#endif
-
 #define PERSISTENT_SIZE (256ull << 20)
 #define FRAME_SIZE (64ull << 20)
 #define DEFAULT_WIDTH 1100
 #define DEFAULT_HEIGHT 700
 
-typedef struct {
-  void *handle;
-  App_API api;
-  ino_t inode;
-  struct timespec mtime;
-} Loaded_App;
-
-static Loaded_App g_app;
+static App_API g_app;
 static char g_app_path[PATH_MAX];
-static int g_reload_count;
 
 static Memory g_memory;
 static Shell g_shell;
@@ -129,7 +116,6 @@ static int g_wake_fd = -1; // timerfd for wake_after
 static int g_repeat_fd = -1; // timerfd for key repeat
 static int g_momentum_fd = -1; // timerfd for scroll momentum
 static int g_test_fd = -1; // timerfd for the next test step
-static int g_inotify_fd = -1;
 static int g_signal_fd = -1;
 
 static double now_seconds(void) {
@@ -225,7 +211,7 @@ static void apply_scale(void) {
 }
 
 static void draw_frame(void) {
-  if (!g_app.api.frame || !g_configured) return;
+  if (!g_app.frame || !g_configured) return;
   atomic_store(&g_needs_redraw, false);
   g_configure_unanswered = false;
   // The callback goes with the commit the renderer's present makes.
@@ -247,7 +233,7 @@ static void draw_frame(void) {
       .key_window = g_key_window,
       .mouse_buttons = g_buttons,
   };
-  Frame_Result result = g_app.api.frame(&g_memory, &g_shell, &input);
+  Frame_Result result = g_app.frame(&g_memory, &g_shell, &input);
   access_frame_done();
   g_event_count = 0;
   g_text_len = 0;
@@ -325,15 +311,7 @@ static void push_event(Event e) {
   atomic_store(&g_needs_redraw, true);
 }
 
-// Hot reload
-
-static bool file_identity(const char *path, ino_t *inode, struct timespec *mtime) {
-  struct stat st;
-  if (stat(path, &st) != 0) return false;
-  *inode = st.st_ino;
-  *mtime = st.st_mtim;
-  return true;
-}
+// Files and the app library
 
 static bool copy_file(const char *from, const char *to) {
   int in = open(from, O_RDONLY | O_CLOEXEC);
@@ -357,27 +335,8 @@ static bool copy_file(const char *from, const char *to) {
   return ok && n == 0;
 }
 
-// With hot reload, copies the library to a unique temp path and opens the
-// copy, so the linker can replace the original while this copy is loaded,
-// and so dlopen sees a new file rather than handing back the old image.
-static bool open_app(Loaded_App *out) {
-  if (!file_identity(g_app_path, &out->inode, &out->mtime)) {
-    fprintf(stderr, "shell: no app library at %s\n", g_app_path);
-    return false;
-  }
-#if HOT_RELOAD
-  char copy[PATH_MAX];
-  const char *tmp = getenv("TMPDIR");
-  snprintf(copy, sizeof copy, "%s/tidalfast-app-%d-%d.so", tmp && *tmp ? tmp : "/tmp", getpid(), g_reload_count++);
-  if (!copy_file(g_app_path, copy)) {
-    fprintf(stderr, "shell: copy to %s failed\n", copy);
-    return false;
-  }
-  void *handle = dlopen(copy, RTLD_NOW | RTLD_LOCAL);
-  unlink(copy);
-#else
+static bool open_app(App_API *out) {
   void *handle = dlopen(g_app_path, RTLD_NOW | RTLD_LOCAL);
-#endif
   if (!handle) {
     fprintf(stderr, "shell: dlopen failed: %s\n", dlerror());
     return false;
@@ -389,44 +348,9 @@ static bool open_app(Loaded_App *out) {
     dlclose(handle);
     return false;
   }
-  out->handle = handle;
-  out->api = *api;
+  *out = *api;
   return true;
 }
-
-static void reload_if_changed(void) {
-  ino_t inode;
-  struct timespec mtime;
-  if (!file_identity(g_app_path, &inode, &mtime)) return;
-  if (inode == g_app.inode && mtime.tv_sec == g_app.mtime.tv_sec && mtime.tv_nsec == g_app.mtime.tv_nsec) return;
-  Loaded_App next = {0};
-  if (!open_app(&next)) {
-    // Remember the file anyway so a broken build isn't retried until it changes.
-    g_app.inode = inode;
-    g_app.mtime = mtime;
-    return;
-  }
-  g_app.api.unload(&g_memory);
-  // The old image stays open for good: a State the new code can't read is
-  // released through a procedure the old code left in it.
-  g_app = next;
-  g_app.api.reload(&g_memory, &g_shell);
-  fprintf(stderr, "shell: reloaded app (%d)\n", g_reload_count - 1);
-  request_redraw();
-}
-
-#if HOT_RELOAD
-// inotify on the build directory sees the rename build.sh uses to put a
-// finished library in place.
-static void watch_app(void) {
-  char dir[PATH_MAX];
-  snprintf(dir, sizeof dir, "%s", g_app_path);
-  char *slash = strrchr(dir, '/');
-  if (slash) *slash = 0;
-  g_inotify_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
-  if (g_inotify_fd >= 0) inotify_add_watch(g_inotify_fd, dir, IN_MOVED_TO | IN_CLOSE_WRITE);
-}
-#endif
 
 // Now Playing
 //
@@ -2034,7 +1958,7 @@ static bool connect_wayland(void) {
 }
 
 static void main_loop(void) {
-  enum { FD_WAYLAND, FD_REDRAW, FD_WAKE, FD_REPEAT, FD_MOMENTUM, FD_TEST, FD_SIGNAL, FD_INOTIFY, FD_RECEIVE, FD_SEND, FD_COUNT = FD_SEND + CLIP_SENDS };
+  enum { FD_WAYLAND, FD_REDRAW, FD_WAKE, FD_REPEAT, FD_MOMENTUM, FD_TEST, FD_SIGNAL, FD_RECEIVE, FD_SEND, FD_COUNT = FD_SEND + CLIP_SENDS };
   struct pollfd fds[FD_COUNT];
   int wl_fd = wl_display_get_fd(g_display);
   while (!g_quit) {
@@ -2054,7 +1978,7 @@ static void main_loop(void) {
       timeout = deadline == 0 ? 0 : (int)ceil((deadline - now_seconds()) * 1000);
       if (timeout < 0) timeout = 0;
     }
-    int fd_list[FD_SEND] = {wl_fd, g_redraw_fd, g_wake_fd, g_repeat_fd, g_momentum_fd, g_test_fd, g_signal_fd, g_inotify_fd, g_receive_fd};
+    int fd_list[FD_SEND] = {wl_fd, g_redraw_fd, g_wake_fd, g_repeat_fd, g_momentum_fd, g_test_fd, g_signal_fd, g_receive_fd};
     for (int i = 0; i < FD_SEND; i++) fds[i] = (struct pollfd){.fd = fd_list[i], .events = POLLIN};
     for (int i = 0; i < CLIP_SENDS; i++) fds[FD_SEND + i] = (struct pollfd){.fd = g_sends[i].fd, .events = POLLOUT};
     if (unflushed) fds[FD_WAYLAND].events |= POLLOUT;
@@ -2086,12 +2010,6 @@ static void main_loop(void) {
     if (fds[FD_SIGNAL].revents & POLLIN) {
       struct signalfd_siginfo info;
       if (read(g_signal_fd, &info, sizeof info) > 0) g_quit = true;
-    }
-    if (g_inotify_fd >= 0 && (fds[FD_INOTIFY].revents & POLLIN)) {
-      char buf[4096];
-      while (read(g_inotify_fd, buf, sizeof buf) > 0) {
-      }
-      reload_if_changed();
     }
     if (fds[FD_RECEIVE].revents) receive_more();
     for (int i = 0; i < CLIP_SENDS; i++)
@@ -2170,10 +2088,7 @@ int main(int argc, char **argv) {
 
   if (!open_app(&g_app)) return 1;
   measure_mark("dylib");
-  g_app.api.init(&g_memory, &g_shell);
-#if HOT_RELOAD
-  watch_app();
-#endif
+  g_app.init(&g_memory, &g_shell);
   while (!g_configured && wl_display_dispatch(g_display) >= 0) {
   }
   draw_frame();
@@ -2181,7 +2096,7 @@ int main(int argc, char **argv) {
   setup_shell_test();
   request_redraw();
   main_loop();
-  if (g_app.api.shutdown) g_app.api.shutdown(&g_memory);
+  if (g_app.shutdown) g_app.shutdown(&g_memory);
   wl_display_disconnect(g_display);
   return 0;
 }

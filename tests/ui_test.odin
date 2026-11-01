@@ -1699,15 +1699,6 @@ test_ui_missed_release_cancels :: proc(t: ^testing.T) {
 	testing.expect(t, sig.held, "held for one frame up in hardware")
 	sig = tap(&v, &now, {kind = .Mouse_Up, x = 20, y = 20, click_count = 1})
 	testing.expect(t, sig.released, "the late release releases")
-
-	// A hot reload lets go of everything.
-	drag_frame_held(&u, &now, down, {kind = .Mouse_Down, x = 50, y = 50, click_count = 1})
-	drag_frame_held(&u, &now, down, {kind = .Mouse_Move, x = 50, y = 120})
-	_, dragging = ui.drag_payload()
-	testing.expect(t, dragging)
-	ui.cancel_pointer(&u)
-	_, dragging = ui.drag_payload()
-	testing.expect(t, !dragging && u.input.buttons == {})
 }
 
 @(test)

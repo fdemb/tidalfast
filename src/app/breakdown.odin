@@ -244,9 +244,7 @@ breakdown_collect :: proc(s: ^State, b: ^Breakdown) {
 	for &face in s.text.faces[:s.text.face_count] {
 		tables += heap_bytes(face.blob)
 	}
-	if s.text.fallback_malloc {
-		tables += heap_bytes(raw_data(s.text.fallback_cache))
-	}
+	tables += heap_bytes(raw_data(s.text.fallback_cache))
 	breakdown_add(b, .Ui, HEAP_POOL, "font tables", tables)
 	breakdown_add(b, .Ui, .Anon, "cover index", covers)
 	breakdown_add(b, .Ui, .Anon, "fake rows", span[.Rows])

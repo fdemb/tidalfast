@@ -22,7 +22,7 @@ $V cleanup                      # stop what we started, delete the test keychain
 
 ## Launch
 
-`$V build` compiles `shell/shell.m`, `src/app` and `tests/mock_tidal` into `/tmp/tidalfast-verify/bin`. It never writes `build/tidalfast` or `build/app.dylib`, so the user's running debug build doesn't hot-reload your work and the user's shell keeps its Keychain signature. The dylib is optimized with `-define:TIDALFAST_MOCK_API=true`, as `./build.sh measure` does, so it honours `TIDALFAST_API` and `TIDALFAST_PKCE_REDIRECT`. A build takes about 40 s. Rebuild after every source change; `doctor` fails when `src/` or `shell/` is newer than the build.
+`$V build` compiles `shell/shell.m`, `src/app` and `tests/mock_tidal` into `/tmp/tidalfast-verify/bin`. It never writes `build/tidalfast` or `build/app.dylib`, so the user's next launch doesn't run your work and the user's shell keeps its Keychain signature. The dylib is optimized with `-define:TIDALFAST_MOCK_API=true`, as `./build.sh measure` does, so it honours `TIDALFAST_API` and `TIDALFAST_PKCE_REDIRECT`. A build takes about 40 s. Rebuild after every source change; `doctor` fails when `src/` or `shell/` is newer than the build.
 
 There are two data modes:
 

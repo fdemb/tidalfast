@@ -171,15 +171,7 @@ measure_start :: proc(s: ^State, shell: ^platform.Shell) {
 	snapshot_start(m)
 }
 
-measure_reload :: proc(s: ^State, shell: ^platform.Shell) {
-	m := &s.measure
-	m.wake = shell.request_redraw
-	m.renderer = &s.renderer
-	measure_thread_start(m)
-	snapshot_start(m)
-}
-
-measure_unload :: proc(s: ^State) {
+measure_stop :: proc(s: ^State) {
 	m := &s.measure
 	snapshot_stop(m)
 	if !m.running {

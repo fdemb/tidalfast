@@ -243,37 +243,6 @@ advance_drops_a_pending_seek :: proc(t: ^testing.T) {
 	testing.expect_value(t, pb.seek_id, u32(0))
 }
 
-// A hot reload while a seek is pending resumes at the seek's target, and
-// the position goes back to following the audio.
-@(test)
-reload_keeps_a_pending_seek :: proc(t: ^testing.T) {
-	rows := []app.Row{{title = "One", seconds = 30}, {title = "Two", seconds = 30}}
-	s := fake_player_state(rows)
-	defer free(s)
-	defer app.playback_shutdown(s)
-	pb := &s.playback
-	pb.null_output = true
-	pb.window = audio.STREAM_WINDOW
-
-	app.playback_play_row(s, 0)
-	one := pb.cur.serial
-	app.playback_observe(s, {serial = one, sample = 44100, rate = 44100, state = .Playing})
-	app.playback_seek(s, 20)
-	app.playback_unload(s)
-	shell := platform.Shell {
-		request_redraw = no_redraw,
-	}
-	app.playback_reload(s, &shell)
-	testing.expect_value(t, pb.cur.at, i64(20 * 44100))
-
-	app.playback_observe(s, {serial = one, seek_id = 0, sample = 20 * 44100, rate = 44100, state = .Playing})
-	at := app.playback_position(s)
-	testing.expectf(t, at >= 20 && at < 21, "after the reload the player is at %v s, not the seek target", at)
-	app.playback_observe(s, {serial = one, sample = 20 * 44100 + 13230, rate = 44100, state = .Playing})
-	later := app.playback_position(s)
-	testing.expectf(t, later > at, "the position stays at %v s", later)
-}
-
 // A queue restored at sign-in, as from its file, with no stream resolved
 // and no workers running.
 @(private = "file")

@@ -1,13 +1,13 @@
 # Working on TIDALfast
 
-TIDALfast is a native TIDAL client in Odin for macOS and Linux, with a small shell that owns the window and loads the app as a hot-reloaded dylib (`src/app`): Obj-C on macOS (`shell/shell.m`), C on Wayland (`shell/shell_wayland.c`). `docs/architecture.md` has the layout and the main decisions, and the other files in `docs/` have the details of every part. This file covers what an agent needs to check its own work, since you can't see the window or hear the audio.
+TIDALfast is a native TIDAL client in Odin for macOS and Linux, with a small shell that owns the window and loads the app as a dylib (`src/app`): Obj-C on macOS (`shell/shell.m`), C on Wayland (`shell/shell_wayland.c`). `docs/architecture.md` has the layout and the main decisions, and the other files in `docs/` have the details of every part. This file covers what an agent needs to check its own work, since you can't see the window or hear the audio.
 
 ## Build and test
 
 ```
 ./build.sh              # debug shell + dylib in build/
 ./build.sh app          # dylib only; doesn't relink the shell
-./build.sh release      # optimized, hot reload off
+./build.sh release      # optimized
 ./build.sh measure      # the measurement app, mock server and tool in build/measure/
 ./build.sh dist         # TIDALfast.app and .dmg, or the AppImage, in build/dist/
 ./build.sh libs         # only the C libraries in third_party, into build/kbts, build/miniaudio and build/dr_flac
@@ -57,7 +57,7 @@ The app draws only on input, worker results or a running animation. After any ch
 ## Things that hurt the user
 
 - **Keychain.** Never read, write or delete the real item, service `tidalfast`, and never log in to real TIDAL. Against the mock, use `TIDALFAST_KEYCHAIN=tidalfast-<task>-<random>` and delete it afterwards with `security delete-generic-password -s <name>`.
-- **Processes.** The user may have the app running. Kill only processes you started, by PID. Never `pkill tidalfast`. A running debug build hot-reloads `build/app.dylib`, so a dylib you build in the main checkout ends up in the user's app; put throwaway builds elsewhere (`-out:/tmp/...`).
+- **Processes.** The user may have the app running. Kill only processes you started, by PID. Never `pkill tidalfast`. Put throwaway builds outside `build/` (`-out:/tmp/...`), so the user's next launch doesn't pick them up.
 - **Audio devices.** Bit-perfect mode changes the output device's sample rate and format and skips the volume. On Linux it forces PipeWire's graph rate while it plays. Test it only with the mock's -60 dBFS tracks, never with the fake tones. Afterwards, check that the default output device is back at its old nominal rate and physical format (`build/audio_top -once`, see `docs/playback.md`), and restore it if not.
 - **Logs.** Never print tokens, Authorization headers, stream or CDN URLs, the pasted PKCE redirect or raw server text. Log error kinds, HTTP status and known codec names (`tidal.error_summary`).
 
@@ -68,5 +68,4 @@ The app draws only on input, worker results or a running animation. After any ch
 - First frames: a page's first frame must look like its second. While building, a box's `rect` and `view_bounds` are the last layout's, and zero on the frame the box first appears. Don't place or size anything from them. Give the build the sizes it needs in points (a scroll view's size, a text field's height) and let draw do the rest, as `draw_label` centres text in the final rect. Settle any state the frame depends on before the boxes that read it: send the search before choosing the view's top room, and pass `focus` to `text_field` instead of focusing it after. Reading `rect` is fine for input on a box already on screen, such as a click, a drag or a menu opened from a button. `tests/first_frame_test.odin` compares each page's first frame with the next, so add a new page to it.
 - Docs and comments: plain direct English, sentence-case headings, no em dashes.
 - `shell/platform.h` and `src/platform/platform.odin` are one ABI. Change both, keep their size checks, and bump the ABI version together. `tests/abi_test.odin` compares every field's offset across the two; add a new shared struct to its list.
-- A reload resets `State` when its layout changes (`state_version` in `src/app/app.odin` hashes it). Bump `STATE_VERSION` when a reload must not reuse old state for another reason, such as a field whose meaning changed.
 - Prove a bug fix with a test that fails on the commit before it.

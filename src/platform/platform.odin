@@ -3,7 +3,7 @@
 // tests/abi_test.odin compares their field offsets.
 package platform
 
-ABI_VERSION :: 8
+ABI_VERSION :: 9
 
 Event_Kind :: enum u32 {
 	None,
@@ -220,7 +220,7 @@ Wayland_Surface :: struct {
 #assert(size_of(Wayland_Surface) == 16)
 
 // What the shell gives the app. The surface and the procedures belong to
-// the shell, so they stay valid across reloads and the app may keep them.
+// the shell and stay valid while the app runs, so the app may keep them.
 Shell :: struct {
 	// What the renderer draws to, set up by the shell: a CAMetalLayer with its
 	// device on macOS, a Wayland_Surface on Linux.
@@ -273,20 +273,17 @@ Frame_Result :: struct {
 	wake_after: f32,
 }
 
-// Returned by app_get_api. The shell calls init on the first load, unload on
-// the old dylib and reload on the new one around a hot reload, and shutdown on
-// quit.
+// Returned by app_get_api. The shell calls init once after loading the
+// dylib, frame for every frame and shutdown on quit.
 App_API :: struct {
 	abi_version: u32,
 	_:           u32,
 	init:        proc "c" (mem: ^Memory, shell: ^Shell),
-	reload:      proc "c" (mem: ^Memory, shell: ^Shell),
-	unload:      proc "c" (mem: ^Memory),
 	shutdown:    proc "c" (mem: ^Memory),
 	frame:       proc "c" (mem: ^Memory, shell: ^Shell, input: ^Frame_Input) -> Frame_Result,
 }
 #assert(size_of(Frame_Input) == 64)
 #assert(size_of(Frame_Result) == 8)
-#assert(size_of(App_API) == 48)
+#assert(size_of(App_API) == 32)
 
 GET_API_SYMBOL :: "app_get_api"

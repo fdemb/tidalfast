@@ -1246,33 +1246,6 @@ view_grows_past_the_count :: proc(t: ^testing.T) {
 }
 
 @(test)
-reload_keeps_the_backoff :: proc(t: ^testing.T) {
-	m: Mock
-	mock_start(&m)
-	defer mock_stop(&m)
-	s := new(app.State)
-	defer free(s)
-	d := &s.data
-	d.api = app.small(m.base_url)
-	app.session_open(d)
-	defer app.data_shutdown(s)
-
-	_, err := tidal.request(d.session, {method = .GET, path = "limited"}, context.temp_allocator)
-	testing.expect(t, tidal.is_error(err, .Too_Many_Requests))
-
-	shell := platform.Shell {
-		request_redraw = proc "c" () {},
-	}
-	app.data_unload(s)
-	app.data_reload(s, &shell)
-	wait := tidal.backoff_remaining(d.session)
-	testing.expect(t, wait > 0.5 && wait <= 1, fmt.tprint(wait))
-	_, err = tidal.request(d.session, {method = .GET, path = "echo"}, context.temp_allocator)
-	testing.expect(t, tidal.is_error(err, .Backing_Off), fmt.tprint(err))
-	testing.expect_value(t, mock_count(&m, "GET /echo"), 0)
-}
-
-@(test)
 api_override_only_for_loopback :: proc(t: ^testing.T) {
 	for url in ([]string{"http://127.0.0.1:8787", "http://127.0.0.1:8787/", "https://localhost/api", "http://LOCALHOST:1", "http://[::1]:8787/x"}) {
 		testing.expect(t, app.is_loopback_url(url), url)
@@ -1835,36 +1808,6 @@ login_resumes_with_tokens_after_the_code_expired :: proc(t: ^testing.T) {
 	testing.expect_value(t, a.user_id, 123)
 }
 
-// A reload after the approval, before the session loaded, keeps the tokens,
-// and the Login_Wait finishes with them instead of polling the spent code.
-@(test)
-reload_keeps_an_approved_login :: proc(t: ^testing.T) {
-	m: Mock
-	mock_start(&m)
-	defer mock_stop(&m)
-	s := mock_data_state(&m)
-	defer data_state_free(s)
-	d := &s.data
-	m.polls = {"ok"}
-	m.sessions_fail = 1
-	show_code(t, s, interval = 0.2)
-	testing.expect_value(t, run_queued(s, app.Login_Wait_Job), 1)
-
-	shell := platform.Shell {
-		request_redraw = proc "c" () {},
-	}
-	app.data_unload(s)
-	app.data_reload(s, &shell)
-	testing.expect_value(t, tidal.session_auth(d.session, context.temp_allocator).refresh_token, "device-refresh")
-	res, ok := wait_result(d, 5 * time.Second)
-	testing.expect(t, ok)
-	app.handle_result(s, &res, 0)
-	app.result_free(&res)
-
-	testing.expect_value(t, m.poll_count, 1)
-	testing.expect(t, !app.show_login(s))
-}
-
 // slow_down, then a 429: the poll after the backoff still waits the slower
 // interval.
 @(test)
@@ -2125,56 +2068,45 @@ superseded_login_wait_job :: proc(t: ^testing.T) {
 	testing.expect(t, !app.show_login(s))
 }
 
-// The PKCE exchange worked but loading the session got a 503. Trying again,
-// and trying again after a hot reload, finish with the tokens: the one-use
-// code isn't sent a second time.
+// The PKCE exchange worked but loading the session got a 503. Trying again
+// finishes with the tokens: the one-use code isn't sent a second time.
 @(test)
 pkce_retry_keeps_the_tokens :: proc(t: ^testing.T) {
-	for reload in ([]bool{false, true}) {
-		m: Mock
-		mock_start(&m)
-		s := mock_data_state(&m)
-		d := &s.data
-		m.polls = {"ok"}
-		m.sessions_fail = 1
-		launch_signed_out(s)
-		app.pkce_submit(s, fmt.tprintf("%sandroid/login/auth?code=one-use", m.base_url))
-		testing.expect(t, shows(login_screen(t, s), "Logging you in…"))
-		app.workers_start(d)
-		res, ok := wait_result(d, 5 * time.Second)
-		testing.expect(t, ok)
-		app.handle_result(s, &res, 0)
-		app.result_free(&res)
-		ACCEPTED :: "TIDAL accepted the login, but your account didn't load."
-		testing.expect(t, shows(login_screen(t, s), ACCEPTED))
-		testing.expect_value(t, m.poll_count, 1)
+	m: Mock
+	mock_start(&m)
+	s := mock_data_state(&m)
+	d := &s.data
+	m.polls = {"ok"}
+	m.sessions_fail = 1
+	launch_signed_out(s)
+	app.pkce_submit(s, fmt.tprintf("%sandroid/login/auth?code=one-use", m.base_url))
+	testing.expect(t, shows(login_screen(t, s), "Logging you in…"))
+	app.workers_start(d)
+	res, ok := wait_result(d, 5 * time.Second)
+	testing.expect(t, ok)
+	app.handle_result(s, &res, 0)
+	app.result_free(&res)
+	ACCEPTED :: "TIDAL accepted the login, but your account didn't load."
+	testing.expect(t, shows(login_screen(t, s), ACCEPTED))
+	testing.expect_value(t, m.poll_count, 1)
 
-		if reload {
-			shell := platform.Shell {
-				request_redraw = proc "c" () {},
-			}
-			app.data_unload(s)
-			app.data_reload(s, &shell)
-			testing.expect(t, shows(login_screen(t, s), ACCEPTED))
-		}
-		login_press(t, s, "Try again")
-		res, ok = wait_result(d, 5 * time.Second)
-		testing.expect(t, ok)
-		app.handle_result(s, &res, 0)
-		app.result_free(&res)
-		testing.expect(t, !app.show_login(s))
-		testing.expect_value(t, m.poll_count, 1)
-		testing.expect_value(t, mock_count(&m, "GET /sessions"), 2)
-		testing.expect(t, tidal.session_is_pkce(d.session))
-		a, saved := keychain_auth(d)
-		testing.expect(t, saved, "the login is saved")
-		testing.expect(t, a.is_pkce)
-		testing.expect_value(t, a.access_token, "device-access")
-		testing.expect_value(t, a.user_id, 123)
+	login_press(t, s, "Try again")
+	res, ok = wait_result(d, 5 * time.Second)
+	testing.expect(t, ok)
+	app.handle_result(s, &res, 0)
+	app.result_free(&res)
+	testing.expect(t, !app.show_login(s))
+	testing.expect_value(t, m.poll_count, 1)
+	testing.expect_value(t, mock_count(&m, "GET /sessions"), 2)
+	testing.expect(t, tidal.session_is_pkce(d.session))
+	a, saved := keychain_auth(d)
+	testing.expect(t, saved, "the login is saved")
+	testing.expect(t, a.is_pkce)
+	testing.expect_value(t, a.access_token, "device-access")
+	testing.expect_value(t, a.user_id, 123)
 
-		data_state_free(s)
-		mock_stop(&m)
-	}
+	data_state_free(s)
+	mock_stop(&m)
 }
 
 // A like whose job is pushed out of a full hold list never reached TIDAL,
@@ -2505,35 +2437,3 @@ login_after_sign_out_keeps_its_item :: proc(t: ^testing.T) {
 	testing.expect_value(t, a.access_token, "new")
 }
 
-// A sign-out after a hot reload deletes the Keychain item that a login
-// saved before the reload.
-@(test)
-sign_out_after_reload_forgets_the_login :: proc(t: ^testing.T) {
-	m: Mock
-	mock_start(&m)
-	defer mock_stop(&m)
-	s := mock_data_state(&m)
-	defer data_state_free(s)
-	d := &s.data
-	sign_in(s)
-	data_jobs(d)
-
-	app.sign_out(s, "Your TIDAL session ended. Log in again.")
-	tidal.session_restore(d.session, {token_type = "Bearer", access_token = "new", refresh_token = "new-r", user_id = 123, user_kind = .Logged_In_User})
-	app.auth_changed(d.session, d)
-	run_disk(s)
-	_, saved := keychain_auth(d)
-	testing.expect(t, saved, "the new login is in the Keychain")
-
-	shell := platform.Shell {
-		request_redraw = proc "c" () {},
-	}
-	app.data_unload(s)
-	app.data_reload(s, &shell)
-
-	app.sign_out(s, "Your TIDAL session ended. Log in again.")
-	app.workers_stop(d)
-	run_disk(s)
-	_, saved = keychain_auth(d)
-	testing.expect(t, !saved, "the keychain item went")
-}

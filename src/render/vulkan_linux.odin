@@ -3,8 +3,7 @@
 // The same pipeline as Metal: one instanced quad per rect, the instances in
 // a storage buffer per frame slot that both shaders index, a colour and a
 // coverage texture bound per batch. The shaders are GLSL in shaders/,
-// compiled to SPIR-V by build.sh and #loaded, so they hot reload with the
-// dylib.
+// compiled to SPIR-V by build.sh and #loaded.
 //
 // Metal writes textures straight from the CPU and keeps released objects
 // alive until the GPU is done with them; Vulkan does neither. So texture
@@ -14,10 +13,6 @@
 // past them. A slot is touched only after its fence has been waited for
 // (slot_ready), which begin_frame does anyway and texture calls between
 // frames do too.
-//
-// Vulkan handles belong to the driver, not the dylib, so they survive a
-// reload. The procedure pointers vendor:vulkan keeps are dylib globals, so
-// reload loads them again, and rebuilds the pipeline from the new shaders.
 package render
 
 import "core:log"
@@ -260,27 +255,6 @@ init :: proc(r: ^Renderer, surface: rawptr) -> (ok: bool) {
 	texture_update(r, 0, white[:], 0, 0, 1, 1)
 	g.pipeline = build_pipeline(r)
 	return g.pipeline != 0
-}
-
-// reload loads this dylib's Vulkan procedures and rebuilds the pipeline
-// from its shaders. If that fails, the old pipeline stays in place and
-// reload returns false.
-reload :: proc(r: ^Renderer) -> bool {
-	g := &r.gpu
-	if g.device == nil {
-		return false
-	}
-	vk.load_proc_addresses_global(rawptr(vkGetInstanceProcAddr))
-	vk.load_proc_addresses_instance(g.instance)
-	vk.load_proc_addresses_device(g.device)
-	pipeline := build_pipeline(r)
-	if pipeline == 0 {
-		return false
-	}
-	vk.DeviceWaitIdle(g.device)
-	vk.DestroyPipeline(g.device, g.pipeline, nil)
-	g.pipeline = pipeline
-	return true
 }
 
 destroy :: proc(r: ^Renderer) {

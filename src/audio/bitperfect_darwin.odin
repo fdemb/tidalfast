@@ -13,7 +13,7 @@ package audio
 //
 // What the device was set to before (rate and physical format) is kept in
 // Hal and put back by hal_close with restore set: when bit-perfect is
-// turned off, on a hot reload and when the app quits. The same goes out
+// turned off and when the app quits. The same goes out
 // as a Device_Change for the app to keep on disk (hal_device_change), so a
 // start after a crash can put it back (device_change_undo).
 

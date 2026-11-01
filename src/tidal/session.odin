@@ -196,15 +196,6 @@ session_epoch :: proc(s: ^Session) -> u64 {
 	return sync.atomic_load(&s.auth_epoch)
 }
 
-// session_set_epoch carries a session's auth epoch over to the one that
-// replaces it, so epochs keep counting up across a hot reload. The epoch
-// never goes back.
-session_set_epoch :: proc(s: ^Session, epoch: u64) {
-	sync.guard(&s.mutex)
-	assert(epoch >= s.auth_epoch, "a session's auth epoch went back")
-	sync.atomic_store(&s.auth_epoch, epoch)
-}
-
 // session_set_login_attempt names the login attempt now under way. A
 // login given another attempt number drops its tokens before they reach
 // the session, so a device-code poll answered after the user moved on to
@@ -270,8 +261,7 @@ session_is_pkce :: proc(s: ^Session) -> bool {
 }
 
 // session_set_pkce_state replaces the PKCE verifier and client key that
-// config_make generated, so a login URL opened by one session can be
-// finished by another, as after a hot reload.
+// config_make generated.
 session_set_pkce_state :: proc(s: ^Session, code_verifier, client_unique_key: string) {
 	sync.guard(&s.mutex)
 	a := vmem.arena_allocator(&s.arena)

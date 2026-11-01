@@ -3,7 +3,7 @@
 ```
 ./build.sh              # debug: build/tidalfast and build/app.dylib
 ./build.sh app          # rebuild only the dylib
-./build.sh release      # optimized, hot reload off
+./build.sh release      # optimized
 ./build.sh dist         # release package in build/dist
 ./build/tidalfast
 ```
@@ -20,7 +20,7 @@ On macOS it needs macOS 14 or later, Odin and the Xcode command line tools; [lin
 
 ## Packaging
 
-`./build.sh dist` builds an optimized app with hot reload off into `build/dist` and packs it. It writes nothing else in `build/`, so a debug app that's running doesn't reload it. `TIDALFAST_VERSION=1.2.3` sets the version. Without it the version comes from a `v1.2.3` tag on HEAD, or is 0.0.0.
+`./build.sh dist` builds an optimized app into `build/dist` and packs it. It writes nothing else in `build/`. `TIDALFAST_VERSION=1.2.3` sets the version. Without it the version comes from a `v1.2.3` tag on HEAD, or is 0.0.0.
 
 On macOS it makes `TIDALfast.app` and `TIDALfast-<version>-macos-arm64.dmg`. The shell and `app.dylib` sit together in `Contents/MacOS`, since the shell loads the dylib from its own folder. Both are built for macOS 14, as `LSMinimumSystemVersion` in `packaging/macos/Info.plist` says. Odin and clang otherwise target the build machine's macOS, and dyld refuses a dylib built for a newer one. The static libraries they link target 14 too. Homebrew's Odin builds its `miniaudio.a` for the macOS it was installed on, which is why the project builds miniaudio itself (see above). The bundle is signed ad hoc, so Gatekeeper blocks a downloaded copy until the user allows it in System Settings > Privacy & Security or runs `xattr -dr com.apple.quarantine /Applications/TIDALfast.app`. Every release has a new ad hoc signature, so the Keychain asks again for access to the saved login after an update. `TIDALFAST_SIGN_IDENTITY` signs it with a real identity instead (see below).
 
@@ -48,7 +48,7 @@ Environment variables:
 - `TIDALFAST_OVERLAY=1` shows the frame-time overlay from the start.
 - `TIDALFAST_VOLUME=0.2` sets the volume slider at start, over the saved one. It isn't saved unless the slider moves.
 - `TIDALFAST_AUDIO_NULL=1` plays to miniaudio's null device: the audio callback runs in real time, but nothing reaches the speakers.
-- `TIDALFAST_AUDIO_CAPTURE=path` writes every sample the audio callback hands the device, after ReplayGain and volume, to `path` as a 32-bit float WAV. In bit-perfect mode it's what the HAL IOProc hands CoreAudio, or the process callback hands PipeWire. Only the first player after start captures, not the ones a hot reload makes. The header's sizes are filled in when the app quits; `tests/audio_check` and `tests/bitperfect_check` also read a file whose header still says 0. The header has the rate of the first device open; after a rate change the frames carry on at the new rate in the same file.
+- `TIDALFAST_AUDIO_CAPTURE=path` writes every sample the audio callback hands the device, after ReplayGain and volume, to `path` as a 32-bit float WAV. In bit-perfect mode it's what the HAL IOProc hands CoreAudio, or the process callback hands PipeWire. The header's sizes are filled in when the app quits; `tests/audio_check` and `tests/bitperfect_check` also read a file whose header still says 0. The header has the rate of the first device open; after a rate change the frames carry on at the new rate in the same file.
 - `TIDALFAST_SETTINGS=path` keeps the settings (volume, bit-perfect, scrollbars, the player bar) in `path` instead of `~/Library/Application Support/tidalfast/settings.json`. The fake data uses only this file, never the default one. A run that shows the fake data because it has no mock URL uses no settings file at all, so bit-perfect output stays off and no file changes.
 - `TIDALFAST_CACHE=dir` keeps the list cache's files in `dir/<user id>` instead of `~/Library/Caches/tidalfast/<user id>` (see [The list cache](tidal-data.md#the-list-cache)). Against `TIDALFAST_API` the default is `~/Library/Caches/tidalfast-mock`, so a mock never writes into a real account's cache.
 - `TIDALFAST_PKCE_REDIRECT=url`: with no saved login the app finishes the PKCE login (see [Login](tidal-data.md#login)) with this address at start, so a script can log in to `tests/mock_tidal` without a browser. Debug and `./build.sh measure` builds only. Set without a mock URL the app takes, in any build, it shows the fake data, as a bad `TIDALFAST_API` does.

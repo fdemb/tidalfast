@@ -28,11 +28,6 @@
 // paragraph direction, fixes up neutrals, numbers and brackets a run at a
 // time and orders the runs itself.
 //
-// State is plain data plus CF object or FreeType face pointers, so it
-// survives a hot reload.
-// The kb_text_shape context keeps a pointer to the library's allocator
-// function, so reload places it afresh. The font loader thread runs dylib
-// code, so unload stops it and reload starts it.
 package text
 
 import "core:c/libc"
@@ -193,9 +188,6 @@ State :: struct {
 	// character or font is asked of the loader once per session.
 	fallback_cache:  []Fallback,
 	fallback_used:   int,
-	// False for a cache from the persistent arena, which a State made by an
-	// older dylib still has after a hot reload. That one is never freed.
-	fallback_malloc: bool,
 	loader:          Loader,
 	// Goes up whenever loaded fonts arrive, so pending runs reshape.
 	generation:      u64,
@@ -234,7 +226,6 @@ init :: proc(t: ^State, wake: proc "c" () = nil) -> bool {
 		return false
 	}
 	t.fallback_cache = cache[:FALLBACK_CAPACITY]
-	t.fallback_malloc = true
 	for &c in t.coverage {
 		c = make([]u8, 0x10000 / 4)
 	}
@@ -267,20 +258,6 @@ init :: proc(t: ^State, wake: proc "c" () = nil) -> bool {
 	return true
 }
 
-// reload places the shaping context afresh, since it holds a pointer into
-// the previous dylib's copy of kb_text_shape, and starts the font loader
-// with this dylib's code. Fonts are plain data and stay.
-reload :: proc(t: ^State, wake: proc "c" () = nil) {
-	t.shaper = kbts.PlaceShapeContextFixedMemory(t.shaper_memory)
-	t.loader.wake = wake
-	loader_start(&t.loader)
-}
-
-// unload stops the font loader thread before its code goes away.
-unload :: proc(t: ^State) {
-	loader_stop(&t.loader)
-}
-
 destroy :: proc(t: ^State, r: ^render.Renderer) {
 	l := &t.loader
 	loader_stop(l)
@@ -295,9 +272,7 @@ destroy :: proc(t: ^State, r: ^render.Renderer) {
 		free_face(&face)
 	}
 	atlas_destroy(&t.atlas, r)
-	if t.fallback_malloc {
-		libc.free(raw_data(t.fallback_cache))
-	}
+	libc.free(raw_data(t.fallback_cache))
 	t^ = {}
 }
 
@@ -1512,10 +1487,7 @@ fallback_room :: proc(t: ^State) -> bool {
 			t.fallback_cache[slot] = entry
 		}
 	}
-	if t.fallback_malloc {
-		libc.free(raw_data(old))
-	}
-	t.fallback_malloc = true
+	libc.free(raw_data(old))
 	return true
 }
 

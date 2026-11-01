@@ -239,17 +239,10 @@ file_face_name :: proc(path: cstring, index: int) -> u64 {
 	return hash.fnv64a(transmute([]byte)string(path)) ~ (u64(index) + 1) * 0x9e37_79b9_7f4a_7c15
 }
 
-// load_embedded loads one of the built-in faces from its #load data. A
-// debug build, which hot reload may replace, takes a copy; a release build
-// reads the image's bytes in place, as on macOS.
+// load_embedded loads one of the built-in faces from its #load data, in
+// place, as on macOS.
 @(private)
 load_embedded :: proc(t: ^State, font: Font, data: []byte) -> bool {
-	data := data
-	when ODIN_DEBUG {
-		copied := make([]byte, len(data))
-		copy(copied, data)
-		data = copied
-	}
 	face := &t.faces[font]
 	if !load_face(face, nil, data, 0, false) {
 		return false

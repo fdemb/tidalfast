@@ -4,12 +4,8 @@ package app
 // downloads and JPEG decoding. The UI thread pushes Jobs into data.queue; a
 // worker runs one, pushes a Result into data.results and wakes the UI
 // thread with the shell's request_redraw. Jobs and results are plain data
-// with fixed-size text, so they reference nothing a view switch or a hot
-// reload could free.
-//
-// Workers run this dylib's code, so unload stops them: it aborts requests
-// in flight, and a worker whose job was cut short puts the job back in the
-// queue. reload starts new workers, which pick those jobs up again.
+// with fixed-size text, so they reference nothing a view switch could
+// free.
 //
 // Memory: each job that returns data gets its own virtual-memory arena,
 // which travels in the Result. The UI thread copies what it keeps into the
@@ -482,7 +478,7 @@ temp_take_back :: proc(given: ^bool) {
 }
 
 // retry_later says whether a job should go back in the queue instead of
-// failing: it was cut short by unload, held back by the backoff gate, or
+// failing: it was cut short by workers_stop, held back by the backoff gate, or
 // was the request that started a backoff. A job cancelled because its
 // login was cleared isn't retried; sign_out drops its result.
 @(private = "file")
@@ -690,8 +686,8 @@ rows_from_tracks :: proc(tracks: []tidal.Track, alloc: mem.Allocator) -> []Row {
 }
 
 // run_login_pkce trades the pasted address's code for tokens. If an
-// earlier try already did, and then loading the account failed or a reload
-// cut it short, the code is spent: it finishes with those tokens instead.
+// earlier try already did, and then loading the account failed, the code
+// is spent: it finishes with those tokens instead.
 @(private = "file")
 run_login_pkce :: proc(d: ^Data, job: Login_Pkce_Job, res: ^Result) {
 	s := d.session
@@ -725,13 +721,13 @@ run_login_wait :: proc(d: ^Data, job: Login_Wait_Job, res: ^Result) {
 	}
 	if job.not_before != {} {
 		if wait := time.tick_diff(time.tick_now(), job.not_before); wait > 0 && jobs.sleep(&d.queue, wait) {
-			// Stopping for a reload: retry_later puts the job back.
+			// Stopping: retry_later puts the job back.
 			res.err = .Cancelled
 			return
 		}
 	}
 	// An earlier poll got the tokens, then failed to load the session
-	// (rate limited, the network dropped, or a reload cut it short). The
+	// (rate limited or the network dropped). The
 	// device code is spent, so finish with the tokens, however long ago the
 	// code expired.
 	a := tidal.session_auth(s, context.temp_allocator)

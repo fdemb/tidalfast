@@ -1,7 +1,7 @@
 // The executable. Owns NSApplication, the window and the CAMetalLayer,
 // collects input into an event array, and drives the app dylib through the
 // App_API table in platform.h. It redraws only when something asks for it:
-// input, resize, a reload or request_redraw from any thread. While the app
+// input, resize or request_redraw from any thread. While the app
 // reports it is animating and the window is visible, the display link adds a
 // frame every vsync, and other redraws wait for the next tick. A frame can
 // also ask to be woken after a delay, which a one-shot timer does.
@@ -12,7 +12,6 @@
 
 #import <Carbon/Carbon.h> // kVK_* only
 #import <Cocoa/Cocoa.h>
-#import <CoreServices/CoreServices.h>
 #import <MediaPlayer/MediaPlayer.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
@@ -20,31 +19,16 @@
 #include <dlfcn.h>
 #include <stdatomic.h>
 #include <sys/mman.h>
-#include <sys/stat.h>
 #include <sys/sysctl.h>
 #include <sys/time.h>
 
 #include "platform.h"
 
-#ifndef HOT_RELOAD
-#define HOT_RELOAD 1
-#endif
-
 #define PERSISTENT_SIZE (256ull << 20)
 #define FRAME_SIZE (64ull << 20)
 
-typedef struct {
-  void *handle;
-  App_API api;
-  ino_t inode;
-  struct timespec mtime;
-} Loaded_App;
-
-static Loaded_App g_app;
+static App_API g_app;
 static NSString *g_app_path;
-#if HOT_RELOAD
-static int g_reload_count;
-#endif
 
 static Memory g_memory;
 static Shell g_shell;
@@ -117,7 +101,7 @@ static uint32_t held_mouse_buttons(void) {
 }
 
 static void draw_frame(void) {
-  if (!g_app.api.frame) return;
+  if (!g_app.frame) return;
   atomic_store(&g_needs_redraw, false);
 
   NSSize size = g_view.bounds.size;
@@ -146,7 +130,7 @@ static void draw_frame(void) {
   };
   Frame_Result result;
   @autoreleasepool {
-    result = g_app.api.frame(&g_memory, &g_shell, &input);
+    result = g_app.frame(&g_memory, &g_shell, &input);
     access_frame_done();
   }
   g_event_count = 0;
@@ -247,39 +231,11 @@ static void before_waiting(CFRunLoopObserverRef observer, CFRunLoopActivity acti
 // before_waiting, which draws if the tick still hasn't come.
 static void tick_fallback_fired(CFRunLoopTimerRef timer, void *info) {}
 
-// Hot reload
+// The app dylib
 
-static bool file_identity(NSString *path, ino_t *inode, struct timespec *mtime) {
-  struct stat st;
-  if (stat(path.fileSystemRepresentation, &st) != 0) return false;
-  *inode = st.st_ino;
-  *mtime = st.st_mtimespec;
-  return true;
-}
-
-// With hot reload, copies the dylib to a unique temp path and opens the
-// copy, so the linker can replace the original while this copy is loaded.
-// Without it the dylib is opened in place: macOS checks the signature of a
-// file it hasn't seen before on every dlopen, about 100 ms for a fresh copy
-// against under 10 for the same file again. dlopen runs the Odin runtime's
-// startup in the new image.
-static bool open_app(Loaded_App *out) {
-  if (!file_identity(g_app_path, &out->inode, &out->mtime)) {
-    fprintf(stderr, "shell: no app dylib at %s\n", g_app_path.UTF8String);
-    return false;
-  }
-#if HOT_RELOAD
-  NSString *name = [NSString stringWithFormat:@"tidalfast-app-%d-%d.dylib", getpid(), g_reload_count++];
-  NSString *copy = [NSTemporaryDirectory() stringByAppendingPathComponent:name];
-  if (copyfile(g_app_path.fileSystemRepresentation, copy.fileSystemRepresentation, NULL, COPYFILE_ALL) != 0) {
-    fprintf(stderr, "shell: copy to %s failed\n", copy.UTF8String);
-    return false;
-  }
-  void *handle = dlopen(copy.fileSystemRepresentation, RTLD_NOW | RTLD_LOCAL);
-  unlink(copy.fileSystemRepresentation);
-#else
+// Opens the dylib in place. dlopen runs the Odin runtime's startup in it.
+static bool open_app(App_API *out) {
   void *handle = dlopen(g_app_path.fileSystemRepresentation, RTLD_NOW | RTLD_LOCAL);
-#endif
   if (!handle) {
     fprintf(stderr, "shell: dlopen failed: %s\n", dlerror());
     return false;
@@ -291,54 +247,9 @@ static bool open_app(Loaded_App *out) {
     dlclose(handle);
     return false;
   }
-  out->handle = handle;
-  out->api = *api;
+  *out = *api;
   return true;
 }
-
-#if HOT_RELOAD
-static void reload_if_changed(void) {
-  ino_t inode;
-  struct timespec mtime;
-  if (!file_identity(g_app_path, &inode, &mtime)) return;
-  if (inode == g_app.inode && mtime.tv_sec == g_app.mtime.tv_sec && mtime.tv_nsec == g_app.mtime.tv_nsec) return;
-
-  Loaded_App next = {0};
-  if (!open_app(&next)) {
-    // Remember the file anyway so a broken build isn't retried until it changes.
-    g_app.inode = inode;
-    g_app.mtime = mtime;
-    return;
-  }
-  g_app.api.unload(&g_memory);
-  // The old image stays open for good. A State the new code can't read is
-  // released through a procedure the old code left in it, so that code must
-  // stay mapped. (macOS wouldn't unmap an Odin dylib anyway, since it uses
-  // thread-local storage.)
-  g_app = next;
-  @autoreleasepool {
-    g_app.api.reload(&g_memory, &g_shell);
-  }
-  fprintf(stderr, "shell: reloaded app (%d)\n", g_reload_count - 1);
-  request_redraw();
-}
-
-static void build_dir_changed(ConstFSEventStreamRef stream, void *info, size_t count, void *paths,
-                              const FSEventStreamEventFlags *flags, const FSEventStreamEventId *ids) {
-  reload_if_changed();
-}
-
-// FSEvents on the build directory: no polling, and it sees the rename that
-// build.sh uses to put a finished dylib in place.
-static void watch_app(void) {
-  NSArray *paths = @[ g_app_path.stringByDeletingLastPathComponent ];
-  FSEventStreamRef stream =
-      FSEventStreamCreate(NULL, build_dir_changed, NULL, (__bridge CFArrayRef)paths, kFSEventStreamEventIdSinceNow, 0.05,
-                          kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer);
-  FSEventStreamSetDispatchQueue(stream, dispatch_get_main_queue());
-  FSEventStreamStart(stream);
-}
-#endif
 
 // Now Playing and media keys
 //
@@ -1641,7 +1552,7 @@ static void setup_blur_reference(void) {
   CFRunLoopAddTimer(g_main_run_loop, g_wake_timer, kCFRunLoopCommonModes);
   [(Metal_View *)g_view update_drawable_size];
   @autoreleasepool {
-    g_app.api.init(&g_memory, &g_shell);
+    g_app.init(&g_memory, &g_shell);
   }
 
   CFRunLoopObserverRef observer =
@@ -1652,10 +1563,6 @@ static void setup_blur_reference(void) {
   g_tick_fallback = CFRunLoopTimerCreate(NULL, CFAbsoluteTimeGetCurrent() + 1e9, 1e9, 0, 0, tick_fallback_fired, NULL);
   CFRunLoopAddTimer(g_main_run_loop, g_tick_fallback, kCFRunLoopCommonModes);
 
-#if HOT_RELOAD
-  watch_app();
-#endif
-
   [g_window makeKeyAndOrderFront:nil];
   [g_window makeFirstResponder:g_view];
   [NSApp activateIgnoringOtherApps:YES];
@@ -1665,7 +1572,7 @@ static void setup_blur_reference(void) {
 }
 
 - (void)applicationWillTerminate:(NSNotification *)notification {
-  if (g_app.api.shutdown) g_app.api.shutdown(&g_memory);
+  if (g_app.shutdown) g_app.shutdown(&g_memory);
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender {

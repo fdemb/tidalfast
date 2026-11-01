@@ -2,9 +2,6 @@
 // The app keeps two in State: jobs from the UI thread to the workers, and
 // results from the workers back to the UI thread.
 //
-// Everything in Queue is plain data in a fixed array, with no allocator or
-// procedure pointer, so a queue survives a hot reload with its items in it.
-//
 // An item popped with pop_wait keeps its slot until done or requeue, so N
 // counts queued and busy items together. That way requeue always has room:
 // work cut short can't be lost because something else filled the queue.

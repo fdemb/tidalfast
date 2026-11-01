@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#define PLATFORM_ABI_VERSION 8
+#define PLATFORM_ABI_VERSION 9
 
 typedef enum {
   EVENT_NONE,
@@ -285,12 +285,10 @@ typedef struct {
   uint32_t abi_version;
   uint32_t _pad;
   void (*init)(Memory *mem, Shell *shell);
-  void (*reload)(Memory *mem, Shell *shell);
-  void (*unload)(Memory *mem);
   void (*shutdown)(Memory *mem);
   Frame_Result (*frame)(Memory *mem, Shell *shell, Frame_Input *input);
 } App_API;
-_Static_assert(sizeof(App_API) == 48, "App_API size must match platform.odin");
+_Static_assert(sizeof(App_API) == 32, "App_API size must match platform.odin");
 
 typedef App_API *(*App_Get_API)(void);
 #define APP_GET_API_SYMBOL "app_get_api"

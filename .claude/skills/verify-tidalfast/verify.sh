@@ -35,8 +35,8 @@ cmd_build() {
 	./build.sh libs || die "C library build failed"
 	echo "verify: building shell"
 	clang shell/shell.m -o "$BIN/tidalfast" -fobjc-arc -mmacosx-version-min=14.0 \
-		-Wall -Wno-unused-parameter -O2 -DHOT_RELOAD=0 \
-		-framework Cocoa -framework Metal -framework QuartzCore -framework CoreServices -framework MediaPlayer ||
+		-Wall -Wno-unused-parameter -O2 \
+		-framework Cocoa -framework Metal -framework QuartzCore -framework MediaPlayer ||
 		die "shell build failed"
 	# MOCK_API makes an optimized build honour TIDALFAST_API and
 	# TIDALFAST_PKCE_REDIRECT, as ./build.sh measure does.

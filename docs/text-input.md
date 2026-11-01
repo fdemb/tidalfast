@@ -2,7 +2,7 @@
 
 ## The text field
 
-`ui.text_field(id, &field, placeholder, width, height)` is a single-line text field, height points tall so its text is centred from its first frame. Its state is a `ui.Text_Field` the app keeps: up to 256 bytes of UTF-8 in a fixed buffer, the cursor and the selection's anchor, the input method's marked text and the undo stacks. It's plain data, so it survives a hot reload, and `edit.odin` holds the editing on its own, which the tests drive without a window.
+`ui.text_field(id, &field, placeholder, width, height)` is a single-line text field, height points tall so its text is centred from its first frame. Its state is a `ui.Text_Field` the app keeps: up to 256 bytes of UTF-8 in a fixed buffer, the cursor and the selection's anchor, the input method's marked text and the undo stacks. It's plain data, and `edit.odin` holds the editing on its own, which the tests drive without a window.
 
 Every offset is a byte offset on a grapheme cluster boundary. The boundaries come from `text.grapheme_starts`, the same segmentation the renderer uses, so Backspace removes a whole 가, a whole jamo syllable, a ZWJ family or a flag with its two regional indicators, and an Arabic letter with its marks. The one exception is a replacement range from the input method, which the field takes by codepoint as the shell's mirror does (see below), so an input method that replaces part of a cluster leaves the cursor inside it. kb_text_shape broke before the last pictograph of a ZWJ sequence (👨‍👩‍ and 👧), so `grapheme_starts` now joins them as rule GB11 says, which fixes truncation of such titles too.
 

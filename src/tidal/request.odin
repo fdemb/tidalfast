@@ -43,14 +43,6 @@ backoff_remaining :: proc(s: ^Session) -> f64 {
 	return max(0, -time.duration_seconds(time.tick_since(s.backoff_until)))
 }
 
-// backoff_state returns when the current backoff ends and why, {} and ""
-// for none, so it can be carried over to another session with
-// backoff_restore.
-backoff_state :: proc(s: ^Session, allocator := context.allocator) -> (until: time.Tick, reason: string) {
-	sync.guard(&s.backoff_mutex)
-	return s.backoff_until, strings.clone(s.backoff_reason, allocator)
-}
-
 // backoff_restore starts a backoff that ends at until, unless the session
 // already has one that ends later.
 backoff_restore :: proc(s: ^Session, until: time.Tick, reason: string) {

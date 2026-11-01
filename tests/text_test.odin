@@ -468,30 +468,6 @@ slice_equal :: proc(a, b: []$T) -> bool {
 	return true
 }
 
-// unload stops the loader thread as a hot reload does, and reload starts it
-// again. Fonts asked for in between load after the restart.
-@(test)
-test_loader_restart :: proc(t: ^testing.T) {
-	s: Shaper
-	context.allocator = shaper_init(&s)
-	defer shaper_destroy(&s)
-
-	testing.expect(t, !shape_loaded(&s, .Regular, 13, "שלום").pending)
-	text.unload(s.state)
-	testing.expect(t, !s.state.loader.running)
-	run := text.shape(s.state, .Regular, 13, "เพลงรัก")
-	testing.expect(t, run.pending)
-	time.sleep(20 * time.Millisecond)
-	testing.expect(t, text.loading(s.state), "nothing loads while stopped")
-	text.reload(s.state)
-	testing.expect(t, s.state.loader.running)
-	run = shape_loaded(&s, .Regular, 13, "เพลงรัก")
-	testing.expect(t, !run.pending)
-	for g in run.glyphs {
-		testing.expect(t, g.id != 0 && g.face >= u8(len(text.Font)), "Thai from a fallback face")
-	}
-}
-
 // Every glyph keeps the index of its own character through shaping, so
 // repeated characters each get their own cluster, in kb_text_shape (Hangul,
 // Latin with marks, Devanagari with a reordered vowel sign, Thai with sara

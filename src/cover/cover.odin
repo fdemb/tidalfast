@@ -1,6 +1,6 @@
 // Cover art: which size to fetch, decoding on a worker, and the texture
 // cache. The cache is plain data with fixed arrays, owned by the UI thread,
-// so it lives in the app's State and survives a hot reload. It never calls
+// and lives in the app's State. It never calls
 // the renderer: it asks the caller to create a page's texture, and trim
 // hands back the textures for the caller to destroy.
 package cover

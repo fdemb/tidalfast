@@ -8,9 +8,6 @@ import MTL "vendor:darwin/Metal"
 
 BACKDROPS :: true
 
-// The Metal objects are owned by the Obj-C runtime, not by the dylib, so
-// they survive a reload. The pipelines are rebuilt on reload because the
-// shader source lives in the dylib.
 Gpu :: struct {
 	device:    id, // id<MTLDevice>
 	layer:     id, // CAMetalLayer*
@@ -42,9 +39,8 @@ Gpu_Texture :: struct {
 	mip_cmd: id,
 }
 
-// Compiled at runtime with newLibraryWithSource. The Metal compiler is not
-// part of the command line tools, and keeping the source here means shader
-// edits hot reload with the rest of the dylib.
+// Compiled at runtime with newLibraryWithSource, since the Metal compiler is
+// not part of the command line tools.
 SHADER_SOURCE :: `
 #include <metal_stdlib>
 using namespace metal;
@@ -235,21 +231,6 @@ init :: proc(r: ^Renderer, surface: rawptr) -> bool {
 	texture_update(r, 0, white[:], 0, 0, 1, 1)
 	g.pipeline, g.blur_down, g.blur_up = build_pipelines(r)
 	return g.pipeline != nil
-}
-
-// reload rebuilds the pipelines from this dylib's shader source. If that
-// fails, the old ones stay in place and reload returns false.
-reload :: proc(r: ^Renderer) -> bool {
-	pipeline, down, up := build_pipelines(r)
-	if pipeline == nil {
-		return false
-	}
-	g := &r.gpu
-	release(g.pipeline)
-	release(g.blur_down)
-	release(g.blur_up)
-	g.pipeline, g.blur_down, g.blur_up = pipeline, down, up
-	return true
 }
 
 destroy :: proc(r: ^Renderer) {

@@ -10,11 +10,6 @@ package app
 // works. The player's status says which serial is audible, and when that is
 // the next track's, the queue moves on.
 //
-// Hot reload: the audio callback, the decode thread and the fetch threads
-// all run dylib code, so unload destroys the player (a short silence) and
-// reload makes a new one and plays the same sources from where they were.
-// The sources' URLs are in heap memory that outlives the dylib.
-//
 // The queue and where it was are kept on disk with the account's lists,
 // so the next start shows the same track, paused at the same place
 // (queue_save, playback_restore).
@@ -78,9 +73,9 @@ Artwork :: struct {
 }
 
 Playback :: struct {
-	player:          ^audio.Player, // nil while the dylib is unloaded
+	player:          ^audio.Player,
 	set_now_playing: proc "c" (info: ^platform.Now_Playing), // the shell's
-	capture:         Small, // TIDALFAST_AUDIO_CAPTURE, for the first player only
+	capture:         Small, // TIDALFAST_AUDIO_CAPTURE
 	window:          int, // TIDALFAST_AUDIO_WINDOW_KB, in bytes
 	null_output:     bool, // TIDALFAST_AUDIO_NULL: play to miniaudio's silent null device
 
@@ -108,7 +103,6 @@ Playback :: struct {
 	paused:          bool,
 	status:          audio.Status,
 	output_seen:     audio.Device_Info, // the last open output, kept while the device reopens; reset when the output setting changes
-	resume_sample:   i64, // position kept across a reload
 	seek_id:         u32, // waiting for this seek to show up in status
 	seek_serial:     u64, // the source it's for; it's dropped once that isn't current
 	seek_sample:     i64,
@@ -162,36 +156,6 @@ playback_start :: proc(s: ^State, shell: ^platform.Shell) {
 	}
 	pb.player = audio.create(shell.request_redraw, s.settings.volume, small_str(&pb.capture), pb.window, pb.null_output, output_of(s.settings))
 	pb.volume_sent = s.settings.volume
-}
-
-playback_unload :: proc(s: ^State) {
-	pb := &s.playback
-	if pb.player == nil {
-		return
-	}
-	st := audio.status(pb.player)
-	pb.resume_sample = st.sample if st.serial == pb.cur.serial else pb.cur.at
-	if pb.seek_id != 0 && pb.seek_serial == pb.cur.serial {
-		pb.resume_sample = pb.seek_sample
-	}
-	audio.destroy(pb.player)
-	pb.player = nil
-}
-
-playback_reload :: proc(s: ^State, shell: ^platform.Shell) {
-	pb := &s.playback
-	pb.set_now_playing = shell.set_now_playing
-	pb.player = audio.create(shell.request_redraw, s.settings.volume, window = pb.window, null_output = pb.null_output, output = output_of(s.settings))
-	// The new player's seek ids start again; a pending seek is in resume_sample.
-	pb.seek_id = 0
-	if pb.cur.resolved {
-		pb.cur.at = pb.resume_sample
-		audio.play(pb.player, source_of(pb, &pb.cur), pb.resume_sample, pb.paused)
-	}
-	if pb.next.resolved {
-		audio.set_next(pb.player, source_of(pb, &pb.next))
-	}
-	pb.np_key = 0
 }
 
 playback_shutdown :: proc(s: ^State) {

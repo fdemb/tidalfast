@@ -1,7 +1,7 @@
 #!/bin/sh
 # ./build.sh              debug build of the shell and the app dylib
-# ./build.sh app          rebuild only the app dylib; a running shell reloads it
-# ./build.sh release      optimized build, hot reload watcher off
+# ./build.sh app          rebuild only the app dylib
+# ./build.sh release      optimized build
 # ./build.sh release app  optimized app dylib only
 # ./build.sh measure      what tools/measure runs: an optimized app in build/measure/app that
 #                         also reads TIDALFAST_API, the mock server and the measure tool
@@ -33,7 +33,7 @@ done
 
 if [ "$mode" = release ]; then
 	odin_flags="-o:speed"
-	clang_flags="-O2 -DHOT_RELOAD=0"
+	clang_flags="-O2"
 else
 	odin_flags="-debug"
 	clang_flags="-g -O0"
@@ -141,7 +141,7 @@ if [ "$(uname -s)" = Linux ]; then
 		mkdir -p build/measure/app
 		odin build src/app -build-mode:dll -out:build/measure/app/app.so -vet -strict-style -o:speed -define:TIDALFAST_MOCK_API=true $app_flags
 		if [ ! -f build/measure/app/tidalfast ] || [ shell/shell_wayland.c -nt build/measure/app/tidalfast ] || [ shell/platform.h -nt build/measure/app/tidalfast ]; then
-			shell_build build/measure/app/tidalfast -O2 -DHOT_RELOAD=0
+			shell_build build/measure/app/tidalfast -O2
 		fi
 		odin build tests/mock_tidal -out:build/measure/mock_tidal -o:speed
 		odin build tools/measure -out:build/measure/measure -vet -strict-style
@@ -173,7 +173,7 @@ if [ "$target" = dist ]; then
 	rm -rf "$bundle/Contents/MacOS/app.dylib.dSYM"
 	clang shell/shell.m -o "$bundle/Contents/MacOS/tidalfast" -fobjc-arc -mmacosx-version-min=$macos_min \
 		-Wall -Wno-unused-parameter $clang_flags \
-		-framework Cocoa -framework Metal -framework QuartzCore -framework CoreServices -framework MediaPlayer
+		-framework Cocoa -framework Metal -framework QuartzCore -framework MediaPlayer
 	sed -e "s/@VERSION@/$version/g" -e "s/@MACOS_MIN@/$macos_min/g" packaging/macos/Info.plist > "$bundle/Contents/Info.plist"
 	cp packaging/macos/AppIcon.icns "$bundle/Contents/Resources/"
 	codesign --force --sign "${sign_identity:--}" "$bundle/Contents/MacOS/app.dylib"
@@ -191,16 +191,16 @@ if [ "$target" = measure ]; then
 	odin build src/app -build-mode:dll -out:build/measure/app/app.dylib -vet -strict-style -o:speed -define:TIDALFAST_MOCK_API=true $app_flags
 	if [ ! -f build/measure/app/tidalfast ] || [ shell/shell.m -nt build/measure/app/tidalfast ] || [ shell/platform.h -nt build/measure/app/tidalfast ]; then
 		clang shell/shell.m -o build/measure/app/tidalfast -fobjc-arc -mmacosx-version-min=14.0 \
-			-Wall -Wno-unused-parameter -O2 -DHOT_RELOAD=0 \
-			-framework Cocoa -framework Metal -framework QuartzCore -framework CoreServices -framework MediaPlayer
+			-Wall -Wno-unused-parameter -O2 \
+			-framework Cocoa -framework Metal -framework QuartzCore -framework MediaPlayer
 	fi
 	odin build tests/mock_tidal -out:build/measure/mock_tidal -o:speed
 	odin build tools/measure -out:build/measure/measure -vet -strict-style
 	exit 0
 fi
 
-# Build to a temp name and rename, so the shell's watcher never sees a half
-# written dylib.
+# Build to a temp name and rename, so a running app keeps the dylib it
+# mapped instead of seeing it overwritten.
 odin build src/app -build-mode:dll -out:build/app.tmp.dylib -vet -strict-style $odin_flags $app_flags
 rm -rf build/app.dylib.dSYM
 [ -d build/app.tmp.dylib.dSYM ] && mv build/app.tmp.dylib.dSYM build/app.dylib.dSYM
@@ -215,7 +215,7 @@ if [ "$target" = all ] && { [ ! -f build/tidalfast ] || [ shell/shell.m -nt buil
 	echo "$mode" > build/shell-mode
 	clang shell/shell.m -o build/tidalfast -fobjc-arc -mmacosx-version-min=14.0 \
 		-Wall -Wno-unused-parameter $clang_flags \
-		-framework Cocoa -framework Metal -framework QuartzCore -framework CoreServices -framework MediaPlayer
+		-framework Cocoa -framework Metal -framework QuartzCore -framework MediaPlayer
 	if [ -n "$sign_identity" ]; then
 		codesign --force --sign "$sign_identity" --identifier "$bundle_id" build/tidalfast
 	fi

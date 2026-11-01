@@ -136,21 +136,12 @@ load_system :: proc(t: ^State, font: Font) -> bool {
 	return true
 }
 
-// load_embedded loads one of the built-in faces from its #load data.
+// load_embedded loads one of the built-in faces from its #load data. The
+// shell never closes the dylib, so CoreText and kb_text_shape read the
+// image's bytes in place.
 @(private)
 load_embedded :: proc(t: ^State, font: Font, data: []byte) -> bool {
-	// The #load data lives in this dylib's image. A debug build, which
-	// hot reload may replace, takes a copy. A release build never
-	// reloads, and the shell never closes a dylib, so CoreText and
-	// kb_text_shape read the image's bytes in place.
-	data := data
-	cf_data: CFDataRef
-	when ODIN_DEBUG {
-		data = slice.clone(data)
-		cf_data = CFDataCreate(nil, raw_data(data), len(data))
-	} else {
-		cf_data = CFDataCreateWithBytesNoCopy(nil, raw_data(data), len(data), kCFAllocatorNull)
-	}
+	cf_data := CFDataCreateWithBytesNoCopy(nil, raw_data(data), len(data), kCFAllocatorNull)
 	desc := CTFontManagerCreateFontDescriptorFromData(cf_data)
 	ct := CTFontCreateWithFontDescriptor(desc, BASE_SIZE, nil)
 	cf_release(desc)

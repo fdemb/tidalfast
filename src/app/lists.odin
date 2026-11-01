@@ -849,7 +849,7 @@ disk_main :: proc "c" (arg: rawptr) -> rawptr {
 		free_all(context.temp_allocator)
 		if reply {
 			if !jobs.push_wait(&d.results, res) {
-				// Stopping for a reload: read it again after.
+				// Stopping: put the job back.
 				result_free(&res)
 				jobs.requeue(&d.lists.queue, job, ticket)
 				continue

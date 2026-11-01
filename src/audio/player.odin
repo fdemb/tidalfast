@@ -37,9 +37,6 @@ package audio
 // device as they were decoded. A rate change between tracks lets the ring play
 // out, re-clocks the device and starts again: a short gap. Tracks at the
 // same rate stay gapless.
-//
-// All of it runs code from the app dylib, so the app destroys the player
-// before a hot reload and makes a new one after. See src/app/player.odin.
 
 import "base:intrinsics"
 import "base:runtime"

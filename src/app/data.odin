@@ -171,7 +171,7 @@ Data :: struct {
 	refresh_errors: int, // token refreshes in a row that failed without ending the login (atomic)
 	keychain_mutex: sync.Mutex, // orders a sign-out's delete against the workers' saves
 	keychain_saved: u64, // the auth epoch of the login last saved, under keychain_mutex
-	session:        ^tidal.Session, // made by this dylib, so closed on unload
+	session:        ^tidal.Session,
 	wake:           proc "c" (), // the shell's request_redraw
 	queue:          jobs.Queue(Job, JOB_QUEUE),
 	results:        jobs.Queue(Result, RESULT_QUEUE),
@@ -179,15 +179,9 @@ Data :: struct {
 	worker_temps:   [WORKERS]Worker_Temp,
 	worker_count:   int, // workers started, which picks each one's worker_temps (atomic)
 	running:        bool,
-	// From unload to reload: the login state (heap), the backoff and the
-	// auth epoch, which keychain_saved and queued Forgets are compared with.
-	saved_auth:     []u8,
-	saved_backoff:  time.Tick,
-	saved_reason:   Small,
-	saved_epoch:    u64,
 	login:          Login,
-	// The hi-res login's PKCE verifier and client key. A new session on
-	// reload takes them, so a login page opened before it still works.
+	// The hi-res login's PKCE verifier and client key, kept until the login
+	// finishes or fails, so every try of one login page uses the same ones.
 	pkce_verifier:  Small,
 	pkce_key:       Small,
 	// The pasted redirect address, for the Login_Pkce job. The UI writes
@@ -278,40 +272,6 @@ data_start :: proc(s: ^State, shell: ^platform.Shell) {
 	workers_start(d)
 }
 
-data_unload :: proc(s: ^State) {
-	d := &s.data
-	workers_stop(d)
-	if d.session != nil {
-		d.saved_auth = auth_marshal(tidal.session_auth(d.session, context.temp_allocator), runtime.heap_allocator())
-		until, reason := tidal.backoff_state(d.session, context.temp_allocator)
-		d.saved_backoff = until
-		d.saved_reason = small(reason)
-		d.saved_epoch = tidal.session_epoch(d.session)
-		tidal.session_destroy(d.session)
-		d.session = nil
-	}
-}
-
-data_reload :: proc(s: ^State, shell: ^platform.Shell) {
-	d := &s.data
-	d.wake = shell.request_redraw
-	if d.fake {
-		return
-	}
-	session_open(d)
-	tidal.session_set_epoch(d.session, d.saved_epoch)
-	if d.saved_auth != nil {
-		// partial: a login approved before the unload may not have loaded
-		// its session yet. Its Login_Wait finishes it with these tokens.
-		auth_restore(d.session, d.saved_auth, partial = true)
-		delete(d.saved_auth, runtime.heap_allocator())
-		d.saved_auth = nil
-	}
-	tidal.backoff_restore(d.session, d.saved_backoff, small_str(&d.saved_reason))
-	d.saved_backoff = {}
-	workers_start(d)
-}
-
 // data_shutdown stops the workers and frees everything Data owns but the
 // cover textures, which render.destroy releases with the rest.
 data_shutdown :: proc(s: ^State) {
@@ -328,7 +288,6 @@ data_shutdown :: proc(s: ^State) {
 		tidal.session_destroy(d.session)
 		d.session = nil
 	}
-	delete(d.saved_auth, runtime.heap_allocator())
 	delete(d.settings_store.path, runtime.heap_allocator())
 	d.settings_store.path = ""
 	delete(d.launch_log_path, runtime.heap_allocator())
@@ -479,9 +438,6 @@ session_open :: proc(d: ^Data) {
 		s.config.api_pkce_auth = strings.concatenate({base, "authorize"}, a)
 		s.config.pkce_uri_redirect = strings.concatenate({base, "android/login/auth"}, a)
 	}
-	if d.pkce_verifier.len > 0 {
-		tidal.session_set_pkce_state(s, small_str(&d.pkce_verifier), small_str(&d.pkce_key))
-	}
 	tidal.session_set_login_attempt(s, u64(d.login_attempt))
 	s.on_auth_change = auth_changed
 	s.on_auth_change_data = d
@@ -582,10 +538,8 @@ auth_marshal :: proc(a: tidal.Auth, allocator: runtime.Allocator) -> []u8 {
 }
 
 // auth_restore puts stored login state into the session. False if it holds
-// no usable login. With partial, tokens without a user are restored too
-// (and true returned): a device login that got its tokens but hasn't loaded
-// the session yet.
-auth_restore :: proc(s: ^tidal.Session, data: []u8, partial := false) -> bool {
+// no usable login.
+auth_restore :: proc(s: ^tidal.Session, data: []u8) -> bool {
 	st: Stored_Auth
 	if json.unmarshal(data, &st, allocator = context.temp_allocator) != nil {
 		return false
@@ -593,7 +547,7 @@ auth_restore :: proc(s: ^tidal.Session, data: []u8, partial := false) -> bool {
 	if st.access_token == "" && st.refresh_token == "" {
 		return false
 	}
-	if st.user_id == 0 && (!partial || st.access_token == "") {
+	if st.user_id == 0 {
 		return false
 	}
 	// Items from before the client id was stored go by is_pkce alone. A

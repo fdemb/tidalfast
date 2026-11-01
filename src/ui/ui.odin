@@ -14,7 +14,7 @@
 //
 // All of State is plain data: no procedure pointers, no allocators. The
 // per-frame pointers (renderer, text, the build tree) are set again by
-// begin_frame, so State survives a hot reload.
+// begin_frame.
 package ui
 
 import "core:hash"
@@ -540,13 +540,6 @@ release_stale :: proc(u: ^State, events: []platform.Event, hardware: platform.Mo
 		u.animating = true
 	}
 	cancel_buttons(u, gone)
-}
-
-// cancel_pointer lets go of every button without a release, for a hot
-// reload, which may have missed one.
-cancel_pointer :: proc(u: ^State) {
-	cancel_buttons(u, u.input.buttons)
-	u.buttons_stale = {}
 }
 
 @(private)
