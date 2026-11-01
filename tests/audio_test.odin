@@ -729,3 +729,72 @@ flac_header_size :: proc(t: ^testing.T) {
 	testing.expect_value(t, s.error.serial, u64(2))
 	testing.expect_value(t, audio.error_text(&s.error), "the FLAC header is too big")
 }
+
+@(private = "file")
+stall_wakes: int
+
+@(private = "file")
+count_wake :: proc "c" () {
+	sync.atomic_add(&stall_wakes, 1)
+}
+
+@(private = "file")
+Stall_Server :: struct {
+	sock:   net.TCP_Socket,
+	file:   []u8,
+	sent:   int, // bytes of file sent before the stall
+	done:   bool, // atomic
+	thread: ^thread.Thread,
+}
+
+// stall_serve answers the first request with the whole file's length and
+// only its first sent bytes, then holds the connection until done.
+@(private = "file")
+stall_serve :: proc(srv: ^Stall_Server) {
+	client, _, err := net.accept_tcp(srv.sock)
+	if err != nil {
+		return
+	}
+	defer net.close(client)
+	buf: [4096]u8
+	net.recv_tcp(client, buf[:])
+	head := fmt.tprintf("HTTP/1.1 200 OK\r\nContent-Type: audio/flac\r\nContent-Length: %d\r\n\r\n", len(srv.file))
+	net.send_tcp(client, transmute([]u8)head)
+	net.send_tcp(client, srv.file[:srv.sent])
+	for !sync.atomic_load(&srv.done) {
+		time.sleep(10 * time.Millisecond)
+	}
+}
+
+// While the decoder waits for bytes that are slow to come, what's in the
+// ring still plays, and the UI still hears about it every TICK.
+@(test)
+stalled_read_keeps_ticking :: proc(t: ^testing.T) {
+	file, audio_start := test_flac(200, 0) // about 5 s
+	sock, err := net.listen_tcp({address = net.IP4_Loopback, port = 0})
+	testing.expect(t, err == nil)
+	defer net.close(sock)
+	ep, _ := net.bound_endpoint(sock)
+	// About 1.5 s of audio comes, then nothing.
+	srv := Stall_Server{sock = sock, file = file, sent = audio_start + (len(file) - audio_start) * 3 / 10}
+	srv.thread = thread.create_and_start_with_poly_data(&srv, stall_serve)
+	defer {
+		sync.atomic_store(&srv.done, true)
+		thread.join(srv.thread)
+		thread.destroy(srv.thread)
+	}
+
+	p := audio.create(count_wake, 0, null_output = true)
+	defer audio.destroy(p)
+	audio.play(p, {kind = .Flac, serial = 1, url = fmt.tprintf("http://127.0.0.1:%d/a.flac", ep.port), gain = 1, seconds = 5})
+	start := time.tick_now()
+	for audio.status(p).sample < 44100 / 4 && time.tick_since(start) < 3 * time.Second {
+		time.sleep(5 * time.Millisecond)
+	}
+	sync.atomic_store(&stall_wakes, 0)
+	time.sleep(time.Second)
+	st := audio.status(p)
+	testing.expect_value(t, st.state, audio.Play_State.Playing)
+	testing.expectf(t, st.sample < 44100 * 3 / 2, "played past the bytes sent, to %d", st.sample)
+	testing.expectf(t, sync.atomic_load(&stall_wakes) >= 2, "%d UI wakes in a second of playing", sync.atomic_load(&stall_wakes))
+}

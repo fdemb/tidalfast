@@ -1657,16 +1657,23 @@ find_start :: proc(p: ^Player, sl: ^Slot, target: i64) -> (offset, sample: i64, 
 }
 
 // wait_for_bytes runs while a read waits for bytes: light commands go
-// through, a heavy one makes the read give up. Then it sleeps until a post
-// with no timeout: the fetch thread posts every change a read looks at, so
-// a paused track waiting on a stalled server costs no CPU.
+// through, a heavy one makes the read give up. While the device runs, the
+// ring still plays, so the status and the UI's ticks go on and the wait
+// lasts a TICK at most. Otherwise it sleeps until a post with no timeout:
+// the fetch thread posts every change a read looks at, so a paused track
+// waiting on a stalled server costs no CPU.
 @(private = "file")
 wait_for_bytes :: proc(data: rawptr) -> bool {
 	p := (^Player)(data)
 	if run_commands(p, .Light) == .Heavy_Waiting {
 		return true
 	}
-	wake_wait(&p.watch.wake)
+	if p.device_running {
+		after_step(p)
+		wake_wait_for(&p.watch.wake, TICK)
+	} else {
+		wake_wait(&p.watch.wake)
+	}
 	return false
 }
 
