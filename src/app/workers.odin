@@ -324,8 +324,13 @@ workers_start :: proc(d: ^Data) {
 	jobs.start(&d.queue)
 	jobs.start(&d.results)
 	tidal.session_abort(d.session, false)
-	for &t in d.threads {
-		posix.pthread_create(&t, nil, worker_main, d)
+	d.thread_count = 0
+	for _ in d.threads {
+		if posix.pthread_create(&d.threads[d.thread_count], nil, worker_main, d) != .NONE {
+			log.error("app: couldn't start a worker thread")
+			continue
+		}
+		d.thread_count += 1
 	}
 	disk_start(d)
 	d.running = true
@@ -340,9 +345,10 @@ workers_stop :: proc(d: ^Data) {
 	tidal.session_abort(d.session, true)
 	jobs.stop(&d.queue)
 	jobs.stop(&d.results)
-	for t in d.threads {
+	for t in d.threads[:d.thread_count] {
 		posix.pthread_join(t)
 	}
+	d.thread_count = 0
 	disk_stop(d)
 	d.running = false
 }
@@ -453,12 +459,11 @@ refresh_failed :: proc(d: ^Data) {
 @(private = "file")
 TEMP_KEEP :: 64 << 10
 
-// temp_tail is the whole pages of a block at base, capacity bytes long,
-// past its first keep bytes. Empty if there are none.
-temp_tail :: proc(base: uintptr, capacity, keep: uint) -> (start: rawptr, size: uint) {
-	PAGE :: 16 << 10 // arm64's page; a multiple of 4 KB pages too
-	from := mem.align_forward_uintptr(base + uintptr(keep), PAGE)
-	to := (base + uintptr(capacity)) &~ (PAGE - 1)
+// temp_tail is the whole pages, page bytes each, of a block at base,
+// capacity bytes long, past its first keep bytes. Empty if there are none.
+temp_tail :: proc(base: uintptr, capacity, keep, page: uint) -> (start: rawptr, size: uint) {
+	from := mem.align_forward_uintptr(base + uintptr(keep), uintptr(page))
+	to := (base + uintptr(capacity)) &~ (uintptr(page) - 1)
 	if to <= from {
 		return nil, 0
 	}
@@ -471,7 +476,7 @@ temp_range :: proc() -> (start: rawptr, size: uint) {
 	if b == nil {
 		return nil, 0
 	}
-	return temp_tail(uintptr(b.base), b.capacity, TEMP_KEEP)
+	return temp_tail(uintptr(b.base), b.capacity, TEMP_KEEP, uint(posix.sysconf(._PAGESIZE)))
 }
 
 // Worker_Temp is where a worker's temp block is, for the memory breakdown
@@ -1000,6 +1005,17 @@ join_artists :: proc(artists: []tidal.Artist, artist: ^tidal.Artist, alloc: mem.
 	return strings.to_string(b), refs
 }
 
+// local_date is t's date in the user's time zone, month 1 for January.
+local_date :: proc(t: time.Time) -> (year, month, day: int) {
+	secs := posix.time_t(time.to_unix_seconds(t))
+	tm: posix.tm
+	if posix.localtime_r(&secs, &tm) == nil {
+		y, m, d := time.date(t)
+		return y, int(m), d
+	}
+	return int(tm.tm_year) + 1900, int(tm.tm_mon) + 1, int(tm.tm_mday)
+}
+
 // row_from_track turns a track into the strings the table shows.
 row_from_track :: proc(t: tidal.Track, alloc: mem.Allocator) -> (row: Row) {
 	row.title = t.full_name if t.full_name != "" else t.title
@@ -1009,8 +1025,8 @@ row_from_track :: proc(t: tidal.Track, alloc: mem.Allocator) -> (row: Row) {
 		row.cover = t.album.cover
 	}
 	if added, ok := t.date_added.?; ok {
-		y, m, day := time.date(added)
-		row.added = fmt.aprintf("%s %d, %d", MONTHS[int(m) - 1], day, y, allocator = alloc)
+		y, m, day := local_date(added)
+		row.added = fmt.aprintf("%s %d, %d", MONTHS[m - 1], day, y, allocator = alloc)
 	}
 	row.seconds = t.duration
 	row.id = t.id

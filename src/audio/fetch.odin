@@ -56,6 +56,7 @@ Stream :: struct {
 	stop:        bool,
 	wake:        ^Wake, // the decode thread's, posted when bytes arrive
 	thread:      posix.pthread_t,
+	running:     bool, // thread started
 	// Header and seek data, filled by the decode thread once it has read them.
 	header:      Flac_Header,
 	head:        []u8, // from flac_decoder_head, read before the frames; borrowed, like url
@@ -72,7 +73,11 @@ stream_init :: proc(st: ^Stream, wake: ^Wake, window := STREAM_WINDOW) {
 	st.wake = wake
 	st.length = -1
 	st.logger = context.logger
-	posix.pthread_create(&st.thread, nil, fetch_main, st)
+	if posix.pthread_create(&st.thread, nil, fetch_main, st) == .NONE {
+		st.running = true
+	} else {
+		log.error("audio: couldn't start a fetch thread, so its tracks don't download")
+	}
 }
 
 stream_destroy :: proc(st: ^Stream) {
@@ -81,7 +86,9 @@ stream_destroy :: proc(st: ^Stream) {
 	st.gen += 1
 	sync.cond_broadcast(&st.cond)
 	sync.unlock(&st.mutex)
-	posix.pthread_join(st.thread)
+	if st.running {
+		posix.pthread_join(st.thread)
+	}
 	stream_clear(st)
 	vmem.release(raw_data(st.buf), uint(len(st.buf)))
 }

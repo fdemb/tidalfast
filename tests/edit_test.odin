@@ -543,9 +543,12 @@ test_text_field_keeps_arrows_in_a_row :: proc(t: ^testing.T) {
 	frame :: proc(u: ^ui.State, f: ^ui.Text_Field, now: ^f64, events: ..platform.Event) -> ui.Field_Signal {
 		now^ += 0.016
 		ui.begin_frame(u, events, nil, nil, 300, 200, now^)
-		ui.row("bar", {}, ui.fill(), ui.px(30))
-		sig := ui.text_field("search", f, "Search", ui.px(200), 30)
-		ui.box_make("go", {.Clickable, .Focusable}, ui.px(40), ui.px(30))
+		sig: ui.Field_Signal
+		{
+			ui.row("bar", {}, ui.fill(), ui.px(30))
+			sig = ui.text_field("search", f, "Search", ui.px(200), 30)
+			ui.box_make("go", {.Clickable, .Focusable}, ui.px(40), ui.px(30))
+		}
 		ui.end_frame()
 		return sig
 	}

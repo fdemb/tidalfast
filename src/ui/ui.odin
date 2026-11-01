@@ -237,9 +237,9 @@ State :: struct {
 	temp_boxes:     []Box, // the rest of this frame's last chunk of TEMP_BOXES
 	hits:           []Hit,
 	hit_count:      int,
-	drag_rects:     [8]render.Rect, // the Window_Drag boxes, from end_frame
+	drag_rects:     [16]render.Rect, // the Window_Drag boxes, from end_frame; MAX_DRAG_REGIONS in shell.m
 	drag_count:     int,
-	drag_from:      [8]int, // the hit list's length when each drag rect was found
+	drag_from:      [16]int, // the hit list's length when each drag rect was found
 
 	frame:          u64,
 	time:           f64,
@@ -251,8 +251,12 @@ State :: struct {
 	root:           ^Box,
 	floating_root:  ^Box,
 	parents:        Stack(^Box),
+	parent_misused: bool, // a pop_parent with none pushed
+	parent_leaks:   int, // frames that ended with the parent stack unbalanced
 	styles:         Styles,
 	style_leaks:    int,
+	drag_dropped:   bool, // this frame had more drag region pieces than drag_rects holds
+	drag_drops:     int, // frames that did
 
 	input:          Input,
 	hot:            Key,
@@ -467,6 +471,7 @@ begin_frame :: proc(u: ^State, events: []platform.Event, r: ^render.Renderer, t:
 	u.shortcut_count = 0
 
 	u.parents.count = 0
+	u.parent_misused = false
 	if !styles_clear(&u.styles) {
 		u.style_leaks += 1
 		if u.style_leaks == 1 {
@@ -1014,6 +1019,13 @@ scroll_hit_at :: proc(u: ^State, pos: [2]f32, axis: Axis) -> Key {
 // still animating, which the app passes to the shell.
 end_frame :: proc() -> bool {
 	u := ctx
+	// begin_frame pushed the root, and only it should be left.
+	if u.parents.count != 1 || u.parent_misused {
+		u.parent_leaks += 1
+		if u.parent_leaks == 1 {
+			log.error("ui: a frame left a parent pushed, or popped one it didn't push")
+		}
+	}
 	layout(u.root, u.texts)
 	layout(u.floating_root, u.texts)
 	fit_floating(u)
@@ -1132,10 +1144,14 @@ finish :: proc(u: ^State, b: ^Box, clip: render.Rect, focus_parent, click_parent
 		}
 		u.hit_count += 1
 	}
-	if .Window_Drag in b.flags && u.drag_count < len(u.drag_rects) {
-		u.drag_rects[u.drag_count] = b.clip
-		u.drag_from[u.drag_count] = u.hit_count
-		u.drag_count += 1
+	if .Window_Drag in b.flags {
+		if u.drag_count < len(u.drag_rects) {
+			u.drag_rects[u.drag_count] = b.clip
+			u.drag_from[u.drag_count] = u.hit_count
+			u.drag_count += 1
+		} else {
+			u.drag_dropped = true
+		}
 	}
 	inner := rect_intersect(clip, b.rect) if .Clip in b.flags else clip
 	fp := b.key if .Focusable in b.flags && b.key != 0 else focus_parent
@@ -1370,7 +1386,10 @@ signal :: proc(b: ^Box) -> (s: Signal) {
 
 push_parent :: proc(b: ^Box) {push(&ctx.parents, b)}
 
-pop_parent :: proc() {pop(&ctx.parents)}
+pop_parent :: proc() {
+	ctx.parent_misused ||= ctx.parents.count == 0
+	pop(&ctx.parents)
+}
 
 top_parent :: proc() -> ^Box {
 	u := ctx
@@ -1597,7 +1616,7 @@ text_input :: proc(u: ^State) -> (input: platform.Text_Input, changed: bool) {
 // doesn't count. A Click_Shield, clickable only to stop presses reaching
 // what's under it, leaves its part of the rect moving the window. Past
 // len(drag_rects) pieces the rest is dropped, which only makes less of the
-// rect a drag region.
+// rect a drag region, and the first frame that drops any logs it.
 @(private)
 cut_drag_regions :: proc(u: ^State) {
 	out: [len(u.drag_rects)]render.Rect
@@ -1629,14 +1648,22 @@ cut_drag_regions :: proc(u: ^State) {
 				open[j] = open[n - 1]
 				n -= 1
 				for p in rest {
-					if p.w > 0 && p.h > 0 && n < len(open) {
-						open[n] = p
-						n += 1
+					if p.w > 0 && p.h > 0 {
+						if n < len(open) {
+							open[n] = p
+							n += 1
+						} else {
+							u.drag_dropped = true
+						}
 					}
 				}
-				if .Click_Shield in h.flags && n_out < len(out) {
-					out[n_out] = o
-					n_out += 1
+				if .Click_Shield in h.flags {
+					if n_out < len(out) {
+						out[n_out] = o
+						n_out += 1
+					} else {
+						u.drag_dropped = true
+					}
 				}
 			}
 		}
@@ -1644,11 +1671,20 @@ cut_drag_regions :: proc(u: ^State) {
 			if n_out < len(out) {
 				out[n_out] = p
 				n_out += 1
+			} else {
+				u.drag_dropped = true
 			}
 		}
 	}
 	u.drag_rects = out
 	u.drag_count = n_out
+	if u.drag_dropped {
+		u.drag_drops += 1
+		if u.drag_drops == 1 {
+			log.warnf("ui: more than %d drag region pieces, the rest don't move the window", len(u.drag_rects))
+		}
+	}
+	u.drag_dropped = false
 }
 
 // drag_regions is where a press moves the window, for the shell, valid

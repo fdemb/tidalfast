@@ -111,7 +111,6 @@ Status :: struct {
 	total:       i64, // its length in samples, 0 if unknown
 	seek_id:     u32, // the last seek the audio reflects
 	state:       Play_State,
-	buffering:   bool, // waiting for data with nothing to play
 	want_next:   bool, // the current track is nearly loaded: send set_next
 	next_serial: u64, // the source set_next gave, 0 for none
 	error:       Error_Info,
@@ -263,6 +262,7 @@ Player :: struct {
 	wake_ui:         proc "c" (),
 	logger:          runtime.Logger, // the creator's, for the decode thread
 	thread:          posix.pthread_t,
+	running:         bool, // thread started
 	cmd_mutex:       sync.Mutex,
 	cmd:             Commands,
 	cmd_pending:     bool,
@@ -312,7 +312,6 @@ Player :: struct {
 	pcm_data:        []f32, // room for MAX_CHANNELS
 	marks:           Mark_Queue,
 	capture:         Pcm_Ring,
-	capturing:       bool,
 
 	// Written by the callback (or the decode thread while the device is
 	// stopped), read by anyone. pub_seq is odd while pub_mark, the current
@@ -378,7 +377,11 @@ create :: proc(wake_ui: proc "c" (), volume: f32, capture_path := "", window := 
 		sl.dash.box = make([]u8, MP4_MAX_BOX, a)
 		stream_init(&sl.stream, &p.watch.wake, max(window, 64 << 10))
 	}
-	posix.pthread_create(&p.thread, nil, decode_main, p)
+	if posix.pthread_create(&p.thread, nil, decode_main, p) == .NONE {
+		p.running = true
+	} else {
+		log.error("audio: couldn't start the decode thread, so nothing plays")
+	}
 	return p
 }
 
@@ -393,7 +396,9 @@ destroy :: proc(p: ^Player) {
 	sync.unlock(&p.cmd_mutex)
 	sync.atomic_store(&p.cmd_pending, true)
 	wake_post(&p.watch.wake)
-	posix.pthread_join(p.thread)
+	if p.running {
+		posix.pthread_join(p.thread)
+	}
 	if !p.null_output {
 		unwatch_default_output(p.watch)
 	}
@@ -1190,7 +1195,6 @@ after_step :: proc(p: ^Player) {
 	sync.lock(&p.status_mutex)
 	changed := want != p.st.want_next
 	p.st.want_next = want
-	p.st.buffering = p.device_running && ring_buffered(&p.pcm) == 0 && !m.end
 	if cur.rate > 0 && cur.source.serial == m.serial {
 		p.st.rate = cur.rate
 		p.st.total = cur.total

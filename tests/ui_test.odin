@@ -737,7 +737,9 @@ test_ui_settle_frames_are_limited :: proc(t: ^testing.T) {
 	for i in 0 ..< 20 {
 		now += 1.0 / 120
 		ui.begin_frame(&u, {}, nil, nil, 300, 200, now)
-		ui.scroll_view("view", ui.px(100 + f32(i)), ui.px(100))
+		{
+			ui.scroll_view("view", ui.px(100 + f32(i)), ui.px(100))
+		}
 		if ui.end_frame() {
 			asked += 1
 		}
@@ -854,22 +856,24 @@ test_ui_scrollbar_header_gutter :: proc(t: ^testing.T) {
 	for _ in 0 ..< 10 {
 		now += 1.0 / 120
 		ui.begin_frame(&u, {}, nil, nil, 300, 200, now)
-		ui.column("main", {}, ui.fill(), ui.fill())
 		{
-			ui.row("", {}, ui.fill(), ui.px(20))
-			ui.spacer(ui.fill())
-			head = ui.box_make("", {}, ui.px(40), ui.fill())
-			ui.spacer(ui.px(ui.scroll_gutter("view")))
-		}
-		{
-			view := ui.scroll_view("view", ui.fill(), ui.fill())
-			rows := ui.virtual_rows(view, 100, 10)
-			for i in rows.first ..< rows.last {
-				ui.row(fmt.tprintf("##row%d", i), {}, ui.fill(), ui.px(10))
+			ui.column("main", {}, ui.fill(), ui.fill())
+			{
+				ui.row("", {}, ui.fill(), ui.px(20))
 				ui.spacer(ui.fill())
-				c := ui.box_make("", {}, ui.px(40), ui.fill())
-				if i == rows.first {
-					cell = c
+				head = ui.box_make("", {}, ui.px(40), ui.fill())
+				ui.spacer(ui.px(ui.scroll_gutter("view")))
+			}
+			{
+				view := ui.scroll_view("view", ui.fill(), ui.fill())
+				rows := ui.virtual_rows(view, 100, 10)
+				for i in rows.first ..< rows.last {
+					ui.row(fmt.tprintf("##row%d", i), {}, ui.fill(), ui.px(10))
+					ui.spacer(ui.fill())
+					c := ui.box_make("", {}, ui.px(40), ui.fill())
+					if i == rows.first {
+						cell = c
+					}
 				}
 			}
 		}
@@ -895,19 +899,21 @@ test_ui_pad :: proc(t: ^testing.T) {
 	frame :: proc(u: ^ui.State, now: ^f64, scroll: f32) -> (view, first, last: ^ui.Box, first_i, built: int) {
 		now^ += 1.0 / 120
 		ui.begin_frame(u, {}, nil, nil, 300, 200, now^)
-		ui.column("main", {}, ui.fill(), ui.fill())
 		{
-			view = ui.scroll_view("view", ui.fill(), ui.fill())
-			view.pad = {16, 25}
-			view.view_off.y = scroll
-			rows := ui.virtual_rows(view, 100, 10)
-			for i in rows.first ..< rows.last {
-				r := ui.row(fmt.tprintf("##row%d", i), {}, ui.fill(), ui.px(10))
-				if i == rows.first {
-					first, first_i = r, i
+			ui.column("main", {}, ui.fill(), ui.fill())
+			{
+				view = ui.scroll_view("view", ui.fill(), ui.fill())
+				view.pad = {16, 25}
+				view.view_off.y = scroll
+				rows := ui.virtual_rows(view, 100, 10)
+				for i in rows.first ..< rows.last {
+					r := ui.row(fmt.tprintf("##row%d", i), {}, ui.fill(), ui.px(10))
+					if i == rows.first {
+						first, first_i = r, i
+					}
+					last = r
+					built = i
 				}
-				last = r
-				built = i
 			}
 		}
 		ui.end_frame()
@@ -1318,6 +1324,37 @@ test_ui_sized_view_builds_rows :: proc(t: ^testing.T) {
 	testing.expect(t, rows.last - rows.first >= 40, "the frame after a resize fills the taller view")
 }
 
+// A frame that leaves a parent pushed, or pops one it didn't push, is
+// counted, and the next frame starts with the stack empty.
+@(test)
+test_ui_unbalanced_parents_are_counted :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	frame :: proc(u: ^ui.State, push, pop: int) {
+		ui.begin_frame(u, nil, nil, nil, 300, 200, 0)
+		for _ in 0 ..< push {
+			ui.push_parent(ui.box_make("p", {}, ui.px(10), ui.px(10)))
+		}
+		for _ in 0 ..< pop {
+			ui.pop_parent()
+		}
+		ui.end_frame()
+	}
+	runner := context.logger
+	context.logger = log.nil_logger() // the first leak is logged as an error
+	defer context.logger = runner
+	frame(&u, 1, 1)
+	frame(&u, 0, 0)
+	testing.expect_value(t, u.parent_leaks, 0)
+	frame(&u, 1, 0)
+	frame(&u, 0, 0)
+	testing.expect_value(t, u.parent_leaks, 1)
+	frame(&u, 0, 1)
+	frame(&u, 0, 0)
+	testing.expect_value(t, u.parent_leaks, 2)
+}
+
 // No_Focus_Ring set through the style stack works as it does on the box.
 @(test)
 test_ui_no_focus_ring_from_the_style :: proc(t: ^testing.T) {
@@ -1477,9 +1514,11 @@ test_ui_drag_outlives_source :: proc(t: ^testing.T) {
 three_frame :: proc(u: ^ui.State, now: ^f64, events: ..platform.Event) -> (boxes: [3]^ui.Box) {
 	now^ += 1.0 / 120
 	ui.begin_frame(u, events, nil, nil, 300, 200, now^)
-	ui.row("", {}, ui.fill(), ui.px(40))
-	for &b, i in boxes {
-		b = ui.box_make(fmt.tprintf("##b%d", i), {.Clickable, .Focusable}, ui.px(50), ui.fill())
+	{
+		ui.row("", {}, ui.fill(), ui.px(40))
+		for &b, i in boxes {
+			b = ui.box_make(fmt.tprintf("##b%d", i), {.Clickable, .Focusable}, ui.px(50), ui.fill())
+		}
 	}
 	ui.end_frame()
 	return
@@ -1576,9 +1615,11 @@ test_ui_focus_scrolls_into_view :: proc(t: ^testing.T) {
 	list :: proc(u: ^ui.State, now: ^f64, events: ..platform.Event) -> (view: ^ui.Box, animating: bool) {
 		now^ += 1.0 / 120
 		ui.begin_frame(u, events, nil, nil, 300, 100, now^)
-		view = ui.scroll_view("list", ui.fill(), ui.fill())
-		for i in 0 ..< 10 {
-			ui.box_make(fmt.tprintf("##item%d", i), {.Clickable, .Focusable}, ui.fill(), ui.px(40))
+		{
+			view = ui.scroll_view("list", ui.fill(), ui.fill())
+			for i in 0 ..< 10 {
+				ui.box_make(fmt.tprintf("##item%d", i), {.Clickable, .Focusable}, ui.fill(), ui.px(40))
+			}
 		}
 		animating = ui.end_frame()
 		return

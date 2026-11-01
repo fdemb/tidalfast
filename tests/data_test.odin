@@ -338,13 +338,13 @@ abort_cancels_requests :: proc(t: ^testing.T) {
 temp_tail_is_whole_pages_past_keep :: proc(t: ^testing.T) {
 	PAGE :: 16 << 10
 	base := uintptr(0x1_0000_0000) + 48 // a block's base needn't be page aligned
-	start, size := app.temp_tail(base, 4 << 20, 64 << 10)
+	start, size := app.temp_tail(base, 4 << 20, 64 << 10, PAGE)
 	testing.expect_value(t, uintptr(start), uintptr(0x1_0000_0000) + 5 * PAGE)
 	testing.expect_value(t, size, uint(4 << 20) - 5 * PAGE)
 	testing.expect_value(t, uintptr(start) % PAGE, 0)
 	testing.expect_value(t, (uintptr(start) + uintptr(size)) % PAGE, 0)
 	testing.expect(t, uintptr(start) + uintptr(size) <= base + (4 << 20))
-	_, size = app.temp_tail(base, 64 << 10, 64 << 10)
+	_, size = app.temp_tail(base, 64 << 10, 64 << 10, PAGE)
 	testing.expect_value(t, size, 0)
 }
 

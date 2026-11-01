@@ -177,6 +177,7 @@ Data :: struct {
 	queue:          jobs.Queue(Job, JOB_QUEUE),
 	results:        jobs.Queue(Result, RESULT_QUEUE),
 	threads:        [WORKERS]posix.pthread_t,
+	thread_count:   int, // of threads, those started
 	worker_temps:   [WORKERS]Worker_Temp,
 	worker_count:   int, // workers started, which picks each one's worker_temps (atomic)
 	running:        bool,

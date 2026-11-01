@@ -7,6 +7,7 @@ import "core:os"
 import "core:slice"
 import "core:strings"
 import "core:sync"
+import "core:sys/posix"
 import "core:testing"
 import "core:thread"
 import "core:time"
@@ -2556,4 +2557,25 @@ sidebar_pages_follow_the_total :: proc(t: ^testing.T) {
 	m.answers[PATH] = {200, playlists_page(0, 50, 1_000_000)}
 	testing.expect_value(t, sidebar_count(t, s), 50 * app.PLAYLIST_PAGES_MAX)
 	testing.expect_value(t, mock_count(&m, "GET " + PATH), 2 + app.PLAYLIST_PAGES_MAX)
+}
+
+// The Added column shows the day where the user is: a track liked at
+// 23:30 UTC on 31 October was liked on 1 November in Warsaw.
+@(test)
+added_date_is_local :: proc(t: ^testing.T) {
+	sync.guard(&env_mutex)
+	saved, had := os.lookup_env("TZ", context.temp_allocator)
+	os.set_env("TZ", "Europe/Warsaw")
+	posix.tzset()
+	defer {
+		if had {
+			os.set_env("TZ", saved)
+		} else {
+			os.unset_env("TZ")
+		}
+		posix.tzset()
+	}
+	added, _ := time.datetime_to_time(2026, 10, 31, 23, 30, 0)
+	row := app.row_from_track({title = "a", date_added = added}, context.temp_allocator)
+	testing.expect_value(t, row.added, "Nov 1, 2026")
 }

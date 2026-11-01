@@ -803,7 +803,11 @@ disk_start :: proc(d: ^Data) {
 		return
 	}
 	jobs.start(&l.queue)
-	posix.pthread_create(&l.thread, nil, disk_main, d)
+	if posix.pthread_create(&l.thread, nil, disk_main, d) != .NONE {
+		log.error("lists: couldn't start the disk thread")
+		jobs.stop(&l.queue)
+		return
+	}
 	l.running = true
 }
 
