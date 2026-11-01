@@ -556,6 +556,78 @@ dash_player_bit_exact :: proc(t: ^testing.T) {
 	}
 }
 
+// Log_Record keeps the lines logged to it, from any thread.
+@(private = "file")
+Log_Record :: struct {
+	mutex: sync.Mutex,
+	lines: [dynamic]string,
+}
+
+@(private = "file")
+record_logger :: proc(r: ^Log_Record) -> runtime.Logger {
+	return {
+		procedure = proc(data: rawptr, level: runtime.Logger_Level, text: string, options: runtime.Logger_Options, location := #caller_location) {
+			r := (^Log_Record)(data)
+			sync.guard(&r.mutex)
+			append(&r.lines, strings.clone(text, runtime.heap_allocator()))
+		},
+		data = r,
+		lowest_level = .Debug,
+	}
+}
+
+// A DASH segment that fails mid-track, read by the decoder through dr_flac,
+// is logged with the player's logger.
+@(test)
+dash_failure_in_the_decoder_is_logged :: proc(t: ^testing.T) {
+	RATE :: 96000
+	dash, _ := test_dash(2.2, 0.75, RATE)
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	m.files["/d/0.mp4"] = dash.init
+	segs := make([]audio.Segment, len(dash.segments), context.temp_allocator)
+	for seg, i in dash.segments {
+		path := fmt.tprintf("/d/%d.mp4", i + 1)
+		if i == 0 {
+			m.files[path] = seg // the others answer 404
+		}
+		segs[i] = {fmt.tprintf("%s%s", m.base_url, path[1:]), dash.starts[i]}
+	}
+	src := audio.Source {
+		kind      = .Dash,
+		serial    = 1,
+		url       = fmt.tprintf("%sd/0.mp4", m.base_url),
+		segments  = segs,
+		timescale = RATE,
+		dash_end  = dash.total,
+		gain      = 1,
+		seconds   = 2.2,
+	}
+	record := Log_Record{lines = make([dynamic]string, runtime.heap_allocator())}
+	defer {
+		for l in record.lines {
+			delete(l, runtime.heap_allocator())
+		}
+		delete(record.lines)
+	}
+	runner := context.logger
+	context.logger = record_logger(&record)
+	p := audio.create(no_wake_hires, 0, null_output = true)
+	context.logger = runner
+	audio.play(p, src)
+	for start := time.tick_now(); audio.status(p).error.serial != 1 && time.tick_since(start) < 5 * time.Second; {
+		time.sleep(10 * time.Millisecond)
+	}
+	testing.expect_value(t, audio.status(p).error.serial, u64(1))
+	audio.destroy(p)
+	logged := false
+	for l in record.lines {
+		logged ||= strings.contains(l, "audio: track 1 failed: download failed")
+	}
+	testing.expectf(t, logged, "the failure wasn't logged: %v", record.lines)
+}
+
 // Turning bit-perfect output on mid-track reopens the device and plays on
 // from where the track was, not from the start.
 @(test)

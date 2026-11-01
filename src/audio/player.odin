@@ -1676,6 +1676,7 @@ wait_for_bytes :: proc(data: rawptr) -> bool {
 vread :: proc "c" (user: rawptr, out: rawptr, n: c.size_t) -> c.size_t {
 	context = runtime.default_context()
 	sl := (^Slot)(user)
+	context.logger = sl.player.logger
 	st := &sl.stream
 	dst := ([^]u8)(out)[:n]
 	done := 0
