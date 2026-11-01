@@ -12,9 +12,9 @@
 // "Play##row12" displays "Play" and hashes the whole string. "Play###row12"
 // hashes only "###row12", so the label can change without changing the key.
 //
-// All of State is plain data: no procedure pointers, no allocators. The
-// per-frame pointers (renderer, text, the build tree) are set again by
-// begin_frame.
+// State holds no allocators. Its only procedure pointers are the shell's
+// clipboard, which set_clipboard gives it every frame. The other per-frame
+// pointers (renderer, text, the build tree) are set again by begin_frame.
 package ui
 
 import "core:hash"

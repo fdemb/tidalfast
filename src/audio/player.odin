@@ -1893,9 +1893,6 @@ hal_open :: proc(p: ^Player, rate, channels, bits: int) -> (ok: bool, reason: st
 	return true, ""
 }
 
-// device_close stops and closes the device. With restore, a device that
-// bit-perfect output changed gets its rate and format back;
-// without it they stay for the next track.
 // mixer_info fills in what miniaudio plays to: the system's default output.
 // Linux has no device rate or format to read here and keeps the track's
 // rate.
@@ -1908,6 +1905,9 @@ mixer_info :: proc(dev: Device_ID, info: ^Device_Info) {
 	info.name_len = copy(info.name[:], device_name(dev))
 }
 
+// device_close stops and closes the device. With restore, a device that
+// bit-perfect output changed gets its rate and format back; without it they
+// stay for the next track.
 @(private = "file")
 device_close :: proc(p: ^Player, restore := false) {
 	if p.watching_hal {
