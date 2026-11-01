@@ -2473,3 +2473,57 @@ login_after_sign_out_keeps_its_item :: proc(t: ^testing.T) {
 	testing.expect_value(t, a.access_token, "new")
 }
 
+
+// playlists_page is a playlistsAndFavoritePlaylists page of n playlists
+// from first on, whose first item is broken if broken is set.
+@(private = "file")
+playlists_page :: proc(first, n, total: int, broken := false) -> string {
+	b := strings.builder_make(context.temp_allocator)
+	fmt.sbprintf(&b, `{{"limit":50,"offset":%d,"totalNumberOfItems":%d,"items":[`, first, total)
+	for i in 0 ..< n {
+		if i > 0 {
+			strings.write_string(&b, ",")
+		}
+		if broken && i == 0 {
+			strings.write_string(&b, `{"type":"PLAYLIST"}`)
+			continue
+		}
+		fmt.sbprintf(&b, `{{"type":"PLAYLIST","playlist":{{"uuid":"pl-%d","title":"Playlist %d","numberOfTracks":1}}}}`, first + i, first + i)
+	}
+	strings.write_string(&b, "]}")
+	return strings.to_string(b)
+}
+
+@(private = "file")
+sidebar_count :: proc(t: ^testing.T, s: ^app.State) -> int {
+	res := app.run_job(&s.data, {auth = s.data.auth_gen, payload = app.Playlists_Job{}})
+	defer app.result_free(&res)
+	testing.expect_value(t, res.err, nil)
+	sidebar, _ := res.payload.(app.Sidebar_Result)
+	return len(sidebar.playlists)
+}
+
+// The sidebar reads pages up to TIDAL's count: an item skipped as broken
+// doesn't end them, and a server that ignores the offset doesn't keep
+// them going.
+@(test)
+sidebar_pages_follow_the_total :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := mock_data_state(&m)
+	defer data_state_free(s)
+	sign_in(s)
+	data_jobs(&s.data)
+
+	PATH :: "/users/123/playlistsAndFavoritePlaylists"
+	m.answers[PATH + "?offset=0"] = {200, playlists_page(0, 50, 52, broken = true)}
+	m.answers[PATH + "?offset=50"] = {200, playlists_page(50, 2, 52)}
+	testing.expect_value(t, sidebar_count(t, s), 51)
+
+	delete_key(&m.answers, PATH + "?offset=0")
+	delete_key(&m.answers, PATH + "?offset=50")
+	m.answers[PATH] = {200, playlists_page(0, 50, 1_000_000)}
+	testing.expect_value(t, sidebar_count(t, s), 50 * app.PLAYLIST_PAGES_MAX)
+	testing.expect_value(t, mock_count(&m, "GET " + PATH), 2 + app.PLAYLIST_PAGES_MAX)
+}

@@ -35,6 +35,7 @@ RESULT_QUEUE :: 256
 PAGE_FIRST :: 50 // the first page of a track list, small so it shows fast
 PAGE_SIZE :: 100
 PLAYLIST_PAGE :: 50 // TIDAL's cap for playlistsAndFavoritePlaylists
+PLAYLIST_PAGES_MAX :: 100 // the sidebar asks for no more, in case TIDAL ignores the offset
 
 // Small is text with a fixed buffer, for jobs and results.
 Small :: struct {
@@ -814,9 +815,11 @@ run_playlists :: proc(s: ^tidal.Session, res: ^Result, alloc: mem.Allocator) {
 	if len(newest) > 0 {
 		sidebar.liked_newest = newest[0].id
 	}
+	// The pages go on to TIDAL's count of them. A page that came back
+	// short or empty, or the page cap, ends them early.
 	items := make([dynamic]Sidebar_Item, 0, 64, alloc)
-	for offset := 0;; offset += PLAYLIST_PAGE {
-		page, perr := tidal.user_playlist_and_favorite_playlists(s, offset, PLAYLIST_PAGE, alloc)
+	for offset := 0; offset < PLAYLIST_PAGE * PLAYLIST_PAGES_MAX; offset += PLAYLIST_PAGE {
+		page, listed, total, perr := tidal.user_playlist_and_favorite_playlists(s, offset, PLAYLIST_PAGE, alloc)
 		if perr != nil {
 			fail(res, perr)
 			return
@@ -828,7 +831,7 @@ run_playlists :: proc(s: ^tidal.Session, res: ^Result, alloc: mem.Allocator) {
 			}
 			append(&items, item)
 		}
-		if len(page) < PLAYLIST_PAGE {
+		if listed < PLAYLIST_PAGE || (total >= 0 && offset + listed >= total) {
 			break
 		}
 	}

@@ -78,6 +78,7 @@ Mock :: struct {
 	// playbackinfopostpaywall's answer for each audioquality; 404 for others.
 	playback:   map[string]Mock_Answer,
 	// Paths answered with these instead of their route, such as a failure.
+	// A key with ?offset=n answers only that page, before its path's.
 	// A request with a filter is looked up as "path?filter=value".
 	answers:    map[string]Mock_Answer,
 
@@ -309,6 +310,11 @@ mock_route :: proc(m: ^Mock, req: Mock_Request, target: string) -> (status: int,
 	answer_key := req.path
 	if filter, ok := req.query["filter"]; ok {
 		answer_key = fmt.tprintf("%s?filter=%s", req.path, filter)
+	}
+	if offset, ok := req.query["offset"]; ok {
+		if a, found := m.answers[fmt.tprintf("%s?offset=%s", req.path, offset)]; found {
+			return a.status, a.body, etag
+		}
 	}
 	if a, ok := m.answers[answer_key]; ok {
 		return a.status, a.body, etag

@@ -60,8 +60,10 @@ user_public_playlists :: proc(s: ^Session, offset := 0, limit := 50, allocator :
 }
 
 // user_playlist_and_favorite_playlists returns playlists the user created
-// and the ones they favorited. TIDAL caps limit at 50.
-user_playlist_and_favorite_playlists :: proc(s: ^Session, offset := 0, limit := 50, allocator := context.allocator) -> (playlists: []Playlist, err: Error) {
+// and the ones they favorited. TIDAL caps limit at 50. listed is how many
+// items the page held, those skipped as broken included, and total is
+// totalNumberOfItems, -1 if TIDAL didn't say.
+user_playlist_and_favorite_playlists :: proc(s: ^Session, offset := 0, limit := 50, allocator := context.allocator) -> (playlists: []Playlist, listed, total: int, err: Error) {
 	scratch_begin(allocator)
 	uid := logged_in_user_id(s) or_return
 	params := make_params()
@@ -78,7 +80,7 @@ user_playlist_and_favorite_playlists :: proc(s: ^Session, offset := 0, limit := 
 		append(&out, parse_playlist(&p, pl))
 		p.date_added = nil
 	}
-	return out[:], nil
+	return out[:], len(items), jint(obj, "totalNumberOfItems", -1), nil
 }
 
 // user_create_playlist creates a playlist in a folder ("root" by default).
