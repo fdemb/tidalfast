@@ -1,21 +1,17 @@
 package app
 
-// The library's data: login, the TIDAL session, the sidebar's playlists,
-// the open track list and the cover cache. Requests run on the workers in
-// workers.odin; this file is the UI thread's side.
+// The library's data: the TIDAL session, the sidebar's playlists, the jobs
+// held for room in the queue and the results coming back. Requests run on
+// the workers in workers.odin; this file is the UI thread's side. The
+// login is in login.odin and auth.odin, the track lists in track_view.odin.
 //
 // With TIDALFAST_FAKE=1 none of it runs and the library shows the fake
 // data from titles.odin, for working on the UI without an account.
 
 import "base:runtime"
-import "core:encoding/json"
-import "core:fmt"
 import "core:log"
-import "core:math"
-import "core:mem"
 import vmem "core:mem/virtual"
 import "core:os"
-import "core:slice"
 import "core:strings"
 import "core:sync"
 import "core:sys/posix"
@@ -29,80 +25,14 @@ import "../render"
 import "../tidal"
 import "../ui"
 
-KEYCHAIN_SERVICE :: "tidalfast"
-KEYCHAIN_MOCK_SERVICE :: "tidalfast-mock" // with TIDALFAST_API
-KEYCHAIN_ACCOUNT :: "auth"
 COVER_BUDGET :: 8 << 20 // cover page bytes: a few screens of covers, see cover.place
 UPLOAD_BUDGET :: 2 * time.Millisecond // cover uploads per frame
-PAGES_IN_FLIGHT :: 2
-LOGIN_RETRY_MAX :: 30 // seconds between polls while TIDAL can't be reached
-PKCE_REDIRECT_MAX :: 2048 // bytes of a pasted redirect address
 
 Account :: enum u8 {
 	Fake,
 	Restoring, // reading the Keychain
 	Signed_Out,
 	Signed_In,
-}
-
-// Login is the login screen: the card it shows, and how far the
-// device-code login got. That one keeps its step while the PKCE card
-// shows, so going back to it polls the same code, or waits for the job
-// still out before it asks for another.
-Login :: struct {
-	card:        Login_Card,
-	code:        Code_Step,
-	field:       ui.Text_Field, // the pasted redirect address
-	focus_field: bool, // the field takes the focus next frame
-	note:        Small, // shown on the card while the login goes on
-}
-
-// Login_Card is the card on the login screen. The PKCE login is the main
-// one, so it's the zero value.
-Login_Card :: union #no_nil {
-	Login_Paste,
-	Login_Exchanging,
-	Login_Code,
-}
-
-// Login_Paste is the PKCE login waiting for the redirect address.
-Login_Paste :: struct {
-	note: Small, // why the last paste didn't work
-}
-
-// Login_Exchanging is the PKCE login with its Login_Pkce job out.
-Login_Exchanging :: struct {}
-
-// Login_Code is the device-code login, see Login.code.
-Login_Code :: struct {}
-
-// Code_Step is how far the device-code login got. nil before it asks for a
-// code.
-Code_Step :: union {
-	Code_Asked,
-	Code_Polling,
-	Code_Failed,
-}
-
-// Code_Asked has a Login_Start job out.
-Code_Asked :: struct {
-	attempt: u32, // the login attempt it's for
-}
-
-// Code_Polling waits for the user to approve the code on screen. A login
-// that has its tokens polls with no code, to load the session with them.
-Code_Polling :: struct {
-	link:     Login_Link,
-	deadline: time.Tick, // when the code expires
-	poll_at:  time.Tick, // the next Login_Wait polls no sooner
-	once:     bool, // it checks once whether TIDAL can be reached again
-	retries:  int, // polls in a row that couldn't reach TIDAL
-	out:      bool, // a Login_Wait job is out
-}
-
-// Code_Failed is a stopped login; the card offers "Try again".
-Code_Failed :: struct {
-	error: Small,
 }
 
 Sidebar :: struct {
@@ -114,45 +44,6 @@ Sidebar :: struct {
 	loaded:       bool,
 	fresh:        bool, // from TIDAL, not from disk
 	fetched:      time.Tick, // when TIDAL's came
-}
-
-// Track_View is a track list: the open one, one kept in memory after it
-// closed (see lists.odin), or the open one being fetched again. Its rows,
-// their loaded flags and its gaps live in space, their strings in its arena.
-// gen tells its pages from those of other lists.
-Track_View :: struct {
-	gen:         u32,
-	source:      Source,
-	id:          Small,
-	name:        Small,
-	image:       Small,
-	hint:        int, // tracks TIDAL said the list has
-	arena:       vmem.Arena,
-	has_arena:   bool, // arena and space are there
-	space:       []u8, // reserved, see ROWS_MAX
-	rows:        []Row, // in space
-	loaded:      []bool, // in space
-	loaded_rows: int,
-	moved:       u32, // goes up when loaded rows move to other indices
-	count:       int, // rows shown, loaded or not
-	next_offset: int, // in TIDAL's offsets, which count the gaps
-	in_flight:   int,
-	done:        bool,
-	error:       Small,
-	gaps:        []Gap, // in space, by offset
-	longest:     int, // seconds, of the longest track loaded
-	version:     List_Version, // what TIDAL said the list was at when it was fetched
-	fetched:     i64, // unix seconds the rows came from TIDAL; 0 until they all have
-	reading:     bool, // waiting for its file
-	found:       Found_Lists, // .Search: the albums, artists and playlists found, in arena
-}
-
-// Gap is where a page came back short before the end of its list: TIDAL
-// leaves out tracks that can't be played but still counts them. The rows
-// after it move up, so row i is at TIDAL's offset i plus the gaps before it.
-Gap :: struct {
-	offset:  int, // the page's
-	missing: int,
 }
 
 Data :: struct {
@@ -446,181 +337,6 @@ session_open :: proc(d: ^Data) {
 	d.session = s
 }
 
-// Keychain is where the login is kept between runs: the OS Keychain item
-// for a service, or, in tests, an item in memory.
-Keychain :: union {
-	Os_Keychain,
-	^Memory_Keychain,
-}
-
-// Os_Keychain is the item (service, KEYCHAIN_ACCOUNT). Against a mock
-// server, TIDALFAST_KEYCHAIN can name another service, so test runs of
-// differently signed builds don't share one and the Keychain doesn't ask
-// for access.
-Os_Keychain :: struct {
-	service: Small,
-}
-
-// Memory_Keychain holds the item on the heap, nil for none. Workers read
-// and write it, so it has a lock of its own.
-Memory_Keychain :: struct {
-	mutex: sync.Mutex,
-	item:  []u8,
-}
-
-keychain_get :: proc(k: ^Keychain, allocator := context.allocator) -> ([]u8, os_services.Status) {
-	switch &k in k {
-	case Os_Keychain:
-		return os_services.secret_get(small_str(&k.service), KEYCHAIN_ACCOUNT, allocator)
-	case ^Memory_Keychain:
-		sync.guard(&k.mutex)
-		if k.item == nil {
-			return nil, os_services.SECRET_NOT_FOUND
-		}
-		return slice.clone(k.item, allocator), os_services.SECRET_OK
-	}
-	return nil, os_services.SECRET_NOT_FOUND
-}
-
-keychain_set :: proc(k: ^Keychain, data: []u8) -> os_services.Status {
-	switch &k in k {
-	case Os_Keychain:
-		return os_services.secret_set(small_str(&k.service), KEYCHAIN_ACCOUNT, data)
-	case ^Memory_Keychain:
-		sync.guard(&k.mutex)
-		delete(k.item, runtime.heap_allocator())
-		k.item = slice.clone(data, runtime.heap_allocator())
-	}
-	return os_services.SECRET_OK
-}
-
-keychain_delete :: proc(k: ^Keychain) -> os_services.Status {
-	switch &k in k {
-	case Os_Keychain:
-		return os_services.secret_delete(small_str(&k.service), KEYCHAIN_ACCOUNT)
-	case ^Memory_Keychain:
-		sync.guard(&k.mutex)
-		delete(k.item, runtime.heap_allocator())
-		k.item = nil
-	}
-	return os_services.SECRET_OK
-}
-
-// Stored_Auth is what goes in the Keychain item, as JSON.
-Stored_Auth :: struct {
-	token_type:    string,
-	access_token:  string,
-	refresh_token: string,
-	expiry:        i64, // unix seconds, 0 for none
-	session_id:    string,
-	country_code:  string,
-	locale:        string,
-	user_id:       i64,
-	is_pkce:       bool,
-	client_id:     string, // the client the tokens belong to; refreshes must use it
-}
-
-auth_marshal :: proc(a: tidal.Auth, allocator: runtime.Allocator) -> []u8 {
-	st := Stored_Auth {
-		token_type    = a.token_type,
-		access_token  = a.access_token,
-		refresh_token = a.refresh_token,
-		session_id    = a.session_id,
-		country_code  = a.country_code,
-		locale        = a.locale,
-		user_id       = a.user_id,
-		is_pkce       = a.is_pkce,
-		client_id     = a.client_id,
-	}
-	if t, ok := a.expiry_time.?; ok {
-		st.expiry = time.to_unix_seconds(t)
-	}
-	data, _ := json.marshal(st, allocator = allocator)
-	return data
-}
-
-// auth_restore puts stored login state into the session. False if it holds
-// no usable login.
-auth_restore :: proc(s: ^tidal.Session, data: []u8) -> bool {
-	st: Stored_Auth
-	if json.unmarshal(data, &st, allocator = context.temp_allocator) != nil {
-		return false
-	}
-	if st.access_token == "" && st.refresh_token == "" {
-		return false
-	}
-	if st.user_id == 0 {
-		return false
-	}
-	// Items from before the client id was stored go by is_pkce alone. A
-	// client this build doesn't know can't refresh; the first request finds
-	// out and the login starts over.
-	if st.client_id != "" {
-		pkce := st.client_id == s.config.client_id_pkce
-		if !pkce && st.client_id != s.config.client_id && st.client_id != s.device_client_id {
-			log.warn("app: the saved login is for a client this build doesn't know")
-		}
-		st.is_pkce = pkce
-	}
-	a := tidal.Auth {
-		token_type    = st.token_type,
-		access_token  = st.access_token,
-		refresh_token = st.refresh_token,
-		session_id    = st.session_id,
-		country_code  = st.country_code,
-		locale        = st.locale,
-		is_pkce       = st.is_pkce,
-		user_id       = st.user_id,
-		user_kind     = .Logged_In_User,
-	}
-	if st.expiry != 0 {
-		a.expiry_time = time.unix(st.expiry, 0)
-	}
-	tidal.session_restore(s, a)
-	return true
-}
-
-// auth_load reads the Keychain item into the session. It runs on a worker:
-// macOS may ask the user whether this build may read the item, and that
-// blocks the caller until they answer.
-auth_load :: proc(d: ^Data, res: ^Result) -> bool {
-	data, status := keychain_get(&d.keychain, context.temp_allocator)
-	if status == os_services.SECRET_NOT_FOUND {
-		return false
-	}
-	if status != os_services.SECRET_OK {
-		res.message = small(fmt.tprintf("Couldn't read the Keychain (error %d)", status))
-		return false
-	}
-	return auth_restore(d.session, data)
-}
-
-// auth_changed is the session's on_auth_change: after a login or a token
-// refresh, on whichever worker did it, the new tokens go to the Keychain.
-// TIDAL may rotate the refresh token on refresh, and the old one stops
-// working, so this happens every time. Tokens from a login that sign_out
-// has cleared since are never saved: with keychain_mutex held, the epoch
-// they were read in must still be the session's.
-auth_changed :: proc(s: ^tidal.Session, data: rawptr) {
-	d := (^Data)(data)
-	sync.atomic_store(&d.refresh_errors, 0)
-	sync.atomic_store(&d.refresh_gate, 0)
-	a := tidal.session_auth(s, context.temp_allocator)
-	if a.user_id == 0 || (a.access_token == "" && a.refresh_token == "") {
-		return
-	}
-	sync.guard(&d.keychain_mutex)
-	if a.epoch != tidal.session_epoch(s) {
-		return
-	}
-	bytes := auth_marshal(a, context.temp_allocator)
-	if status := keychain_set(&d.keychain, bytes); status != os_services.SECRET_OK {
-		log.errorf("app: couldn't save the login to the Keychain (error %d)", status)
-	} else {
-		d.keychain_saved = a.epoch
-	}
-}
-
 Held_Job :: struct {
 	job:      Job,
 	priority: u8,
@@ -700,23 +416,6 @@ held_remove_if :: proc(d: ^Data, pred: proc(job: ^Job, data: rawptr) -> bool, da
 	return removed
 }
 
-// page_of picks the pages of the list gen names, queued or held.
-@(private = "file")
-page_of :: proc(job: ^Job, gen: rawptr) -> bool {
-	p, page := job.payload.(Tracks_Job)
-	return page && p.view == (^u32)(gen)^
-}
-
-@(private = "file")
-page_held :: proc(d: ^Data, gen: u32) -> bool {
-	for h in d.held[:d.held_count] {
-		if p, page := h.job.payload.(Tracks_Job); page && p.view == gen {
-			return true
-		}
-	}
-	return false
-}
-
 @(private = "file")
 drop_account_job :: proc(job: ^Job, _: rawptr) -> bool {
 	if !for_account(job^) {
@@ -773,64 +472,6 @@ account_end :: proc(s: ^State) {
 	s.library.playlist = 0
 }
 
-// code_login_next asks for what the device login waits on, unless its job
-// is out: the poll for the code on screen, or a new code. If an approved
-// login still has its tokens, as after a failure loading the session, it
-// loads the session with them instead: the code is spent, and the user
-// approved.
-code_login_next :: proc(d: ^Data) {
-	l := &d.login
-	#partial switch c in l.code {
-	case Code_Asked:
-		return
-	case Code_Polling:
-		if c.out {
-			return
-		}
-		if c.link.device_code.len > 0 {
-			request_login_poll(d)
-			return
-		}
-	}
-	if login_has_tokens(d) {
-		if _, polling := l.code.(Code_Polling); !polling {
-			l.code = Code_Polling{}
-		}
-		l.note = small("Loading your account…")
-		request_login_poll(d)
-		return
-	}
-	push_job(d, {payload = Login_Start_Job{attempt = d.login_attempt}})
-	l.code = Code_Asked{d.login_attempt}
-}
-
-// login_has_tokens says whether the device login got its tokens but hasn't
-// loaded the session yet. The code is spent then, and its expiry no longer
-// matters: Login_Wait finishes with the tokens.
-login_has_tokens :: proc(d: ^Data) -> bool {
-	a := tidal.session_auth(d.session, context.temp_allocator)
-	return a.access_token != "" && a.user_id == 0
-}
-
-// request_login_poll queues the poll for the code on screen, or with no
-// code, the one that loads the session with the login's tokens.
-request_login_poll :: proc(d: ^Data) {
-	p := &d.login.code.(Code_Polling)
-	if p.out {
-		return
-	}
-	p.out = true
-	push_job(d, {payload = Login_Wait_Job{attempt = d.login_attempt, device_code = p.link.device_code, interval = p.link.interval, deadline = p.deadline, not_before = p.poll_at, once = p.once}})
-}
-
-// login_next_attempt starts a new login attempt. Tokens that arrive for an
-// older one are dropped before they reach the session, and its results
-// are ignored.
-login_next_attempt :: proc(d: ^Data) {
-	d.login_attempt += 1
-	tidal.session_set_login_attempt(d.session, u64(d.login_attempt))
-}
-
 request_playlists :: proc(d: ^Data) {
 	if d.sidebar.loading {
 		return
@@ -862,17 +503,6 @@ data_retry :: proc(d: ^Data) {
 	if pages {
 		view_request_pages(d)
 	}
-}
-
-// track_view is the list, open, fetched again or followed by the play
-// queue, that gen names, or nil.
-track_view :: proc(d: ^Data, gen: u32) -> ^Track_View {
-	for v in ([]^Track_View{&d.refresh, &d.queued, &d.view}) {
-		if v.gen == gen && v.source != .None {
-			return v
-		}
-	}
-	return nil
 }
 
 sidebar_free :: proc(d: ^Data) {
@@ -918,79 +548,18 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 	}
 	switch p in res.job.payload {
 	case Restore_Job:
-		if res.message.len > 0 {
-			d.message = res.message
-		}
-		if restored, _ := res.payload.(Restore_Result); restored.signed_in {
-			signed_in(d)
-		} else {
-			d.account = .Signed_Out
-			pkce_prepare(d)
-			if redirect := pkce_redirect_env(); redirect != "" {
-				pkce_submit(s, redirect)
-			}
-		}
+		restore_result(s, res)
 	case Login_Start_Job:
-		l := &d.login
-		if p.attempt != d.login_attempt {
-			// The user went on to another login. If that's the device login
-			// again, it waited for this answer to ask for a code of its own.
-			// A Login_Start from before the login started over is no one's.
-			if asked, ok := l.code.(Code_Asked); ok && asked.attempt == p.attempt {
-				l.code = nil
-				if _, shown := l.card.(Login_Code); shown {
-					code_login_next(d)
-				}
-			}
-			return
-		}
-		if failed {
-			l^ = {
-				card = Login_Code{},
-				code = Code_Failed{login_error(err, res.message)},
-			}
-			return
-		}
-		link, _ := res.payload.(Login_Link)
-		l^ = {
-			card = Login_Code{},
-			code = Code_Polling{link = link, deadline = time.tick_add(time.tick_now(), time.Duration(f64(link.expires) * f64(time.Second)))},
-			note = l.note,
-		}
-		request_login_poll(d)
+		login_start_result(d, res, p)
 	case Login_Wait_Job:
-		if p.attempt != d.login_attempt {
-			// The user went on to another login. If that's the device login
-			// again, its poll waited for this one to end.
-			l := &d.login
-			if poll, ok := &l.code.(Code_Polling); ok {
-				poll.out = false
-				if _, shown := l.card.(Login_Code); shown {
-					code_login_next(d)
-				}
-			}
-			return
-		}
-		login_wait_done(d, res, p, err, failed)
+		login_wait_result(d, res, p)
 	case Login_Pkce_Job:
-		if p.attempt != d.login_attempt {
-			return
-		}
-		pkce_done(d, res, failed)
+		pkce_result(d, res, p)
 	case Save_Settings_Job:
-		if failed {
-			d.message = res.message
-		}
+		save_settings_result(d, res)
 	case Launch_Log_Job:
 	case Playlists_Job:
-		d.sidebar.loading = false
-		if failed {
-			d.message = res.message
-			return
-		}
-		sidebar, _ := res.payload.(Sidebar_Result)
-		sidebar_adopt(s, res, sidebar, false)
-		sidebar_save(d)
+		playlists_result(s, res)
 	case Disk_Job:
 		disk_result(s, res, p)
 	case Add_Track_Job:
@@ -1005,33 +574,7 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 	case Home_Job:
 		home_result(d, res, failed)
 	case Tracks_Job:
-		r := &d.refresh
-		v := track_view(d, p.view)
-		if v == nil {
-			return
-		}
-		v.in_flight -= 1
-		if failed {
-			if v == r {
-				refresh_drop(d) // the rows on screen stay
-				return
-			}
-			v.error = res.message
-			v.done = true
-			v.in_flight -= held_remove_if(d, page_of, &v.gen)
-			return
-		}
-		page, _ := res.payload.(Tracks_Result)
-		view_add_rows(v, int(p.offset), int(p.limit), page.rows, page.total)
-		if v.done {
-			v.in_flight -= held_remove_if(d, page_of, &v.gen)
-		}
-		view_pages(d, v)
-		if v != r {
-			list_loaded(d, v)
-		} else if view_complete(r) {
-			refresh_land(s)
-		}
+		tracks_result(s, res, p)
 	case Stream_Job:
 		stream_result(s, res, p)
 	case Artwork_Job:
@@ -1039,111 +582,21 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 	case Search_Job:
 		search_result(s, res, p)
 	case Cover_Job:
-		key := p.key
-		img, _ := res.payload.(Image_Result)
-		if failed || img.pixels == nil {
-			cover.set_failed(&d.covers, key, now)
-			return
-		}
-		// The worker scaled it to the entry's size. Nil from place: the
-		// entry is gone or every page is in use; failed covers are retried.
-		e := cover.lookup(&d.covers, key)
-		page: ^cover.Page
-		if e != nil && img.w == int(e.px) && img.h == int(e.px) {
-			e, page = cover.place(&d.covers, key, s.frame_count, now)
-		}
-		if page == nil {
-			cover.set_failed(&d.covers, key, now)
-			return
-		}
-		r := &s.renderer
-		if page.texture == 0 {
-			_, side := cover.page_layout(int(page.px))
-			page.texture = render.texture_create(r, side, side, .RGBA8)
-		}
-		src := cover.src(&d.covers, e)
-		render.texture_update(r, page.texture, img.pixels, int(src.x), int(src.y), img.w, img.h, converted = true)
-		d.bench.uploads += 1
-		d.bench.frame_uploads += 1
+		cover_result(s, res, p, now)
 	}
 }
 
-// login_wait_done handles the end of a Login_Wait. A code that expired is
-// replaced. While TIDAL can't be reached (a network failure, a 5xx or a
-// 408, see run_login_wait) and the code is still good, or the login has
-// its tokens, the app checks again after 2, 4, 8 up to LOGIN_RETRY_MAX
-// seconds, once per try, and goes back to polling as soon as TIDAL
-// answers.
-@(private = "file")
-login_wait_done :: proc(d: ^Data, res: ^Result, job: Login_Wait_Job, err: tidal.Error_Kind, failed: bool) {
-	l := &d.login
-	poll, polling := &l.code.(Code_Polling)
-	if !polling {
-		return // the login started over
-	}
-	poll.out = false
-	if wait, _ := res.payload.(Login_Wait_Result); wait.interval > 0 {
-		poll.link.interval = wait.interval
-	}
-	if !failed {
-		signed_in(d)
+// playlists_result takes the sidebar from a Playlists job.
+playlists_result :: proc(s: ^State, res: ^Result) {
+	d := &s.data
+	d.sidebar.loading = false
+	if res.err != nil {
+		d.message = res.message
 		return
 	}
-	expired := time.tick_diff(time.tick_now(), poll.deadline) <= 0 && !login_has_tokens(d)
-	#partial switch err {
-	case .Timeout:
-		if job.once && !expired {
-			// TIDAL answered the check, which counts as a poll.
-			l.note = {}
-			poll.retries = 0
-			poll.poll_at = time.tick_add(time.tick_now(), time.Duration(f64(poll.link.interval) * f64(time.Second)))
-			poll.once = false
-			request_login_poll(d)
-			return
-		}
-		d.login = {
-			card = Login_Code{},
-			note = small("The code expired. Here's a new one."),
-		}
-		code_login_next(d)
-	case .Network:
-		if expired {
-			d.login = {
-				card = Login_Code{},
-				note = small("The code expired. Here's a new one."),
-			}
-			code_login_next(d)
-			return
-		}
-		poll.retries += 1
-		// The poll may have reached TIDAL, so the next one waits at least
-		// the interval.
-		wait := max(min(1 << uint(min(poll.retries, 5)), LOGIN_RETRY_MAX), int(math.ceil(poll.link.interval)))
-		poll.poll_at = time.tick_add(time.tick_now(), time.Duration(wait) * time.Second)
-		poll.once = true
-		l.note = small(fmt.tprintf("Can't reach TIDAL. Trying again in %d s.", wait))
-		request_login_poll(d)
-	case:
-		if err == .Authentication && login_has_tokens(d) {
-			// TIDAL refused the tokens, so "Try again" needs a new code.
-			tidal.session_clear_auth(d.session)
-		}
-		d.login = {
-			card = Login_Code{},
-			code = Code_Failed{login_error(err, res.message)},
-		}
-	}
-}
-
-@(private = "file")
-login_error :: proc(err: tidal.Error_Kind, message: Small) -> Small {
-	#partial switch err {
-	case .Network:
-		return small("Can't reach TIDAL. Check your connection.")
-	case .Authentication:
-		return small("The login was denied.")
-	}
-	return message
+	sidebar, _ := res.payload.(Sidebar_Result)
+	sidebar_adopt(s, res, sidebar, false)
+	sidebar_save(d)
 }
 
 // select_playlist opens sidebar entry i: Liked Songs first, then the
@@ -1173,329 +626,6 @@ select_playlist :: proc(s: ^State, i: int) {
 	}
 	sidebar_check(d)
 }
-
-// drop_track_jobs drops the pages asked for but the ones for keep.
-@(private = "file")
-drop_track_jobs :: proc(job: ^Job, keep: rawptr) -> bool {
-	q := (^Track_View)(keep)
-	p, tracks := job.payload.(Tracks_Job)
-	return tracks && (q.source == .None || p.view != q.gen)
-}
-
-POISON :: 0xdb
-
-view_gen :: proc(d: ^Data) -> u32 {
-	d.next_gen += 1
-	return d.next_gen
-}
-
-// view_close closes the open list. A list that loaded whole is kept in
-// memory (list_keep). One the play queue follows that's still loading goes
-// on loading in d.queued, so the queue gets the rest of it. The rest is
-// freed. A refresh of it stops.
-view_close :: proc(d: ^Data) {
-	v := &d.view
-	if v.has_arena && v.gen == d.queue_view && !view_complete(v) && v.error.len == 0 && !v.reading {
-		queued_drop(d)
-		d.queued = take(v)
-	}
-	jobs.remove_if(&d.queue, drop_track_jobs, &d.queued)
-	refresh_drop(d)
-	if v.has_arena {
-		if d.lists.memory && view_complete(v) && v.fetched != 0 {
-			list_keep(d, take(v))
-		} else {
-			view_free(d, v)
-		}
-	}
-	v^ = {gen = view_gen(d)}
-}
-
-// queued_drop stops loading the list the play queue followed. One that
-// loaded whole is kept like a closed list.
-queued_drop :: proc(d: ^Data) {
-	q := &d.queued
-	if q.source == .None {
-		return
-	}
-	jobs.remove_if(&d.queue, page_of, &q.gen)
-	if q.has_arena && d.lists.memory && view_complete(q) && q.fetched != 0 {
-		list_keep(d, take(q))
-	} else {
-		view_free(d, q)
-	}
-	q^ = {}
-}
-
-// queue_list is the list the play queue follows while it loads, open or
-// in d.queued, or nil.
-queue_list :: proc(d: ^Data) -> ^Track_View {
-	if d.view.source != .None && d.view.gen == d.queue_view {
-		return &d.view
-	}
-	if d.queued.source != .None && d.queued.gen == d.queue_view {
-		return &d.queued
-	}
-	return nil
-}
-
-// view_open opens a list from TIDAL, whatever is kept of it. list_open
-// looks in the cache first.
-view_open :: proc(d: ^Data, source: Source, id, name, image: string, hint: int) {
-	view_close(d)
-	view_fetch(d, source, id, name, image, hint)
-}
-
-// view_fetch has TIDAL fill the open list, just closed or read from a file
-// that wasn't there.
-view_fetch :: proc(d: ^Data, source: Source, id, name, image: string, hint: int) {
-	v := &d.view
-	sid, sname, simage := small(id), small(name), small(image)
-	v^ = {gen = v.gen}
-	v.source = source
-	v.id, v.name, v.image = sid, sname, simage
-	v.hint = hint
-	v.count = hint
-	v.version = list_version_now(d, source, id).? or_else {}
-	view_init(v)
-	view_reserve(v, max(hint, PAGE_FIRST))
-	view_request_pages(d)
-}
-
-// A list's rows, their loaded flags and its gaps each have a range of one
-// reservation, committed as the list grows. So rows never move, a longer
-// list leaves no old copy behind, and a view can be moved by value. Pages
-// the list hasn't reached cost nothing.
-ROWS_MAX :: 1 << 18
-GAPS_MAX :: ROWS_MAX / PAGE_FIRST + 1 // a gap is a short page
-
-@(private = "file")
-SPACE_PAGE :: 1 << 16
-@(private = "file")
-LOADED_AT :: (ROWS_MAX * size_of(Row) + SPACE_PAGE - 1) / SPACE_PAGE * SPACE_PAGE
-@(private = "file")
-GAPS_AT :: LOADED_AT + (ROWS_MAX + SPACE_PAGE - 1) / SPACE_PAGE * SPACE_PAGE
-@(private = "file")
-SPACE_SIZE :: GAPS_AT + GAPS_MAX * size_of(Gap)
-
-// space_reserve reserves a list's space, with no rows yet.
-space_reserve :: proc() -> (space: []u8, ok: bool) {
-	err: mem.Allocator_Error
-	if space, err = vmem.reserve(SPACE_SIZE); err != nil {
-		return nil, false
-	}
-	if vmem.commit(&space[GAPS_AT], GAPS_MAX * size_of(Gap)) != nil {
-		space_release(space)
-		return nil, false
-	}
-	return space, true
-}
-
-space_release :: proc(space: []u8) {
-	if space != nil {
-		vmem.release(raw_data(space), len(space))
-	}
-}
-
-// space_rows commits room for n rows in space, up to ROWS_MAX, and returns
-// them and their loaded flags.
-space_rows :: proc(space: []u8, n: int) -> (rows: []Row, loaded: []bool, ok: bool) {
-	count := min(n, ROWS_MAX)
-	if count == 0 {
-		return nil, nil, true
-	}
-	if vmem.commit(&space[0], uint(count * size_of(Row))) != nil || vmem.commit(&space[LOADED_AT], uint(count)) != nil {
-		return nil, nil, false
-	}
-	return ([^]Row)(&space[0])[:count], ([^]bool)(&space[LOADED_AT])[:count], true
-}
-
-// view_init makes v's arena and space, with no rows yet. has_arena says
-// whether both are there.
-view_init :: proc(v: ^Track_View) {
-	v.has_arena = false
-	if vmem.arena_init_growing(&v.arena) != nil {
-		return
-	}
-	space, ok := space_reserve()
-	if !ok {
-		vmem.arena_destroy(&v.arena)
-		return
-	}
-	v.space = space
-	v.rows, v.loaded, v.gaps = nil, nil, nil
-	v.has_arena = true
-}
-
-// view_release frees v's arena and space.
-view_release :: proc(v: ^Track_View) {
-	if !v.has_arena {
-		return
-	}
-	vmem.arena_destroy(&v.arena)
-	space_release(v.space)
-	v.has_arena = false
-	v.space, v.rows, v.loaded, v.gaps = nil, nil, nil, nil
-}
-
-// view_free frees a list's memory. Debug builds and tests poison it and
-// keep it until the next one goes, see Data.poison.
-view_free :: proc(d: ^Data, v: ^Track_View) {
-	if !v.has_arena {
-		return
-	}
-	if !d.poison {
-		view_release(v)
-		return
-	}
-	for b := v.arena.curr_block; b != nil; b = b.prev {
-		mem.set(b.base, POISON, int(b.used))
-	}
-	mem.set(raw_data(v.rows), POISON, len(v.rows) * size_of(Row))
-	mem.set(raw_data(v.loaded), POISON, len(v.loaded))
-	mem.set(raw_data(v.gaps), POISON, len(v.gaps) * size_of(Gap))
-	view_release(&d.retired)
-	d.retired = take(v)
-}
-
-// view_bytes is about what a list holds in memory.
-view_bytes :: proc(v: ^Track_View) -> int {
-	if !v.has_arena {
-		return 0
-	}
-	return arena_bytes(&v.arena) + int(mem.align_forward_uint(uint(len(v.rows) * size_of(Row) + len(v.loaded)), 16 << 10))
-}
-
-// view_reserve makes room for n rows, up to ROWS_MAX.
-view_reserve :: proc(v: ^Track_View, n: int) {
-	if n <= len(v.rows) || !v.has_arena || len(v.rows) == ROWS_MAX {
-		return
-	}
-	size := max(n, 2 * len(v.rows))
-	rows, loaded, ok := space_rows(v.space, size)
-	if !ok {
-		log.errorf("lists: no memory for %d rows", size)
-		return
-	}
-	v.rows, v.loaded = rows, loaded
-}
-
-// view_add_rows copies the page asked for at offset with limit into the
-// view. total is the list's length TIDAL gave with the page, or -1.
-//
-// With a total, the page that reaches it ends the list, and a short page
-// before that is a gap (see Gap): the rows after it move up. Without one, a
-// short page ends the list. Pages arrive out of order either way, so the
-// earliest end found stands: an empty page asked for past the end mustn't
-// bring back rows a short page before it cut. Rows past the end are
-// dropped. Until the end is known, a full page past the count TIDAL gave
-// grows the list.
-view_add_rows :: proc(v: ^Track_View, offset, limit: int, rows: []Row, total := -1) {
-	rows := rows
-	last := len(rows) < limit
-	if total >= 0 {
-		last = offset + limit >= total || len(rows) == 0
-		v.hint = total
-	}
-	start := view_row_at(v, offset)
-	if !last && len(rows) < limit {
-		view_close_gap(v, offset, start, limit, len(rows))
-	}
-	end := start + len(rows)
-	if last && (!v.done || end < v.count) {
-		v.done = true
-		v.count = end
-	}
-	if v.done {
-		rows = rows[:clamp(v.count - start, 0, len(rows))]
-	} else {
-		v.count = max(v.count, end)
-	}
-	view_reserve(v, start + len(rows))
-	if !v.has_arena {
-		return
-	}
-	rows = rows[:clamp(len(v.rows) - start, 0, len(rows))]
-	a := vmem.arena_allocator(&v.arena)
-	for r, i in rows {
-		v.rows[start + i] = row_clone(r, a)
-		v.loaded_rows += int(!v.loaded[start + i])
-		v.loaded[start + i] = true
-		v.longest = max(v.longest, r.seconds)
-	}
-}
-
-// view_row_at is the row that TIDAL's offset lands on, past the gaps
-// before it.
-view_row_at :: proc(v: ^Track_View, offset: int) -> int {
-	row := offset
-	for g in v.gaps {
-		if g.offset >= offset {
-			break
-		}
-		row -= g.missing
-	}
-	return row
-}
-
-// view_close_gap records that the page at offset, whose rows start at row,
-// came back with got of the limit rows asked for, and moves the rows of
-// later pages up to close the gap. It's rare, so it counts the loaded rows
-// again.
-@(private = "file")
-view_close_gap :: proc(v: ^Track_View, offset, row, limit, got: int) {
-	missing := limit - got
-	from := row + limit
-	to := row + got
-	used := min(v.count, len(v.rows))
-	if from < used {
-		copy(v.rows[to:], v.rows[from:used])
-		copy(v.loaded[to:], v.loaded[from:used])
-	}
-	v.count = max(v.count - missing, to)
-	v.moved += 1
-	for i in v.count ..< used {
-		v.loaded[i] = false
-	}
-	v.loaded_rows = 0
-	for l in v.loaded[:min(v.count, len(v.loaded))] {
-		v.loaded_rows += int(l)
-	}
-	if !v.has_arena || len(v.gaps) == GAPS_MAX {
-		return
-	}
-	i := 0
-	for i < len(v.gaps) && v.gaps[i].offset < offset {
-		i += 1
-	}
-	n := len(v.gaps)
-	v.gaps = ([^]Gap)(&v.space[GAPS_AT])[:n + 1]
-	copy(v.gaps[i + 1:], v.gaps[i:n])
-	v.gaps[i] = {offset, missing}
-}
-
-// view_request_pages keeps PAGES_IN_FLIGHT pages loading, for the open list
-// and its refresh, until a short page says the list has ended. The first
-// page is small so it shows sooner.
-view_request_pages :: proc(d: ^Data) {
-	view_pages(d, &d.view)
-	view_pages(d, &d.refresh)
-	view_pages(d, &d.queued)
-}
-
-// view_pages asks for v's next pages. It stops at a held one, so no page
-// goes out ahead of an earlier one, and a page that ends the list leaves
-// only later ones held.
-view_pages :: proc(d: ^Data, v: ^Track_View) {
-	for v.source != .None && !v.done && !v.reading && v.in_flight < PAGES_IN_FLIGHT && (v.next_offset < v.hint || v.in_flight == 0) && !page_held(d, v.gen) {
-		limit := PAGE_FIRST if v.next_offset == 0 else PAGE_SIZE
-		push_job(d, {payload = Tracks_Job{view = v.gen, source = v.source, id = v.id, offset = i32(v.next_offset), limit = i32(limit)}})
-		v.next_offset += limit
-		v.in_flight += 1
-	}
-}
-
-// What the library screen shows, from the fake data or the live data.
 
 Sidebar_Entry :: struct {
 	name:     string,
@@ -1605,14 +735,6 @@ view_row :: proc(s: ^State, i: int) -> ^Row {
 		return &s.rows[i] if i >= 0 && i < len(s.rows) else nil
 	}
 	return list_row(&s.data.view, i)
-}
-
-// list_row returns row i of v, or nil while it's loading.
-list_row :: proc(v: ^Track_View, i: int) -> ^Row {
-	if i < 0 || i >= len(v.loaded) || !v.loaded[i] {
-		return nil
-	}
-	return &v.rows[i]
 }
 
 // show_login says whether the library screen should be the login screen.

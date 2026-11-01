@@ -130,3 +130,35 @@ covers_schedule :: proc(s: ^State) {
 		render.texture_destroy(&s.renderer, t)
 	}
 }
+
+// cover_result puts a decoded cover in its page, or marks it failed.
+cover_result :: proc(s: ^State, res: ^Result, p: Cover_Job, now: f64) {
+	d := &s.data
+	failed := res.err != nil
+	key := p.key
+	img, _ := res.payload.(Image_Result)
+	if failed || img.pixels == nil {
+		cover.set_failed(&d.covers, key, now)
+		return
+	}
+	// The worker scaled it to the entry's size. Nil from place: the
+	// entry is gone or every page is in use; failed covers are retried.
+	e := cover.lookup(&d.covers, key)
+	page: ^cover.Page
+	if e != nil && img.w == int(e.px) && img.h == int(e.px) {
+		e, page = cover.place(&d.covers, key, s.frame_count, now)
+	}
+	if page == nil {
+		cover.set_failed(&d.covers, key, now)
+		return
+	}
+	r := &s.renderer
+	if page.texture == 0 {
+		_, side := cover.page_layout(int(page.px))
+		page.texture = render.texture_create(r, side, side, .RGBA8)
+	}
+	src := cover.src(&d.covers, e)
+	render.texture_update(r, page.texture, img.pixels, int(src.x), int(src.y), img.w, img.h, converted = true)
+	d.bench.uploads += 1
+	d.bench.frame_uploads += 1
+}

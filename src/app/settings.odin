@@ -271,3 +271,9 @@ draw_settings_button :: proc(s: ^State) {
 	}
 }
 
+// save_settings_result shows why the settings didn't save, if they didn't.
+save_settings_result :: proc(d: ^Data, res: ^Result) {
+	if res.err != nil {
+		d.message = res.message
+	}
+}
