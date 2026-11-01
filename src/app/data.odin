@@ -1518,13 +1518,13 @@ sidebar_entry :: proc(s: ^State, i: int) -> Sidebar_Entry {
 	d := &s.data
 	seed := u32(i) * 7919 + 13
 	if d.fake {
-		return {PLAYLISTS[i], playlist_songs(ROW_COUNT if i == 0 else 20 + i * 37 % 300), "", seed}
+		return {PLAYLISTS[i], songs(ROW_COUNT if i == 0 else 20 + i * 37 % 300), "", seed}
 	}
 	if i == 0 {
-		return {"Liked Songs", playlist_songs(d.sidebar.liked_count) if d.sidebar.loaded else "", "", seed}
+		return {"Liked Songs", songs(d.sidebar.liked_count) if d.sidebar.loaded else "", "", seed}
 	}
 	pl := d.sidebar.items[i - 1]
-	return {pl.name, playlist_songs(pl.tracks), pl.image, seed}
+	return {pl.name, songs(pl.tracks), pl.image, seed}
 }
 
 // sidebar_image is sidebar_entry's image alone, for prefetching covers.
@@ -1535,8 +1535,9 @@ sidebar_image :: proc(s: ^State, i: int) -> string {
 	return s.data.sidebar.items[i - 1].image
 }
 
-playlist_songs :: proc(n: int) -> string {
-	return cat(num(n), " songs")
+// songs is "1 song" or "n songs", in the frame's memory.
+songs :: proc(n: int) -> string {
+	return "1 song" if n == 1 else cat(num(n), " songs")
 }
 
 view_title :: proc(s: ^State) -> string {
@@ -1561,7 +1562,7 @@ view_subtitle :: proc(s: ^State) -> string {
 	if d.fake {
 		lib := &s.library
 		count := ROW_COUNT if lib.playlist == 0 else 20 + lib.playlist * 37 % 300
-		return fmt.tprintf("Playlist · %d songs", count)
+		return cat("Playlist · ", songs(count))
 	}
 	v := &d.view
 	if d.account == .Restoring {
@@ -1571,9 +1572,9 @@ view_subtitle :: proc(s: ^State) -> string {
 		return ""
 	}
 	if !v.done {
-		return fmt.tprintf("Playlist · %d songs · loading, %d so far", v.count, v.loaded_rows)
+		return cat("Playlist · ", songs(v.count), " · loading, ", num(v.loaded_rows), " so far")
 	}
-	return fmt.tprintf("Playlist · %d songs", v.count)
+	return cat("Playlist · ", songs(v.count))
 }
 
 // data_status is a line for the header: rate limiting, errors, or "".

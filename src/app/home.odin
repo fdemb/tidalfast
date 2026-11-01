@@ -377,7 +377,7 @@ home_card :: proc(item: tidal.Item) -> (source: Source, f: Found, ok: bool) {
 		}
 		f = {uuid = v.id, name = v.name, image = v.square_picture, tracks = v.num_tracks, subtitle = "Playlist"}
 		if v.num_tracks > 0 {
-			f.subtitle = fmt.tprintf("Playlist · %d songs", v.num_tracks)
+			f.subtitle = cat("Playlist · ", songs(v.num_tracks))
 		}
 		return .Playlist, f, true
 	case tidal.Artist:

@@ -1,6 +1,7 @@
 package tidal_tests
 
 import "core:mem"
+import "core:slice"
 import "core:testing"
 
 import app "../src/app"
@@ -57,4 +58,28 @@ volume_slider_is_its_own_height :: proc(t: ^testing.T) {
 		}
 	}
 	testing.expect(t, found, "a volume slider")
+}
+
+// A playlist with one song says so in the singular.
+@(test)
+one_song_is_singular :: proc(t: ^testing.T) {
+	arena: mem.Dynamic_Arena
+	mem.dynamic_arena_init(&arena)
+	defer mem.dynamic_arena_destroy(&arena)
+	context.allocator = mem.dynamic_arena_allocator(&arena)
+	s := library_state(false)
+	defer library_state_free(s)
+	s.data.sidebar.items = []app.Sidebar_Item{{id = "one", name = "One", tracks = 1}, {id = "two", name = "Two", tracks = 2}}
+	f: Frame
+	library_frame(t, s, &f)
+	library_frame(t, s, &f)
+	labels: [dynamic]string
+	nodes, _ := ui.access_tree(&s.ui)
+	for n in nodes {
+		if n.role == .Row {
+			append(&labels, string(n.label))
+		}
+	}
+	testing.expectf(t, slice.contains(labels[:], "One, 1 song"), "rows %q", labels[:])
+	testing.expectf(t, slice.contains(labels[:], "Two, 2 songs"), "rows %q", labels[:])
 }

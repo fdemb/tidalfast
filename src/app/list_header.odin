@@ -230,7 +230,7 @@ list_songs :: proc(s: ^State, kind: List_Kind) -> string {
 			return view_subtitle(s)
 		}
 		if !v.done {
-			return cat("Loading, ", num(v.loaded_rows), " songs so far")
+			return cat("Loading, ", songs(v.loaded_rows), " so far")
 		}
 	}
 	n := view_count(s)
@@ -245,10 +245,7 @@ list_songs :: proc(s: ^State, kind: List_Kind) -> string {
 			}
 		}
 	}
-	if n == 1 {
-		return cat("1 song, ", list_duration(total.seconds))
-	}
-	return cat(num(n), " songs, ", list_duration(total.seconds))
+	return cat(songs(n), ", ", list_duration(total.seconds))
 }
 
 MONTH_NAMES := [12]string{"January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"}

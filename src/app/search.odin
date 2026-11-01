@@ -605,7 +605,7 @@ browse_header :: proc(s: ^State) -> (title, subtitle: string, ok: bool) {
 		if sr.fake_source == .None {
 			return
 		}
-		return small_str(&sr.fake_title), fmt.tprintf("%s · %d songs", kinds[sr.fake_source], sr.fake_count), true
+		return small_str(&sr.fake_title), cat(kinds[sr.fake_source], " · ", songs(sr.fake_count)), true
 	}
 	v := &s.data.view
 	if !sr.browsing || v.source == .None {
@@ -613,9 +613,9 @@ browse_header :: proc(s: ^State) -> (title, subtitle: string, ok: bool) {
 	}
 	title = small_str(&v.name)
 	if !v.done {
-		subtitle = fmt.tprintf("%s · loading, %d songs so far", kinds[v.source], v.loaded_rows)
+		subtitle = cat(kinds[v.source], " · loading, ", songs(v.loaded_rows), " so far")
 	} else {
-		subtitle = fmt.tprintf("%s · %d songs", kinds[v.source], v.count)
+		subtitle = cat(kinds[v.source], " · ", songs(v.count))
 	}
 	if v.source == .Search && (sr.loading || sr.due > 0) {
 		subtitle = fmt.tprintf("%s · searching for “%s”", subtitle, search_query(s))
@@ -860,7 +860,7 @@ found_lists :: proc(r: tidal.Search_Results, a: runtime.Allocator) -> (out: Foun
 	for &f, i in playlists {
 		pl := r.playlists[i]
 		f = {uuid = pl.id, name = pl.name, image = pl.square_picture, tracks = pl.num_tracks}
-		f.subtitle = fmt.aprintf("Playlist · %d songs", pl.num_tracks, allocator = a)
+		f.subtitle = strings.concatenate({"Playlist · ", songs(pl.num_tracks)}, a)
 	}
 	return {albums, artists, playlists}
 }
