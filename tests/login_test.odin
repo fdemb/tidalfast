@@ -2145,6 +2145,36 @@ pkce_retry_keeps_the_tokens :: proc(t: ^testing.T) {
 	mock_stop(&m)
 }
 
+// The UI can write the pasted address while the Login_Pkce job's request
+// is out: the job holds pkce_mutex only to copy it.
+@(test)
+pkce_exchange_doesnt_hold_the_redirect :: proc(t: ^testing.T) {
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := mock_data_state(&m)
+	defer data_state_free(s)
+	d := &s.data
+	m.polls = {"ok"}
+	m.oauth_delay = time.Second
+	launch_signed_out(s)
+	app.pkce_submit(s, fmt.tprintf("%sandroid/login/auth?code=c", m.base_url))
+	app.workers_start(d)
+	for wait := time.tick_now(); mock_count(&m, "POST /oauth2/token") == 0 && time.tick_since(wait) < 3 * time.Second; {
+		time.sleep(5 * time.Millisecond)
+	}
+	testing.expect_value(t, mock_count(&m, "POST /oauth2/token"), 1)
+	start := time.tick_now()
+	sync.mutex_lock(&d.pkce_mutex)
+	waited := time.tick_since(start)
+	sync.mutex_unlock(&d.pkce_mutex)
+	testing.expectf(t, waited < 300 * time.Millisecond, "the UI waited %v for the exchange", waited)
+	res, ok := wait_result(d, 5 * time.Second)
+	testing.expect(t, ok)
+	app.handle_result(s, &res, 0)
+	app.result_free(&res)
+}
+
 // A like whose job is pushed out of a full hold list never reached TIDAL,
 // so its heart goes back, and a fetch that was out doesn't bring it back.
 @(test)

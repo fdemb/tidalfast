@@ -61,6 +61,7 @@ Mock :: struct {
 	device_status: int,
 	token_error:   string, // the OAuth error with token_status
 	token_delay:   time.Duration, // before /token answers
+	oauth_delay:   time.Duration, // before /oauth2/token answers
 	sessions_fail: int, // /sessions answers this many requests with a 503
 	sessions_status: int, // or with this status, if set
 	// After a POST adds to the playlist, this many GETs of it answer 429.
@@ -413,6 +414,11 @@ mock_route :: proc(m: ^Mock, req: Mock_Request, target: string) -> (status: int,
 		// Covers carry no token. A 401 here mustn't end the login.
 		return 401, `{"status":401,"subStatus":11003,"userMessage":"unauthorized"}`, etag
 	case req.path == "/device_token" || req.path == "/oauth2/token":
+		if req.path == "/oauth2/token" && m.oauth_delay > 0 {
+			sync.mutex_unlock(&m.mutex)
+			time.sleep(m.oauth_delay)
+			sync.mutex_lock(&m.mutex)
+		}
 		poll := m.polls[m.poll_count] if m.poll_count < len(m.polls) else "pending"
 		m.poll_count += 1
 		append(&m.poll_times, time.tick_now())

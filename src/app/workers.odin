@@ -734,8 +734,10 @@ run_login_pkce :: proc(d: ^Data, job: Login_Pkce_Job, res: ^Result) {
 		auth_changed(s, d)
 		return
 	}
-	sync.guard(&d.pkce_mutex)
-	if err := tidal.login_pkce_complete(s, string(d.pkce_redirect[:d.pkce_len]), attempt); err != nil {
+	sync.lock(&d.pkce_mutex)
+	redirect := strings.clone(string(d.pkce_redirect[:d.pkce_len]), context.temp_allocator)
+	sync.unlock(&d.pkce_mutex)
+	if err := tidal.login_pkce_complete(s, redirect, attempt); err != nil {
 		fail_login(res, err)
 	}
 }
