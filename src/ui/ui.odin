@@ -1311,8 +1311,8 @@ approach :: proc(u: ^State, v, target, rate, eps: f32) -> f32 {
 }
 
 // scroll_box applies this frame's scroll to a scroll view. Trackpad deltas
-// move the view straight away, momentum included, since macOS already
-// supplies the inertia. Wheel lines move the target and the view eases
+// move the view straight away, momentum included, since the shell supplies
+// the inertia: macOS's own, or the Linux shell's. Wheel lines move the target and the view eases
 // after it. Both stay within the content from the last layout.
 @(private)
 scroll_box :: proc(u: ^State, b: ^Box) {

@@ -92,7 +92,8 @@ if [ "$(uname -s)" = Linux ]; then
 	for xml in stable/xdg-shell/xdg-shell.xml stable/viewporter/viewporter.xml \
 		staging/fractional-scale/fractional-scale-v1.xml \
 		unstable/xdg-decoration/xdg-decoration-unstable-v1.xml \
-		unstable/text-input/text-input-unstable-v3.xml; do
+		unstable/text-input/text-input-unstable-v3.xml \
+		unstable/pointer-gestures/pointer-gestures-unstable-v1.xml; do
 		name=$(basename "$xml" .xml)
 		if [ ! -f "build/wayland/$name-protocol.c" ]; then
 			wayland-scanner client-header "$protocols/$xml" "build/wayland/$name-client-protocol.h"
@@ -113,7 +114,7 @@ if [ "$(uname -s)" = Linux ]; then
 		shift
 		rm -rf "$dir"
 		mkdir -p "$dir"
-		for c in shell/shell_wayland.c build/wayland/*-protocol.c; do
+		for c in shell/shell_wayland.c shell/scroll.c build/wayland/*-protocol.c; do
 			cc -std=gnu11 -fPIC -c "$c" -o "$dir/$(basename "$c" .c).o" \
 				-Ishell -Ibuild/wayland -Wall -Wno-unused-parameter "$@" \
 				$(pkg-config --cflags wayland-client wayland-cursor xkbcommon)

@@ -16,7 +16,7 @@
 // an input method, and otherwise from the keyboard through xkbcommon, with
 // compose sequences for dead keys. Trackpad scrolls carry phases, and the
 // shell adds momentum after the fingers lift, since Wayland leaves that to
-// the client. Not here yet: accessibility (AT-SPI) and Now Playing (MPRIS);
+// the client; scroll.c has the model, which follows GTK's. Not here yet: accessibility (AT-SPI) and Now Playing (MPRIS);
 // the shell takes the app's tree only for the test driver's ax-dump and
 // ax-press, and media keys reach the app while the window has the keyboard.
 
@@ -47,12 +47,14 @@
 #include <xkbcommon/xkbcommon.h>
 
 #include "fractional-scale-v1-client-protocol.h"
+#include "pointer-gestures-unstable-v1-client-protocol.h"
 #include "text-input-unstable-v3-client-protocol.h"
 #include "viewporter-client-protocol.h"
 #include "xdg-decoration-unstable-v1-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
 
 #include "platform.h"
+#include "scroll.h"
 
 #define PERSISTENT_SIZE (256ull << 20)
 #define FRAME_SIZE (64ull << 20)
@@ -89,6 +91,8 @@ static struct zxdg_decoration_manager_v1 *g_decoration_manager;
 static struct wp_viewporter *g_viewporter;
 static struct wp_fractional_scale_manager_v1 *g_fractional_manager;
 static struct zwp_text_input_manager_v3 *g_text_input_manager;
+static struct zwp_pointer_gestures_v1 *g_gestures;
+static struct zwp_pointer_gesture_hold_v1 *g_hold;
 static struct wl_surface *g_surface;
 static struct xdg_surface *g_xdg_surface;
 static struct xdg_toplevel *g_toplevel;
@@ -113,7 +117,6 @@ static double g_frame_interval = 1.0 / 60;
 static int g_redraw_fd = -1; // eventfd
 static int g_wake_fd = -1; // timerfd for wake_after
 static int g_repeat_fd = -1; // timerfd for key repeat
-static int g_momentum_fd = -1; // timerfd for scroll momentum
 static int g_test_fd = -1; // timerfd for the next test step
 static int g_signal_fd = -1;
 
@@ -196,6 +199,12 @@ static uint32_t g_buttons;
 static void set_text_input_state(void);
 static void access_frame_done(void);
 
+// Finger scrolls and the momentum after them, as GTK does them (scroll.c).
+// The momentum is drawn from the frame's time, so each frame moves by as
+// much as its own interval.
+static Scroll_Kinetic g_kinetic;
+static void glide_frame(double now);
+
 static void frame_done(void *data, struct wl_callback *callback, uint32_t time);
 static const struct wl_callback_listener g_frame_listener = {.done = frame_done};
 
@@ -220,6 +229,7 @@ static void draw_frame(void) {
     g_frame_requested = now_seconds();
   }
   apply_scale();
+  glide_frame(now_seconds());
   Frame_Input input = {
       .events = g_events,
       .event_count = g_event_count,
@@ -236,7 +246,7 @@ static void draw_frame(void) {
   access_frame_done();
   g_event_count = 0;
   g_text_len = 0;
-  g_animating = result.animating;
+  g_animating = result.animating || g_kinetic.running;
   arm_timer(g_wake_fd, result.wake_after > 0 ? result.wake_after : 0, 0);
   wl_display_flush(g_display);
 }
@@ -1138,37 +1148,16 @@ static void pointer_button(void *data, struct wl_pointer *p, uint32_t serial, ui
 static struct {
   double dx, dy;
   uint32_t source;
+  uint32_t time; // the compositor's ms, of the last axis or stop
   bool has_source, has_axis, stop;
   int32_t value120_x, value120_y;
   bool fingers; // a finger scroll is under way
 } g_axis;
 
-// Momentum after a finger scroll ends, in points per second, decaying.
-static struct {
-  double vx, vy; // velocity while the fingers move, smoothed
-  double last; // time of the last finger frame
-  bool running, started;
-  double tick;
-} g_momentum;
+static bool g_gliding; // the app was sent a momentum began and no ended yet
 
-#define MOMENTUM_TAU 0.35 // seconds for the speed to fall to 1/e
-#define MOMENTUM_MIN 30.0 // points per second where it stops
-#define MOMENTUM_TICK (1.0 / 120)
-
-// libinput sends finger scrolls at about the finger's own speed, where macOS
-// accelerates them. Slow drags stay 1:1 for control and fast swipes go up to
-// SCROLL_GAIN_MAX times, so one swipe can cross a screen as in Chromium.
-#define SCROLL_GAIN_SLOW 100.0 // points per second below which the gain is 1
-#define SCROLL_GAIN_RAMP 300.0 // points per second for each extra 1x
-#define SCROLL_GAIN_MAX 4.0
 // A wheel notch scrolls this many lines, as GTK and Firefox do.
 #define WHEEL_LINES 3.0
-
-static double scroll_gain(double distance, double dt) {
-  if (dt < 0.004) dt = 0.004; // frames arrive at up to a few hundred Hz
-  double gain = 1 + (distance / dt - SCROLL_GAIN_SLOW) / SCROLL_GAIN_RAMP;
-  return gain < 1 ? 1 : gain > SCROLL_GAIN_MAX ? SCROLL_GAIN_MAX : gain;
-}
 
 static double g_test_scrolled_points, g_test_scrolled_lines; // for the scrolled test step
 
@@ -1189,33 +1178,29 @@ static void scroll_event(float dx, float dy, bool precise, uint32_t phase, uint3
   });
 }
 
-static void momentum_stop(void) {
-  if (!g_momentum.running) return;
-  g_momentum.running = false;
-  arm_timer(g_momentum_fd, 0, 0);
-  if (g_momentum.started) scroll_event(0, 0, true, SCROLL_PHASE_NONE, SCROLL_PHASE_ENDED);
+static void glide_ended(void) {
+  if (!g_gliding) return;
+  g_gliding = false;
+  scroll_event(0, 0, true, SCROLL_PHASE_NONE, SCROLL_PHASE_ENDED);
 }
 
-static void momentum_tick(void) {
-  double now = now_seconds();
-  double dt = now - g_momentum.tick;
-  g_momentum.tick = now;
-  double decay = exp(-dt / MOMENTUM_TAU);
-  g_momentum.vx *= decay;
-  g_momentum.vy *= decay;
-  if (hypot(g_momentum.vx, g_momentum.vy) < MOMENTUM_MIN) {
-    momentum_stop();
-    return;
+// The momentum's part of a frame drawn at now.
+static void glide_frame(double now) {
+  double d[2];
+  Scroll_Step step = scroll_step(&g_kinetic, now, d);
+  if (step == SCROLL_IDLE) return;
+  if (d[0] != 0 || d[1] != 0) {
+    scroll_event((float)d[0], (float)d[1], true, SCROLL_PHASE_NONE, g_gliding ? SCROLL_PHASE_CHANGED : SCROLL_PHASE_BEGAN);
+    g_gliding = true;
   }
-  uint32_t phase = g_momentum.started ? SCROLL_PHASE_CHANGED : SCROLL_PHASE_BEGAN;
-  g_momentum.started = true;
-  scroll_event((float)(g_momentum.vx * dt), (float)(g_momentum.vy * dt), true, SCROLL_PHASE_NONE, phase);
+  if (step == SCROLL_FINISHED) glide_ended();
 }
 
 static void pointer_axis(void *data, struct wl_pointer *p, uint32_t time, uint32_t axis, wl_fixed_t value) {
   double v = -wl_fixed_to_double(value);
   if (axis == WL_POINTER_AXIS_VERTICAL_SCROLL) g_axis.dy += v;
   else g_axis.dx += v;
+  g_axis.time = time;
   g_axis.has_axis = true;
 }
 
@@ -1224,7 +1209,12 @@ static void pointer_axis_source(void *data, struct wl_pointer *p, uint32_t sourc
   g_axis.has_source = true;
 }
 
-static void pointer_axis_stop(void *data, struct wl_pointer *p, uint32_t time, uint32_t axis) { g_axis.stop = true; }
+static void pointer_axis_stop(void *data, struct wl_pointer *p, uint32_t time, uint32_t axis) {
+  if (axis == WL_POINTER_AXIS_VERTICAL_SCROLL) g_axis.dy = 0;
+  else g_axis.dx = 0;
+  g_axis.time = time;
+  g_axis.stop = true;
+}
 
 static void pointer_axis_discrete(void *data, struct wl_pointer *p, uint32_t axis, int32_t discrete) {}
 
@@ -1238,48 +1228,62 @@ static void pointer_axis_relative_direction(void *data, struct wl_pointer *p, ui
 static void pointer_frame(void *data, struct wl_pointer *p) {
   bool fingers = g_axis.has_source ? g_axis.source == WL_POINTER_AXIS_SOURCE_FINGER || g_axis.source == WL_POINTER_AXIS_SOURCE_CONTINUOUS
                                    : g_axis.fingers;
-  if (g_axis.has_axis || g_axis.stop) {
-    double now = now_seconds();
-    if (fingers && (g_axis.has_axis || g_axis.fingers)) {
-      momentum_stop();
-      if (g_axis.has_axis) {
-        uint32_t phase = g_axis.fingers ? SCROLL_PHASE_CHANGED : SCROLL_PHASE_BEGAN;
-        double dt = now - g_momentum.last;
-        if (!g_axis.fingers || dt > 0.1) g_momentum.vx = g_momentum.vy = 0;
-        double gain = scroll_gain(hypot(g_axis.dx, g_axis.dy), g_axis.fingers ? dt : 0.016);
-        g_axis.dx *= gain;
-        g_axis.dy *= gain;
-        if (dt > 0.001) {
-          double k = dt / (dt + 0.03);
-          g_momentum.vx += (g_axis.dx / dt - g_momentum.vx) * k;
-          g_momentum.vy += (g_axis.dy / dt - g_momentum.vy) * k;
-        }
-        g_momentum.last = now;
-        g_axis.fingers = true;
-        scroll_event((float)g_axis.dx, (float)g_axis.dy, true, phase, SCROLL_PHASE_NONE);
+  double now = now_seconds();
+  bool moved = g_axis.dx != 0 || g_axis.dy != 0;
+  // As in GDK, one axis stopping while the other still moves isn't the end.
+  bool stop = g_axis.stop && !moved;
+  if (fingers) {
+    if (moved) {
+      if (!g_axis.fingers) {
+        scroll_begin(&g_kinetic, now);
+        glide_ended();
       }
-      if (g_axis.stop && g_axis.fingers) {
-        g_axis.fingers = false;
-        scroll_event(0, 0, true, SCROLL_PHASE_ENDED, SCROLL_PHASE_NONE);
-        // Fingers that stopped moving before they lifted leave no momentum.
-        if (now - g_momentum.last < 0.05 && hypot(g_momentum.vx, g_momentum.vy) > MOMENTUM_MIN * 4) {
-          g_momentum.running = true;
-          g_momentum.started = false;
-          g_momentum.tick = now;
-          arm_timer(g_momentum_fd, MOMENTUM_TICK, MOMENTUM_TICK);
-        }
-      }
-    } else if (g_axis.has_axis) {
-      momentum_stop();
-      // A wheel: lines, from value120 where the compositor sends it.
-      double lx = (g_axis.value120_x ? g_axis.value120_x / 120.0 : g_axis.dx / 10) * WHEEL_LINES;
-      double ly = (g_axis.value120_y ? g_axis.value120_y / 120.0 : g_axis.dy / 10) * WHEEL_LINES;
-      scroll_event((float)lx, (float)ly, false, SCROLL_PHASE_NONE, SCROLL_PHASE_NONE);
+      double d[2] = {g_axis.dx, g_axis.dy};
+      scroll_finger(&g_kinetic, d, g_axis.time);
+      scroll_event((float)d[0], (float)d[1], true, g_axis.fingers ? SCROLL_PHASE_CHANGED : SCROLL_PHASE_BEGAN, SCROLL_PHASE_NONE);
+      g_axis.fingers = true;
     }
+    if (stop && g_axis.fingers) {
+      g_axis.fingers = false;
+      scroll_event(0, 0, true, SCROLL_PHASE_ENDED, SCROLL_PHASE_NONE);
+      if (scroll_release(&g_kinetic, g_axis.time, now)) request_redraw();
+    }
+  } else if (g_axis.has_axis) {
+    scroll_cancel(&g_kinetic);
+    glide_ended();
+    // A wheel: lines, from value120 where the compositor sends it.
+    double lx = (g_axis.value120_x ? g_axis.value120_x / 120.0 : g_axis.dx / 10) * WHEEL_LINES;
+    double ly = (g_axis.value120_y ? g_axis.value120_y / 120.0 : g_axis.dy / 10) * WHEEL_LINES;
+    scroll_event((float)lx, (float)ly, false, SCROLL_PHASE_NONE, SCROLL_PHASE_NONE);
   }
   bool keep = g_axis.fingers;
   g_axis = (__typeof__(g_axis)){0};
   g_axis.fingers = keep;
+}
+
+// A finger resting on the touchpad stops the momentum, as in GTK, which
+// takes holds of one or two fingers.
+static void hold_begin(void *data, struct zwp_pointer_gesture_hold_v1 *h, uint32_t serial, uint32_t time, struct wl_surface *surface,
+                       uint32_t fingers) {
+  if (fingers != 1 && fingers != 2) return;
+  scroll_hold(&g_kinetic, now_seconds());
+  glide_ended();
+  request_redraw();
+}
+
+static void hold_end(void *data, struct zwp_pointer_gesture_hold_v1 *h, uint32_t serial, uint32_t time, int32_t cancelled) {}
+
+static const struct zwp_pointer_gesture_hold_v1_listener g_hold_listener = {.begin = hold_begin, .end = hold_end};
+
+// Holds come from the pointer, so the gesture follows it.
+static void update_hold(void) {
+  if (g_hold && !g_pointer) {
+    zwp_pointer_gesture_hold_v1_destroy(g_hold);
+    g_hold = NULL;
+  } else if (!g_hold && g_pointer && g_gestures) {
+    g_hold = zwp_pointer_gestures_v1_get_hold_gesture(g_gestures, g_pointer);
+    zwp_pointer_gesture_hold_v1_add_listener(g_hold, &g_hold_listener, NULL);
+  }
 }
 
 static const struct wl_pointer_listener g_pointer_listener = {
@@ -1448,9 +1452,12 @@ static void seat_capabilities(void *data, struct wl_seat *seat, uint32_t caps) {
   if ((caps & WL_SEAT_CAPABILITY_POINTER) && !g_pointer) {
     g_pointer = wl_seat_get_pointer(seat);
     wl_pointer_add_listener(g_pointer, &g_pointer_listener, NULL);
+    update_hold();
   } else if (!(caps & WL_SEAT_CAPABILITY_POINTER) && g_pointer) {
-    wl_pointer_release(g_pointer);
+    struct wl_pointer *pointer = g_pointer;
     g_pointer = NULL;
+    update_hold();
+    wl_pointer_release(pointer);
   }
   if ((caps & WL_SEAT_CAPABILITY_KEYBOARD) && !g_keyboard) {
     g_keyboard = wl_seat_get_keyboard(seat);
@@ -1556,6 +1563,10 @@ static void registry_global(void *data, struct wl_registry *r, uint32_t name, co
     g_fractional_manager = wl_registry_bind(r, name, &wp_fractional_scale_manager_v1_interface, 1);
   } else if (!strcmp(interface, zwp_text_input_manager_v3_interface.name)) {
     g_text_input_manager = wl_registry_bind(r, name, &zwp_text_input_manager_v3_interface, 1);
+  } else if (!strcmp(interface, zwp_pointer_gestures_v1_interface.name) && version >= 3) {
+    // Version 3 added holds.
+    g_gestures = wl_registry_bind(r, name, &zwp_pointer_gestures_v1_interface, 3);
+    update_hold();
   }
 #undef MIN
 }
@@ -1589,8 +1600,12 @@ static const struct wl_registry_listener g_registry_listener = {.global = regist
 //   wheel=n             n wheel notches down, negative for up
 //   finger=dy           one touchpad frame moving content up by dy, as libinput sends it
 //   lift                the fingers leave the touchpad
+//   hold                two fingers rest on the touchpad, which stops the momentum
 //   scrolled            print the scroll the app was sent: points from touchpads, lines from wheels
 //   quit
+
+// Event times for the steps, in ms like the compositor's.
+static uint32_t test_ms(void) { return (uint32_t)(now_seconds() * 1000); }
 
 typedef struct {
   double at;
@@ -1763,12 +1778,14 @@ static void test_step(const char *command, char *arg) {
     pointer_frame(NULL, NULL);
   } else if (!strcmp(command, "finger")) {
     pointer_axis_source(NULL, NULL, WL_POINTER_AXIS_SOURCE_FINGER);
-    pointer_axis(NULL, NULL, 0, WL_POINTER_AXIS_VERTICAL_SCROLL, wl_fixed_from_double(atof(arg)));
+    pointer_axis(NULL, NULL, test_ms(), WL_POINTER_AXIS_VERTICAL_SCROLL, wl_fixed_from_double(atof(arg)));
     pointer_frame(NULL, NULL);
   } else if (!strcmp(command, "lift")) {
     pointer_axis_source(NULL, NULL, WL_POINTER_AXIS_SOURCE_FINGER);
-    pointer_axis_stop(NULL, NULL, 0, WL_POINTER_AXIS_VERTICAL_SCROLL);
+    pointer_axis_stop(NULL, NULL, test_ms(), WL_POINTER_AXIS_VERTICAL_SCROLL);
     pointer_frame(NULL, NULL);
+  } else if (!strcmp(command, "hold")) {
+    hold_begin(NULL, NULL, 0, test_ms(), NULL, 2);
   } else if (!strcmp(command, "scrolled")) {
     fprintf(stderr, "shell: test: scrolled %.1f points, %.1f lines\n", g_test_scrolled_points, g_test_scrolled_lines);
   } else if (!strcmp(command, "quit")) {
@@ -1940,7 +1957,7 @@ static bool connect_wayland(void) {
 }
 
 static void main_loop(void) {
-  enum { FD_WAYLAND, FD_REDRAW, FD_WAKE, FD_REPEAT, FD_MOMENTUM, FD_TEST, FD_SIGNAL, FD_RECEIVE, FD_SEND, FD_COUNT = FD_SEND + CLIP_SENDS };
+  enum { FD_WAYLAND, FD_REDRAW, FD_WAKE, FD_REPEAT, FD_TEST, FD_SIGNAL, FD_RECEIVE, FD_SEND, FD_COUNT = FD_SEND + CLIP_SENDS };
   struct pollfd fds[FD_COUNT];
   int wl_fd = wl_display_get_fd(g_display);
   while (!g_quit) {
@@ -1960,7 +1977,7 @@ static void main_loop(void) {
       timeout = deadline == 0 ? 0 : (int)ceil((deadline - now_seconds()) * 1000);
       if (timeout < 0) timeout = 0;
     }
-    int fd_list[FD_SEND] = {wl_fd, g_redraw_fd, g_wake_fd, g_repeat_fd, g_momentum_fd, g_test_fd, g_signal_fd, g_receive_fd};
+    int fd_list[FD_SEND] = {wl_fd, g_redraw_fd, g_wake_fd, g_repeat_fd, g_test_fd, g_signal_fd, g_receive_fd};
     for (int i = 0; i < FD_SEND; i++) fds[i] = (struct pollfd){.fd = fd_list[i], .events = POLLIN};
     for (int i = 0; i < CLIP_SENDS; i++) fds[FD_SEND + i] = (struct pollfd){.fd = g_sends[i].fd, .events = POLLOUT};
     if (unflushed) fds[FD_WAYLAND].events |= POLLOUT;
@@ -1980,10 +1997,6 @@ static void main_loop(void) {
     if (fds[FD_REPEAT].revents & POLLIN) {
       drain(g_repeat_fd);
       if (g_repeat_key && g_xkb_state) key_press(g_repeat_key, true);
-    }
-    if (fds[FD_MOMENTUM].revents & POLLIN) {
-      drain(g_momentum_fd);
-      if (g_momentum.running) momentum_tick();
     }
     if (fds[FD_TEST].revents & POLLIN) {
       drain(g_test_fd);
@@ -2041,7 +2054,6 @@ int shell_main(int argc, char **argv) {
   g_redraw_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
   g_wake_fd = new_timer();
   g_repeat_fd = new_timer();
-  g_momentum_fd = new_timer();
   g_test_fd = new_timer();
 
   if (!connect_wayland()) return 1;
