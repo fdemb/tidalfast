@@ -38,17 +38,31 @@ The shell differs from GTK in three places. The glide ends once less than a quar
 
 Not done yet: media keys and MPRIS, the screen reader tree (AT-SPI) and client-side decorations. The Vulkan backend gives each texture its own `VkDeviceMemory`, which is fine for the few hundred textures the app makes but could use a sub-allocator.
 
-To check the Linux build without a display, run a headless Weston and point the app at it. Mesa's lavapipe gives a software Vulkan device, so this works with no GPU too:
+To check the Linux build without a display, run a headless Weston and point the app at it. On a desktop, keep both away from the session's own state. Give them a temp runtime folder, and give the app throwaway `HOME`, `XDG_DATA_HOME`, `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` and a D-Bus session of its own. Otherwise the app reads and writes the user's settings, caches and keyring.
+
+With a GPU, Weston needs `--renderer=gl`. Its default renderer offers the Vulkan driver no sRGB format, and the renderer fails with "the surface has no 8-bit sRGB format". Without one, Mesa's lavapipe gives a software Vulkan device and the default renderer works, as in the `linux-text` workflow.
 
 ```
-mkdir -p /tmp/xdg && chmod 700 /tmp/xdg
-XDG_RUNTIME_DIR=/tmp/xdg weston --backend=headless --socket=wl-test --width=1600 --height=1000 &
-XDG_RUNTIME_DIR=/tmp/xdg WAYLAND_DISPLAY=wl-test TIDALFAST_FAKE=1 TIDALFAST_AUDIO_NULL=1 \
-    TIDALFAST_CAPTURE=/tmp/frame.tga TIDALFAST_SHELL_TEST="2:size=820,600;3:capture=/tmp/narrow.tga;4:quit" ./build/tidalfast
+t=$(mktemp -d) && mkdir -m 700 "$t/run"
+XDG_RUNTIME_DIR="$t/run" weston --backend=headless --renderer=gl --socket=wl-test --width=1600 --height=1000 &
+weston=$!
+sleep 2 # until its socket is up
+env HOME="$t" XDG_DATA_HOME="$t/data" XDG_CONFIG_HOME="$t/config" XDG_CACHE_HOME="$t/cache" \
+    XDG_RUNTIME_DIR="$t/run" WAYLAND_DISPLAY=wl-test TIDALFAST_FAKE=1 TIDALFAST_AUDIO_NULL=1 \
+    TIDALFAST_CAPTURE="$t/frame.tga" TIDALFAST_SHELL_TEST="2:size=820,600;3:capture=$t/narrow.tga;4:quit" \
+    dbus-run-session -- ./build/tidalfast
+kill $weston
 ```
 
-One test, `keychain_round_trip`, needs a Secret Service. The login tests keep the login in memory. Run the tests inside a private D-Bus session with a throwaway keyring, so that test never touches yours:
+The captures are in `$t`. Remove it with `rm -rf "$t"` once you've looked at them.
+
+One test, `keychain_round_trip`, needs a Secret Service. The login tests keep the login in memory. Run the tests in a private D-Bus session with a throwaway keyring.
+
+A temp `HOME` alone doesn't make the keyring throwaway. gnome-keyring keeps its keyrings in `$XDG_DATA_HOME/keyrings` and its control socket in `$XDG_RUNTIME_DIR/keyring`, and desktop sessions often set both. With them pointing at the user's folders, `gnome-keyring-daemon --unlock` creates a real `login.keyring` with the password `x`. Programs that look in the login keyring before the default one, such as the GitHub CLI, then stop finding their secrets. So point all of them at a temp folder. The keyring daemon exits with the D-Bus session.
 
 ```
-dbus-run-session -- sh -c 'export HOME=$(mktemp -d); eval "$(echo x | gnome-keyring-daemon --unlock --components=secrets)"; odin test tests'
+t=$(mktemp -d) && mkdir -m 700 "$t/run"
+env HOME="$t" XDG_DATA_HOME="$t/data" XDG_CONFIG_HOME="$t/config" XDG_CACHE_HOME="$t/cache" XDG_RUNTIME_DIR="$t/run" \
+    dbus-run-session -- sh -c 'echo x | gnome-keyring-daemon --unlock --components=secrets > /dev/null; odin test tests'
+rm -rf "$t"
 ```
