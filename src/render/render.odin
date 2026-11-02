@@ -201,7 +201,7 @@ Renderer :: struct {
 Gpu_Memory :: struct {
 	instances: int, // the frames' instance buffers
 	staging:   int, // upload and capture buffers (Vulkan)
-	backdrop:  int, // the blur's textures (Metal)
+	backdrop:  int, // the blur's textures
 }
 
 // Textures

@@ -13,6 +13,14 @@
 // past them. A slot is touched only after its fence has been waited for
 // (slot_ready), which begin_frame does anyway and texture calls between
 // frames do too.
+//
+// A backdrop blurs as on Metal (see render.odin and docs/renderer.md): a
+// render pass draws the batches under it into the scene image at half size,
+// then the dual filter's passes go down and up the float levels, all in the
+// frame's command buffer ahead of the drawable's pass. Each offscreen pass
+// waits for the reads of its image before writing it and makes its writes
+// visible to the fragment shaders after, so the one set of images serves
+// every frame in flight.
 package render
 
 import "core:log"
@@ -38,6 +46,9 @@ MAX_WRITES :: 64 // images one upload holds as transfer destinations
 
 VERTEX_SPIRV :: #load("../../build/shaders/rect.vert.spv")
 FRAGMENT_SPIRV :: #load("../../build/shaders/rect.frag.spv")
+BLUR_VERTEX_SPIRV :: #load("../../build/shaders/blur.vert.spv")
+BLUR_DOWN_SPIRV :: #load("../../build/shaders/blur_down.frag.spv")
+BLUR_UP_SPIRV :: #load("../../build/shaders/blur_up.frag.spv")
 
 Gpu_Frame :: struct {
 	cmd:            vk.CommandBuffer,
@@ -81,9 +92,18 @@ Gpu_Buffer :: struct {
 	allocated: int, // bytes of memory behind it, which can be more
 }
 
-// Not yet: push_backdrop draws its tint, and the app keeps the player bar
-// off the content.
-BACKDROPS :: false
+BACKDROPS :: true
+
+// An image an offscreen pass draws into and later ones sample: the
+// backdrop's scene or one of the blur's levels.
+Blur_Image :: struct {
+	image:       vk.Image,
+	view:        vk.ImageView,
+	memory:      vk.DeviceMemory,
+	size:        int,
+	framebuffer: vk.Framebuffer,
+	set:         vk.DescriptorSet, // the image as a texture, for the passes that sample it
+}
 
 Gpu :: struct {
 	instance:         vk.Instance,
@@ -107,6 +127,24 @@ Gpu :: struct {
 	texture_layout:   vk.DescriptorSetLayout,
 	pipeline_layout:  vk.PipelineLayout,
 	pipeline:         vk.Pipeline,
+	// The backdrop. scene_pass draws into the scene image, in the
+	// drawable's format, and blur_pass into the levels, RGBA16 float; both
+	// leave their image ready to sample. The images are made for the
+	// region's size and kept until it changes, with the blur in levels[0]
+	// kept for blurred_hash.
+	scene_pass:       vk.RenderPass,
+	blur_pass:        vk.RenderPass,
+	blur_layout:      vk.PipelineLayout,
+	// The rect pipeline again, for scene_pass, whose dependencies make it
+	// incompatible with render_pass.
+	scene_pipeline:   vk.Pipeline,
+	blur_down:        vk.Pipeline, // the dual filter's halving pass
+	blur_up:          vk.Pipeline, // and its doubling pass
+	scene:            Blur_Image,
+	levels:           [MAX_BLUR_LEVELS]Blur_Image,
+	level_size:       [MAX_BLUR_LEVELS + 1][2]int, // the scene's, then the levels
+	region_size:      [2]int, // in the drawable's pixels
+	blurred_hash:     u64, // Backdrop_Pass.hash of what levels[0] holds, 0 for nothing
 	samplers:         [2]vk.Sampler, // linear with mips, nearest
 	pool:             vk.CommandPool,
 	descriptors:      vk.DescriptorPool,
@@ -201,12 +239,14 @@ init :: proc(r: ^Renderer, surface: rawptr) -> (ok: bool) {
 		flags            = {.RESET_COMMAND_BUFFER},
 		queueFamilyIndex = g.queue_family,
 	}
-	// The frame layout's two immutable samplers count against the pool.
-	sizes := [3]vk.DescriptorPoolSize{{.STORAGE_BUFFER, FRAMES_IN_FLIGHT}, {.SAMPLER, 2 * FRAMES_IN_FLIGHT}, {.SAMPLED_IMAGE, MAX_TEXTURES + 1}}
+	// The frame layout's two immutable samplers count against the pool. The
+	// backdrop's images take a set each.
+	images :: MAX_TEXTURES + 1 + MAX_BLUR_LEVELS + 1
+	sizes := [3]vk.DescriptorPoolSize{{.STORAGE_BUFFER, FRAMES_IN_FLIGHT}, {.SAMPLER, 2 * FRAMES_IN_FLIGHT}, {.SAMPLED_IMAGE, images}}
 	descriptor_info := vk.DescriptorPoolCreateInfo {
 		sType         = .DESCRIPTOR_POOL_CREATE_INFO,
 		flags         = {.FREE_DESCRIPTOR_SET},
-		maxSets       = MAX_TEXTURES + 1 + FRAMES_IN_FLIGHT,
+		maxSets       = images + FRAMES_IN_FLIGHT,
 		poolSizeCount = len(sizes),
 		pPoolSizes    = &sizes[0],
 	}
@@ -253,7 +293,11 @@ init :: proc(r: ^Renderer, surface: rawptr) -> (ok: bool) {
 	}
 	white := [4]u8{255, 255, 255, 255}
 	texture_update(r, 0, white[:], 0, 0, 1, 1)
-	g.pipeline = build_pipeline(r)
+	g.pipeline = build_pipeline(g, VERTEX_SPIRV, FRAGMENT_SPIRV, g.pipeline_layout, g.render_pass, .TRIANGLE_STRIP, true)
+	// Without the backdrop's pipelines a backdrop draws its tint alone.
+	g.scene_pipeline = build_pipeline(g, VERTEX_SPIRV, FRAGMENT_SPIRV, g.pipeline_layout, g.scene_pass, .TRIANGLE_STRIP, true)
+	g.blur_down = build_pipeline(g, BLUR_VERTEX_SPIRV, BLUR_DOWN_SPIRV, g.blur_layout, g.blur_pass, .TRIANGLE_LIST, false)
+	g.blur_up = build_pipeline(g, BLUR_VERTEX_SPIRV, BLUR_UP_SPIRV, g.blur_layout, g.blur_pass, .TRIANGLE_LIST, false)
 	return g.pipeline != 0
 }
 
@@ -285,6 +329,16 @@ release :: proc(r: ^Renderer) {
 		}
 		destroy_swapchain(g)
 		vk.DestroySwapchainKHR(g.device, g.swapchain, nil)
+		free_blur_image(g, &g.scene)
+		for &l in g.levels {
+			free_blur_image(g, &l)
+		}
+		vk.DestroyPipeline(g.device, g.scene_pipeline, nil)
+		vk.DestroyPipeline(g.device, g.blur_down, nil)
+		vk.DestroyPipeline(g.device, g.blur_up, nil)
+		vk.DestroyPipelineLayout(g.device, g.blur_layout, nil)
+		vk.DestroyRenderPass(g.device, g.scene_pass, nil)
+		vk.DestroyRenderPass(g.device, g.blur_pass, nil)
 		vk.DestroyPipeline(g.device, g.pipeline, nil)
 		vk.DestroyPipelineLayout(g.device, g.pipeline_layout, nil)
 		vk.DestroyDescriptorSetLayout(g.device, g.frame_layout, nil)
@@ -324,6 +378,10 @@ gpu_memory :: proc(r: ^Renderer) -> Gpu_Memory {
 	for &f in r.gpu.frames {
 		m.instances += f.instances.allocated
 		m.staging += f.staging.allocated + f.capture.allocated
+	}
+	m.backdrop = r.gpu.scene.size
+	for l in r.gpu.levels {
+		m.backdrop += l.size
 	}
 	return m
 }
@@ -437,7 +495,40 @@ make_render_pass :: proc(g: ^Gpu) -> bool {
 		dependencyCount = 1,
 		pDependencies   = &dependency,
 	}
-	return vk.CreateRenderPass(g.device, &info, nil, &g.render_pass) == .SUCCESS
+	if vk.CreateRenderPass(g.device, &info, nil, &g.render_pass) != .SUCCESS {
+		return false
+	}
+
+	// The backdrop's passes. Each draws its whole image, so what was there
+	// goes. It first waits for the passes before it in the queue that read
+	// or wrote the image, then its writes reach the fragment shaders after.
+	offscreen := [2]vk.SubpassDependency {
+		{
+			srcSubpass    = vk.SUBPASS_EXTERNAL,
+			dstSubpass    = 0,
+			srcStageMask  = {.FRAGMENT_SHADER, .COLOR_ATTACHMENT_OUTPUT},
+			dstStageMask  = {.COLOR_ATTACHMENT_OUTPUT},
+			srcAccessMask = {.COLOR_ATTACHMENT_WRITE},
+			dstAccessMask = {.COLOR_ATTACHMENT_WRITE},
+		},
+		{
+			srcSubpass    = 0,
+			dstSubpass    = vk.SUBPASS_EXTERNAL,
+			srcStageMask  = {.COLOR_ATTACHMENT_OUTPUT},
+			dstStageMask  = {.FRAGMENT_SHADER},
+			srcAccessMask = {.COLOR_ATTACHMENT_WRITE},
+			dstAccessMask = {.SHADER_READ},
+		},
+	}
+	info.dependencyCount = len(offscreen)
+	info.pDependencies = &offscreen[0]
+	attachment.finalLayout = .SHADER_READ_ONLY_OPTIMAL
+	if vk.CreateRenderPass(g.device, &info, nil, &g.scene_pass) != .SUCCESS {
+		return false
+	}
+	attachment.format = .R16G16B16A16_SFLOAT
+	attachment.loadOp = .DONT_CARE
+	return vk.CreateRenderPass(g.device, &info, nil, &g.blur_pass) == .SUCCESS
 }
 
 @(private)
@@ -481,11 +572,13 @@ make_layouts :: proc(g: ^Gpu) -> bool {
 	if vk.CreateDescriptorSetLayout(g.device, &frame_info, nil, &g.frame_layout) != .SUCCESS || vk.CreateDescriptorSetLayout(g.device, &texture_info, nil, &g.texture_layout) != .SUCCESS {
 		return false
 	}
-	// Set 1 is the colour texture, set 2 the coverage texture.
-	sets := [3]vk.DescriptorSetLayout{g.frame_layout, g.texture_layout, g.texture_layout}
+	// Set 1 is the colour texture, set 2 the coverage texture and set 3 the
+	// blurred backdrop. The push constants are the target and origin, see
+	// rect.vert.
+	sets := [4]vk.DescriptorSetLayout{g.frame_layout, g.texture_layout, g.texture_layout, g.texture_layout}
 	push := vk.PushConstantRange {
-		stageFlags = {.VERTEX},
-		size       = size_of([2]f32),
+		stageFlags = {.VERTEX, .FRAGMENT},
+		size       = size_of([2][4]f32),
 	}
 	layout_info := vk.PipelineLayoutCreateInfo {
 		sType                  = .PIPELINE_LAYOUT_CREATE_INFO,
@@ -494,13 +587,21 @@ make_layouts :: proc(g: ^Gpu) -> bool {
 		pushConstantRangeCount = 1,
 		pPushConstantRanges    = &push,
 	}
-	return vk.CreatePipelineLayout(g.device, &layout_info, nil, &g.pipeline_layout) == .SUCCESS
+	if vk.CreatePipelineLayout(g.device, &layout_info, nil, &g.pipeline_layout) != .SUCCESS {
+		return false
+	}
+	// The blur samples set 1 with set 0's linear sampler, and takes half a
+	// source texel as its push constant.
+	layout_info.setLayoutCount = 2
+	push = {stageFlags = {.FRAGMENT}, size = size_of([2]f32)}
+	return vk.CreatePipelineLayout(g.device, &layout_info, nil, &g.blur_layout) == .SUCCESS
 }
 
 // build_pipeline returns a new pipeline, or 0 after logging why it failed.
+// With blend, the fragment shader's premultiplied colour goes over what's
+// there; without, it replaces it.
 @(private)
-build_pipeline :: proc(r: ^Renderer) -> vk.Pipeline {
-	g := &r.gpu
+build_pipeline :: proc(g: ^Gpu, vertex, fragment: []byte, layout: vk.PipelineLayout, render_pass: vk.RenderPass, topology: vk.PrimitiveTopology, blend: bool) -> vk.Pipeline {
 	module :: proc(g: ^Gpu, spirv: []byte) -> vk.ShaderModule {
 		// #load data has no alignment; SPIR-V is read as u32s.
 		words := make([]u32, (len(spirv) + 3) / 4, context.temp_allocator)
@@ -517,8 +618,8 @@ build_pipeline :: proc(r: ^Renderer) -> vk.Pipeline {
 		}
 		return m
 	}
-	vs := module(g, VERTEX_SPIRV)
-	fs := module(g, FRAGMENT_SPIRV)
+	vs := module(g, vertex)
+	fs := module(g, fragment)
 	defer vk.DestroyShaderModule(g.device, vs, nil)
 	defer vk.DestroyShaderModule(g.device, fs, nil)
 	if vs == 0 || fs == 0 {
@@ -533,7 +634,7 @@ build_pipeline :: proc(r: ^Renderer) -> vk.Pipeline {
 	}
 	assembly := vk.PipelineInputAssemblyStateCreateInfo {
 		sType    = .PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-		topology = .TRIANGLE_STRIP,
+		topology = topology,
 	}
 	viewport := vk.PipelineViewportStateCreateInfo {
 		sType         = .PIPELINE_VIEWPORT_STATE_CREATE_INFO,
@@ -551,9 +652,8 @@ build_pipeline :: proc(r: ^Renderer) -> vk.Pipeline {
 		sType                = .PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
 		rasterizationSamples = {._1},
 	}
-	// The fragment shader outputs premultiplied colour.
 	blend_attachment := vk.PipelineColorBlendAttachmentState {
-		blendEnable         = true,
+		blendEnable         = b32(blend),
 		srcColorBlendFactor = .ONE,
 		dstColorBlendFactor = .ONE_MINUS_SRC_ALPHA,
 		colorBlendOp        = .ADD,
@@ -562,7 +662,7 @@ build_pipeline :: proc(r: ^Renderer) -> vk.Pipeline {
 		alphaBlendOp        = .ADD,
 		colorWriteMask      = {.R, .G, .B, .A},
 	}
-	blend := vk.PipelineColorBlendStateCreateInfo {
+	blend_state := vk.PipelineColorBlendStateCreateInfo {
 		sType           = .PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
 		attachmentCount = 1,
 		pAttachments    = &blend_attachment,
@@ -582,10 +682,10 @@ build_pipeline :: proc(r: ^Renderer) -> vk.Pipeline {
 		pViewportState      = &viewport,
 		pRasterizationState = &raster,
 		pMultisampleState   = &multisample,
-		pColorBlendState    = &blend,
+		pColorBlendState    = &blend_state,
 		pDynamicState       = &dynamic_info,
-		layout              = g.pipeline_layout,
-		renderPass          = g.render_pass,
+		layout              = layout,
+		renderPass          = render_pass,
 	}
 	pipeline: vk.Pipeline
 	if res := vk.CreateGraphicsPipelines(g.device, 0, 1, &info, nil, &pipeline); res != .SUCCESS {
@@ -1273,10 +1373,16 @@ end_frame :: proc(r: ^Renderer) {
 	}
 	cmd := f.cmd
 	vk.BeginCommandBuffer(cmd, &begin)
-	// The swapchain is sRGB, so the clear colour is given in linear.
-	clear := vk.ClearValue {
-		color = {float32 = {linear_from_srgb(r.clear.r), linear_from_srgb(r.clear.g), linear_from_srgb(r.clear.b), r.clear.a}},
+	draw_calls := 0
+	blurred := r.textures[0].gpu.set
+	if r.backdrop.batch >= 0 {
+		set, calls := encode_backdrop(r, cmd, f)
+		draw_calls += calls
+		if set != 0 {
+			blurred = set
+		}
 	}
+	clear := clear_value(r)
 	pass := vk.RenderPassBeginInfo {
 		sType           = .RENDER_PASS_BEGIN_INFO,
 		renderPass      = g.render_pass,
@@ -1286,33 +1392,8 @@ end_frame :: proc(r: ^Renderer) {
 		pClearValues    = &clear,
 	}
 	vk.CmdBeginRenderPass(cmd, &pass, .INLINE)
-	draw_calls := 0
-	if r.instance_count > 0 {
-		viewport := vk.Viewport{0, 0, f32(g.extent.width), f32(g.extent.height), 0, 1}
-		scissor := vk.Rect2D{extent = g.extent}
-		vk.CmdSetViewport(cmd, 0, 1, &viewport)
-		vk.CmdSetScissor(cmd, 0, 1, &scissor)
-		vk.CmdBindPipeline(cmd, .GRAPHICS, g.pipeline)
-		size := [2]f32{f32(g.extent.width), f32(g.extent.height)}
-		vk.CmdPushConstants(cmd, g.pipeline_layout, {.VERTEX}, 0, size_of(size), &size)
-		vk.CmdBindDescriptorSets(cmd, .GRAPHICS, g.pipeline_layout, 0, 1, &f.set, 0, nil)
-		bound := [2]vk.DescriptorSet{}
-		for b in r.batches[:r.batch_count] {
-			if b.count == 0 {
-				continue
-			}
-			for t, index in b.textures {
-				slot := texture_slot(r, t)
-				set := slot.gpu.set if slot != nil else r.textures[0].gpu.set
-				if set != bound[index] {
-					vk.CmdBindDescriptorSets(cmd, .GRAPHICS, g.pipeline_layout, u32(1 + index), 1, &set, 0, nil)
-					bound[index] = set
-				}
-			}
-			vk.CmdDraw(cmd, 4, b.count, 0, b.first)
-			draw_calls += 1
-		}
-	}
+	whole := [4]f32{0, 0, f32(g.extent.width), f32(g.extent.height)}
+	draw_calls += draw_batches(r, cmd, f, g.pipeline, r.batches[:r.batch_count], g.extent, whole, {0, 0, 1, 1}, blurred)
 	vk.CmdEndRenderPass(cmd)
 
 	if r.capture_path != "" && g.can_capture {
@@ -1367,6 +1448,258 @@ end_frame :: proc(r: ^Renderer) {
 		write_tga(r.capture_path, pixels, w, h)
 		free_buffer(g, &f.capture)
 	}
+}
+
+// clear_value is the frame's clear colour. The targets are sRGB, so it's
+// given in linear.
+@(private)
+clear_value :: proc(r: ^Renderer) -> vk.ClearValue {
+	return {color = {float32 = {linear_from_srgb(r.clear.r), linear_from_srgb(r.clear.g), linear_from_srgb(r.clear.b), r.clear.a}}}
+}
+
+// draw_batches draws batches with pipeline, a rect pipeline made for the
+// render pass, into one of size pixels covering target (x, y, w, h) of the
+// drawable's pixels. origin is the target's
+// origin in the drawable and the drawable pixels per target pixel, and
+// backdrop the blurred texture's set. Returns the draw calls.
+@(private)
+draw_batches :: proc(r: ^Renderer, cmd: vk.CommandBuffer, f: ^Gpu_Frame, pipeline: vk.Pipeline, batches: []Batch, size: vk.Extent2D, target, origin: [4]f32, backdrop: vk.DescriptorSet) -> int {
+	g := &r.gpu
+	if r.instance_count == 0 {
+		return 0
+	}
+	viewport := vk.Viewport{0, 0, f32(size.width), f32(size.height), 0, 1}
+	scissor := vk.Rect2D{extent = size}
+	vk.CmdSetViewport(cmd, 0, 1, &viewport)
+	vk.CmdSetScissor(cmd, 0, 1, &scissor)
+	vk.CmdBindPipeline(cmd, .GRAPHICS, pipeline)
+	push := [2][4]f32{target, origin}
+	vk.CmdPushConstants(cmd, g.pipeline_layout, {.VERTEX, .FRAGMENT}, 0, size_of(push), &push)
+	vk.CmdBindDescriptorSets(cmd, .GRAPHICS, g.pipeline_layout, 0, 1, &f.set, 0, nil)
+	backdrop := backdrop
+	vk.CmdBindDescriptorSets(cmd, .GRAPHICS, g.pipeline_layout, 3, 1, &backdrop, 0, nil)
+	draw_calls := 0
+	bound := [2]vk.DescriptorSet{}
+	for b in batches {
+		if b.count == 0 {
+			continue
+		}
+		for t, index in b.textures {
+			slot := texture_slot(r, t)
+			set := slot.gpu.set if slot != nil else r.textures[0].gpu.set
+			if set != bound[index] {
+				vk.CmdBindDescriptorSets(cmd, .GRAPHICS, g.pipeline_layout, u32(1 + index), 1, &set, 0, nil)
+				bound[index] = set
+			}
+		}
+		vk.CmdDraw(cmd, 4, b.count, 0, b.first)
+		draw_calls += 1
+	}
+	return draw_calls
+}
+
+// encode_backdrop records the batches before the backdrop into the scene
+// image at half size and the blur down its levels and back up, and returns
+// the set of the level the backdrop samples and the draw calls it took.
+// When what the blur reads hasn't changed since it last ran, it returns
+// that blur as it is and records nothing. 0 if there's no blur to sample.
+@(private)
+encode_backdrop :: proc(r: ^Renderer, cmd: vk.CommandBuffer, f: ^Gpu_Frame) -> (blurred: vk.DescriptorSet, draw_calls: int) {
+	g := &r.gpu
+	bd := r.backdrop
+	w, h := int(bd.region.z - bd.region.x), int(bd.region.w - bd.region.y)
+	if g.scene_pipeline == 0 || g.blur_down == 0 || g.blur_up == 0 || !backdrop_textures(r, w, h) {
+		return 0, 0
+	}
+	if bd.hash == g.blurred_hash {
+		return g.levels[0].set, 0
+	}
+	scene := g.level_size[0]
+	extent := vk.Extent2D{u32(scene.x), u32(scene.y)}
+	clear := clear_value(r)
+	pass := vk.RenderPassBeginInfo {
+		sType           = .RENDER_PASS_BEGIN_INFO,
+		renderPass      = g.scene_pass,
+		framebuffer     = g.scene.framebuffer,
+		renderArea      = {extent = extent},
+		clearValueCount = 1,
+		pClearValues    = &clear,
+	}
+	vk.CmdBeginRenderPass(cmd, &pass, .INLINE)
+	scale := [2]f32{f32(w) / f32(scene.x), f32(h) / f32(scene.y)}
+	target := [4]f32{bd.region.x, bd.region.y, f32(w), f32(h)}
+	origin := [4]f32{bd.region.x, bd.region.y, scale.x, scale.y}
+	draw_calls = draw_batches(r, cmd, f, g.scene_pipeline, r.batches[:bd.batch], extent, target, origin, r.textures[0].gpu.set)
+	vk.CmdEndRenderPass(cmd)
+
+	// Drawing the scene at half size was the first halving.
+	src := g.scene
+	for i in 0 ..< bd.levels - 1 {
+		blur_pass(r, cmd, f, g.blur_down, src, g.levels[i], g.level_size[i], g.level_size[i + 1])
+		src = g.levels[i]
+	}
+	for i := bd.levels - 2; i > 0; i -= 1 {
+		blur_pass(r, cmd, f, g.blur_up, g.levels[i], g.levels[i - 1], g.level_size[i + 1], g.level_size[i])
+	}
+	g.blurred_hash = bd.hash
+	return g.levels[0].set, draw_calls + 2 * bd.levels - 3
+}
+
+// blur_pass records one pass of the dual filter from src, src_size texels,
+// into dst, dst_size texels.
+@(private)
+blur_pass :: proc(r: ^Renderer, cmd: vk.CommandBuffer, f: ^Gpu_Frame, pipeline: vk.Pipeline, src, dst: Blur_Image, src_size, dst_size: [2]int) {
+	g := &r.gpu
+	extent := vk.Extent2D{u32(dst_size.x), u32(dst_size.y)}
+	pass := vk.RenderPassBeginInfo {
+		sType       = .RENDER_PASS_BEGIN_INFO,
+		renderPass  = g.blur_pass,
+		framebuffer = dst.framebuffer,
+		renderArea  = {extent = extent},
+	}
+	vk.CmdBeginRenderPass(cmd, &pass, .INLINE)
+	viewport := vk.Viewport{0, 0, f32(extent.width), f32(extent.height), 0, 1}
+	scissor := vk.Rect2D{extent = extent}
+	vk.CmdSetViewport(cmd, 0, 1, &viewport)
+	vk.CmdSetScissor(cmd, 0, 1, &scissor)
+	vk.CmdBindPipeline(cmd, .GRAPHICS, pipeline)
+	sets := [2]vk.DescriptorSet{f.set, src.set}
+	vk.CmdBindDescriptorSets(cmd, .GRAPHICS, g.blur_layout, 0, len(sets), &sets[0], 0, nil)
+	half_pixel := [2]f32{0.5 / f32(src_size.x), 0.5 / f32(src_size.y)}
+	vk.CmdPushConstants(cmd, g.blur_layout, {.FRAGMENT}, 0, size_of(half_pixel), &half_pixel)
+	vk.CmdDraw(cmd, 3, 1, 0, 0)
+	vk.CmdEndRenderPass(cmd)
+}
+
+// backdrop_textures makes the scene image for a region w by h pixels and
+// the levels under it, unless they're that size already.
+@(private)
+backdrop_textures :: proc(r: ^Renderer, w, h: int) -> bool {
+	g := &r.gpu
+	if g.scene.image != 0 && g.region_size == {w, h} {
+		return true
+	}
+	// Frames in flight may still sample the old ones. This happens when the
+	// window or the bar changes size, not frame to frame.
+	if g.scene.image != 0 {
+		vk.DeviceWaitIdle(g.device)
+	}
+	free_blur_image(g, &g.scene)
+	for &l in g.levels {
+		free_blur_image(g, &l)
+	}
+	g.region_size = {}
+	g.blurred_hash = 0
+	g.level_size[0] = {max((w + 1) / 2, 1), max((h + 1) / 2, 1)}
+	ok := make_blur_image(g, &g.scene, g.format, g.scene_pass, g.level_size[0])
+	for i in 0 ..< MAX_BLUR_LEVELS {
+		size := g.level_size[i]
+		g.level_size[i + 1] = {max((size.x + 1) / 2, 1), max((size.y + 1) / 2, 1)}
+		ok &&= make_blur_image(g, &g.levels[i], .R16G16B16A16_SFLOAT, g.blur_pass, g.level_size[i + 1])
+	}
+	if ok {
+		g.region_size = {w, h}
+	} else {
+		log.error("render: can't make the backdrop's images")
+	}
+	return ok
+}
+
+// make_blur_image makes an image that render_pass draws into and the
+// passes after it sample.
+@(private)
+make_blur_image :: proc(g: ^Gpu, b: ^Blur_Image, format: vk.Format, render_pass: vk.RenderPass, size: [2]int) -> bool {
+	info := vk.ImageCreateInfo {
+		sType         = .IMAGE_CREATE_INFO,
+		imageType     = .D2,
+		format        = format,
+		extent        = {u32(size.x), u32(size.y), 1},
+		mipLevels     = 1,
+		arrayLayers   = 1,
+		samples       = {._1},
+		tiling        = .OPTIMAL,
+		usage         = {.COLOR_ATTACHMENT, .SAMPLED},
+		sharingMode   = .EXCLUSIVE,
+		initialLayout = .UNDEFINED,
+	}
+	if vk.CreateImage(g.device, &info, nil, &b.image) != .SUCCESS {
+		b.image = 0
+		return false
+	}
+	req: vk.MemoryRequirements
+	vk.GetImageMemoryRequirements(g.device, b.image, &req)
+	b.memory = allocate(g, req, {.DEVICE_LOCAL})
+	if b.memory == 0 {
+		return false
+	}
+	b.size = int(req.size)
+	vk.BindImageMemory(g.device, b.image, b.memory, 0)
+	view_info := vk.ImageViewCreateInfo {
+		sType            = .IMAGE_VIEW_CREATE_INFO,
+		image            = b.image,
+		viewType         = .D2,
+		format           = format,
+		subresourceRange = {{.COLOR}, 0, 1, 0, 1},
+	}
+	if vk.CreateImageView(g.device, &view_info, nil, &b.view) != .SUCCESS {
+		b.view = 0
+		return false
+	}
+	fb_info := vk.FramebufferCreateInfo {
+		sType           = .FRAMEBUFFER_CREATE_INFO,
+		renderPass      = render_pass,
+		attachmentCount = 1,
+		pAttachments    = &b.view,
+		width           = u32(size.x),
+		height          = u32(size.y),
+		layers          = 1,
+	}
+	if vk.CreateFramebuffer(g.device, &fb_info, nil, &b.framebuffer) != .SUCCESS {
+		b.framebuffer = 0
+		return false
+	}
+	set_info := vk.DescriptorSetAllocateInfo {
+		sType              = .DESCRIPTOR_SET_ALLOCATE_INFO,
+		descriptorPool     = g.descriptors,
+		descriptorSetCount = 1,
+		pSetLayouts        = &g.texture_layout,
+	}
+	if vk.AllocateDescriptorSets(g.device, &set_info, &b.set) != .SUCCESS {
+		b.set = 0
+		return false
+	}
+	image_info := vk.DescriptorImageInfo {
+		imageView   = b.view,
+		imageLayout = .SHADER_READ_ONLY_OPTIMAL,
+	}
+	write := vk.WriteDescriptorSet {
+		sType           = .WRITE_DESCRIPTOR_SET,
+		dstSet          = b.set,
+		descriptorCount = 1,
+		descriptorType  = .SAMPLED_IMAGE,
+		pImageInfo      = &image_info,
+	}
+	vk.UpdateDescriptorSets(g.device, 1, &write, 0, nil)
+	return true
+}
+
+// free_blur_image frees what make_blur_image made of b, at once.
+@(private)
+free_blur_image :: proc(g: ^Gpu, b: ^Blur_Image) {
+	if b.set != 0 {
+		vk.FreeDescriptorSets(g.device, g.descriptors, 1, &b.set)
+	}
+	if b.framebuffer != 0 {
+		vk.DestroyFramebuffer(g.device, b.framebuffer, nil)
+	}
+	if b.view != 0 {
+		vk.DestroyImageView(g.device, b.view, nil)
+	}
+	if b.image != 0 {
+		vk.DestroyImage(g.device, b.image, nil)
+	}
+	free_memory(g, b.memory, b.size)
+	b^ = {}
 }
 
 // swapchain_stale says whether the swapchain has to be made again for a

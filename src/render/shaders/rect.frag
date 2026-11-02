@@ -20,6 +20,14 @@ layout(set = 0, binding = 1) uniform sampler linear_sampler;
 layout(set = 0, binding = 2) uniform sampler nearest_sampler;
 layout(set = 1, binding = 0) uniform texture2D colour_tex;
 layout(set = 2, binding = 0) uniform texture2D coverage_tex;
+layout(set = 3, binding = 0) uniform texture2D backdrop_tex;
+
+// See rect.vert. origin is the render target's origin in the drawable and
+// the drawable pixels per target pixel.
+layout(push_constant) uniform Push {
+	vec4 target;
+	vec4 origin;
+} push;
 
 layout(location = 0) flat in uint iid;
 layout(location = 0) out vec4 out_color;
@@ -27,6 +35,7 @@ layout(location = 0) out vec4 out_color;
 const uint TEXTURED = 1u;
 const uint NEAREST = 2u;
 const uint COVERAGE = 4u;
+const uint BACKDROP = 8u;
 const uint ADDITIVE = 16u;
 
 // Signed distance from p to a box centred on the origin with rounded corners.
@@ -52,7 +61,8 @@ vec4 premultiply(vec4 c) {
 
 void main() {
 	Instance r = instances[iid];
-	vec2 pixel = gl_FragCoord.xy; // pixel centre, top left origin
+	// The pixel centre in the drawable, top left origin.
+	vec2 pixel = gl_FragCoord.xy * push.origin.zw + push.origin.xy;
 	vec2 size = max(r.dst.zw - r.dst.xy, 1e-4);
 	vec2 half_size = size * 0.5;
 	vec2 local = pixel - (r.dst.xy + half_size);
@@ -75,7 +85,15 @@ void main() {
 	vec3 rgb = c.a > 0.0 ? c.rgb / c.a : vec3(0.0);
 	vec4 color = vec4(linear_from_srgb(rgb) * c.a, c.a);
 
-	if ((r.flags & TEXTURED) != 0u) {
+	if ((r.flags & BACKDROP) != 0u) {
+		// The blur under the tint, its colours pulled away from their
+		// luminance by the saturation. It's premultiplied and keeps its
+		// alpha, so what was translucent under it stays so.
+		vec4 b = texture(sampler2D(backdrop_tex, linear_sampler), mix(r.src.xy, r.src.zw, t));
+		float luma = dot(b.rgb, vec3(0.2126, 0.7152, 0.0722));
+		b.rgb = max(mix(vec3(luma), b.rgb, r.extra), 0.0);
+		color += b * (1.0 - color.a);
+	} else if ((r.flags & TEXTURED) != 0u) {
 		vec2 uv = mix(r.src.xy, r.src.zw, t);
 		if ((r.flags & COVERAGE) != 0u) {
 			color *= (r.flags & NEAREST) != 0u ? texture(sampler2D(coverage_tex, nearest_sampler), uv) : texture(sampler2D(coverage_tex, linear_sampler), uv);

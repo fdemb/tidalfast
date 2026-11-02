@@ -100,9 +100,10 @@ if [ "$(uname -s)" = Linux ]; then
 			wayland-scanner private-code "$protocols/$xml" "build/wayland/$name-protocol.c"
 		fi
 	done
-	for stage in vert frag; do
-		if [ ! -f "build/shaders/rect.$stage.spv" ] || [ "src/render/shaders/rect.$stage" -nt "build/shaders/rect.$stage.spv" ]; then
-			glslangValidator -V --quiet "src/render/shaders/rect.$stage" -o "build/shaders/rect.$stage.spv"
+	for shader in src/render/shaders/*.vert src/render/shaders/*.frag; do
+		spv="build/shaders/$(basename "$shader").spv"
+		if [ ! -f "$spv" ] || [ "$shader" -nt "$spv" ]; then
+			glslangValidator -V --quiet "$shader" -o "$spv"
 		fi
 	done
 

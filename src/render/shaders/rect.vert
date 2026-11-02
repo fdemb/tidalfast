@@ -19,8 +19,11 @@ layout(std430, set = 0, binding = 0) readonly buffer Instances {
 	Instance instances[];
 };
 
+// target is the render target's origin and size in the drawable's pixels;
+// origin is for the fragment shader, see rect.frag.
 layout(push_constant) uniform Push {
-	vec2 viewport;
+	vec4 target;
+	vec4 origin;
 } push;
 
 layout(location = 0) flat out uint iid;
@@ -36,6 +39,6 @@ void main() {
 	uint vid = uint(gl_VertexIndex);
 	vec2 p = mix(p0, p1, vec2(float(vid & 1u), float(vid >> 1u)));
 	// Vulkan's clip space has y down, like the pixels.
-	gl_Position = vec4(p / push.viewport * 2.0 - 1.0, 0.0, 1.0);
+	gl_Position = vec4((p - push.target.xy) / push.target.zw * 2.0 - 1.0, 0.0, 1.0);
 	iid = uint(gl_InstanceIndex);
 }
