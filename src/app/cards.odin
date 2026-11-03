@@ -176,6 +176,7 @@ card_grid :: proc(s: ^State, id, title: string, items: []Found, source: Source, 
 	row_h := f32(CARD_H + GRID_ROW_GAP)
 	kind := card_cover(source)
 	view := ui.scroll_view(id, ui.px(width), ui.px(height), inset_end = bar_inset(s))
+	history_scroll(s, view)
 	ui.accessible(view, .List, title)
 	rows := ui.virtual_rows(view, (n + cols - 1) / cols, row_h)
 	for r in rows.first ..< rows.last {

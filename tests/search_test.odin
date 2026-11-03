@@ -590,6 +590,76 @@ back_and_forward_go_through_the_places_visited :: proc(t: ^testing.T) {
 	testing.expect_value(t, app.view_title(s), "Liked Songs")
 }
 
+// Back and Forward put a list back where it was scrolled when they left
+// it, the search results too. A place visited anew starts at the top.
+@(test)
+back_and_forward_keep_the_scroll :: proc(t: ^testing.T) {
+	arena: vmem.Arena
+	_ = vmem.arena_init_growing(&arena)
+	defer vmem.arena_destroy(&arena)
+	context.allocator = vmem.arena_allocator(&arena)
+	scroll :: proc(t: ^testing.T, s: ^app.State, f: ^Frame, dy: f32) {
+		library_frame(t, s, f, {kind = .Mouse_Move, x = 600, y = 400})
+		library_frame(t, s, f, {kind = .Scroll, x = 600, y = 400, dy = dy, precise = true, phase = .Began})
+		library_frame(t, s, f, {kind = .Scroll, x = 600, y = 400, phase = .Ended})
+		library_frame(t, s, f)
+	}
+	s := library_state(true)
+	defer library_state_free(s)
+	lib := &s.library
+	f: Frame
+	library_frame(t, s, &f)
+	library_frame(t, s, &f)
+	scroll(t, s, &f, -3000)
+	liked, liked_offset := lib.top_row, lib.top_offset
+	testing.expect(t, liked > 0, "Liked Songs scrolled down")
+
+	library_frame(t, s, &f, press(s, "Daily Mix 1,"))
+	library_frame(t, s, &f)
+	testing.expect_value(t, app.view_title(s), "Daily Mix 1")
+	testing.expect_value(t, lib.top_row, 0)
+	scroll(t, s, &f, -1500)
+	mix := lib.top_row
+	testing.expect(t, mix > 0 && mix != liked, "Daily Mix 1 scrolled down")
+
+	library_frame(t, s, &f, press(s, "Back"))
+	library_frame(t, s, &f)
+	testing.expect_value(t, app.view_title(s), "Liked Songs")
+	testing.expect_value(t, lib.top_row, liked)
+	testing.expect_value(t, lib.top_offset, liked_offset)
+	library_frame(t, s, &f, press(s, "Forward"))
+	library_frame(t, s, &f)
+	testing.expect_value(t, app.view_title(s), "Daily Mix 1")
+	testing.expect_value(t, lib.top_row, mix)
+
+	library_frame(t, s, &f, press(s, "Release Radar,"))
+	library_frame(t, s, &f)
+	testing.expect_value(t, app.view_title(s), "Release Radar")
+	testing.expect_value(t, lib.top_row, 0)
+
+	// Back to a search searches again and scrolls the results once they
+	// show.
+	open_search(t, s, &f)
+	library_frame(t, s, &f, type_text(&f, "a"))
+	library_frame(t, s, &f, dt = 1)
+	testing.expect(t, app.search_showing(s))
+	scroll(t, s, &f, -1200)
+	found := lib.top_row
+	testing.expect(t, found > 0, "the results scrolled down")
+	row := app.view_row(s, found + 2)
+	down, up := right_click(s, row.title)
+	library_frame(t, s, &f, down, up)
+	library_frame(t, s, &f)
+	library_frame(t, s, &f, press(s, "Go to album"))
+	library_frame(t, s, &f)
+	testing.expect(t, !app.search_page_showing(s))
+	testing.expect_value(t, lib.top_row, 0)
+	library_frame(t, s, &f, press(s, "Back"))
+	library_frame(t, s, &f)
+	testing.expect(t, app.search_showing(s))
+	testing.expect_value(t, lib.top_row, found)
+}
+
 // The history keeps the last HISTORY_MAX places and forgets older ones.
 @(test)
 history_forgets_the_oldest_places :: proc(t: ^testing.T) {

@@ -199,6 +199,7 @@ draw_home :: proc(s: ^State, main_w, view_h: f32) {
 	home_want(&s.data)
 	content_w := min(main_w, CONTENT_MAX) - 2 * PAGE_PAD
 	view := ui.scroll_view("home", ui.px(main_w), ui.px(view_h), inset_end = bar_inset(s))
+	history_scroll(s, view)
 	ui.accessible(view, .Group, "Home")
 	nav_float(s, view.view_off.y)
 	centred(content_w)
