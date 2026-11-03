@@ -92,7 +92,12 @@ Job_Payload :: union {
 	Launch_Log_Job,
 	Artist_Job,
 	Home_Job,
+	Profile_Job,
 }
+
+// Profile_Job is the signed-in user's name and picture, for the sidebar's
+// user menu.
+Profile_Job :: struct {}
 
 // Restore_Job reads the tokens from the Keychain into the session.
 Restore_Job :: struct {}
@@ -244,6 +249,12 @@ Result_Payload :: union {
 	Liked_Ids_Result,
 	Artist_Result,
 	Home_Result,
+	Profile_Result,
+}
+
+Profile_Result :: struct {
+	name:    Small,
+	picture: Small, // TIDAL's image id, "" for none
 }
 
 Restore_Result :: struct {
@@ -716,6 +727,8 @@ run_job :: proc(d: ^Data, job: Job) -> (res: Result) {
 		res.payload = Artist_Result{content}
 	case Home_Job:
 		run_home(s, &res, alloc)
+	case Profile_Job:
+		run_profile(s, &res)
 	case Search_Job:
 		query := p.query
 		found, err := tidal.search(s, small_str(&query), {.Track, .Album, .Artist, .Playlist}, SEARCH_PAGE, 0, alloc)
@@ -884,6 +897,19 @@ liked_version :: proc(s: ^tidal.Session, alloc: mem.Allocator) -> (version: List
 		newest = tracks[0]
 	}
 	return
+}
+
+// run_profile reads the signed-in user's name, its first and last name or
+// else its username, and picture.
+@(private = "file")
+run_profile :: proc(s: ^tidal.Session, res: ^Result) {
+	u, err := tidal.user_me(s, context.temp_allocator)
+	if err != nil {
+		fail(res, err)
+		return
+	}
+	name := strings.trim_space(strings.join({u.first_name, u.last_name}, " ", context.temp_allocator))
+	res.payload = Profile_Result{small(name if name != "" else u.username), small(u.picture_id)}
 }
 
 // run_liked_ids reads every liked track's id and followed artist's in one

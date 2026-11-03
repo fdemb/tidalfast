@@ -403,8 +403,8 @@ history_button :: proc(id, name: string, enabled: bool) -> ui.Signal {
 }
 
 // draw_sidebar is the sidebar, h tall: the top row with the settings
-// button, Home, Search, the Your Library heading and the playlists under
-// them.
+// button, Home, Search, the Your Library heading, the playlists under
+// them and the user row at the bottom, above the player bar.
 draw_sidebar :: proc(s: ^State, h: f32) {
 	lib := &s.library
 	ui.set_next_background(PANEL)
@@ -437,20 +437,24 @@ draw_sidebar :: proc(s: ^State, h: f32) {
 		ui.accessible(heading, .Static_Text, heading.label)
 	}
 	ui.spacer(ui.px(SIDEBAR_LIST_TOP))
-	list_h := h - top - SIDEBAR_HEAD_H - SIDEBAR_LIST_TOP - LIST_PAD_Y
-	list := ui.scroll_view("playlists", ui.px(lib.sidebar_w), ui.px(list_h), inset_end = bar_inset(s))
-	list.pad.x = SIDEBAR_PAD
-	ui.accessible(list, .List, "Playlists")
+	list_h := h - top - SIDEBAR_HEAD_H - SIDEBAR_LIST_TOP - LIST_PAD_Y - USER_ROW_H - bar_inset(s)
 	{
-		rows := ui.virtual_rows(list, sidebar_count(s), PLAYLIST_ROW_H)
-		for i in rows.first ..< rows.last {
-			draw_playlist_row(s, i)
-			ui.spacer(ui.px(PLAYLIST_GAP))
+		list := ui.scroll_view("playlists", ui.px(lib.sidebar_w), ui.px(list_h))
+		list.pad.x = SIDEBAR_PAD
+		ui.accessible(list, .List, "Playlists")
+		{
+			rows := ui.virtual_rows(list, sidebar_count(s), PLAYLIST_ROW_H)
+			for i in rows.first ..< rows.last {
+				draw_playlist_row(s, i)
+				ui.spacer(ui.px(PLAYLIST_GAP))
+			}
+			sidebar_prefetch(s, rows.first - COVER_PREFETCH_ROWS, rows.first)
+			sidebar_prefetch(s, rows.last, rows.last + COVER_PREFETCH_ROWS)
 		}
-		sidebar_prefetch(s, rows.first - COVER_PREFETCH_ROWS, rows.first)
-		sidebar_prefetch(s, rows.last, rows.last + COVER_PREFETCH_ROWS)
+		ui.spacer(ui.px(LIST_PAD_Y))
 	}
 	ui.spacer(ui.px(LIST_PAD_Y))
+	draw_user_row(s)
 }
 
 // draw_playlist_row is sidebar entry i: its cover, name and number of
@@ -1449,6 +1453,7 @@ Pending :: union {
 	Play_Row,
 	Go_Back,
 	Go_Forward,
+	Log_Out,
 }
 
 Close_Search :: struct {}
@@ -1473,6 +1478,7 @@ Play_Row :: struct {
 
 Go_Back :: struct {}
 Go_Forward :: struct {}
+Log_Out :: struct {}
 
 // Play_Order is what Play and Shuffle on a page ask Play_Row for: the first
 // row with shuffle off, or a random row with it on. Keep plays index and
@@ -1603,6 +1609,8 @@ apply_pending :: proc(s: ^State) -> bool {
 		if !history_step(s, 1) {
 			return false
 		}
+	case Log_Out:
+		sign_out(s, "")
 	}
 	ui.data_changed()
 	return true

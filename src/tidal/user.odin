@@ -12,6 +12,12 @@ user_get :: proc(s: ^Session, user_id: i64, allocator := context.allocator) -> (
 	return parse_user(&p, obj), nil
 }
 
+// user_me fetches the logged in user.
+user_me :: proc(s: ^Session, allocator := context.allocator) -> (user: User, err: Error) {
+	uid := logged_in_user_id(s) or_return
+	return user_get(s, uid, allocator)
+}
+
 // user_image_url builds a profile picture URL. Valid sizes: 100, 210, 600.
 user_image_url :: proc(s: ^Session, u: User, size: int, allocator := context.allocator) -> (url: string, err: Error) {
 	switch size {

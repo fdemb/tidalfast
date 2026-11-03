@@ -135,6 +135,7 @@ Build :: struct {
 	inset_end:                 f32, // a scroll view's bottom under something drawn over it, see scroll_view
 	keep_in_window:            bool, // a floating box moved inside the window once its size is known, see fit_floating
 	flip_y:                    f32, // with keep_in_window, where its bottom goes when it doesn't fit below
+	above:                     bool, // with keep_in_window, its bottom goes at flip_y even when it fits below
 	id:                        string, // as given; must live until end_frame
 	label:                     string, // the part of id before "##"
 	using style:               Style,
@@ -307,6 +308,7 @@ State :: struct {
 	menu:           Key, // the open or closing context menu, 0 if none
 	menu_open:      bool,
 	menu_pos:       [2]f32,
+	menu_up:        bool, // the menu's bottom goes at menu_pos, see open_menu
 	menu_built:     bool,
 	menu_focus_new: bool, // the first menu item built takes the focus
 	menu_saved:     Key, // the focus before the menu opened, restored when it closes
@@ -1090,7 +1092,7 @@ fit_floating :: proc(u: ^State) {
 		}
 		pos := [2]f32{b.rect.x, b.rect.y}
 		pos.x = max(min(pos.x, u.width - b.rect.w - MARGIN), MARGIN)
-		if pos.y + b.rect.h > u.height - MARGIN {
+		if b.above || pos.y + b.rect.h > u.height - MARGIN {
 			pos.y = b.flip_y - b.rect.h
 		}
 		pos.y = max(pos.y, MARGIN)

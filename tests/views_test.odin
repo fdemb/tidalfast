@@ -85,17 +85,19 @@ expect_views_fit :: proc(t: ^testing.T, s: ^app.State, size: [2]f32, page: strin
 	bar_in_flow := !s.blur_reference && !s.bar_over_content
 	bottom := size.y - app.status_bar_h(s) - (app.PLAYER_BAR_H if bar_in_flow else 0)
 	found := 0
-	check :: proc(t: ^testing.T, b: ^ui.Box, bottom: f32, page: string, found: ^int, loc: runtime.Source_Code_Location) {
+	// The playlists stop above the user row, which stays clear of the bar.
+	sidebar_end := app.LIST_PAD_Y + app.USER_ROW_H + app.bar_inset(s)
+	check :: proc(t: ^testing.T, b: ^ui.Box, bottom, sidebar_end: f32, page: string, found: ^int, loc: runtime.Source_Code_Location) {
 		if .View_Scroll in b.flags && .Allow_Overflow_Y in b.flags {
 			found^ += 1
-			end := bottom - (app.LIST_PAD_Y if b.id == "playlists" else 0)
+			end := bottom - (sidebar_end if b.id == "playlists" else 0)
 			got := b.rect.y + b.rect.h
 			testing.expectf(t, abs(got - end) < 0.5, "%s: %q ends at %v, not %v", page, b.id, got, end, loc = loc)
 		}
 		for c := b.first; c != nil; c = c.next {
-			check(t, c, bottom, page, found, loc)
+			check(t, c, bottom, sidebar_end, page, found, loc)
 		}
 	}
-	check(t, s.ui.root, bottom, page, &found, loc)
+	check(t, s.ui.root, bottom, sidebar_end, page, &found, loc)
 	testing.expectf(t, found == want, "%s: %d views that scroll down, not %d", page, found, want, loc = loc)
 }

@@ -107,6 +107,7 @@ Data :: struct {
 	followed:       Followed_Set, // the followed artist ids the Follow buttons show, see followed.odin
 	artists:        Artist_Cache, // artist pages, see artist_data.odin
 	home:           Home, // the Home page's shelves, see home.odin
+	profile:        Profile, // the signed-in user's name and picture, see user_menu.odin
 	window_key:     bool, // the window had the keyboard last frame
 	// Debug builds and tests keep the last list freed (view_free) filled
 	// with POISON until the next one is, so a string or row still borrowed
@@ -425,9 +426,9 @@ drop_account_job :: proc(job: ^Job, _: rawptr) -> bool {
 	return true
 }
 
-// sign_out ends a login TIDAL no longer accepts. Results of jobs queued
-// before it are dropped when they arrive, so however many requests fail,
-// the login ends once and one new login starts. Queued jobs for the old
+// sign_out ends a login TIDAL no longer accepts, or one the user logs out
+// of. Results of jobs queued before it are dropped when they arrive, so
+// however many requests fail, the login ends once and one new login starts. Queued jobs for the old
 // login go, the ones in flight are cancelled (session_clear_auth), and the
 // disk thread deletes the Keychain item (lists_forget). Playback stops and
 // its queue goes.
@@ -464,6 +465,7 @@ account_end :: proc(s: ^State) {
 	followed_clear(d)
 	artist_clear(d)
 	home_clear(d)
+	d.profile = {}
 	view_close(d)
 	queued_drop(d)
 	lists_clear(d)
@@ -574,6 +576,8 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 		artist_result(d, res, p)
 	case Home_Job:
 		home_result(d, res, failed)
+	case Profile_Job:
+		profile_result(d, res, failed)
 	case Tracks_Job:
 		tracks_result(s, res, p)
 	case Stream_Job:

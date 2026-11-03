@@ -339,7 +339,8 @@ floating_end :: proc() {
 	pop_parent()
 }
 
-// Menus. One context menu is open at a time. open_menu opens it at pos;
+// Menus. One context menu is open at a time. open_menu opens it at pos,
+// or with up its bottom at pos, as for a button at the window's bottom;
 // menu builds it while it's open or fading out. A click outside it or
 // Escape closes it, and so does clicking an item. While it's open the
 // keyboard reaches nothing else. The focus is its highlighted item, which
@@ -347,7 +348,7 @@ floating_end :: proc() {
 // only when the keyboard opened the menu. Closing it puts the focus back
 // where it was.
 
-open_menu :: proc(id: string, pos: [2]f32) {
+open_menu :: proc(id: string, pos: [2]f32, up := false) {
 	u := ctx
 	if !u.menu_open {
 		u.menu_saved = u.focus
@@ -356,6 +357,7 @@ open_menu :: proc(id: string, pos: [2]f32) {
 	u.menu = key_from_string(0, id)
 	u.menu_open = true
 	u.menu_pos = pos
+	u.menu_up = up
 	u.menu_focus_new = u.key_click != 0
 	u.focus = 0
 }
@@ -415,9 +417,11 @@ menu :: proc(id: string, width: f32 = 220) -> bool {
 		floating_end()
 		return false
 	}
-	// Above pos if there's no room below.
-	b.fixed_pos = u.menu_pos + {0, (1 - b.open_t) * -6}
+	// Above pos if there's no room below, or if it opened up. It slides
+	// in from pos.
+	b.fixed_pos = u.menu_pos + {0, (1 - b.open_t) * (6 if u.menu_up else -6)}
 	b.keep_in_window = true
+	b.above = u.menu_up
 	b.flip_y = b.fixed_pos.y
 	b.opacity = b.open_t
 	push_parent(b)

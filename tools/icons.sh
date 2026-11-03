@@ -30,6 +30,9 @@ fill house e2c2
 bold magnifying-glass e30c
 fill magnifying-glass e30c
 bold gear e270
+bold caret-up-down e140
+bold sign-out e42a
+bold user e4c2
 "
 
 for weight in fill bold; do

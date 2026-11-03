@@ -22,7 +22,7 @@ import "core:time"
 @(private)
 same_request :: proc(held, job: Job) -> bool {
 	switch p in job.payload {
-	case Restore_Job, Login_Start_Job, Login_Wait_Job, Login_Pkce_Job, Playlists_Job, Liked_Ids_Job, Search_Job, Save_Settings_Job, Home_Job:
+	case Restore_Job, Login_Start_Job, Login_Wait_Job, Login_Pkce_Job, Playlists_Job, Liked_Ids_Job, Search_Job, Save_Settings_Job, Home_Job, Profile_Job:
 		return reflect.union_variant_typeid(held.payload) == reflect.union_variant_typeid(job.payload)
 	case Artwork_Job:
 		h, art := held.payload.(Artwork_Job)
@@ -48,7 +48,7 @@ held_evictable :: proc(job: Job) -> bool {
 	switch _ in job.payload {
 	case Stream_Job, Artwork_Job, Add_Track_Job, Artist_Job, Follow_Job:
 		return true
-	case Restore_Job, Login_Start_Job, Login_Wait_Job, Login_Pkce_Job, Playlists_Job, Tracks_Job, Search_Job, Save_Settings_Job, Liked_Ids_Job, Home_Job:
+	case Restore_Job, Login_Start_Job, Login_Wait_Job, Login_Pkce_Job, Playlists_Job, Tracks_Job, Search_Job, Save_Settings_Job, Liked_Ids_Job, Home_Job, Profile_Job:
 		return false
 	case Cover_Job, Launch_Log_Job, Disk_Job:
 		return false // never held
@@ -79,7 +79,7 @@ held_wanted :: proc(d: ^Data, job: Job) -> bool {
 	case Login_Pkce_Job:
 		_, exchanging := l.card.(Login_Exchanging)
 		return exchanging
-	case Playlists_Job, Home_Job:
+	case Playlists_Job, Home_Job, Profile_Job:
 		return d.account == .Signed_In
 	case Tracks_Job:
 		return track_view(d, p.view) != nil
@@ -124,6 +124,8 @@ held_drop :: proc(d: ^Data, job: ^Job) {
 		artist_job_dropped(d, p)
 	case Home_Job:
 		home_job_dropped(d)
+	case Profile_Job:
+		d.profile.loading = false
 	case Restore_Job, Login_Pkce_Job, Save_Settings_Job, Stream_Job, Artwork_Job, Search_Job:
 		// No flag waits on these.
 	case Tracks_Job:
@@ -141,7 +143,7 @@ job_free :: proc(job: ^Job) {
 	case Disk_Job:
 		delete(p.blob, runtime.heap_allocator())
 		p.blob = nil
-	case Restore_Job, Login_Start_Job, Login_Wait_Job, Login_Pkce_Job, Playlists_Job, Tracks_Job, Cover_Job, Stream_Job, Artwork_Job, Search_Job, Save_Settings_Job, Add_Track_Job, Liked_Ids_Job, Follow_Job, Launch_Log_Job, Artist_Job, Home_Job:
+	case Restore_Job, Login_Start_Job, Login_Wait_Job, Login_Pkce_Job, Playlists_Job, Tracks_Job, Cover_Job, Stream_Job, Artwork_Job, Search_Job, Save_Settings_Job, Add_Track_Job, Liked_Ids_Job, Follow_Job, Launch_Log_Job, Artist_Job, Home_Job, Profile_Job:
 	}
 }
 
@@ -152,7 +154,7 @@ for_account :: proc(job: Job) -> bool {
 	switch _ in job.payload {
 	case Cover_Job:
 		return false
-	case Restore_Job, Login_Start_Job, Login_Wait_Job, Login_Pkce_Job, Playlists_Job, Tracks_Job, Stream_Job, Artwork_Job, Search_Job, Save_Settings_Job, Disk_Job, Add_Track_Job, Liked_Ids_Job, Follow_Job, Launch_Log_Job, Artist_Job, Home_Job:
+	case Restore_Job, Login_Start_Job, Login_Wait_Job, Login_Pkce_Job, Playlists_Job, Tracks_Job, Stream_Job, Artwork_Job, Search_Job, Save_Settings_Job, Disk_Job, Add_Track_Job, Liked_Ids_Job, Follow_Job, Launch_Log_Job, Artist_Job, Home_Job, Profile_Job:
 		return true
 	}
 	return true
@@ -164,7 +166,7 @@ for_account :: proc(job: Job) -> bool {
 // means the user denied it.
 ends_login :: proc(job: Job) -> bool {
 	switch _ in job.payload {
-	case Restore_Job, Playlists_Job, Tracks_Job, Stream_Job, Search_Job, Add_Track_Job, Liked_Ids_Job, Follow_Job, Artist_Job, Home_Job:
+	case Restore_Job, Playlists_Job, Tracks_Job, Stream_Job, Search_Job, Add_Track_Job, Liked_Ids_Job, Follow_Job, Artist_Job, Home_Job, Profile_Job:
 		return true
 	case Login_Start_Job, Login_Wait_Job, Login_Pkce_Job:
 		return false
@@ -187,7 +189,7 @@ is_local :: proc(job: ^Job) -> bool {
 		return !p.image.remote
 	case Artwork_Job:
 		return !p.image.remote
-	case Restore_Job, Login_Start_Job, Login_Wait_Job, Login_Pkce_Job, Playlists_Job, Tracks_Job, Stream_Job, Search_Job, Add_Track_Job, Liked_Ids_Job, Follow_Job, Artist_Job, Home_Job:
+	case Restore_Job, Login_Start_Job, Login_Wait_Job, Login_Pkce_Job, Playlists_Job, Tracks_Job, Stream_Job, Search_Job, Add_Track_Job, Liked_Ids_Job, Follow_Job, Artist_Job, Home_Job, Profile_Job:
 		return false
 	}
 	return false
@@ -211,7 +213,7 @@ requeued :: proc(job: Job, res: Result) -> Job {
 			p.interval = wait.interval
 			p.not_before = time.tick_add(time.tick_now(), time.Duration(f64(p.interval) * f64(time.Second)))
 		}
-	case Restore_Job, Login_Start_Job, Login_Pkce_Job, Playlists_Job, Tracks_Job, Stream_Job, Search_Job, Save_Settings_Job, Disk_Job, Add_Track_Job, Liked_Ids_Job, Follow_Job, Launch_Log_Job, Artist_Job, Home_Job:
+	case Restore_Job, Login_Start_Job, Login_Pkce_Job, Playlists_Job, Tracks_Job, Stream_Job, Search_Job, Save_Settings_Job, Disk_Job, Add_Track_Job, Liked_Ids_Job, Follow_Job, Launch_Log_Job, Artist_Job, Home_Job, Profile_Job:
 	}
 	return job
 }
