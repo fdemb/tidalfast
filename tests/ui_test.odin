@@ -2,6 +2,7 @@ package tidal_tests
 
 import "core:fmt"
 import "core:log"
+import "core:math"
 import "core:testing"
 
 import app "../src/app"
@@ -450,6 +451,47 @@ test_ui_scroll :: proc(t: ^testing.T) {
 	}
 	testing.expect(t, !animating)
 	testing.expect_value(t, list.view_off.y, list.view_off_target.y)
+}
+
+// At a fractional scale a scroll moves content by whole pixels, so text,
+// which lands on a whole pixel row, keeps its place against the rects
+// around it. Moved by a fraction of a pixel it jumped a pixel against
+// them at some offsets.
+@(test)
+test_ui_scroll_whole_pixels :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	r: render.Renderer
+	r.scale = 1.6
+	// Enough for end_frame to push the list's clip, without a GPU.
+	r.clip_depth = 1
+	r.clips[0] = {-1e9, -1e9, 1e9, 1e9}
+	rows: [4]^ui.Box
+	list_frame :: proc(u: ^ui.State, r: ^render.Renderer, rows: ^[4]^ui.Box, time: f64, events: ..platform.Event) -> ^ui.Box {
+		ui.begin_frame(u, events, r, nil, 300, 200, time)
+		list := ui.box_make("list", {.View_Scroll, .Allow_Overflow_Y, .Clip}, ui.px(300), ui.px(200))
+		list.child_axis = .Y
+		ui.push_parent(list)
+		for &row, i in rows {
+			row = ui.box_make(fmt.tprintf("##row%d", i), {}, ui.fill(), ui.px(56))
+		}
+		ui.box_make("", {}, ui.fill(), ui.px(1000))
+		ui.pop_parent()
+		ui.end_frame()
+		return list
+	}
+	now := 0.0
+	list_frame(&u, &r, &rows, now)
+	for step in 0 ..< 20 {
+		now += 0.01
+		list := list_frame(&u, &r, &rows, now, {kind = .Scroll, x = 50, y = 50, dy = -0.37, precise = true, phase = .Changed})
+		testing.expect(t, list.view_off.y > 0)
+		for row, i in rows {
+			moved := (f32(i) * 56 - (row.rect.y - list.rect.y)) * r.scale
+			testing.expectf(t, abs(moved - math.round(moved)) < 1e-3, "step %d row %d moved %v px", step, i, moved)
+		}
+	}
 }
 
 @(private = "file")

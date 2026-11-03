@@ -1029,8 +1029,8 @@ end_frame :: proc() -> bool {
 			log.error("ui: a frame left a parent pushed, or popped one it didn't push")
 		}
 	}
-	layout(u.root, u.texts)
-	layout(u.floating_root, u.texts)
+	layout(u.root, u.texts, ui_scale(u))
+	layout(u.floating_root, u.texts, ui_scale(u))
 	fit_floating(u)
 	u.hit_count = 0
 	u.drag_count = 0
@@ -1178,7 +1178,7 @@ reveal_focus :: proc(u: ^State) {
 		if .View_Scroll not_in v.flags || v.key == 0 {
 			continue
 		}
-		pos := [2]f32{b.rect.x - v.rect.x, b.rect.y - v.rect.y} + v.view_off
+		pos := [2]f32{b.rect.x - v.rect.x, b.rect.y - v.rect.y} + view_offset(v)
 		size := [2]f32{b.rect.w, b.rect.h}
 		view := [2]f32{v.rect.w, v.rect.h}
 		for axis in 0 ..< 2 {
@@ -1301,6 +1301,18 @@ box_alloc :: proc(u: ^State, key: Key) -> ^Box {
 	// It has no rect to test input against until it's laid out.
 	u.animating = true
 	return b
+}
+
+// ui_scale is the display's pixels per point, or 0 without a renderer.
+ui_scale :: proc(u: ^State) -> f32 {
+	return u.renderer.scale if u.renderer != nil else 0
+}
+
+// view_offset is how far layout moves view's content: its scroll offset
+// on whole pixels. A box that stays put in a scroll view sits at it.
+view_offset :: proc(view: ^Box) -> [2]f32 {
+	s := ui_scale(ctx)
+	return {drawn_off(view, 0, s), drawn_off(view, 1, s)}
 }
 
 // approach eases v toward target by rate and snaps once it's within eps.

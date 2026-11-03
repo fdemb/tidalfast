@@ -33,11 +33,27 @@ import "../text"
 
 // layout lays out the tree under root. With texts it first shapes the
 // labels of boxes sized by their text, so it knows their sizes. Other
-// labels are shaped when drawn, if they're on screen.
-layout :: proc(root: ^Box, texts: ^text.State = nil) {
+// labels are shaped when drawn, if they're on screen. scale is the
+// display's pixels per point; above 0, scroll offsets move content by
+// whole pixels.
+layout :: proc(root: ^Box, texts: ^text.State = nil, scale: f32 = 0) {
 	sizes(root, texts)
 	root.rect = {root.fixed_pos.x, root.fixed_pos.y, root.fixed_size.x, root.fixed_size.y}
-	place(root)
+	place(root, scale)
+}
+
+// drawn_off is b's scroll offset on axis rounded to whole pixels at scale.
+// Text baselines and rect edges round to pixels separately, so content
+// moved by a fraction of a pixel shifts its text against its rects by a
+// pixel at some offsets, and rows a fractional number of pixels apart do
+// it at different offsets. Moved by whole pixels, every box rounds the
+// same way at every offset.
+@(private)
+drawn_off :: proc(b: ^Box, axis: int, scale: f32) -> f32 {
+	if scale <= 0 {
+		return b.view_off[axis]
+	}
+	return math.round(b.view_off[axis] * scale) / scale
 }
 
 @(private)
@@ -59,7 +75,7 @@ sizes :: proc(b: ^Box, texts: ^text.State) {
 }
 
 @(private)
-place :: proc(b: ^Box) {
+place :: proc(b: ^Box, scale: f32) {
 	if b.first == nil {
 		// What position would work out for a box without children.
 		b.view_bounds = {2 * b.pad.x, 2 * b.pad.y + b.inset_end}
@@ -67,10 +83,10 @@ place :: proc(b: ^Box) {
 	}
 	for axis in Axis {
 		solve_violations(b, axis)
-		position(b, axis)
+		position(b, axis, scale)
 	}
 	for c := b.first; c != nil; c = c.next {
-		place(c)
+		place(c, scale)
 	}
 }
 
@@ -192,7 +208,7 @@ solve_violations :: proc(b: ^Box, axis: Axis) {
 
 // position places b's children along axis and sets b's view_bounds.
 @(private)
-position :: proc(b: ^Box, axis: Axis) {
+position :: proc(b: ^Box, axis: Axis, scale: f32) {
 	at := b.pad[axis]
 	if .Center_Children in b.flags && axis == b.child_axis {
 		used: f32
@@ -205,6 +221,7 @@ position :: proc(b: ^Box, axis: Axis) {
 	}
 	bounds: f32
 	origin := b.rect.x if axis == .X else b.rect.y
+	off := drawn_off(b, int(axis), scale)
 	for c := b.first; c != nil; c = c.next {
 		if !floating_on(c, axis) {
 			c.fixed_pos[axis] = at
@@ -215,7 +232,7 @@ position :: proc(b: ^Box, axis: Axis) {
 				bounds = max(bounds, c.fixed_size[axis])
 			}
 		}
-		p := origin + c.fixed_pos[axis] - b.view_off[axis]
+		p := origin + c.fixed_pos[axis] - off
 		if axis == .X {
 			c.rect.x = p
 			c.rect.w = c.fixed_size.x

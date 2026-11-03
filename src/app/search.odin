@@ -371,6 +371,7 @@ search_shown :: proc(s: ^State) {
 	sr := &s.search
 	if at, ok := sr.place.?; ok {
 		s.history.at = at
+		s.history.restore = s.history.scroll[at]
 		sr.place = nil
 		return
 	}
@@ -734,6 +735,7 @@ draw_found_list :: proc(s: ^State, w, h: f32) {
 	head := search_list_header(nav_reserve(s))
 	top := head.hero + head.actions
 	list := ui.scroll_view("found", ui.px(w), ui.px(h), inset_end = bar_inset(s))
+	history_scroll(s, list)
 	if list.view_off.y < top {
 		draw_search_hero(s, head, list.view_off.y)
 	} else {

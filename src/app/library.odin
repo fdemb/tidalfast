@@ -630,6 +630,7 @@ draw_track_list :: proc(s: ^State, main_w, view_h: f32) {
 		lib.scrolled_gen = lib.list_gen
 		list.view_off.y, list.view_off_target.y = 0, 0
 	}
+	history_scroll(s, list)
 	if s.bench.running && s.bench.ui {
 		list.view_off.y = rows_top + bench_offset(s, view_h)
 		list.view_off_target.y = list.view_off.y
@@ -1636,6 +1637,7 @@ history_step :: proc(s: ^State, by: int) -> bool {
 	}
 	h.at = to
 	place_go(s, h.places[to])
+	h.restore = h.scroll[to]
 	return true
 }
 
@@ -1660,10 +1662,28 @@ place_go :: proc(s: ^State, place: Place) {
 HISTORY_MAX :: 50
 
 // History is the places visited, oldest first; at is the one showing.
+// scroll is how far down each place's view was when it was last shown,
+// and restore the offset Back or Forward wants on the next view built
+// (history_scroll).
 History :: struct {
-	places: [HISTORY_MAX]Place,
-	count:  int,
-	at:     int,
+	places:  [HISTORY_MAX]Place,
+	scroll:  [HISTORY_MAX]f32,
+	count:   int,
+	at:      int,
+	restore: Maybe(f32),
+}
+
+// history_scroll puts view, the main view's scroll view, where Back or
+// Forward left its place, on the first frame it shows again, and records
+// how far down it is for the next time. Call it right after the view is
+// made, before anything reads its offset.
+history_scroll :: proc(s: ^State, view: ^ui.Box) {
+	h := &s.history
+	if y, ok := h.restore.?; ok {
+		view.view_off.y, view.view_off_target.y = y, y
+		h.restore = nil
+	}
+	h.scroll[h.at] = view.view_off_target.y
 }
 
 // history_visit records p as the place showing next, dropping the places
@@ -1675,6 +1695,7 @@ history_visit :: proc(s: ^State, p: Place) {
 		h.places[0] = playlist_place(s, s.library.playlist)
 		h.count, h.at = 1, 0
 	}
+	h.restore = nil
 	p := p
 	if entry, ok := p.(Playlist_Place); ok {
 		p = playlist_place(s, entry.index)
@@ -1688,11 +1709,13 @@ history_visit :: proc(s: ^State, p: Place) {
 	if !was_search || !is_search {
 		if h.at == HISTORY_MAX - 1 {
 			copy(h.places[:], h.places[1:])
+			copy(h.scroll[:], h.scroll[1:])
 			h.at -= 1
 		}
 		h.at += 1
 	}
 	h.places[h.at] = p
+	h.scroll[h.at] = 0
 	h.count = h.at + 1
 }
 
