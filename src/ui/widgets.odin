@@ -262,7 +262,7 @@ scrollbar :: proc(view: ^Box) {
 	set_next_flags({})
 	size := build_size(view)
 	bar := box_make("###scrollbar", flags, px(SCROLLBAR_TRACK), px(size.y - view.inset_end))
-	bar.fixed_pos = {size.x - SCROLLBAR_TRACK, view.view_off.y}
+	bar.fixed_pos = {size.x - SCROLLBAR_TRACK, view_offset(view).y}
 	bar.opacity = view.bar_t
 	push_parent(bar)
 	defer pop_parent()

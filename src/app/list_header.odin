@@ -406,7 +406,7 @@ draw_pinned_header :: proc(s: ^State, list: ^ui.Box, h: List_Header, cols: Track
 		flags += {.Clickable, .Click_Shield}
 	}
 	pin := ui.column("pinned", flags, ui.fill(), ui.children_sum())
-	pin.fixed_pos = {0, list.view_off.y}
+	pin.fixed_pos = {0, ui.view_offset(list).y}
 	if h.bar > 0 {
 		ui.set_next_background({PANEL.r, PANEL.g, PANEL.b, c.bar})
 		ui.column("", {.Draw_Background}, ui.fill(), ui.px(h.bar))
