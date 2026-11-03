@@ -228,6 +228,7 @@ init :: proc(r: ^Renderer, surface: rawptr) -> (ok: bool) {
 		return false
 	}
 	vk.load_proc_addresses_device(g.device)
+	init_step(&r.init_steps, "render_device")
 	vk.GetDeviceQueue(g.device, g.queue_family, 0, &g.queue)
 	vk.GetPhysicalDeviceMemoryProperties(g.physical, &g.memory)
 	if !pick_format(g) || !make_render_pass(g) || !make_layouts(g) {

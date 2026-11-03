@@ -47,6 +47,7 @@ import "core:log"
 import "core:math"
 import "core:math/bits"
 import "core:os"
+import "core:time"
 
 FRAMES_IN_FLIGHT :: 3
 INITIAL_INSTANCES :: 4096
@@ -195,6 +196,24 @@ Renderer :: struct {
 	// Debug: when set, end_frame waits for the GPU and writes each frame to
 	// this path as a TGA. Set it before init.
 	capture_path:   string,
+	// When the slow steps of init finished, for the startup marks.
+	init_steps:     Init_Steps,
+}
+
+// Init_Steps are the wall-clock times, Unix nanoseconds, at which named
+// steps of an init finished. The app prints them as startup marks.
+Init_Steps :: struct {
+	names: [4]string,
+	times: [4]i64,
+	count: int,
+}
+
+init_step :: proc(steps: ^Init_Steps, name: string) {
+	if steps.count < len(steps.names) {
+		steps.names[steps.count] = name
+		steps.times[steps.count] = time.to_unix_nanoseconds(time.now())
+		steps.count += 1
+	}
 }
 
 // Gpu_Memory is the GPU memory the renderer allocates for itself, in bytes.

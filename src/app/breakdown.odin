@@ -96,10 +96,6 @@ Breakdown :: struct {
 	count: int,
 }
 
-measure_init_part :: proc(s: ^State, part: Init_Part) {
-	s.measure.init_offsets[part] = s.arena.offset
-}
-
 // breakdown_json writes the breakdown's fields, "footprint" and "items",
 // into sb.
 breakdown_json :: proc(s: ^State, sb: ^strings.Builder) {

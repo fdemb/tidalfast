@@ -217,6 +217,8 @@ State :: struct {
 	// Some glyph wasn't drawn this frame: the atlas was full (begin_frame
 	// resets it) or the raster budget ran out. Draw another frame.
 	needs_redraw:    bool,
+	// When the slow steps of init finished, for the startup marks.
+	init_steps:      render.Init_Steps,
 }
 
 // init loads the system font and the icons, allocates the caches from context.allocator,
@@ -247,6 +249,7 @@ init :: proc(t: ^State, wake: proc "c" () = nil) -> bool {
 		t.face_count += 1
 		t.loader.known[font] = {t.faces[font].name, t.faces[font].kb}
 	}
+	render.init_step(&t.init_steps, "text_fonts")
 	t.loader.known_count = len(Font)
 	t.loader.wake = wake
 	loader_start(&t.loader)

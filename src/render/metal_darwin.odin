@@ -307,6 +307,7 @@ build_pipelines :: proc(r: ^Renderer) -> (rect, down, up: id) {
 		return
 	}
 	defer release(library)
+	init_step(&r.init_steps, "render_shaders")
 	pixel_format := msg_proc(proc "c" (id, SEL) -> MTL.PixelFormat)(r.gpu.layer, sel_registerName("pixelFormat"))
 	// The rect fragment shader outputs premultiplied colour.
 	rect = build_pipeline(r, library, "rect_vertex", "rect_fragment", pixel_format, true)

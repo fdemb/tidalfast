@@ -295,6 +295,49 @@ measure_mark :: proc(s: ^State, mark: Mark) {
 	}
 }
 
+INIT_PART_MARKS := [Init_Part]string {
+	.Render   = "init_render",
+	.Text     = "init_text",
+	.Ui       = "init_ui",
+	.Library  = "init_library",
+	.Data     = "init_data",
+	.Rows     = "init_rows",
+	.Playback = "init_playback",
+	.Search   = "init_search",
+}
+
+// measure_init_part runs after each step of start. It keeps how far the
+// persistent arena got, for the memory breakdown, and prints when the step
+// and the slow parts inside it finished.
+measure_init_part :: proc(s: ^State, part: Init_Part) {
+	m := &s.measure
+	m.init_offsets[part] = s.arena.offset
+	if m.mode == .Off {
+		return
+	}
+	steps: ^render.Init_Steps
+	#partial switch part {
+	case .Render:
+		steps = &s.renderer.init_steps
+	case .Text:
+		steps = &s.text.init_steps
+	}
+	if steps != nil {
+		for i in 0 ..< steps.count {
+			measure_point(steps.names[i], f64(steps.times[i] - m.start_ns) / 1e6)
+		}
+	}
+	measure_point(INIT_PART_MARKS[part], measure_ms(m))
+}
+
+// measure_point prints a mark with its time alone, for the steps of start,
+// which come too close together for a memory reading each.
+@(private = "file")
+measure_point :: proc(name: string, ms: f64) {
+	buf: [128]u8
+	measure_write(fmt.bprintf(buf[:], `{{"mark":"%s","ms":%.1f}}`, name, ms))
+}
+
 // A sample also counts the mapped fonts' resident pages, which takes a few
 // milliseconds, so marks leave that out.
 measure_sample :: proc(s: ^State, name: string) {

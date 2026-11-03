@@ -888,6 +888,7 @@ static uint32_t scroll_phase(NSEventPhase phase) {
 - (CALayer *)makeBackingLayer {
   g_layer = [CAMetalLayer layer];
   g_layer.device = MTLCreateSystemDefaultDevice();
+  measure_mark("metal_device");
   // An sRGB format, so blending happens in linear space. See src/render.
   g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm_sRGB;
   g_layer.colorspace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
@@ -1455,6 +1456,7 @@ static void setup_blur_reference(void) {
                           NSWindowStyleMaskResizable | NSWindowStyleMaskFullSizeContentView
                   backing:NSBackingStoreBuffered
                     defer:NO];
+  measure_mark("ns_window");
   g_window.title = @"TIDALfast";
   // The app draws the titlebar: the view goes under it and only the window's
   // buttons stay.
@@ -1525,6 +1527,7 @@ static void setup_blur_reference(void) {
   g_wake_timer = CFRunLoopTimerCreate(NULL, CFAbsoluteTimeGetCurrent() + 1e9, 1e9, 0, 0, wake_timer_fired, NULL);
   CFRunLoopAddTimer(g_main_run_loop, g_wake_timer, kCFRunLoopCommonModes);
   [(Metal_View *)g_view update_drawable_size];
+  measure_mark("app_start");
   @autoreleasepool {
     app_init(&g_memory, &g_shell);
   }

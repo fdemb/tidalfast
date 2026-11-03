@@ -90,7 +90,14 @@ The startup marks, in order:
 | mark | what has happened |
 |---|---|
 | `main` | `shell_main` started: dyld has loaded the executable and its frameworks, and the Odin runtime has run its `@(init)` procedures |
-| `launched` | `applicationDidFinishLaunching`: AppKit is set up |
+| `launched` | `applicationDidFinishLaunching`: AppKit is set up. On Linux: connected to the Wayland compositor |
+| `ns_window` | macOS: the `NSWindow` is made |
+| `metal_device` | macOS: `MTLCreateSystemDefaultDevice` returned, in the view's `makeBackingLayer` |
+| `app_start` | the shell calls `app_init` |
+| `render_device` | Linux: the Vulkan instance and device are made |
+| `render_shaders` | macOS: `newLibraryWithSource` compiled the shaders |
+| `init_render` ... `init_search` | each step of the app's `start` returned, in order: render, text, ui, library, data, rows, playback, search |
+| `text_fonts` | inside the text step: the system font and the icon fonts are loaded, before the fallback faces |
 | `init` | the app's `init` returned: renderer, shaders, fonts, caches, workers |
 | `window` | the window is ordered front |
 | `first_frame` | the first frame is committed and its drawable presented |
@@ -98,6 +105,8 @@ The startup marks, in order:
 | `tracks` | the first frame with track rows and every cover on screen ready |
 
 "Presented" means the app called `presentDrawable` and committed. The frame reaches the display a vsync or two later.
+
+The shell's marks and the marks inside `init` carry only their time. The rest also carry the memory and the instruction counts. [Startup time](startup.md) uses these marks to compare macOS and Linux.
 
 Samples carry the same memory numbers as the marks plus the mapped fonts. The memory scenario takes one after each of these stages:
 

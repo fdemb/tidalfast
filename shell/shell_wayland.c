@@ -2069,6 +2069,7 @@ int shell_main(int argc, char **argv) {
       .set_accessibility = getenv("TIDALFAST_SHELL_TEST") ? set_accessibility : NULL,
   };
 
+  measure_mark("app_start");
   app_init(&g_memory, &g_shell);
   g_app_started = true;
   while (!g_configured && wl_display_dispatch(g_display) >= 0) {

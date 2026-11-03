@@ -56,9 +56,34 @@ Line :: struct {
 	drawable_wait_p95:  f64,
 }
 
-// The marks in the order they happen. The shell prints main, launched and
-// window; the app the rest.
-MARKS := [?]string{"main", "launched", "init", "window", "first_frame", "library", "tracks"}
+// The marks in the order they happen. The shell prints main, launched,
+// ns_window, metal_device, app_start and window; the app the rest. The
+// init_ marks end the steps of the app's start, and the render_ and text_
+// marks slow parts inside them. A mark only one OS has is left out on the
+// other.
+MARKS := [?]string {
+	"main",
+	"launched",
+	"ns_window",
+	"metal_device",
+	"app_start",
+	"render_device",
+	"render_shaders",
+	"init_render",
+	"text_fonts",
+	"init_text",
+	"init_ui",
+	"init_library",
+	"init_data",
+	"init_rows",
+	"init_playback",
+	"init_search",
+	"init",
+	"window",
+	"first_frame",
+	"library",
+	"tracks",
+}
 
 // The memory scenario's samples in order.
 STAGES := [?]string{"startup_idle", "list_open", "scrolled", "playing", "idle_after"}
@@ -368,7 +393,7 @@ setups :: proc(metrics: []Metric, scenario: string, allocator := context.temp_al
 write_tables :: proc(b: ^strings.Builder, r: ^Results) {
 	for setup in setups(r.metrics[:], "startup") {
 		fmt.sbprintfln(b, "startup, %s: ms since the process started; run 1, then median/min/max of the later runs", setup)
-		fmt.sbprintfln(b, "  %-12s %9s %9s %9s %9s", "mark", "run 1", "median", "min", "max")
+		fmt.sbprintfln(b, "  %-14s %9s %9s %9s %9s", "mark", "run 1", "median", "min", "max")
 		for mark in MARKS {
 			first, has_first := find_metric(r.metrics[:], "startup", setup, mark, "first")
 			median, has_median := find_metric(r.metrics[:], "startup", setup, mark, "median")
@@ -377,7 +402,7 @@ write_tables :: proc(b: ^strings.Builder, r: ^Results) {
 			}
 			lo, _ := find_metric(r.metrics[:], "startup", setup, mark, "min")
 			hi, _ := find_metric(r.metrics[:], "startup", setup, mark, "max")
-			fmt.sbprintfln(b, "  %-12s %9s %9s %9s %9s", mark, num(first, has_first), num(median, has_median), num(lo, has_median), num(hi, has_median))
+			fmt.sbprintfln(b, "  %-14s %9s %9s %9s %9s", mark, num(first, has_first), num(median, has_median), num(lo, has_median), num(hi, has_median))
 		}
 		fp, has := find_metric(r.metrics[:], "startup", setup, "memory", "footprint")
 		res, _ := find_metric(r.metrics[:], "startup", setup, "memory", "resident")
@@ -475,7 +500,7 @@ significant :: proc(unit: string, a, diff: f64) -> bool {
 // unit but fps, so a significant change is marked worse or better, if marks
 // is set.
 write_compare :: proc(sb: ^strings.Builder, deltas: []Delta, marks := true) {
-	fmt.sbprintfln(sb, "%-8s %-5s %-13s %-18s %10s %10s %10s %8s", "scenario", "setup", "row", "field", "a", "b", "delta", "change")
+	fmt.sbprintfln(sb, "%-8s %-5s %-14s %-18s %10s %10s %10s %8s", "scenario", "setup", "row", "field", "a", "b", "delta", "change")
 	for d in deltas {
 		diff := d.b - d.value
 		change := "-"
@@ -486,7 +511,7 @@ write_compare :: proc(sb: ^strings.Builder, deltas: []Delta, marks := true) {
 				flag = " worse" if (diff > 0) != (d.unit == "fps") else " better"
 			}
 		}
-		line := fmt.tprintf("%-8s %-5s %-13s %-18s %10s %10s %10s %8s %s%s", d.scenario, d.setup, d.row, d.field, num(d.value, true), num(d.b, true), fmt.tprintf("%+.1f", diff), change, d.unit, flag)
+		line := fmt.tprintf("%-8s %-5s %-14s %-18s %10s %10s %10s %8s %s%s", d.scenario, d.setup, d.row, d.field, num(d.value, true), num(d.b, true), fmt.tprintf("%+.1f", diff), change, d.unit, flag)
 		fmt.sbprintln(sb, strings.trim_right_space(line))
 	}
 }
@@ -629,12 +654,12 @@ paired_verdict :: proc(p: Paired) -> string {
 }
 
 write_paired :: proc(sb: ^strings.Builder, rows: []Paired) {
-	fmt.sbprintfln(sb, "%-5s %-12s %-16s %10s %10s %10s %8s  %-19s %-12s %5s", "setup", "mark", "field", "a", "b", "delta", "change", "middle half", "b higher", "p")
+	fmt.sbprintfln(sb, "%-5s %-14s %-16s %10s %10s %10s %8s  %-19s %-12s %5s", "setup", "mark", "field", "a", "b", "delta", "change", "middle half", "b higher", "p")
 	for p in rows {
 		change := fmt.tprintf("%+.1f%%", p.diff / p.a * 100) if p.a != 0 else "-"
 		half := fmt.tprintf("%+.1f to %+.1f", p.low, p.high)
 		higher := fmt.tprintf("%d of %d", p.higher, p.count)
-		line := fmt.tprintf("%-5s %-12s %-16s %10s %10s %10s %8s  %-19s %-12s %5s %s %s", p.setup, p.row, p.field,
+		line := fmt.tprintf("%-5s %-14s %-16s %10s %10s %10s %8s  %-19s %-12s %5s %s %s", p.setup, p.row, p.field,
 			fmt.tprintf("%.1f", p.a), fmt.tprintf("%.1f", p.b), fmt.tprintf("%+.1f", p.diff), change, half, higher,
 			fmt.tprintf("%.2f", sign_test(p.higher, p.lower)), p.unit, paired_verdict(p))
 		fmt.sbprintln(sb, strings.trim_right_space(line))
