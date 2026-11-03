@@ -161,6 +161,7 @@ draw_artist :: proc(s: ^State, p: ^List_Place, main_w, view_h: f32) {
 		return
 	}
 	view := ui.scroll_view(fmt.tprintf("artist##%d", page.id), ui.px(main_w), ui.px(view_h), inset_end = bar_inset(s))
+	history_scroll(s, view)
 	ui.accessible(view, .Group, small_str(&page.name))
 	nav_float(s, view.view_off.y)
 	draw_artist_hero(s, page, main_w, content_w)
