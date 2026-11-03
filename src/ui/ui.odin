@@ -93,6 +93,7 @@ Box_Flag :: enum u32 {
 	No_Focus_Ring, // shows the focus itself, as a table does with its selected row
 	Shrink_From_End, // children that don't fit give up room from the end, not in proportion: the one crossing the edge is cut short and those after it get none
 	Center_Children, // children sit in the middle of the room along the child axis, as between two fill() spacers, for a box that's only there to centre something
+	Draw_Glass, // a lens of glass tinted by background, lit while hot and swelling while pressed, see render.push_glass
 }
 Box_Flags :: bit_set[Box_Flag; u32]
 

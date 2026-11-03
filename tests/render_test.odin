@@ -125,3 +125,47 @@ backdrop_hash_follows_what_it_blurs :: proc(t: ^testing.T) {
 	testing.expect(t, frame(r, {0.2, 0.3, 0.41, 1}, 10) != h)
 	testing.expect(t, frame(r, {0.2, 0.3, 0.4, 1}, 10.5) != h)
 }
+
+// Glass inside the frame's backdrop bends the backdrop's blur, under the
+// backdrop's tint and saturation, and maps its rect into the blur's region.
+// Outside it, or with no backdrop, there's nothing to bend, so it samples
+// nothing. Either way it comes after the backdrop and doesn't change what
+// the backdrop blurs.
+@(test)
+glass_bends_the_backdrop_under_it :: proc(t: ^testing.T) {
+	if !render.BACKDROPS {
+		return
+	}
+	r := new(render.Renderer, context.temp_allocator)
+	instances := make([]render.Instance, 64, context.temp_allocator)
+	r.instances = raw_data(instances)
+	r.capacity[0] = len(instances)
+	r.scale = 2
+	r.width, r.height = 400, 300
+	r.clip_depth = 1
+	r.clips[0] = {-1e9, -1e9, 1e9, 1e9}
+	r.backdrop = {batch = -1}
+
+	render.push_glass(r, {10, 260, 36, 36}, 18, {tint = {1, 1, 1, 0.1}})
+	testing.expect_value(t, r.instances[0].flags, render.Instance_Flags{.Glass})
+
+	render.push_rect(r, {0, 200, 400, 100}, {0.2, 0.3, 0.4, 1})
+	tint := render.Color{0, 0, 0, 0.75}
+	render.push_backdrop(r, {0, 250, 400, 50}, 20, 1.8, tint)
+	h := r.backdrop.hash
+	render.push_glass(r, {182, 257, 36, 36}, 18, {tint = {1, 1, 1, 0.1}, refraction = 4, bevel = 8})
+	render.push_glass(r, {182, 230, 36, 36}, 18, {tint = {1, 1, 1, 0.1}})
+	testing.expect_value(t, r.backdrop.hash, h)
+
+	inside := r.instances[r.instance_count - 2]
+	testing.expect_value(t, inside.flags, render.Instance_Flags{.Glass, .Backdrop})
+	testing.expect_value(t, inside.colors[1], tint)
+	testing.expect_value(t, inside.extra, 1.8)
+	testing.expect_value(t, inside.colors[2].xy, [2]f32{8, 16})
+	// The region is the bar, 0 to 800 by 500 to 600 pixels, plus 40 pixels
+	// of reach above it, so 800 by 140 from y 460.
+	testing.expect_value(t, inside.src, [4]f32{364.0 / 800, 54.0 / 140, 436.0 / 800, 126.0 / 140})
+
+	above := r.instances[r.instance_count - 1]
+	testing.expect_value(t, above.flags, render.Instance_Flags{.Glass})
+}

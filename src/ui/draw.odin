@@ -38,6 +38,8 @@ draw_box :: proc(u: ^State, b: ^Box, alpha: f32) {
 	}
 	if .Draw_Backdrop in b.flags {
 		render.push_backdrop(r, rect, b.backdrop.blur, b.backdrop.saturation, fade(b.background, a), b.radius)
+	} else if .Draw_Glass in b.flags {
+		draw_glass(u, b, a)
 	} else if .Draw_Background in b.flags {
 		if b.gradient.a > 0 {
 			render.push_gradient(r, rect, fade(b.background, a), fade(b.gradient, a), false, b.radius)
@@ -75,6 +77,24 @@ draw_box :: proc(u: ^State, b: ^Box, alpha: f32) {
 	if .Clip in b.flags {
 		render.pop_clip(r)
 	}
+}
+
+// draw_glass draws b as glass. Pressed, it swells a little and a light
+// follows the pointer inside it, as a finger lights glass on iOS.
+@(private)
+draw_glass :: proc(u: ^State, b: ^Box, a: f32) {
+	grow := min(b.rect.w, b.rect.h) * 0.06 * b.active_t
+	rect := render.Rect{b.rect.x - grow, b.rect.y - grow, b.rect.w + 2 * grow, b.rect.h + 2 * grow}
+	tint := b.background
+	tint.a = (tint.a + 0.05 * b.hot_t + 0.04 * b.active_t) * a
+	render.push_glass(u.renderer, rect, b.radius + grow, {
+		tint = tint,
+		refraction = min(rect.w, rect.h) * 0.12,
+		bevel = min(rect.w, rect.h) * 0.22,
+		highlight = (0.6 + 0.4 * b.hot_t) * a,
+		glow = b.active_t * a,
+		glow_at = u.input.mouse,
+	})
 }
 
 // draw_label centres the label vertically and truncates it with an

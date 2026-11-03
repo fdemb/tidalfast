@@ -77,6 +77,7 @@ STATUS_BAR_H :: 22
 BAR_BLUR :: 20
 BAR_SATURATION :: 1.8
 BAR_TINT :: render.Color{PANEL.r, PANEL.g, PANEL.b, 0.75}
+PLAY_GLASS :: render.Color{1, 1, 1, 0.025} // the play button's tint
 TRACK_ROW_H :: 56
 PLAYLIST_ROW_H :: 50 // a playlist and the gap under it
 PLAYLIST_GAP :: 2
@@ -1168,9 +1169,9 @@ draw_player_bar :: proc(s: ^State, w, h: f32) {
 
 	{
 		ui.column("transport", {}, ui.fill(), ui.fill())
-		ui.spacer(ui.px(14))
+		ui.spacer(ui.px(10))
 		{
-			ui.row("", {}, ui.fill(), ui.px(36))
+			ui.row("", {}, ui.fill(), ui.px(PLAY_SIZE))
 			ui.text_align(.Center)
 			ui.radius(18)
 			ui.spacer(ui.fill())
@@ -1302,18 +1303,21 @@ draw_progress :: proc(s: ^State, position, duration: f64, active: bool) {
 	ui.box_make("", {.Draw_Background}, ui.pct(frac, 1), ui.fill())
 }
 
+PLAY_SIZE :: 44
+
+// play_button is a disc of glass over the player bar, with the icon in white.
 play_button :: proc(playing: bool) -> ui.Signal {
-	ui.text_style(.Icon_Fill, 18, PANEL)
+	ui.text_style(.Icon_Fill, 20, TEXT)
 	id := text.ICON_PAUSE + "###play" if playing else text.ICON_PLAY + "###play"
-	ui.set_next_background(TEXT)
-	ui.set_next_hover_color({1, 1, 1, 0.5})
-	ui.set_next_active_color({0, 0, 0, 0.15})
-	b := ui.box_make(id, {.Clickable, .Focusable, .Draw_Background, .Draw_Text, .Draw_Hot_Effects, .Draw_Active_Effects}, ui.px(36), ui.px(36))
+	ui.set_next_background(PLAY_GLASS)
+	ui.set_next_radius(PLAY_SIZE / 2)
+	b := ui.box_make(id, {.Clickable, .Focusable, .Draw_Glass, .Draw_Text}, ui.px(PLAY_SIZE), ui.px(PLAY_SIZE))
 	ui.accessible(b, .Button, "Pause" if playing else "Play")
 	return ui.signal(b)
 }
 
 skip_button :: proc(id: string, forward: bool) -> ui.Signal {
+	ui.column("", {.Center_Children}, ui.px(36), ui.fill()) // level with the taller play button
 	ui.text_style(.Icon_Fill, 18, SECONDARY)
 	icon := text.ICON_SKIP_FORWARD if forward else text.ICON_SKIP_BACK
 	b := ui.box_make(id, {.Clickable, .Focusable, .Draw_Text, .Draw_Hot_Effects, .Draw_Active_Effects}, ui.px(36), ui.px(36))
@@ -1324,6 +1328,7 @@ skip_button :: proc(id: string, forward: bool) -> ui.Signal {
 
 // toggle_button is a transport button lit while on.
 toggle_button :: proc(id, icon, name, value: string, on: bool) -> ui.Signal {
+	ui.column("", {.Center_Children}, ui.px(36), ui.fill()) // level with the taller play button
 	ui.text_style(.Icon, 18, ACCENT if on else SECONDARY)
 	b := ui.box_make(id, {.Clickable, .Focusable, .Draw_Text, .Draw_Hot_Effects, .Draw_Active_Effects}, ui.px(36), ui.px(36))
 	b.label = icon

@@ -106,6 +106,7 @@ Instance_Flag :: enum u32 {
 	// dst * (1 - extra) + colour: with extra 0 it adds the colour to what's
 	// under it, as plus-lighter does.
 	Additive,
+	Glass, // a lens of glass, see push_glass
 }
 Instance_Flags :: bit_set[Instance_Flag; u32]
 
@@ -119,7 +120,7 @@ Instance :: struct {
 	border:   f32,
 	softness: f32,
 	flags:    Instance_Flags,
-	extra:    f32, // Backdrop: the saturation. Additive: the alpha
+	extra:    f32, // Backdrop and Glass: the saturation. Additive: the alpha
 	clip:     [4]f32, // x0 y0 x1 y1
 }
 #assert(size_of(Instance) == 144)
@@ -524,6 +525,58 @@ push_backdrop :: proc(r: ^Renderer, rect: Rect, blur, saturation: f32, tint: Col
 	// a couple of pixels.
 	levels := clamp(int(math.round(math.log2(max(reach, 2) / 2))), 2, MAX_BLUR_LEVELS)
 	r.backdrop = {batch, region, levels, backdrop_hash(r, batch, region, levels)}
+}
+
+// Glass is how push_glass draws a lens. Lengths are in points.
+Glass :: struct {
+	tint:       Color, // over what the lens shows
+	refraction: f32, // how far in from outside the rim the lens pulls what's under it
+	bevel:      f32, // the width of the curved rim
+	highlight:  f32, // the strength of the light on the rim, about 0 to 1
+	glow:       f32, // the strength of a light under the pointer, 0 to 1
+	glow_at:    [2]f32, // where that light is
+}
+
+// push_glass draws a lens of glass with corners of radius over rect: what's
+// under it bends outward across its rim, as through the edge of a drop, a
+// little more for blue than for red, and the rim catches a light from the
+// top left. Inside this frame's backdrop it bends the backdrop's blur, with
+// the backdrop's tint over it. Anywhere else there's nothing to bend, and it
+// draws only its tint and light over what's under it. The GPU does all of
+// it in the instance's fragments.
+//
+// The instance's colours carry numbers for the Glass branch of the shader:
+// colors[0] is the tint, colors[1] the backdrop's tint, colors[2] the
+// refraction, bevel, highlight and glow, and colors[3] where the glow is,
+// its radius and the width of the rim's line, all in pixels.
+push_glass :: proc(r: ^Renderer, rect: Rect, radius: f32, glass: Glass) {
+	inst: Instance
+	inst.dst = snap(r, rect)
+	if inst.dst.x >= inst.dst.z || inst.dst.y >= inst.dst.w {
+		return
+	}
+	inst.flags = {.Glass}
+	for c in Corner {
+		inst.radii[c] = radius * r.scale
+	}
+	s := r.scale
+	inst.colors[0] = glass.tint
+	inst.colors[2] = {glass.refraction * s, max(glass.bevel * s, 1), glass.highlight, glass.glow}
+	inst.colors[3] = {glass.glow_at.x * s, glass.glow_at.y * s, max(rect.w, rect.h) * 0.5 * s, max(math.round(s), 1)}
+	if r.backdrop.batch >= 0 {
+		under := r.instances[r.batches[r.backdrop.batch].first]
+		region := r.backdrop.region
+		size := [2]f32{region.z - region.x, region.w - region.y}
+		d := inst.dst
+		if d.x >= under.dst.x && d.y >= under.dst.y && d.z <= under.dst.z && d.w <= under.dst.w {
+			inst.flags += {.Backdrop}
+			inst.src = {(d.x - region.x) / size.x, (d.y - region.y) / size.y, (d.z - region.x) / size.x, (d.w - region.y) / size.y}
+			inst.colors[1] = under.colors[0]
+			inst.extra = under.extra
+		}
+	}
+	inst.clip = r.clips[min(r.clip_depth, MAX_CLIP_DEPTH) - 1]
+	append_instance(r, inst, 0, 0)
 }
 
 // backdrop_hash hashes what a backdrop over region blurs: the instances in
