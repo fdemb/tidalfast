@@ -13,6 +13,12 @@ VULKAN_SURFACE_EXTENSION :: "VK_KHR_win32_surface"
 // when Vulkan fails on Linux, and says why in the log.
 @(private)
 vulkan_loader :: proc() -> rawptr {
+	// Overlay layers that games' launchers register (Steam, Epic, GOG,
+	// Fossilize) load into every Vulkan process and cost 26 MB here for
+	// nothing a music player uses. The user's own setting wins.
+	if win.GetEnvironmentVariableW(win.L("VK_LOADER_LAYERS_DISABLE"), nil, 0) == 0 {
+		win.SetEnvironmentVariableW(win.L("VK_LOADER_LAYERS_DISABLE"), win.L("~implicit~"))
+	}
 	lib := win.LoadLibraryW(win.L("vulkan-1.dll"))
 	if lib == nil {
 		log.error("render: no vulkan-1.dll; install the GPU's driver")
