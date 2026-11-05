@@ -620,16 +620,31 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
-// The test steps of this shell, on top of common.c's:
+// The test steps of this shell, on top of common.c's. The pointer and the
+// wheel go through the window procedure, as Windows' own messages do:
 //
 //   size=w,h            make the window's client area w by h points
-//   wheel=n             n wheel notches down, negative for up
+//   move=x,y            the pointer moves to x, y in points
+//   click=x,y           a left click at x, y in points
+//   wheel=n             n wheel notches down, negative for up, where the pointer is
 //   touchpad=dy         a precision touchpad scroll moving content up by dy points
 //   scrolled            print the scroll the app was sent: points from touchpads, lines from wheels
 //   snapshot            ask the app for a memory snapshot, as SIGUSR1 does elsewhere
 
 // app_take_snapshot is in src/app/snapshot_windows.odin.
 void app_take_snapshot(void);
+
+static LPARAM test_point(const char *arg) {
+  const char *comma = strchr(arg, ',');
+  int x = (int)lroundf((float)atof(arg) * g_scale), y = comma ? (int)lroundf((float)atof(comma + 1) * g_scale) : 0;
+  return MAKELPARAM(x, y);
+}
+
+static void test_wheel(int delta) {
+  POINT p = {(LONG)(g_mouse_x * g_scale), (LONG)(g_mouse_y * g_scale)};
+  ClientToScreen(g_window, &p);
+  SendMessageW(g_window, WM_MOUSEWHEEL, MAKEWPARAM(0, delta), MAKELPARAM(p.x, p.y));
+}
 
 bool os_test_step(const char *command, char *arg) {
   if (!strcmp(command, "size")) {
@@ -644,10 +659,19 @@ bool os_test_step(const char *command, char *arg) {
     AdjustWindowRectExForDpi(&r, (DWORD)GetWindowLongW(g_window, GWL_STYLE), FALSE, (DWORD)GetWindowLongW(g_window, GWL_EXSTYLE), dpi);
     SetWindowPos(g_window, NULL, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
     request_redraw();
+  } else if (!strcmp(command, "move")) {
+    SendMessageW(g_window, WM_MOUSEMOVE, 0, test_point(arg));
+  } else if (!strcmp(command, "click")) {
+    LPARAM at = test_point(arg);
+    SendMessageW(g_window, WM_MOUSEMOVE, 0, at);
+    SendMessageW(g_window, WM_LBUTTONDOWN, MK_LBUTTON, at);
+    SendMessageW(g_window, WM_LBUTTONUP, 0, at);
   } else if (!strcmp(command, "wheel")) {
-    wheel(-atoi(arg) * WHEEL_DELTA, false);
+    test_wheel(-atoi(arg) * WHEEL_DELTA);
   } else if (!strcmp(command, "touchpad")) {
-    wheel((int)lround(atof(arg) / 16.0 / 3.0 * -WHEEL_DELTA), false);
+    // Thirds of a notch, which is three lines of 16 points.
+    int thirds = (int)lround(atof(arg) / 16.0);
+    for (int i = 0; i < abs(thirds); i++) test_wheel(thirds < 0 ? WHEEL_DELTA / 3 : -WHEEL_DELTA / 3);
   } else if (!strcmp(command, "scrolled")) {
     fprintf(stderr, "shell: test: scrolled %.1f points, %.1f lines\n", g_test_scrolled_points, g_test_scrolled_lines);
   } else if (!strcmp(command, "snapshot")) {
@@ -761,6 +785,10 @@ static void main_loop(void) {
 }
 
 int shell_main(int argc, char **argv) {
+  // The CRT buffers stderr whole when it isn't a console, and the app
+  // leaves through ExitProcess, which doesn't flush it: a log sent to a
+  // file or a pipe would lose the shell's lines.
+  setvbuf(stderr, NULL, _IONBF, 0);
   QueryPerformanceFrequency(&g_qpc_frequency);
   measure_init();
   measure_mark("main");
