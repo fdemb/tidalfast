@@ -7,7 +7,6 @@ import "core:sys/unix"
 import "core:time"
 
 import "../render"
-import "../sys"
 
 foreign import libc "system:System"
 

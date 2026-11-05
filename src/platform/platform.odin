@@ -217,11 +217,19 @@ Wayland_Surface :: struct {
 }
 #assert(size_of(Wayland_Surface) == 16)
 
+// What Shell.surface points to on Windows: the module and the window, for
+// the renderer to make a Vulkan surface from. The shell owns both.
+Win32_Surface :: struct {
+	instance: rawptr, // HINSTANCE
+	window:   rawptr, // HWND
+}
+#assert(size_of(Win32_Surface) == 16)
+
 // What the shell gives the app. The surface and the procedures belong to
 // the shell and stay valid while the app runs, so the app may keep them.
 Shell :: struct {
 	// What the renderer draws to, set up by the shell: a CAMetalLayer with its
-	// device on macOS, a Wayland_Surface on Linux.
+	// device on macOS, a Wayland_Surface on Linux, a Win32_Surface on Windows.
 	surface:           rawptr,
 	// Safe from any thread. Wakes the main run loop and draws one frame.
 	request_redraw:  proc "c" (),
@@ -238,7 +246,7 @@ Shell :: struct {
 	set_accessibility: proc "c" (nodes: [^]Access_Node, count: u32),
 	// Where a press moves the window, as x, y, w, h in view points: the
 	// empty parts of the titlebar the view draws under. The shell copies
-	// them. nil on Linux.
+	// them. nil on Linux and Windows.
 	set_drag_regions:  proc "c" (rects: [^][4]f32, count: u32),
 }
 #assert(size_of(Shell) == 64)

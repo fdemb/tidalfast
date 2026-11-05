@@ -6,7 +6,6 @@ import "core:sys/posix"
 import "core:time"
 
 import "../render"
-import "../sys"
 
 foreign import libc "system:c"
 

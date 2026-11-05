@@ -25,6 +25,7 @@ platform_h_matches_platform_odin :: proc(t: ^testing.T) {
 		{"Text_Input", platform.Text_Input},
 		{"Access_Node", platform.Access_Node},
 		{"Wayland_Surface", platform.Wayland_Surface},
+		{"Win32_Surface", platform.Win32_Surface},
 		{"Shell", platform.Shell},
 		{"Frame_Input", platform.Frame_Input},
 		{"Frame_Result", platform.Frame_Result},
