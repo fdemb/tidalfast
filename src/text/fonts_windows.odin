@@ -2,9 +2,10 @@ package text
 
 // Fallback fonts on Windows: Segoe UI at the font's weight, then the first
 // font in WINDOWS_FALLBACKS, in the Windows fonts folder, whose cmap has
-// the character. They are fonts every Windows 10 and 11 install has, each
-// script's UI font in about the order Windows' own fallback tries them. A
-// font that isn't there is skipped. Segoe UI Emoji comes first for
+// the character. They are the UI fonts Windows 10 and 11 use for each
+// script, in about the order Windows' own fallback tries them; some come
+// in optional font packages, so a font that isn't there is skipped. Segoe
+// UI Emoji comes first for
 // characters drawn as emoji, but its colour layers (COLR) aren't drawn
 // yet: the emoji come out in black and white.
 //
