@@ -11,8 +11,9 @@
 // four bitmaps per glyph for the fractional x position.
 //
 // Characters the system font lacks go to a fallback font that CTFontCreateForString
-// picks on macOS and fontconfig on Linux (fonts_darwin.odin,
-// fonts_linux.odin). Its file is loaded into kb_text_shape too, so both
+// picks on macOS, fontconfig on Linux and a list of the system's fonts on
+// Windows (fonts_darwin.odin, fonts_linux.odin, fonts_windows.odin). Its
+// file is loaded into kb_text_shape too, so both
 // sides see the same glyph IDs. Fallbacks load on a worker thread
 // (loader.odin). Some macOS fonts (Geeza Pro for Arabic, Apple Color Emoji)
 // carry only Apple's morx shaping tables, which kb_text_shape can't read.

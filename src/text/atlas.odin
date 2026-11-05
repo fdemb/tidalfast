@@ -8,7 +8,7 @@ import stbrp "vendor:stb/rect_pack"
 import "../render"
 
 // Glyph bitmaps, rasterized by the OS (glyph_box and rasterize in
-// fonts_darwin.odin and fonts_linux.odin) at physical pixel sizes. Coverage
+// fonts_darwin.odin and fonts_freetype.odin) at physical pixel sizes. Coverage
 // goes into R8 pages, colour glyphs (emoji) into BGRA pages. A page starts
 // at a quarter of its full side and doubles when it fills, keeping what it
 // holds; a full-size page that fills gets a sibling. When the entries fill,

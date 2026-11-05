@@ -1,6 +1,6 @@
 # Working on TIDALfast
 
-TIDALfast is a native TIDAL client in Odin for macOS and Linux, with a small shell that owns the window: Obj-C on macOS (`shell/shell.m`), C on Wayland (`shell/shell_wayland.c`). Odin links the two into one executable, whose `main` in `src/app` hands the process to the shell. `docs/architecture.md` has the layout and the main decisions, and the other files in `docs/` have the details of every part. This file covers what an agent needs to check its own work, since you can't see the window or hear the audio.
+TIDALfast is a native TIDAL client in Odin for macOS and Linux, with a first Windows build, and a small shell that owns the window: Obj-C on macOS (`shell/shell.m`), C on Wayland (`shell/shell_wayland.c`) and Win32 (`shell/shell_win32.c`, with `shell/common.c` shared with Wayland). Odin links the two into one executable, whose `main` in `src/app` hands the process to the shell. `docs/architecture.md` has the layout and the main decisions, and the other files in `docs/` have the details of every part. This file covers what an agent needs to check its own work, since you can't see the window or hear the audio.
 
 ## Build and test
 
@@ -15,7 +15,7 @@ odin test tests         # run ./build.sh once first: it builds the C libraries
 
 Keep `./build.sh` clean with `-vet -strict-style`. `odin test tests` runs without `-strict-style`.
 
-Per-OS code lives in `_darwin.odin` and `_linux.odin` files. `odin check src/app -no-entry-point -vet -strict-style -target:darwin_arm64` (and `-target:linux_amd64`) type-checks the other OS's files without its SDK, so check both after touching shared code.
+Per-OS code lives in `_darwin.odin`, `_linux.odin` and `_windows.odin` files. Shared code doesn't import `core:sys/posix`; `src/sys` has threads, local time, the page size and file mappings for every OS. `odin check src/app -no-entry-point -vet -strict-style -target:darwin_arm64` (and `-target:linux_amd64`) type-checks the other OS's files without its SDK, so check both after touching shared code. For Windows, `odin check` refuses the target without an SDK, so build it: `WINDOWS_SDK=<xwin splat> ./build.sh windows` (`docs/windows.md`).
 
 Odin dev-2026-10 crashes the compiler on any Obj-C method call (`missing procedure 'objc_lookUpClass'`). Call Obj-C through `objc_msgSend` casts as `src/render` does, call C frameworks (CoreText, CoreAudio, Security) through hand-written foreign declarations, or put Obj-C-only code in `shell.m`.
 
@@ -34,6 +34,7 @@ The window is often covered or the screen locked, and real input may not reach i
 - **Profiling.** `TIDALFAST_SPALL=path` writes a spall trace. `sample <pid>` has hung in this environment before; timers inside the code worked when it did.
 - **Metal.** `MTL_DEBUG_LAYER=1 METAL_DEVICE_WRAPPER_TYPE=1` turns on validation.
 - **Linux without a display.** Run `weston --backend=headless` with its own `XDG_RUNTIME_DIR` and socket, and point the app at it with `WAYLAND_DISPLAY`. With a GPU, Weston needs `--renderer=gl`, or the Vulkan renderer finds no sRGB format and doesn't start. Without one, Mesa's lavapipe is a software Vulkan device. `size=w,h` in `TIDALFAST_SHELL_TEST` resizes the window, since nobody else will. On a desktop, run the app and the tests with throwaway `HOME`, `XDG_DATA_HOME`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `XDG_RUNTIME_DIR`, in their own `dbus-run-session`. A temp `HOME` alone isn't enough, because desktops set the XDG variables and a keyring daemon started for the tests then writes into the user's real keyrings. `docs/linux.md` has the commands.
+- **Windows without Windows.** `./build.sh windows` cross-builds `build/windows/tidalfast.exe` (`docs/windows.md`). Wine runs it, Hangover's Wine on ARM64 Linux, on an Xvfb with a Wine prefix of its own and `APPDATA` and `LOCALAPPDATA` pointed at a temp folder. Paths the app gets are Windows paths: `Z:\tmp\x.tga` for `/tmp/x.tga`. The shell test steps are the Linux ones, plus `move=x,y` and `click=x,y`, and `touchpad=dy` for a precision touchpad. Frame times under emulation mean nothing.
 
 ## Measuring RAM and startup
 
@@ -55,7 +56,7 @@ The app draws only on input, worker results or a running animation. After any ch
 
 ## Things that hurt the user
 
-- **Keychain.** Never read, write or delete the real item, service `tidalfast`, and never log in to real TIDAL. Against the mock, use `TIDALFAST_KEYCHAIN=tidalfast-<task>-<random>` and delete it afterwards with `security delete-generic-password -s <name>`, or `secret-tool clear service <name>` on Linux.
+- **Keychain.** Never read, write or delete the real item, service `tidalfast`, and never log in to real TIDAL. Against the mock, use `TIDALFAST_KEYCHAIN=tidalfast-<task>-<random>` and delete it afterwards with `security delete-generic-password -s <name>`, or `secret-tool clear service <name>` on Linux. On Windows the login is a generic credential named `<name>/auth` (and `<name>/auth#1` and on for a long one); under Wine it lives in the throwaway prefix.
 - **Processes.** The user may have the app running. Kill only processes you started, by PID, a headless Weston included. Never `pkill tidalfast`. Put throwaway builds outside `build/` (`-out:/tmp/...`), so the user's next launch doesn't pick them up.
 - **Audio devices.** Bit-perfect mode changes the output device's sample rate and format and skips the volume. On Linux it forces PipeWire's graph rate while it plays. Test it only with the mock's -60 dBFS tracks, never with the fake tones. Afterwards, check that the default output device is back at its old nominal rate and physical format (`build/audio_top -once`, see `docs/playback.md`), and restore it if not.
 - **Logs.** Never print tokens, Authorization headers, stream or CDN URLs, the pasted PKCE redirect or raw server text. Log error kinds, HTTP status and known codec names (`tidal.error_summary`).
