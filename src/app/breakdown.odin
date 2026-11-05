@@ -15,11 +15,11 @@ import "core:mem"
 import vmem "core:mem/virtual"
 import "core:strings"
 import "core:sync"
-import "core:sys/posix"
 
 import "../audio"
 import "../cover"
 import "../render"
+import "../sys"
 
 Mem_Group :: enum u8 {
 	Api,
@@ -299,13 +299,13 @@ pages_counted :: proc(ptr: rawptr, n: int) -> int {
 	if ptr == nil || n <= 0 {
 		return 0
 	}
-	page := uintptr(posix.sysconf(._PAGESIZE))
+	page := uintptr(sys.page_size())
 	end := uintptr(ptr) + uintptr(n)
 	vec: [1024]u8
 	total := 0
 	for at := mem.align_forward_uintptr(uintptr(ptr), page); at < end; {
 		pages := min(int((end - at + page - 1) / page), len(vec))
-		if mincore(rawptr(at), uint(pages) * uint(page), &vec[0]) == 0 {
+		if sys.page_flags(rawptr(at), vec[:pages]) {
 			for v in vec[:pages] {
 				total += int(page) if v & PAGE_COUNTS != 0 else 0
 			}
@@ -315,7 +315,3 @@ pages_counted :: proc(ptr: rawptr, n: int) -> int {
 	return total
 }
 
-// heap_bytes is what malloc gave for ptr, 0 for nil.
-heap_bytes :: proc(ptr: rawptr) -> int {
-	return int(malloc_size(ptr)) if ptr != nil else 0
-}

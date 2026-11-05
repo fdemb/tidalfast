@@ -15,13 +15,12 @@ package text
 import "core:c"
 import "core:hash"
 import "core:math"
-import "core:sys/posix"
 
 import "../../third_party/kbts"
+import "../sys"
 
 foreign import freetype "system:freetype"
 foreign import fontconfig "system:fontconfig"
-foreign import libc_mincore "system:c"
 
 // The loader never takes a font by reference on Linux, so this stays nil.
 Font_Ref :: rawptr
@@ -136,12 +135,6 @@ foreign fontconfig {
 	FcDefaultSubstitute :: proc(p: FcPattern) ---
 	FcFontSort :: proc(config: rawptr, p: FcPattern, trim: b32, csp: ^FcCharSet, result: ^c.int) -> ^FcFontSet ---
 	FcFontSetDestroy :: proc(s: ^FcFontSet) ---
-}
-
-@(default_calling_convention = "c")
-foreign libc_mincore {
-	@(private)
-	mincore :: proc(addr: rawptr, length: uint, vec: [^]u8) -> i32 ---
 }
 
 // Face_Native is a face's FreeType side, made on the UI thread by
@@ -345,13 +338,13 @@ known_or_load :: proc(l: ^Loader, path: cstring, index: int, need: rune, res: ^L
 	if l.known_count == MAX_FACES {
 		return false
 	}
-	data, ok := map_file(path)
+	data, ok := sys.map_file(path)
 	if !ok {
 		return false
 	}
 	face: Face
 	if !load_face(&face, nil, data, index, true, need) {
-		posix.munmap(raw_data(data), uint(len(data)))
+		sys.unmap_file(data)
 		return false
 	}
 	face.name = name

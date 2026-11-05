@@ -23,11 +23,11 @@ import "core:log"
 import "core:strconv"
 import "core:strings"
 import "core:sync"
-import "core:sys/posix"
 import "core:time"
 import curl "vendor:curl"
 
 import "../cacert"
+import "../sys"
 
 STREAM_WINDOW :: 3 << 20 // bytes kept per track, about 17 s of 16/44.1 FLAC, 5 s of 24/192
 KEEP_BEHIND :: 256 << 10 // bytes kept before the read position, for short seeks back
@@ -55,7 +55,7 @@ Stream :: struct {
 	error:       [96]u8,
 	stop:        bool,
 	wake:        ^Wake, // the decode thread's, posted when bytes arrive
-	thread:      posix.pthread_t,
+	thread:      sys.Thread,
 	running:     bool, // thread started
 	// Header and seek data, filled by the decode thread once it has read them.
 	header:      Flac_Header,
@@ -73,7 +73,7 @@ stream_init :: proc(st: ^Stream, wake: ^Wake, window := STREAM_WINDOW) {
 	st.wake = wake
 	st.length = -1
 	st.logger = context.logger
-	if posix.pthread_create(&st.thread, nil, fetch_main, st) == .NONE {
+	if sys.thread_start(&st.thread, fetch_main, st) {
 		st.running = true
 	} else {
 		log.error("audio: couldn't start a fetch thread, so its tracks don't download")
@@ -87,7 +87,7 @@ stream_destroy :: proc(st: ^Stream) {
 	sync.cond_broadcast(&st.cond)
 	sync.unlock(&st.mutex)
 	if st.running {
-		posix.pthread_join(st.thread)
+		sys.thread_join(st.thread)
 	}
 	stream_clear(st)
 	vmem.release(raw_data(st.buf), uint(len(st.buf)))

@@ -14,7 +14,6 @@ import vmem "core:mem/virtual"
 import "core:os"
 import "core:strings"
 import "core:sync"
-import "core:sys/posix"
 import "core:time"
 
 import "../cover"
@@ -22,6 +21,7 @@ import "../jobs"
 import "../os_services"
 import "../platform"
 import "../render"
+import "../sys"
 import "../tidal"
 import "../ui"
 
@@ -67,7 +67,7 @@ Data :: struct {
 	wake:           proc "c" (), // the shell's request_redraw
 	queue:          jobs.Queue(Job, JOB_QUEUE),
 	results:        jobs.Queue(Result, RESULT_QUEUE),
-	threads:        [WORKERS]posix.pthread_t,
+	threads:        [WORKERS]sys.Thread,
 	thread_count:   int, // of threads, those started
 	worker_temps:   [WORKERS]Worker_Temp,
 	worker_count:   int, // workers started, which picks each one's worker_temps (atomic)

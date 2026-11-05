@@ -18,9 +18,9 @@ import "core:fmt"
 import "core:mem"
 import vmem "core:mem/virtual"
 import "core:strings"
-import "core:sys/posix"
 import "core:time"
 
+import "../sys"
 import "../text"
 import "../tidal"
 import "../ui"
@@ -249,10 +249,8 @@ draw_home :: proc(s: ^State, main_w, view_h: f32) {
 // greeting says good morning, afternoon or evening by the local time.
 @(private = "file")
 greeting :: proc() -> string {
-	now := posix.time(nil)
-	local: posix.tm
-	posix.localtime_r(&now, &local)
-	switch local.tm_hour {
+	local, _ := sys.local_time(time.to_unix_seconds(time.now()))
+	switch local.hour {
 	case 5 ..< 12:
 		return "Good morning"
 	case 12 ..< 18:

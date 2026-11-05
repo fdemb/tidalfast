@@ -7,6 +7,7 @@ import "core:sys/unix"
 import "core:time"
 
 import "../render"
+import "../sys"
 
 foreign import libc "system:System"
 
@@ -16,7 +17,7 @@ foreign libc {
 	// Through libc rather than intrinsics.syscall, whose registers an
 	// optimized build trusts across the call: that crashed.
 	syscall :: proc(number: i32, #c_vararg args: ..any) -> i32 ---
-	mincore :: proc(addr: rawptr, length: uint, vec: [^]u8) -> i32 ---
+	@(private = "file")
 	malloc_size :: proc(ptr: rawptr) -> uint ---
 	mach_vm_region_recurse :: proc(task: darwin.task_t, address: ^u64, size: ^u64, depth: ^u32, info: rawptr, count: ^u32) -> darwin.Kern_Return ---
 }
@@ -172,4 +173,10 @@ os_memory :: proc(r: ^render.Renderer) -> Os_Memory {
 		om.pools[.Other] += part.bytes
 	}
 	return om
+}
+
+
+// heap_bytes is what malloc gave for ptr, 0 for nil.
+heap_bytes :: proc(ptr: rawptr) -> int {
+	return int(malloc_size(ptr)) if ptr != nil else 0
 }

@@ -48,11 +48,13 @@ import "core:mem"
 import vmem "core:mem/virtual"
 import "core:slice"
 import "core:strings"
+import "core:os"
 import "core:sync"
-import "core:sys/posix"
 import "core:time"
 import drflac "../../third_party/dr_flac"
 import ma "../../third_party/miniaudio"
+
+import "../sys"
 
 RING_FRAMES :: 1 << 17 // about 3 s at 44.1 kHz
 CHUNK :: 4096 // frames decoded per step
@@ -261,7 +263,7 @@ Player :: struct {
 	arena:           vmem.Arena, // the Player and the buffers that live as long as it
 	wake_ui:         proc "c" (),
 	logger:          runtime.Logger, // the creator's, for the decode thread
-	thread:          posix.pthread_t,
+	thread:          sys.Thread,
 	running:         bool, // thread started
 	cmd_mutex:       sync.Mutex,
 	cmd:             Commands,
@@ -302,7 +304,7 @@ Player :: struct {
 	ui_mark:         u64,
 	seek_tick:       u64, // clock_ticks of the last seek command
 	seek_logged:     u32,
-	capture_fd:      posix.FD,
+	capture_file:    ^os.File, // nil without TIDALFAST_AUDIO_CAPTURE
 	capture_frames:  i64,
 	capture_rate:    int,
 	capture_ch:      int,
@@ -350,7 +352,6 @@ create :: proc(wake_ui: proc "c" (), volume: f32, capture_path := "", window := 
 	p.logger = context.logger
 	p.null_output = null_output
 	p.output = output
-	p.capture_fd = -1
 	set_volume(p, volume)
 	// Pages nobody writes cost nothing, so these are as big as they can need.
 	p.scratch = make([]f32, CHUNK * MAX_CHANNELS, a)
@@ -362,8 +363,8 @@ create :: proc(wake_ui: proc "c" (), volume: f32, capture_path := "", window := 
 		watch_default_output(p.watch)
 	}
 	if capture_path != "" {
-		p.capture_fd = posix.open(strings.clone_to_cstring(capture_path, context.temp_allocator), {.WRONLY, .CREAT, .TRUNC}, {.IRUSR, .IWUSR, .IRGRP, .IROTH})
-		if p.capture_fd >= 0 {
+		if f, err := os.open(capture_path, {.Write, .Create, .Trunc}, os.Permissions_Default_File); err == nil {
+			p.capture_file = f
 			cap_data := make([]f32, CAPTURE_FRAMES * MAX_CHANNELS, a)
 			ring_init(&p.capture, cap_data, CAPTURE_FRAMES, 2)
 			log.info("audio: capturing output to", capture_path)
@@ -377,7 +378,7 @@ create :: proc(wake_ui: proc "c" (), volume: f32, capture_path := "", window := 
 		sl.dash.box = make([]u8, MP4_MAX_BOX, a)
 		stream_init(&sl.stream, &p.watch.wake, max(window, 64 << 10))
 	}
-	if posix.pthread_create(&p.thread, nil, decode_main, p) == .NONE {
+	if sys.thread_start(&p.thread, decode_main, p) {
 		p.running = true
 	} else {
 		log.error("audio: couldn't start the decode thread, so nothing plays")
@@ -397,7 +398,7 @@ destroy :: proc(p: ^Player) {
 	sync.atomic_store(&p.cmd_pending, true)
 	wake_post(&p.watch.wake)
 	if p.running {
-		posix.pthread_join(p.thread)
+		sys.thread_join(p.thread)
 	}
 	if !p.null_output {
 		unwatch_default_output(p.watch)
@@ -2032,19 +2033,19 @@ after_render :: proc "contextless" (p: ^Player, out: [^]f32, frame_count, n: u64
 
 @(private = "file")
 capture_begin :: proc(p: ^Player, rate, channels: int) {
-	if p.capture_fd < 0 || p.capture_rate != 0 {
+	if p.capture_file == nil || p.capture_rate != 0 {
 		return
 	}
 	p.capture_rate = rate
 	p.capture_ch = channels
 	p.capture.channels = channels
 	header := wav_header(rate, channels, 0)
-	posix.write(p.capture_fd, raw_data(header[:]), len(header))
+	os.write(p.capture_file, header[:])
 }
 
 @(private = "file")
 capture_drain :: proc(p: ^Player) {
-	if p.capture_fd < 0 || p.capture_rate == 0 {
+	if p.capture_file == nil || p.capture_rate == 0 {
 		return
 	}
 	buf: [CHUNK * 2]f32
@@ -2054,24 +2055,23 @@ capture_drain :: proc(p: ^Player) {
 		if n == 0 {
 			break
 		}
-		posix.write(p.capture_fd, ([^]u8)(raw_data(buf[:])), uint(n) * uint(p.capture_ch) * size_of(f32))
+		os.write(p.capture_file, ([^]u8)(raw_data(buf[:]))[:int(n) * p.capture_ch * size_of(f32)])
 		p.capture_frames += i64(n)
 	}
 }
 
 @(private = "file")
 capture_close :: proc(p: ^Player) {
-	if p.capture_fd < 0 {
+	if p.capture_file == nil {
 		return
 	}
 	capture_drain(p)
 	if p.capture_rate != 0 {
 		header := wav_header(p.capture_rate, p.capture_ch, p.capture_frames)
-		posix.lseek(p.capture_fd, 0, .SET)
-		posix.write(p.capture_fd, raw_data(header[:]), len(header))
+		os.write_at(p.capture_file, header[:], 0)
 	}
-	posix.close(p.capture_fd)
-	p.capture_fd = -1
+	os.close(p.capture_file)
+	p.capture_file = nil
 }
 
 // wav_header is a 44-byte header for IEEE float samples.

@@ -11,7 +11,6 @@ import "core:mem"
 import "core:os"
 import "core:prof/spall"
 import "core:sync"
-import "core:sys/posix"
 import "core:time"
 
 import "../platform"
@@ -92,7 +91,7 @@ app_shutdown :: proc "c" (m: ^platform.Memory) {
 	context = app_context(s)
 	if s.profiling {
 		spall.buffer_destroy(&s.spall_ctx, &s.spall_buf)
-		posix.close(posix.FD(s.spall_ctx.fd))
+		spall.context_destroy(&s.spall_ctx)
 	}
 	measure_stop(s)
 	workers_stop(&s.data)
