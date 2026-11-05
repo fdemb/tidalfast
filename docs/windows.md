@@ -58,7 +58,7 @@ Under emulation the frame times say nothing about real hardware: the CPU is emul
 
 ## Not done yet
 
-- A build on Windows itself (a `build.bat`, or `build.sh` in Git Bash with MSVC on `PATH`), and a CI job. `odin test tests` doesn't build for Windows from another system yet, since `odin test` takes no `-windows-sdk-root`.
+- A CI job, and a run of `build.bat` on a real Windows machine. `build.bat` (`release`, `libs`, `dist`) builds on Windows itself from an x64 Native Tools Command Prompt with Odin and `glslangValidator` on `PATH`, using MSVC's `cl`, `lib` and `rc`, but hasn't been run there yet. `odin test tests` doesn't build for Windows from another system yet, since `odin test` takes no `-windows-sdk-root`.
 - Packaging: an installer or a zip with the executable, and code signing. `./build.sh windows dist` writes only `build/dist/tidalfast.exe`. `./build.sh windows measure` refuses: `tools/measure` drives only Linux and macOS builds.
 - WASAPI exclusive mode for bit-perfect output.
 - The System Media Transport Controls, for media keys from anywhere and Now Playing.
