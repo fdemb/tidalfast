@@ -1,6 +1,7 @@
 #+build linux, darwin
 package sys
 
+import "core:os"
 import "core:sys/posix"
 
 when ODIN_OS == .Darwin {
@@ -79,6 +80,11 @@ page_flags :: proc "contextless" (start: rawptr, flags: []u8) -> bool {
 
 unmap_file :: proc(data: []byte) {
 	posix.munmap(raw_data(data), uint(len(data)))
+}
+
+// replace_file renames from over to in one step. False if it couldn't.
+replace_file :: proc(from, to: string) -> bool {
+	return os.rename(from, to) == nil
 }
 
 // write_stderr writes b with one call, so lines written from different

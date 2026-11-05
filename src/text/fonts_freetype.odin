@@ -113,6 +113,7 @@ FT_GLYPH_FORMAT_OUTLINE :: 0x6f75_746c // 'outl'
 FT_GLYPH_FORMAT_BITMAP :: 0x6269_7473 // 'bits'
 FT_PIXEL_MODE_GRAY :: 2
 FT_PIXEL_MODE_BGRA :: 7
+FT_RENDER_MODE_NORMAL :: 0
 
 @(default_calling_convention = "c")
 foreign freetype {
@@ -126,6 +127,7 @@ foreign freetype {
 	FT_Get_Advance :: proc(face: ^FT_FaceRec, glyph_index: c.uint, load_flags: i32, advance: ^c.long) -> FT_Error ---
 	FT_Outline_Get_CBox :: proc(outline: ^FT_Outline, box: ^FT_BBox) ---
 	FT_Outline_Translate :: proc(outline: ^FT_Outline, dx, dy: c.long) ---
+	FT_Render_Glyph :: proc(slot: ^FT_GlyphSlotRec, render_mode: c.int) -> FT_Error ---
 	FT_Outline_Get_Bitmap :: proc(library: FT_Library, outline: ^FT_Outline, bitmap: ^FT_Bitmap) -> FT_Error ---
 }
 
@@ -135,6 +137,7 @@ Face_Native :: struct {
 	index:     int, // in a collection, with a variable font's named instance in the high bits
 	ft:        ^FT_FaceRec,
 	ft_failed: bool,
+	colr:      bool, // colour from COLR layers, which FreeType renders to BGRA at the size asked for
 	ft_size:   f32, // the pixel size last set on ft
 }
 
@@ -251,7 +254,9 @@ face_native_init :: proc(face: ^Face, ct: Font_Ref, index: int) -> bool {
 		if face.color && font_table(face.file, index, "glyf") == nil && font_table(face.file, index, "CFF ") == nil {
 			return false
 		}
-		face.color = false
+		// Segoe UI Emoji's colour is COLR layers over its outlines.
+		face.colr = font_table(face.file, index, "COLR") != nil && font_table(face.file, index, "CPAL") != nil
+		face.color = face.colr
 	}
 	return true
 }
@@ -383,7 +388,15 @@ load_glyph :: proc(a: ^Atlas, face: ^Face, px_size: f32, glyph: u16) -> (slot: ^
 		face.ft_size = px_size
 	}
 	flags: i32 = FT_LOAD_COLOR if strike_ppem > 0 else FT_LOAD_NO_HINTING | FT_LOAD_NO_BITMAP
+	if face.colr {
+		flags = FT_LOAD_COLOR | FT_LOAD_NO_HINTING | FT_LOAD_NO_BITMAP
+	}
 	if FT_Load_Glyph(ft, c.uint(glyph), flags) != 0 {
+		return
+	}
+	// FreeType blends the layers in the default palette into a BGRA bitmap
+	// at px_size, which rasterize then places like a strike's at scale 1.
+	if face.colr && FT_Render_Glyph(ft.glyph, FT_RENDER_MODE_NORMAL) != 0 {
 		return
 	}
 	r.loaded_face, r.loaded_id, r.loaded_size = ft, glyph, px_size

@@ -133,9 +133,9 @@ main :: proc() {
 	if cfg.app == "" {
 		// The measure build reads TIDALFAST_API; a release build doesn't. The
 		// real account's Keychain item belongs to build/tidalfast.
-		cfg.app = join(cfg.root, "build", "tidalfast") if cfg.real else join(cfg.out_dir, "app", "tidalfast")
+		cfg.app = join(cfg.root, "build", "tidalfast" + EXE_SUFFIX) if cfg.real else join(cfg.out_dir, "app", "tidalfast" + EXE_SUFFIX)
 	}
-	cfg.mock = join(cfg.out_dir, "mock_tidal")
+	cfg.mock = join(cfg.out_dir, "mock_tidal" + EXE_SUFFIX)
 	if !os.exists(cfg.app) {
 		fmt.eprintfln("measure: no app at %s; run ./build.sh measure (or ./build.sh release for -real)", cfg.app)
 		os.exit(1)
@@ -158,7 +158,7 @@ main :: proc() {
 		machine = machine(),
 		app     = strings.trim_prefix(cfg.app, strings.concatenate({cfg.root, "/"})),
 	}
-	fmt.printfln("%s, %s, macOS %s (%s), %.0f GB", results.machine.model, results.machine.cpu, results.machine.os, results.machine.os_build, results.machine.memory_gb)
+	fmt.printfln("%s, %s, %s%s (%s), %.0f GB", results.machine.model, results.machine.cpu, OS_LABEL, results.machine.os, results.machine.os_build, results.machine.memory_gb)
 	fmt.printfln("app %s, logs in %s\n", cfg.app, cfg.log_dir)
 
 	has_mock := false

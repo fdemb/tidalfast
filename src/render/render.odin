@@ -49,6 +49,8 @@ import "core:math/bits"
 import "core:os"
 import "core:time"
 
+import "../sys"
+
 FRAMES_IN_FLIGHT :: 3
 INITIAL_INSTANCES :: 4096
 MAX_BATCHES :: 4096
@@ -738,5 +740,5 @@ write_tga :: proc(path: string, pixels: []byte, w, h: uint) {
 	os.write(f, header[:])
 	os.write(f, pixels)
 	os.close(f)
-	os.rename(tmp, path)
+	sys.replace_file(tmp, path)
 }

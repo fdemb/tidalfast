@@ -226,6 +226,27 @@ hal_fill :: proc "contextless" (list: ^Audio_Buffer_List, ring: ^Pcm_Ring, scrat
 	return
 }
 
+// float_to_pcm writes samples interleaved floats from src to dst as
+// little-endian signed integers of bytes (2, 3 or 4) each. The decoder's
+// floats are its integers over 2^31, so for a source of up to 24 bits the
+// float times 2^31 is the integer again, shifted up, and a device at least
+// as deep gets the samples unchanged. Out-of-range values clip.
+float_to_pcm :: proc "contextless" (src: [^]f32, dst: [^]u8, samples: int, bytes: int) {
+	for i in 0 ..< samples {
+		v := clamp(f64(src[i]) * 2147483648.0, -2147483648.0, 2147483647.0)
+		s := u32(i32(v))
+		at := i * bytes
+		switch bytes {
+		case 2:
+			dst[at], dst[at + 1] = u8(s >> 16), u8(s >> 24)
+		case 3:
+			dst[at], dst[at + 1], dst[at + 2] = u8(s >> 8), u8(s >> 16), u8(s >> 24)
+		case 4:
+			dst[at], dst[at + 1], dst[at + 2], dst[at + 3] = u8(s), u8(s >> 8), u8(s >> 16), u8(s >> 24)
+		}
+	}
+}
+
 // device_taken_reason is the Output menu's line for a device another app
 // set to rate while this one played to it.
 device_taken_reason :: proc(rate: int) -> string {

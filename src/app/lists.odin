@@ -1091,7 +1091,9 @@ disk_write :: proc(dir, path: string, blob: []u8) -> bool {
 		werr = cerr
 	}
 	if werr == nil {
-		werr = os.rename(tmp, path)
+		if !sys.replace_file(tmp, path) {
+			werr = .Unknown
+		}
 	}
 	if werr != nil {
 		os.remove(tmp)

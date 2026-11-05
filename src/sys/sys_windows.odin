@@ -133,6 +133,26 @@ page_flags :: proc "contextless" (start: rawptr, flags: []u8) -> bool {
 	return true
 }
 
+// replace_file renames from over to in one step. False if it couldn't.
+// Windows refuses while another handle has the file open, as a reader in this
+// or another process may for a moment, so it tries again for up to a
+// second.
+replace_file :: proc(from, to: string) -> bool {
+	wfrom := windows.utf8_to_wstring(from, context.temp_allocator)
+	wto := windows.utf8_to_wstring(to, context.temp_allocator)
+	for _ in 0 ..< 100 {
+		if windows.MoveFileExW(wfrom, wto, windows.MOVEFILE_REPLACE_EXISTING | windows.MOVEFILE_WRITE_THROUGH) {
+			return true
+		}
+		err := windows.GetLastError()
+		if err != windows.ERROR_ACCESS_DENIED && err != windows.ERROR_SHARING_VIOLATION {
+			return false
+		}
+		windows.Sleep(10)
+	}
+	return false
+}
+
 // write_stderr writes b with one call, so lines written from different
 // threads don't interleave.
 write_stderr :: proc "contextless" (b: []byte) {

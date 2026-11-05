@@ -8,6 +8,7 @@ import "core:time"
 
 // OS_LABEL goes before Machine.os when it is printed.
 OS_LABEL :: "macOS "
+EXE_SUFFIX :: ""
 
 // delete_keychain_item deletes the mock login the runs saved, made for
 // this run alone. SecItemDelete from this program gets -25244, since the

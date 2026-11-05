@@ -70,7 +70,7 @@ copy /y packaging\windows\tidalfast.manifest build\windows\shell\ >nul
 rc /nologo /fo build\windows\shell\tidalfast.res build\windows\shell\tidalfast.rc || exit /b 1
 set objects=
 for %%c in (shell\shell_win32.c shell\common.c) do (
-	cl /nologo /c /MT /W3 %cl_opt% /Ishell "%%c" /Fobuild\windows\shell\%%~nc.obj || exit /b 1
+	cl /nologo /c /MT /W3 /std:c11 /experimental:c11atomics %cl_opt% /Ishell "%%c" /Fobuild\windows\shell\%%~nc.obj || exit /b 1
 	set objects=!objects! build\windows\shell\%%~nc.obj
 )
 
@@ -88,7 +88,7 @@ rem its Odin binding links. Delete the folder to rebuild it.
 :lib
 if exist build\windows\%1\%2.lib exit /b 0
 if not exist build\windows\%1 mkdir build\windows\%1
-cl /nologo /c /MT /W3 /O2 third_party\%1\%2.c /Fobuild\windows\%1\%2.obj || exit /b 1
+cl /nologo /c /MT /W3 /std:c11 /experimental:c11atomics /O2 third_party\%1\%2.c /Fobuild\windows\%1\%2.obj || exit /b 1
 lib /nologo /out:build\windows\%1\%2.lib build\windows\%1\%2.obj || exit /b 1
 del build\windows\%1\%2.obj
 exit /b 0

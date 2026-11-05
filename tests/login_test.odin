@@ -7,7 +7,7 @@ import "core:os"
 import "core:slice"
 import "core:strings"
 import "core:sync"
-import "core:sys/posix"
+import "core:log"
 import "core:testing"
 import "core:thread"
 import "core:time"
@@ -1298,12 +1298,13 @@ mock_run_without_mock_url_keeps_off_tidal :: proc(t: ^testing.T) {
 	append(
 		&cases,
 		Case{keychain = keychain},
-		Case{keychain = keychain, api = ""},
 		Case{keychain = keychain, api = "http://example.com"},
 		Case{keychain = keychain, api = strings.concatenate({"http://127.0.0.1:1/", strings.repeat("x", 300, context.temp_allocator)}, context.temp_allocator)},
-		Case{api = ""},
 		Case{pkce = "http://127.0.0.1:1/android/login/auth?code=mock-pkce-code-1"},
 	)
+	if CAN_SET_EMPTY_ENV {
+		append(&cases, Case{keychain = keychain, api = ""}, Case{api = ""})
+	}
 	when ODIN_DEBUG {
 		append(&cases, Case{api = "http://127.0.0.1:8787", keychain = keychain, service = keychain})
 	}
@@ -1389,7 +1390,14 @@ mock_fallback_leaves_bit_perfect_and_the_settings_alone :: proc(t: ^testing.T) {
 	path := fmt.tprintf("%s/settings.json", dir)
 	on := `{"bit_perfect": true, "volume": 0.5}`
 	testing.expect(t, os.write_entire_file(path, transmute([]u8)on) == nil)
-	os.set_env("TIDALFAST_API", "")
+	// The fallback needs TIDALFAST_API set and empty, which Windows can't
+	// hold: setting a variable to "" deletes it. TIDALFAST_KEYCHAIN without
+	// a mock URL falls back the same way.
+	if CAN_SET_EMPTY_ENV {
+		os.set_env("TIDALFAST_API", "")
+	} else {
+		os.set_env("TIDALFAST_KEYCHAIN", test_keychain_service())
+	}
 
 	for settings in ([]Maybe(string){nil, path}) {
 		env_put("TIDALFAST_SETTINGS", settings)
@@ -2588,17 +2596,21 @@ sidebar_pages_follow_the_total :: proc(t: ^testing.T) {
 // 23:30 UTC on 31 October was liked on 1 November in Warsaw.
 @(test)
 added_date_is_local :: proc(t: ^testing.T) {
+	if !CAN_SET_TIME_ZONE {
+		log.info("skipped: the time zone can't be set for this process")
+		return
+	}
 	sync.guard(&env_mutex)
 	saved, had := os.lookup_env("TZ", context.temp_allocator)
 	os.set_env("TZ", "Europe/Warsaw")
-	posix.tzset()
+	reset_time_zone()
 	defer {
 		if had {
 			os.set_env("TZ", saved)
 		} else {
 			os.unset_env("TZ")
 		}
-		posix.tzset()
+		reset_time_zone()
 	}
 	added, _ := time.datetime_to_time(2026, 10, 31, 23, 30, 0)
 	row := app.row_from_track({title = "a", date_added = added}, context.temp_allocator)

@@ -50,7 +50,7 @@ hires_prepare :: proc(dir: string) -> bool {
 			command = {"afconvert", "-f", "flac", "-d", "flac", wav, flac},
 		}
 		state, _, stderr, err := os.process_exec(desc, context.temp_allocator)
-		if err != nil || !state.success {
+		if err != nil || !state.success || state.exit_code != 0 {
 			fmt.eprintfln("mock: afconvert failed for %s: %v %s", h.name, err, string(stderr))
 			return false
 		}

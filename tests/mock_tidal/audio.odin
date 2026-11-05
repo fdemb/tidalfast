@@ -161,7 +161,7 @@ encode :: proc(dir, name: string, pcm: []i16, seektable: bool) -> ([]u8, bool) {
 		command = {"afconvert", "-f", "flac", "-d", "flac", wav, flac},
 	}
 	state, _, stderr, err := os.process_exec(desc, context.temp_allocator)
-	if err != nil || !state.success {
+	if err != nil || !state.success || state.exit_code != 0 {
 		fmt.eprintfln("mock: afconvert failed for %s: %v %s", name, err, string(stderr))
 		return nil, false
 	}

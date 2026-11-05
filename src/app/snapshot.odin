@@ -162,7 +162,7 @@ snapshot_save :: proc(json: string) {
 	_ = os.make_directory_all(dir)
 	path := strings.concatenate({dir, "/", name, ".json"}, context.temp_allocator)
 	tmp := strings.concatenate({path, ".tmp"}, context.temp_allocator)
-	if os.write_entire_file(tmp, transmute([]u8)json) != nil || os.rename(tmp, path) != nil {
+	if os.write_entire_file(tmp, transmute([]u8)json) != nil || !sys.replace_file(tmp, path) {
 		log.errorf("snapshot: couldn't write %s", path)
 		return
 	}

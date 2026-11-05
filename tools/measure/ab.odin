@@ -30,13 +30,18 @@ run_ab :: proc(cfg: ^Config, base, stamp: string) -> int {
 		return 1
 	}
 	defer run_command({"git", "-C", cfg.root, "worktree", "remove", "--force", worktree}, build_log)
-	if !run_command({"sh", join(worktree, "build.sh"), "measure"}, build_log) {
+	when ODIN_OS == .Windows {
+		build_command := []string{"cmd", "/c", join(worktree, "build.bat"), "measure"}
+	} else {
+		build_command := []string{"sh", join(worktree, "build.sh"), "measure"}
+	}
+	if !run_command(build_command, build_log) {
 		fmt.eprintfln("measure: building %s failed, see %s", base, build_log)
 		return 1
 	}
 
 	sides := [2]Side {
-		{name = "a", app = join(worktree, "build", "measure", "app", "tidalfast"), log_dir = join(cfg.log_dir, "a")},
+		{name = "a", app = join(worktree, "build", "measure", "app", "tidalfast" + EXE_SUFFIX), log_dir = join(cfg.log_dir, "a")},
 		{name = "b", app = cfg.app, log_dir = join(cfg.log_dir, "b")},
 	}
 	results: [2]Results
