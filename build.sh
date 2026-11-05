@@ -81,7 +81,7 @@ c_lib() { # name, library
 	fi
 }
 
-# Windows: the Win32 shell in C and the Vulkan renderer, cross-built for
+# Windows: the Win32 shell in C and the Direct3D 11 renderer, cross-built for
 # x86-64 from macOS or Linux with clang-cl and lld-link against the MSVC
 # libraries and the Windows SDK that xwin fetches (docs/windows.md).
 # WINDOWS_SDK names that folder, laid out for /winsysroot. The C libraries
@@ -143,13 +143,8 @@ if [ "$target_os" = windows ]; then
 	fi
 	[ "$target" = libs ] && exit 0
 
-	mkdir -p build/shaders
-	for shader in src/render/shaders/*.vert src/render/shaders/*.frag; do
-		spv="build/shaders/$(basename "$shader").spv"
-		if [ ! -f "$spv" ] || [ "$shader" -nt "$spv" ]; then
-			glslangValidator -V --quiet "$shader" -o "$spv"
-		fi
-	done
+	# The Direct3D 11 shaders are the bytecode in src/render/shaders/dxbc,
+	# which build.bat compiles with fxc on Windows.
 
 	# The icon and the version go into the executable as resources.
 	mkdir -p build/windows/shell

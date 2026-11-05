@@ -1,8 +1,8 @@
 // The platform side of the Windows executable. Owns the window, collects
 // input into the event queue (common.c), and drives the app through the
 // entry points in platform.h, as shell_wayland.c does on Linux. src/app's
-// main calls shell_main. The renderer makes its own Vulkan surface from the
-// Win32_Surface it gets.
+// main calls shell_main. The renderer makes its own Direct3D 11 swap chain
+// for the window in the Win32_Surface it gets.
 //
 // It redraws only when something asks for it: input, a resize or
 // request_redraw from any thread. The main loop waits in

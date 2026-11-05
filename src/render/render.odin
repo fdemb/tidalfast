@@ -22,8 +22,8 @@
 // linear out; texture_update converts to that from ordinary premultiplied
 // sRGB.
 //
-// The backend is picked by file: metal_darwin.odin on macOS and
-// vulkan.odin on Linux and Windows. Each defines Gpu and Gpu_Texture, the
+// The backend is picked by file: metal_darwin.odin on macOS, vulkan.odin
+// on Linux and d3d11_windows.odin on Windows. Each defines Gpu and Gpu_Texture, the
 // backend's part of Renderer and of a texture slot, BACKDROPS, and the procs
 // this file leaves out: init, destroy, end_frame and gpu_allocated,
 // and privately new_texture_slot, gpu_texture_free, gpu_texture_write,

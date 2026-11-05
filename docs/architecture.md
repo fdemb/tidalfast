@@ -1,6 +1,6 @@
 # TIDALfast architecture
 
-A native TIDAL client for macOS, Linux and, in a first build, Windows. Odin for the app, a small shell for the parts of the OS that need it (Obj-C on macOS, C on Wayland and Win32), a handmade immediate-mode UI in the style of Ryan Fleury's box UI, and Metal or Vulkan for drawing.
+A native TIDAL client for macOS, Linux and, in a first build, Windows. Odin for the app, a small shell for the parts of the OS that need it (Obj-C on macOS, C on Wayland and Win32), a handmade immediate-mode UI in the style of Ryan Fleury's box UI, and Metal, Vulkan or Direct3D 11 for drawing.
 
 ## Layout
 
@@ -9,7 +9,7 @@ shell/            the shell: window, GPU layer, event queue, IME, media keys, se
                   shell_win32.c on Windows, with common.c for what the last two share
 src/platform/     types shared by the shell and Odin (events, frame input, shell callbacks)
 src/app/          the app: main, frame loop, views, app state
-src/render/       instanced rect renderer, Metal on macOS and Vulkan on Linux and Windows
+src/render/       instanced rect renderer, Metal on macOS, Vulkan on Linux, Direct3D 11 on Windows
 src/text/         font loading, shaping (kb_text_shape), rasterizing (CoreText, FreeType), glyph atlas
 src/ui/           box tree, layout, interaction, animation
 src/tidal/        the TIDAL API library (package `tidal`)

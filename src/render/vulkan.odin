@@ -1,6 +1,6 @@
-#+build linux, windows
-// The Vulkan backend, for Linux on Wayland and for Windows. The surface
-// comes from vulkan_linux.odin or vulkan_windows.odin.
+#+build linux
+// The Vulkan backend, for Linux on Wayland. The surface comes from
+// vulkan_linux.odin.
 //
 // The same pipeline as Metal: one instanced quad per rect, the instances in
 // a storage buffer per frame slot that both shaders index, a colour and a

@@ -8,9 +8,11 @@ rem                        build\measure\app that also reads TIDALFAST_API,
 rem                        the mock server and the measure tool
 rem
 rem Builds on Windows itself. Run it from a "x64 Native Tools Command Prompt"
-rem for Visual Studio, so cl, lib, rc and link are on PATH, with odin and
-rem glslangValidator (from the Vulkan SDK) on PATH too. curl and tar come
-rem with Windows 10 and later. TIDALFAST_VERSION=1.2.3 sets the version.
+rem for Visual Studio, so cl, lib, rc and link are on PATH, with odin on PATH
+rem too. fxc, from the Windows SDK, compiles the shaders when it's on PATH;
+rem otherwise the build uses the bytecode in src\render\shaders\dxbc. curl
+rem and tar come with Windows 10 and later. TIDALFAST_VERSION=1.2.3 sets the
+rem version.
 rem build.sh windows cross-builds the same executable from macOS or Linux.
 setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
@@ -59,9 +61,12 @@ call :lib dr_flac dr_flac || exit /b 1
 call :freetype || exit /b 1
 if "%target%"=="libs" exit /b 0
 
-if not exist build\shaders mkdir build\shaders
-for %%s in (src\render\shaders\*.vert src\render\shaders\*.frag) do (
-	glslangValidator -V --quiet "%%s" -o "build\shaders\%%~nxs.spv" || exit /b 1
+rem The Direct3D 11 shaders, one entry point of rect.hlsl each. The bytecode
+rem is checked in, so a build without fxc, or a cross-build, still has it.
+where fxc >nul 2>&1 && (
+	for %%e in (vs_rect:vs ps_rect:ps vs_blur:vs ps_blur_down:ps ps_blur_up:ps) do for /f "tokens=1,2 delims=:" %%a in ("%%e") do (
+		fxc /nologo /O3 /WX /T %%b_5_0 /E %%a /Fo src\render\shaders\dxbc\%%a.dxbc src\render\shaders\rect.hlsl >nul || exit /b 1
+	)
 )
 
 rem The icon and the version go into the executable as resources.

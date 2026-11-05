@@ -62,7 +62,7 @@ Each item comes out of its pool, and what's left of a pool becomes an item of it
 | api | `session` (the TIDAL session's arena), `sidebar`, `open list`, `list refresh`, `queued list` (the list the queue follows), `kept lists` (closed lists kept in memory), `freed list (debug)`, `artist pages`, `home`, `search results`, `liked and followed ids`, `worker scratch` (the workers' temp blocks, malloc), `data state` (`Data` in `State` without the cover index, and what `data_start` took from the persistent arena) |
 | playback | `player` (the Player, its ring and scratch buffers), `stream windows`, `track data` (URLs, segment tables, headers), `queue`, `playback state` |
 | ui | `text caches` (shaped runs, glyph pool, shaper memory, coverage, atlas entries), `font tables` (kb_text_shape's parsed tables, malloc), `cover index`, `fake rows`, `frame arena`, `app state` (the rest of `State` and of the persistent arena) |
-| gpu | `glyph atlas`, `cover pages`, `instance buffers`, `upload buffers` (Vulkan), `backdrop blur`, and the two rests above |
+| gpu | `glyph atlas`, `cover pages`, `instance buffers`, `upload buffers` (Vulkan on Linux), `backdrop blur`, and the two rests above |
 | system | `malloc outside the app's buffers`, `other anonymous memory`, `binaries' data`, `thread stacks`, `other tagged regions`, `page tables and unaccounted` |
 
 Malloc that the app has no pointer to, such as AppKit's, Core Text's, libcurl's connections and dr_flac's decoder, goes in `system` as the malloc rest; Instruments' Allocations can say whose it is. On Linux the pools are the footprint and the device memory Vulkan reports, which a GPU keeps outside the footprint; with lavapipe it's host memory and counts twice.
