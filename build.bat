@@ -3,6 +3,9 @@ rem build.bat              debug build of the app, build\windows\tidalfast.exe
 rem build.bat release      optimized build, with the windows subsystem
 rem build.bat libs         only the C libraries, into build\windows
 rem build.bat dist         release build in build\dist\tidalfast.exe
+rem build.bat measure      what tools\measure runs: an optimized app in
+rem                        build\measure\app that also reads TIDALFAST_API,
+rem                        the mock server and the measure tool
 rem
 rem Builds on Windows itself. Run it from a "x64 Native Tools Command Prompt"
 rem for Visual Studio, so cl, lib, rc and link are on PATH, with odin and
@@ -16,8 +19,8 @@ set mode=debug
 set target=all
 :args
 if "%~1"=="" goto args_done
-if /i "%~1"=="release" (set mode=release) else if /i "%~1"=="libs" (set target=libs) else if /i "%~1"=="dist" (set target=dist& set mode=release) else (
-	echo usage: %~nx0 [release] ^| %~nx0 libs ^| %~nx0 dist 1>&2
+if /i "%~1"=="release" (set mode=release) else if /i "%~1"=="libs" (set target=libs) else if /i "%~1"=="dist" (set target=dist& set mode=release) else if /i "%~1"=="measure" (set target=measure& set mode=release) else (
+	echo usage: %~nx0 [release] ^| %~nx0 libs ^| %~nx0 dist ^| %~nx0 measure 1>&2
 	exit /b 1
 )
 shift
@@ -75,12 +78,27 @@ for %%c in (shell\shell_win32.c shell\common.c) do (
 )
 
 set out=build\windows\tidalfast.exe
+set defines=
 if "%target%"=="dist" (
 	if not exist build\dist mkdir build\dist
 	set out=build\dist\tidalfast.exe
 )
-odin build src\app -out:%out% -target:windows_amd64 -vet -strict-style %odin_flags% -define:TIDALFAST_COMMIT=%commit% ^
+rem The measure tool reads the app's stderr, so its app keeps the console.
+if "%target%"=="measure" (
+	if not exist build\measure\app mkdir build\measure\app
+	set out=build\measure\app\tidalfast.exe
+	set defines=-define:TIDALFAST_MOCK_API=true
+	set subsystem=console
+)
+rem Odin's own linker on Windows, rad-link, can fail without a message or an
+rem exit code, so MSVC's link does it.
+odin build src\app -out:%out% -target:windows_amd64 -vet -strict-style -linker:default %odin_flags% %defines% -define:TIDALFAST_COMMIT=%commit% ^
 	-extra-linker-flags:"/subsystem:%subsystem% /ignore:4099 %objects% build\windows\shell\tidalfast.res user32.lib gdi32.lib imm32.lib dwmapi.lib shell32.lib ole32.lib advapi32.lib psapi.lib" || exit /b 1
+if not exist %out% (echo %~nx0: odin wrote no %out% 1>&2 & exit /b 1)
+if "%target%"=="measure" (
+	odin build tests\mock_tidal -out:build\measure\mock_tidal.exe -o:speed -linker:default || exit /b 1
+	odin build tools\measure -out:build\measure\measure.exe -vet -strict-style -linker:default || exit /b 1
+)
 exit /b 0
 
 rem A C library from third_party into build\windows\<name>\<lib>.lib, which

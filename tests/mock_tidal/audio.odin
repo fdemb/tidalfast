@@ -4,7 +4,7 @@ package mock_tidal
 // continuous sine sweep, so a gap, a repeat or a click where one track
 // meets the next shows up as a break in the sweep, plus four plain tones
 // that every other track id plays. Generated as WAV at startup and encoded
-// to FLAC with macOS's afconvert. afconvert writes no SEEKTABLE, so the
+// to FLAC (flac_file). Neither encoder writes a SEEKTABLE, so the
 // files are rebuilt with one (every 2 s) unless -seektable=0, followed by a
 // PADDING block the decoder has to skip.
 //
@@ -24,6 +24,7 @@ import "core:strings"
 import "core:time"
 
 import "../../src/audio"
+import "../dashgen"
 
 RATE :: 44100
 ALBUM_ID :: 4242
@@ -149,20 +150,19 @@ audio_prepare :: proc(dir: string, seektable: bool) -> bool {
 	return true
 }
 
-// encode writes pcm as WAV, runs afconvert, and returns the FLAC, rebuilt
-// with a SEEKTABLE if asked.
+// encode writes pcm as FLAC (flac_file) and returns it, rebuilt with a
+// SEEKTABLE if asked.
 encode :: proc(dir, name: string, pcm: []i16, seektable: bool) -> ([]u8, bool) {
 	wav := fmt.tprintf("%s/%s.wav", dir, name)
 	flac := fmt.tprintf("%s/%s.flac", dir, name)
 	if !write_wav(wav, pcm) {
 		return nil, false
 	}
-	desc := os.Process_Desc {
-		command = {"afconvert", "-f", "flac", "-d", "flac", wav, flac},
+	wide := make([]i32, len(pcm), context.temp_allocator)
+	for v, i in pcm {
+		wide[i] = i32(v)
 	}
-	state, _, stderr, err := os.process_exec(desc, context.temp_allocator)
-	if err != nil || !state.success || state.exit_code != 0 {
-		fmt.eprintfln("mock: afconvert failed for %s: %v %s", name, err, string(stderr))
+	if !flac_file(name, wav, flac, wide, RATE, 16) {
 		return nil, false
 	}
 	os.remove(wav)
@@ -175,6 +175,32 @@ encode :: proc(dir, name: string, pcm: []i16, seektable: bool) -> ([]u8, bool) {
 		_ = os.write_entire_file(flac, data)
 	}
 	return data, true
+}
+
+// flac_file encodes the WAV at wav, whose samples are pcm, to the FLAC file
+// flac: with macOS's afconvert, which compresses like a real encoder, and
+// elsewhere with dashgen's verbatim encoder, which is lossless all the same
+// but about as big as the WAV.
+flac_file :: proc(name, wav, flac: string, pcm: []i32, rate, bits: int) -> bool {
+	when ODIN_OS == .Darwin {
+		desc := os.Process_Desc {
+			command = {"afconvert", "-f", "flac", "-d", "flac", wav, flac},
+		}
+		state, _, stderr, err := os.process_exec(desc, context.temp_allocator)
+		if err != nil || !state.success || state.exit_code != 0 {
+			fmt.eprintfln("mock: afconvert failed for %s: %v %s", name, err, string(stderr))
+			return false
+		}
+		return true
+	} else {
+		// afconvert's 4608-sample frames, which the album's lengths avoid.
+		data := dashgen.encode_verbatim(pcm, 2, bits, rate, 4608, context.temp_allocator)
+		if os.write_entire_file(flac, data) != nil {
+			fmt.eprintfln("mock: couldn't write %s", flac)
+			return false
+		}
+		return true
+	}
 }
 
 write_wav :: proc(path: string, pcm: []i16) -> bool {

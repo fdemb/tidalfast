@@ -39,7 +39,8 @@ WINDOWS_FALLBACKS := [?]string {
 	"YuGothM.ttc", // Yu Gothic UI: Japanese
 	"malgun.ttf", // Malgun Gothic: Korean
 	"msjh.ttc", // Microsoft JhengHei UI: Chinese, traditional
-	"Nirmala.ttf", // Nirmala UI: Indic scripts
+	"Nirmala.ttc", // Nirmala UI: Indic scripts, Windows 11
+	"Nirmala.ttf", // the same on Windows 10
 	"LeelawUI.ttf", // Leelawadee UI: Thai, Lao, Khmer
 	"ebrima.ttf", // African scripts
 	"mmrtext.ttf", // Myanmar

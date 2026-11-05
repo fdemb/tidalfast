@@ -21,6 +21,29 @@ delete_keychain_item :: proc(service: string) {
 	}
 }
 
+// stop_windows posts WM_CLOSE to p's windows, which the app's shell turns
+// into a clean quit, and kills a process without one, such as the mock.
+stop_windows :: proc(p: os.Process) {
+	Find :: struct {
+		pid:   u32,
+		found: bool,
+	}
+	f := Find{pid = u32(p.pid)}
+	win.EnumWindows(proc "system" (hwnd: win.HWND, data: win.LPARAM) -> win.BOOL {
+		f := (^Find)(rawptr(uintptr(data)))
+		pid: win.DWORD
+		win.GetWindowThreadProcessId(hwnd, &pid)
+		if pid == f.pid {
+			win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0)
+			f.found = true
+		}
+		return true
+	}, win.LPARAM(uintptr(&f)))
+	if !f.found {
+		_ = os.process_kill(p)
+	}
+}
+
 machine :: proc() -> Machine {
 	reg :: proc(key, value: string) -> string {
 		buf: [256]u16

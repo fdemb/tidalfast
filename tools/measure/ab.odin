@@ -159,7 +159,7 @@ new_keychain_name :: proc() -> string {
 // run_command runs command with its output added to log_path and says
 // whether it exited with 0.
 run_command :: proc(command: []string, log_path: string) -> bool {
-	f, err := os.open(log_path, {.Write, .Create, .Append})
+	f, err := child_log(log_path, append = true)
 	if err != nil {
 		return false
 	}
