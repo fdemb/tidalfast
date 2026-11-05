@@ -115,7 +115,7 @@ if [ "$(uname -s)" = Linux ]; then
 		shift
 		rm -rf "$dir"
 		mkdir -p "$dir"
-		for c in shell/shell_wayland.c shell/scroll.c build/wayland/*-protocol.c; do
+		for c in shell/shell_wayland.c shell/common.c shell/scroll.c build/wayland/*-protocol.c; do
 			cc -std=gnu11 -fPIC -c "$c" -o "$dir/$(basename "$c" .c).o" \
 				-Ishell -Ibuild/wayland -Wall -Wno-unused-parameter "$@" \
 				$(pkg-config --cflags wayland-client wayland-cursor xkbcommon)
