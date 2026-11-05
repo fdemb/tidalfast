@@ -626,6 +626,8 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 //   size=w,h            make the window's client area w by h points
 //   move=x,y            the pointer moves to x, y in points
 //   click=x,y           a left click at x, y in points
+//   type=text           each UTF-16 unit of text as a WM_CHAR, surrogate pairs as two
+//   vkey=name           WM_KEYDOWN and WM_KEYUP for a key: escape, return, backspace, left, right, a to z
 //   wheel=n             n wheel notches down, negative for up, where the pointer is
 //   touchpad=dy         a precision touchpad scroll moving content up by dy points
 //   scrolled            print the scroll the app was sent: points from touchpads, lines from wheels
@@ -666,6 +668,29 @@ bool os_test_step(const char *command, char *arg) {
     SendMessageW(g_window, WM_MOUSEMOVE, 0, at);
     SendMessageW(g_window, WM_LBUTTONDOWN, MK_LBUTTON, at);
     SendMessageW(g_window, WM_LBUTTONUP, 0, at);
+  } else if (!strcmp(command, "type")) {
+    int n = MultiByteToWideChar(CP_UTF8, 0, arg, -1, NULL, 0);
+    wchar_t *w = malloc((size_t)n * sizeof(wchar_t));
+    MultiByteToWideChar(CP_UTF8, 0, arg, -1, w, n);
+    for (int i = 0; i + 1 < n; i++) SendMessageW(g_window, WM_CHAR, w[i], 1);
+    free(w);
+  } else if (!strcmp(command, "vkey")) {
+    static const struct {
+      const char *name;
+      UINT vk;
+    } keys[] = {{"escape", VK_ESCAPE}, {"return", VK_RETURN}, {"backspace", VK_BACK}, {"left", VK_LEFT}, {"right", VK_RIGHT}};
+    UINT vk = 0;
+    for (size_t i = 0; i < sizeof keys / sizeof keys[0]; i++)
+      if (!strcmp(keys[i].name, arg)) vk = keys[i].vk;
+    if (!vk && strlen(arg) == 1 && arg[0] >= 'a' && arg[0] <= 'z') vk = (UINT)(arg[0] - 'a' + 'A');
+    if (!vk) {
+      fprintf(stderr, "shell: test: no key named %s\n", arg);
+      return true;
+    }
+    UINT scan = MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
+    LPARAM extended = (vk == VK_LEFT || vk == VK_RIGHT) ? (1 << 24) : 0;
+    SendMessageW(g_window, WM_KEYDOWN, vk, 1 | (LPARAM)scan << 16 | extended);
+    SendMessageW(g_window, WM_KEYUP, vk, 1 | (LPARAM)scan << 16 | extended | (LPARAM)3 << 30);
   } else if (!strcmp(command, "wheel")) {
     test_wheel(-atoi(arg) * WHEEL_DELTA);
   } else if (!strcmp(command, "touchpad")) {
