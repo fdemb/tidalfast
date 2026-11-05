@@ -1,8 +1,26 @@
 # Windows
 
-The Windows build is a first pass. It runs the same app as macOS and Linux: a Win32 shell in C (`shell/shell_win32.c`), the Vulkan renderer Linux uses, FreeType text, miniaudio playback through WASAPI's shared mode and the login in the Credential Manager. It is built for x86-64 Windows 10 and 11, and it cross-compiles from macOS or Linux. There is no build on Windows itself yet.
+The Windows build is a first pass. It runs the same app as macOS and Linux: a Win32 shell in C (`shell/shell_win32.c`), the Vulkan renderer Linux uses, FreeType text, miniaudio playback through WASAPI's shared mode, bit-perfect output through WASAPI's exclusive mode, and the login in the Credential Manager. It is built for x86-64 Windows 10 and 11, on Windows itself with `build.bat` or cross-compiled from macOS or Linux.
 
-## Building
+## Building on Windows
+
+`build.bat` builds from a prompt with MSVC's `cl`, `lib`, `link` and `rc` on `PATH` (an x64 Native Tools Command Prompt), with `odin` and `glslangValidator` (from the Vulkan SDK) on `PATH` too. `curl` and `tar` come with Windows.
+
+```
+build.bat               debug build\windows\tidalfast.exe, with a console for the log
+build.bat release       optimized, the windows subsystem
+build.bat dist          release build in build\dist\tidalfast.exe
+build.bat measure       build\measure\: the measure app, mock_tidal.exe and measure.exe
+build.bat libs          only the C libraries
+odin test tests         after one build.bat, which builds the C libraries
+tools\check_other_os.bat  type-checks the app and the measure tool for Linux and macOS
+```
+
+The C code is compiled as C11 (`/std:c11 /experimental:c11atomics`). Odin links with MSVC's `link` (`-linker:default`): Odin's own rad-link has failed here without a message or an exit code. `check_other_os.bat` puts empty stand-ins for the Unix `.a` files the C library bindings check for, and removes only the ones it made.
+
+Some things about Odin on Windows that the tools work around: `os.process_wait` reports `success` whatever the exit code, so check `exit_code`; `os.create` makes handles a child process doesn't inherit, so a log handed to a child is opened with `.Inheritable`; and `os.process_terminate` sends a console Ctrl-C, which reaches every process on the console, the one that started it too, so `tools/measure` closes the app's window instead (`stop_windows`).
+
+## Cross-compiling
 
 `./build.sh windows` writes `build/windows/tidalfast.exe`. `./build.sh windows release` makes an optimized one with the windows subsystem, so it opens no console. The debug build keeps the console, where the log goes. It needs:
 
@@ -30,12 +48,14 @@ The C libraries are compiled with clang-cl into `build/windows`, apart from the 
 - **Pointer and wheel.** A whole wheel notch scrolls the user's "lines per notch" setting. A fraction of a notch, from a precision touchpad or a free-spinning wheel, is a precise scroll in points, 16 to a line. Windows sends touchpad scrolls without phases, so there is no momentum after the fingers lift beyond what the touchpad driver sends. The side buttons and `WM_APPCOMMAND` go back and forward.
 - **Media keys.** The media keys reach the app while the window has the focus, as `VK_MEDIA_*` keys or `WM_APPCOMMAND`. Not yet the System Media Transport Controls, which would take them from anywhere and show Now Playing in the volume flyout.
 - **Rendering.** `src/render/vulkan.odin` is the Linux backend, with the surface made in `vulkan_windows.odin` from the window. `vulkan-1.dll` is loaded when the renderer starts, so a machine without a Vulkan driver opens the window, draws nothing and logs why, as Linux does. Current GPU drivers for Windows ship Vulkan; it has only been tried on Wine's winevulkan over llvmpipe.
-- **Text.** FreeType rasterizes as on Linux (`src/text/fonts_freetype.odin`). The text font is the built-in Noto Sans. Fallback fonts come from a list of the UI fonts Windows 10 and 11 use for each script, in the fonts folder (`fonts_windows.odin`): Segoe UI, Segoe UI Symbol, each script's UI font, and Segoe UI Emoji for emoji. Some of them come in optional font packages, and a font that isn't there is skipped. The list hasn't been checked against a real Windows install yet. Fonts the user installed aren't searched; DirectWrite's font fallback would find them. Segoe UI Emoji's colour layers (COLR) aren't drawn, so emoji are black and white. The Windows build's FreeType has no PNG decoder, so a font whose glyphs are only PNG bitmaps (CBDT or sbix, such as Noto Color Emoji) is skipped for the next font in the list.
-- **Audio.** miniaudio plays through WASAPI in shared mode, where Windows mixes and resamples. There is no bit-perfect output (`audio.BIT_PERFECT` is false, and the Output menu leaves it out); WASAPI exclusive mode would give it.
+- **Text.** FreeType rasterizes as on Linux (`src/text/fonts_freetype.odin`). The text font is the built-in Noto Sans. Fallback fonts come from a list of the UI fonts Windows 10 and 11 use for each script, in the fonts folder (`fonts_windows.odin`): Segoe UI, Segoe UI Symbol, each script's UI font, and Segoe UI Emoji for emoji. Some of them come in optional font packages, and a font that isn't there is skipped; Nirmala UI is `Nirmala.ttc` on Windows 11 and `Nirmala.ttf` on 10, so both are listed. Checked on Windows 11 25H2 with Hebrew, CJK, Devanagari, Thai, Greek, Arabic and emoji. Fonts the user installed aren't searched; DirectWrite's font fallback would find them. Segoe UI Emoji's colour layers (COLRv0) are drawn in colour: FreeType blends them into a BGRA bitmap at the size asked for (`FT_LOAD_COLOR`, then `FT_Render_Glyph`), with the foreground colour white, and a glyph with no layers, such as its check mark, is drawn white. The Windows build's FreeType has no PNG decoder, so a font whose glyphs are only PNG bitmaps (CBDT or sbix, such as Noto Color Emoji) is skipped for the next font in the list.
+- **Audio.** With bit-perfect output off, miniaudio plays through WASAPI in shared mode, where Windows mixes and resamples, and the Output menu shows the engine's mix rate and the device's format from the endpoint's properties. With it on, `src/audio/bitperfect_windows.odin` opens the default output in exclusive mode at the track's rate in the narrowest signed integer format of at least the track's depth that the device takes (16 in 16, 24 in 24, 24 in 32, 32 in 32), event-driven, on a thread registered as a "Pro Audio" MMCSS task. The decoder's floats are its integers over 2^31, so `float_to_pcm` gives the device those integers back exactly. Nothing on the device changes, so there is no device change to undo; the device is the shared mixer's again when the stream closes. A device that refuses the rate or format, or that the user set to forbid exclusive mode, plays through the shared mode with the reason in the Output menu. Odin has no WASAPI bindings, so the few COM interfaces are declared in that file. On an NVIDIA HDMI output that takes only 48 kHz, a 24/48 track played through the player captured every one of its 384,000 samples unchanged, a 44.1 and a 96 kHz track fell back to the shared mode, and the device's shared format was the same afterwards.
 - **Login.** The login is a generic credential in the Credential Manager, target `<service>/auth`, which Windows encrypts with the user's login. One credential holds at most 2560 bytes, so a longer login is split across `<service>/auth`, `<service>/auth#1` and so on. `TIDALFAST_KEYCHAIN` names another service against the mock, as on macOS.
 - **Files.** Settings and snapshots go in `%APPDATA%\tidalfast` and caches in `%LOCALAPPDATA%\tidalfast`. The app joins paths with `/`, which Windows takes. The environment variables come first, as `XDG_CONFIG_HOME` does on Linux, so a test can point them elsewhere.
 - **Memory.** The footprint is the private working set, what Task Manager's Memory column shows; where Windows doesn't report it (before Windows 10 1809, and Wine), the private bytes or the working set stand in. `sys.page_flags` counts a page as in the working set through `QueryWorkingSetEx`. The memory blocks the shell gives the app are committed with `VirtualAlloc`, which costs nothing until a page is written. `TIDALFAST_MEASURE` marks work as on the other systems; the cycle counters come from `QueryThreadCycleTime`, and there is no instruction count.
-- **Quitting.** Ctrl-C in the console and SIGTERM, which `sys.quit` raises for `measure`, quit through the main loop, so the app's shutdown runs. There is no SIGUSR1: the shell's `snapshot` test step asks for a memory snapshot.
+- **Quitting.** Ctrl-C in the console and SIGTERM, which `sys.quit` raises for `measure`, quit through the main loop, so the app's shutdown runs. There is no SIGUSR1: the shell's `snapshot` test step asks for a memory snapshot. Closing the window (`WM_CLOSE`) quits the same way.
+- **Measuring.** `build.bat measure`, then `build\measure\measure.exe all`, runs as on the other systems: the machine comes from the registry, and the mock's login is deleted from the Credential Manager after the runs. Run it in a console of its own (`start /wait cmd /c ...`) when something else shares the console. On a Ryzen 5 7600 with an RTX 3070 Ti, the fake data's tracks were drawn 136 ms after the process started, and the footprint at tracks was 54 MB, 70 MB at its peak.
+- **The mock.** `tests/mock_tidal` encodes its FLAC files with macOS's `afconvert`, and elsewhere with `tests/dashgen`'s verbatim encoder: lossless, but about as big as the WAV.
 
 ## Running it without Windows
 
@@ -58,12 +78,12 @@ Under emulation the frame times say nothing about real hardware: the CPU is emul
 
 ## Not done yet
 
-- A CI job, and a run of `build.bat` on a real Windows machine. `build.bat` (`release`, `libs`, `dist`) builds on Windows itself from an x64 Native Tools Command Prompt with Odin and `glslangValidator` on `PATH`, using MSVC's `cl`, `lib` and `rc`, but hasn't been run there yet. `odin test tests` doesn't build for Windows from another system yet, since `odin test` takes no `-windows-sdk-root`.
-- Packaging: an installer or a zip with the executable, and code signing. `./build.sh windows dist` writes only `build/dist/tidalfast.exe`. `./build.sh windows measure` refuses: `tools/measure` drives only Linux and macOS builds.
-- WASAPI exclusive mode for bit-perfect output.
+- A CI job. `odin test tests` runs on Windows itself (all 432 pass on Windows 11), but doesn't build for Windows from another system, since `odin test` takes no `-windows-sdk-root`. Two tests skip what Windows can't do: the time zone comes from the system, not `TZ`, and a variable set to "" is deleted (`tests/os_quirks_*.odin`).
+- Packaging: an installer or a zip with the executable, and code signing. `./build.sh windows dist` writes only `build/dist/tidalfast.exe`. `./build.sh windows measure` refuses; build the measure tools on Windows with `build.bat measure`.
+- Following a new default output while exclusive output plays; it moves at the next track.
 - The System Media Transport Controls, for media keys from anywhere and Now Playing.
 - UI Automation for screen readers. The app's accessibility tree is there; the shell keeps it only for tests.
 - Drawing into the title bar, as on macOS, with `DwmExtendFrameIntoClientArea` and `WM_NCHITTEST` for the drag regions the app already reports.
-- DirectWrite font fallback for fonts the user installed, and COLR colour emoji.
+- DirectWrite font fallback for fonts the user installed, and COLRv1 colour fonts.
 - Drag and drop.
 - Windows on ARM64. Odin has no `windows_arm64` target yet.

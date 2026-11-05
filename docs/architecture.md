@@ -58,7 +58,7 @@ Read-only checkouts in `~/.t3/scratch/2026-10-14-please-analyze-how-spotifast-is
 ## Not done yet
 
 - Linux: MPRIS for media keys and Now Playing, AT-SPI for screen readers, and client-side decorations for compositors without xdg-decoration, such as GNOME.
-- Windows: WASAPI exclusive for bit-perfect output, the System Media Transport Controls, UI Automation, a build on Windows itself and packaging. [windows.md](windows.md) lists the rest.
+- Windows: the System Media Transport Controls, UI Automation and packaging. [windows.md](windows.md) lists the rest.
 
 ## Pitfalls
 
