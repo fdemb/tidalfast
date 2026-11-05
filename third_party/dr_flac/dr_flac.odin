@@ -7,10 +7,10 @@ package dr_flac
 import "core:c"
 
 @(private)
-LIB :: "../../build/dr_flac/dr_flac.a"
+LIB :: "../../build/windows/dr_flac/dr_flac.lib" when ODIN_OS == .Windows else "../../build/dr_flac/dr_flac.a"
 
 when !#exists(LIB) {
-	#panic("build/dr_flac/dr_flac.a is missing: run ./build.sh first")
+	#panic(LIB + " is missing: run ./build.sh first")
 }
 
 foreign import lib { LIB }

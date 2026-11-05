@@ -18,13 +18,15 @@ cd "$(dirname "$0")"
 
 mode=debug
 target=all
+target_os=native
 for arg in "$@"; do
 	case "$arg" in
 	release) mode=release ;;
 	measure) target=measure ;;
 	dist) target=dist mode=release ;;
 	libs) target=libs ;;
-	*) echo "usage: $0 [release] | $0 measure | $0 dist | $0 libs" >&2; exit 1 ;;
+	windows) target_os=windows ;;
+	*) echo "usage: $0 [release] | $0 measure | $0 dist | $0 libs, each after windows to cross-build for Windows" >&2; exit 1 ;;
 	esac
 done
 
@@ -78,6 +80,94 @@ c_lib() { # name, library
 		rm "build/$1/$2.o"
 	fi
 }
+
+# Windows: the Win32 shell in C and the Vulkan renderer, cross-built for
+# x86-64 from macOS or Linux with clang-cl and lld-link against the MSVC
+# libraries and the Windows SDK that xwin fetches (docs/windows.md).
+# WINDOWS_SDK names that folder, laid out for /winsysroot. The C libraries
+# go to build/windows, apart from the native ones in build, and FreeType,
+# which Windows doesn't have, is built from its release.
+if [ "$target_os" = windows ]; then
+	sdk=${WINDOWS_SDK:?set WINDOWS_SDK to the xwin splat folder, see docs/windows.md}
+	clang_cl=${CLANG_CL:-$(command -v clang-cl || command -v clang-cl-19 || echo clang-cl)}
+	win_cc() { # source, object, extra flags
+		src=$1
+		obj=$2
+		shift 2
+		"$clang_cl" /nologo /c /MT /W3 /winsysroot "$sdk" --target=x86_64-pc-windows-msvc "$@" "$src" /Fo"$obj"
+	}
+	if [ "$mode" = release ]; then
+		win_opt=/O2
+	else
+		win_opt="/Od /Z7"
+	fi
+	win_lib() { # name, library, extra flags
+		out=build/windows/$1/$2.lib
+		dir=third_party/$1
+		if [ ! -f "$out" ] || [ "$dir/$2.c" -nt "$out" ] || [ "$dir/$2.h" -nt "$out" ]; then
+			mkdir -p "build/windows/$1"
+			name=$1
+			lib=$2
+			shift 2
+			win_cc "$dir/$lib.c" "build/windows/$name/$lib.obj" /O2 "$@"
+			llvm-lib /nologo /out:"$out" "build/windows/$name/$lib.obj"
+			rm "build/windows/$name/$lib.obj"
+		fi
+	}
+	win_lib kbts kb_text_shape
+	win_lib miniaudio miniaudio
+	win_lib dr_flac dr_flac
+
+	# FreeType 2.13.3, with the modules and options in third_party/freetype.
+	ft=build/windows/freetype-2.13.3
+	if [ ! -f build/windows/freetype/freetype.lib ] || [ third_party/freetype/tf_ftmodule.h -nt build/windows/freetype/freetype.lib ] || [ third_party/freetype/tf_ftoption.h -nt build/windows/freetype/freetype.lib ]; then
+		if [ ! -d "$ft" ]; then
+			mkdir -p build/windows
+			curl -fsSL -o "$ft.tar.xz" https://download.savannah.gnu.org/releases/freetype/freetype-2.13.3.tar.xz
+			echo "0550350666d427c74daeb85d5ac7bb353acba5f76956395995311a9c6f063289  $ft.tar.xz" | sha256sum -c --quiet -
+			tar xf "$ft.tar.xz" -C build/windows
+			rm "$ft.tar.xz"
+		fi
+		mkdir -p build/windows/freetype/obj
+		for c in base/ftsystem.c base/ftinit.c base/ftdebug.c base/ftbase.c base/ftbbox.c base/ftbitmap.c base/ftmm.c \
+			truetype/truetype.c cff/cff.c sfnt/sfnt.c psaux/psaux.c psnames/psnames.c pshinter/pshinter.c smooth/smooth.c; do
+			win_cc "$ft/src/$c" "build/windows/freetype/obj/$(basename "$c" .c).obj" /O2 -I"$ft/include" -Ithird_party/freetype \
+				-DFT2_BUILD_LIBRARY '-DFT_CONFIG_MODULES_H=<tf_ftmodule.h>' '-DFT_CONFIG_OPTIONS_H=<tf_ftoption.h>' -Wno-everything
+		done
+		llvm-lib /nologo /out:build/windows/freetype/freetype.lib build/windows/freetype/obj/*.obj
+		rm -rf build/windows/freetype/obj
+	fi
+	[ "$target" = libs ] && exit 0
+
+	mkdir -p build/shaders
+	for shader in src/render/shaders/*.vert src/render/shaders/*.frag; do
+		spv="build/shaders/$(basename "$shader").spv"
+		if [ ! -f "$spv" ] || [ "$shader" -nt "$spv" ]; then
+			glslangValidator -V --quiet "$shader" -o "$spv"
+		fi
+	done
+
+	# The icon and the version go into the executable as resources.
+	mkdir -p build/windows/shell
+	sed -e "s/@VERSION@/$version/g" -e "s/@VERSION_COMMAS@/$(echo "$version" | tr . ,),0/g" packaging/windows/tidalfast.rc \
+		> build/windows/shell/tidalfast.rc
+	cp packaging/windows/tidalfast.ico packaging/windows/tidalfast.manifest build/windows/shell/
+	llvm-rc /nologo /fo build/windows/shell/tidalfast.res build/windows/shell/tidalfast.rc
+	for c in shell/shell_win32.c shell/common.c; do
+		win_cc "$c" "build/windows/shell/$(basename "$c" .c).obj" $win_opt -Ishell -Wno-unused-parameter
+	done
+	out=build/windows/tidalfast.exe
+	[ "$target" = dist ] && out=build/dist/tidalfast.exe && mkdir -p build/dist
+	# The subsystem is the console in debug builds, so the log shows in the
+	# terminal that started the app, and windows in release builds.
+	subsystem=console
+	[ "$mode" = release ] && subsystem=windows
+	odin build src/app -out:"$out" -target:windows_amd64 -windows-sdk-root:"$sdk" -linker:lld \
+		-vet -strict-style $odin_flags $app_flags \
+		-extra-linker-flags:"/subsystem:$subsystem /ignore:4099 $(echo build/windows/shell/*.obj) build/windows/shell/tidalfast.res user32.lib gdi32.lib imm32.lib dwmapi.lib shell32.lib ole32.lib advapi32.lib psapi.lib"
+	exit 0
+fi
+
 c_lib kbts kb_text_shape
 c_lib miniaudio miniaudio
 c_lib dr_flac dr_flac

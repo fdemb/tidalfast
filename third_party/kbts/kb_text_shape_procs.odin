@@ -5,10 +5,10 @@
 package kbts
 
 @(private)
-LIB_PATH :: "../../build/kbts/kb_text_shape.a"
+LIB_PATH :: "../../build/windows/kbts/kb_text_shape.lib" when ODIN_OS == .Windows else "../../build/kbts/kb_text_shape.a"
 
 when !#exists(LIB_PATH) {
-	#panic("build/kbts/kb_text_shape.a is missing: run ./build.sh first")
+	#panic(LIB_PATH + " is missing: run ./build.sh first")
 }
 
 foreign import lib { LIB_PATH }

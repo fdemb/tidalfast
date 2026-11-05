@@ -23,7 +23,7 @@ import "../../third_party/kbts"
 import "../sys"
 
 when ODIN_OS == .Windows {
-	foreign import freetype "../../build/freetype/freetype.lib"
+	foreign import freetype "../../build/windows/freetype/freetype.lib"
 } else {
 	foreign import freetype "system:freetype"
 }
