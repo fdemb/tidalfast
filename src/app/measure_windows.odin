@@ -51,6 +51,12 @@ process_memory :: proc "contextless" (r: ^render.Renderer) -> Process_Memory {
 		pm.resident = int(c.WorkingSetSize)
 		pm.resident_peak = int(c.PeakWorkingSetSize)
 		pm.footprint = int(c.PrivateWorkingSetSize)
+		// Windows before 10 1809, and Wine, leave the private working set
+		// at 0. The private bytes, then the whole working set, are the
+		// nearest it has.
+		if pm.footprint == 0 {
+			pm.footprint = int(c.PrivateUsage) if c.PrivateUsage != 0 else pm.resident
+		}
 	}
 	peak := sync.atomic_load(&footprint_peak)
 	for pm.footprint > peak {

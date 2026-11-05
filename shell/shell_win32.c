@@ -632,6 +632,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 //   touchpad=dy         a precision touchpad scroll moving content up by dy points
 //   scrolled            print the scroll the app was sent: points from touchpads, lines from wheels
 //   snapshot            ask the app for a memory snapshot, as SIGUSR1 does elsewhere
+//   minimize, restore   minimize the window, and show it again
 
 // app_take_snapshot is in src/app/snapshot_windows.odin.
 void app_take_snapshot(void);
@@ -701,6 +702,11 @@ bool os_test_step(const char *command, char *arg) {
     fprintf(stderr, "shell: test: scrolled %.1f points, %.1f lines\n", g_test_scrolled_points, g_test_scrolled_lines);
   } else if (!strcmp(command, "snapshot")) {
     app_take_snapshot();
+  } else if (!strcmp(command, "minimize")) {
+    ShowWindow(g_window, SW_MINIMIZE);
+  } else if (!strcmp(command, "restore")) {
+    ShowWindow(g_window, SW_RESTORE);
+    request_redraw();
   } else {
     return false;
   }

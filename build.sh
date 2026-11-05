@@ -88,6 +88,10 @@ c_lib() { # name, library
 # go to build/windows, apart from the native ones in build, and FreeType,
 # which Windows doesn't have, is built from its release.
 if [ "$target_os" = windows ]; then
+	if [ "$target" = measure ]; then
+		echo "$0: measure isn't built for Windows yet; tools/measure drives a Linux or macOS app" >&2
+		exit 1
+	fi
 	sdk=${WINDOWS_SDK:?set WINDOWS_SDK to the xwin splat folder, see docs/windows.md}
 	clang_cl=${CLANG_CL:-$(command -v clang-cl || command -v clang-cl-19 || echo clang-cl)}
 	win_cc() { # source, object, extra flags

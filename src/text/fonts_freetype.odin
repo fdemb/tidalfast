@@ -237,7 +237,9 @@ FONT_NAMES := [Font]string {
 
 // face_native_init notes which face of a collection this is and whether
 // it's a colour bitmap font. The FreeType face comes later, on the UI
-// thread.
+// thread. The Windows build's FreeType has no PNG decoder, which CBDT and
+// sbix strikes need, so there a font that has only those draws nothing and
+// is refused, and the fallback goes on to the next font.
 @(private)
 face_native_init :: proc(face: ^Face, ct: Font_Ref, index: int) -> bool {
 	if face.units_per_em == 0 {
@@ -245,6 +247,12 @@ face_native_init :: proc(face: ^Face, ct: Font_Ref, index: int) -> bool {
 	}
 	face.index = index
 	face.color = font_table(face.file, index, "CBDT") != nil || font_table(face.file, index, "sbix") != nil
+	when ODIN_OS == .Windows {
+		if face.color && font_table(face.file, index, "glyf") == nil && font_table(face.file, index, "CFF ") == nil {
+			return false
+		}
+		face.color = false
+	}
 	return true
 }
 
