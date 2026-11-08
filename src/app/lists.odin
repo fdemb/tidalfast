@@ -185,11 +185,6 @@ list_name :: proc(source: Source, id: string) -> string {
 	return fmt.tprintf("%v %s", source, id) if id != "" else fmt.tprint(source)
 }
 
-// view_complete says whether every row of a list is in and none failed.
-view_complete :: proc(v: ^Track_View) -> bool {
-	return v.source != .None && v.done && v.in_flight == 0 && v.error.len == 0 && !v.reading
-}
-
 // Memory
 
 lru_find :: proc(d: ^Data, source: Source, id: string) -> int {
@@ -299,11 +294,10 @@ list_open :: proc(d: ^Data, source: Source, id, name, image: string, hint: int) 
 		v.image = small(image)
 		v.hint = hint
 		v.count = hint
-		v.reading = true
+		v.load = List_Reading{}
 		if disk_push(d, {op = .Read, source = source, view = v.gen, id = small(id)}) {
 			return
 		}
-		v.reading = false
 	}
 	view_fetch(d, source, id, name, image, hint)
 }
@@ -1211,10 +1205,9 @@ disk_result :: proc(s: ^State, res: ^Result, job: Disk_Job) {
 		return
 	}
 	v := &d.view
-	if job.view != v.gen || !v.reading {
+	if _, reading := v.load.(List_Reading); job.view != v.gen || !reading {
 		return
 	}
-	v.reading = false
 	list, hit := &res.payload.(List_File_Result)
 	if !hit {
 		view_fetch(d, v.source, small_str(&v.id), small_str(&v.name), small_str(&v.image), v.hint)
@@ -1232,7 +1225,7 @@ disk_result :: proc(s: ^State, res: ^Result, job: Disk_Job) {
 	v.loaded_rows = n
 	v.hint = list.total
 	v.next_offset = list.total
-	v.done = true
+	v.load = List_Ended{}
 	v.version = list.version
 	v.fetched = list.fetched
 	for &r in v.rows {

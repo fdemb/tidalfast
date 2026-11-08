@@ -357,13 +357,13 @@ test_measure_list_loaded :: proc(t: ^testing.T) {
 	d := new(app.Data)
 	defer free(d)
 	d.view.source = .Liked
-	d.view.done = true
+	d.view.load = app.List_Ended{}
 	testing.expect(t, app.measure_list_loaded(d, 0))
 	testing.expect(t, !app.measure_list_loaded(d, 3))
 	d.view.source = .Playlist
 	testing.expect(t, app.measure_list_loaded(d, 3))
 	testing.expect(t, !app.measure_list_loaded(d, 0))
-	d.view.done = false
+	d.view.load = app.List_Paging{}
 	testing.expect(t, !app.measure_list_loaded(d, 3))
 	d.fake = true
 	testing.expect(t, app.measure_list_loaded(d, 0))

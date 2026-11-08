@@ -518,7 +518,7 @@ measure_list_loaded :: proc(d: ^Data, index: int) -> bool {
 	if d.fake {
 		return true
 	}
-	return d.view.source == (Source.Liked if index == 0 else Source.Playlist) && d.view.done
+	return d.view.source == (Source.Liked if index == 0 else Source.Playlist) && !view_loading(&d.view)
 }
 
 // longest_list is the sidebar entry with the most tracks. The fake data's
