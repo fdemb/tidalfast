@@ -549,7 +549,7 @@ draw_top_tracks :: proc(s: ^State, p: ^List_Place, view: ^ui.Box, width: f32) {
 	}
 	ui.spacer(ui.px(8))
 	shown := min(n, TOP_TRACKS)
-	if !s.data.fake && n == 0 && !s.data.view.done {
+	if !s.data.fake && n == 0 && view_loading(&s.data.view) {
 		shown = TOP_TRACKS // loading: the rows stand empty
 	}
 	cols := track_columns(width, .Artist)

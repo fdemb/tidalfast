@@ -44,8 +44,8 @@ current_error :: proc(s: ^State) -> (source: Error_Source, text: string) {
 		if wait := tidal.backoff_remaining(d.session); wait > 0 {
 			return .Rate_Limit, fmt.tprintf("TIDAL asked us to slow down. Trying again in %d s.", int(wait + 0.5))
 		}
-		if d.view.error.len > 0 {
-			return .List, small_str(&d.view.error)
+		if err := view_error(&d.view); err != "" {
+			return .List, err
 		}
 		if s.search.error.len > 0 && search_query(s) != "" {
 			return .Search, fmt.tprintf("Search failed: %s", small_str(&s.search.error))

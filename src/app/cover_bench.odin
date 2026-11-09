@@ -63,7 +63,7 @@ cover_bench_record :: proc(s: ^State, frame_ms: f32) {
 			if longest >= 0 {
 				select_playlist(s, longest + 1)
 			}
-		} else if d.view.loaded_rows >= COVER_BENCH_MIN_ROWS || d.view.done {
+		} else if d.view.loaded_rows >= COVER_BENCH_MIN_ROWS || !view_loading(&d.view) {
 			log.infof("bench: covers: %s, %d of %d rows loaded after %d frames", small_str(&d.view.name), d.view.loaded_rows, d.view.count, b.frame)
 			b^ = {running = true, phase = 1}
 		}
