@@ -91,6 +91,7 @@ Gpu :: struct {
 	region_size:   [2]int,
 	blurred_hash:  u64,
 	allocated:     int, // bytes of textures and buffers; atomic
+	tried_at:      time.Tick, // the last try at a new device, after losing one
 }
 
 Gpu_Texture :: struct {
@@ -112,7 +113,15 @@ init :: proc(r: ^Renderer, surface: rawptr) -> (ok: bool) {
 		return false
 	}
 	g.window = dxgi.HWND(ws.window)
+	return make_device(r, first = true)
+}
 
+// make_device makes the device and what the renderer keeps for its
+// lifetime, for the window in g.window. On failure the caller releases
+// what it made.
+@(private)
+make_device :: proc(r: ^Renderer, first: bool) -> bool {
+	g := &r.gpu
 	// A machine without a GPU driver, a VM or Wine without one, still draws
 	// through WARP, Direct3D's CPU rasterizer.
 	levels := [2]d3d.FEATURE_LEVEL{._11_0, ._10_0}
@@ -127,7 +136,9 @@ init :: proc(r: ^Renderer, surface: rawptr) -> (ok: bool) {
 		return false
 	}
 	log_adapter(g)
-	init_step(&r.init_steps, "render_device")
+	if first {
+		init_step(&r.init_steps, "render_device")
+	}
 
 	if !make_shaders(g) || !make_states(g) {
 		return false
@@ -238,7 +249,8 @@ com_release :: proc(p: ^$T) {
 
 // release frees the GPU objects, so g.device is nil and the renderer draws
 // nothing. It keeps the frame's counts, batches and clips, which a lost
-// device can leave halfway, and the capture path the shell set. Each
+// device can leave halfway, the capture path the shell set, and the window
+// and the time of the last try at a device, for making a new one. Each
 // slot's generation moves on, as in texture_destroy, so no old handle
 // matches.
 release :: proc(r: ^Renderer) {
@@ -248,6 +260,9 @@ release :: proc(r: ^Renderer) {
 			g.ctx->Unmap((^d3d.IResource)(g.instances), 0)
 		}
 		g.ctx->ClearState()
+		// Destroys what was released now, so a new swap chain can take the
+		// window.
+		g.ctx->Flush()
 	}
 	for &slot in r.textures {
 		if slot.width != 0 {
@@ -275,7 +290,8 @@ release :: proc(r: ^Renderer) {
 	com_release(&g.swapchain)
 	com_release(&g.ctx)
 	com_release(&g.device)
-	r.gpu = {}
+	window, tried_at := g.window, g.tried_at
+	r.gpu = {window = window, tried_at = tried_at}
 	for &slot in r.textures {
 		slot = {generation = slot.generation + 1}
 	}
@@ -418,6 +434,9 @@ gpu_texture_copy :: proc(r: ^Renderer, from, to: ^Texture_Slot, w, h: int) {
 @(private)
 gpu_frame_begin :: proc(r: ^Renderer) -> [^]Instance {
 	g := &r.gpu
+	if g.device == nil && r.device_lost {
+		new_device(r)
+	}
 	if g.device == nil {
 		return nil
 	}
@@ -600,6 +619,42 @@ make_swapchain :: proc(g: ^Gpu, want: [2]u32) -> bool {
 	return true
 }
 
+// lose_device lets go of a device Windows took away, as on a driver update
+// or a GPU reset, and every texture with it. The next begin_frame makes a
+// new one.
+@(private)
+lose_device :: proc(r: ^Renderer, reason: u32) {
+	log.errorf("render: the GPU device was lost (0x%x), making a new one", reason)
+	release(r)
+	r.device_lost = true
+}
+
+// device_gone says whether the device is gone, after a call failed, and
+// why.
+@(private)
+device_gone :: proc(g: ^Gpu) -> (reason: u32, gone: bool) {
+	hr := g.device->GetDeviceRemovedReason()
+	return u32(hr), hr < 0
+}
+
+// new_device tries to make a device again after losing one, at most once a
+// second: until the driver is back, as during an update, it fails.
+@(private)
+new_device :: proc(r: ^Renderer) {
+	g := &r.gpu
+	if g.tried_at != {} && time.tick_since(g.tried_at) < time.Second {
+		return
+	}
+	g.tried_at = time.tick_now()
+	if !make_device(r, first = false) {
+		release(r)
+		return
+	}
+	r.device_lost = false
+	r.device_resets += 1
+	log.info("render: made a new GPU device")
+}
+
 // end_frame draws the frame and presents it.
 end_frame :: proc(r: ^Renderer) {
 	g := &r.gpu
@@ -616,6 +671,9 @@ end_frame :: proc(r: ^Renderer) {
 		return
 	}
 	if swapchain_stale(g, want) && !make_swapchain(g, want) {
+		if reason, gone := device_gone(g); gone {
+			lose_device(r, reason)
+		}
 		return
 	}
 
@@ -646,9 +704,8 @@ end_frame :: proc(r: ^Renderer) {
 		time.sleep(16 * time.Millisecond)
 	}
 	if hr == dxgi.ERROR_DEVICE_REMOVED || hr == dxgi.ERROR_DEVICE_RESET {
-		reason := g.device->GetDeviceRemovedReason()
-		log.errorf("render: the GPU device was lost (0x%x), drawing nothing from now on", u32(reason))
-		release(r)
+		reason, _ := device_gone(g)
+		lose_device(r, reason)
 		return
 	}
 	r.stats = {draw_calls, r.instance_count}

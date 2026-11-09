@@ -201,6 +201,13 @@ Renderer :: struct {
 	capture_path:   string,
 	// When the slow steps of init finished, for the startup marks.
 	init_steps:     Init_Steps,
+	// The Direct3D 11 backend makes a new device when it loses one, as a
+	// driver update does. device_lost is set while it has none and tries
+	// again, once a second at most, at each begin_frame. device_resets
+	// counts the new devices: every texture went with the old one, so on a
+	// change the app makes what it keeps in textures again.
+	device_lost:    bool,
+	device_resets:  u32,
 }
 
 // Init_Steps are the wall-clock times, Unix nanoseconds, at which named

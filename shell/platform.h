@@ -52,7 +52,8 @@ typedef enum {
   SCROLL_PHASE_CANCELLED,
 } Scroll_Phase;
 
-// Keys by their place on a US keyboard. See Key in platform.odin.
+// Keys by their place on a US keyboard, or on Windows letters and digits by
+// the layout's virtual keys. See Key in platform.odin.
 typedef enum {
   KEY_NONE,
   KEY_A,

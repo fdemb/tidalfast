@@ -61,7 +61,10 @@ Scroll_Phase :: enum u32 {
 	Cancelled,
 }
 
-// Keys by their place on a US keyboard, whatever the layout says they type.
+// Keys by their place on a US keyboard, whatever the layout says they type,
+// on macOS and Linux. On Windows, letters and digits follow the layout's
+// virtual keys, as Windows apps' shortcuts do, so Control+Z is undo on the
+// key labelled Z on a German or French keyboard, and the rest go by place.
 // Text comes in Text events; these are for shortcuts and editing. The shell
 // maps its own key codes to these, and keys not listed here to None.
 Key :: enum u32 {

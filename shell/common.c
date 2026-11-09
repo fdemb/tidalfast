@@ -73,6 +73,32 @@ void push_event(Event e) {
   atomic_store(&g_needs_redraw, true);
 }
 
+static Event *g_spare_events;
+static uint32_t g_spare_event_capacity;
+static uint8_t *g_spare_text;
+static uint32_t g_spare_text_cap;
+
+void queue_take(Event **events, uint32_t *count, const uint8_t **text, uint32_t *text_length) {
+  *events = g_events;
+  *count = g_event_count;
+  *text = g_text;
+  *text_length = g_text_len;
+  Event *e = g_events;
+  g_events = g_spare_events;
+  g_spare_events = e;
+  uint32_t n = g_event_capacity;
+  g_event_capacity = g_spare_event_capacity;
+  g_spare_event_capacity = n;
+  uint8_t *t = g_text;
+  g_text = g_spare_text;
+  g_spare_text = t;
+  n = g_text_cap;
+  g_text_cap = g_spare_text_cap;
+  g_spare_text_cap = n;
+  g_event_count = 0;
+  g_text_len = 0;
+}
+
 // Now Playing
 //
 // Not shown anywhere yet: MPRIS over D-Bus on Linux, the System Media
