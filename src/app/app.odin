@@ -304,6 +304,12 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input, shell: ^platfor
 	s.titlebar_h = input.titlebar_height
 	r := &s.renderer
 	render.begin_frame(r, w, h, input.scale, CLEAR_COLOR)
+	if r.device_resets != s.gpu_resets {
+		// The renderer lost its GPU device and every texture with it.
+		s.gpu_resets = r.device_resets
+		text.forget_glyphs(&s.text, r)
+		covers_forget(s)
+	}
 	ui_begin := time.tick_now()
 	measure_frame_begin(s)
 	text.begin_frame(&s.text, r)
@@ -351,7 +357,12 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input, shell: ^platfor
 		}
 		s.last_stats = r.stats
 	}
-	return {animating = b32(animating || acted || s.dev.sliding || s.text.needs_redraw), wake_after = ui.wake_after(&s.ui)}
+	wake := ui.wake_after(&s.ui)
+	if r.device_lost {
+		// Frames try again for a new device.
+		wake = 1 if wake <= 0 else min(wake, 1)
+	}
+	return {animating = b32(animating || acted || s.dev.sliding || s.text.needs_redraw), wake_after = wake}
 }
 
 // hsv returns an opaque sRGB colour. Hue wraps, so any value works.

@@ -178,6 +178,12 @@ atlas_clear :: proc(a: ^Atlas, r: ^render.Renderer) {
 	a.full = .No
 }
 
+// forget_glyphs drops every glyph, after the renderer lost its textures
+// with its GPU device. They are rasterized again when next drawn.
+forget_glyphs :: proc(t: ^State, r: ^render.Renderer) {
+	atlas_clear(&t.atlas, r)
+}
+
 // subpixel splits a pixel x into a whole pixel and one of SUBPIXEL_STEPS
 // offsets, rounding to the nearest step.
 subpixel :: proc(x: f32) -> (whole: f32, bucket: u8) {

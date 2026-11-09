@@ -131,6 +131,17 @@ covers_schedule :: proc(s: ^State) {
 	}
 }
 
+// covers_forget drops every cover in a texture, after the renderer lost
+// its textures with its GPU device. Those still on screen are asked for
+// again, and decoded again.
+covers_forget :: proc(s: ^State) {
+	d := &s.data
+	n := cover.forget(&d.covers, d.evicted[:])
+	for t in d.evicted[:n] {
+		render.texture_destroy(&s.renderer, t)
+	}
+}
+
 // cover_result puts a decoded cover in its page, or marks it failed.
 cover_result :: proc(s: ^State, res: ^Result, p: Cover_Job, now: f64) {
 	d := &s.data
