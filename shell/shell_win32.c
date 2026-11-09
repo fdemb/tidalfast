@@ -57,6 +57,7 @@
 #define MIN_WIDTH 480
 #define MIN_HEIGHT 360
 #define MODAL_TIMER 1
+#define MODAL_READY_WAIT_MS 33 // a swap chain whose frames go nowhere may never signal frame_ready
 
 static bool g_app_started; // app_init has run, so frames can be drawn
 static Memory g_memory;
@@ -186,6 +187,23 @@ static void draw_frame(void) {
   if (g_surface_info.presents != presents) g_ready_taken = false;
   g_animating = result.animating;
   arm_timer(g_wake_timer, result.wake_after > 0 ? result.wake_after : 0);
+}
+
+// A frame from inside a modal loop, where the main loop can't wait for the
+// swap chain. Present doesn't block on a swap chain with frame_ready, so
+// without a wait the content falls behind the window during a drag. A resize
+// leaves extra signals on frame_ready, and a wait on those would return at
+// once, so they're dropped first and the wait is for the next one.
+static void draw_modal_frame(void) {
+  HANDLE ready = (HANDLE)g_surface_info.frame_ready;
+  if (!g_in_frame && ready && !g_ready_taken && !(g_minimized && !g_capture) &&
+      WaitForSingleObject(ready, 100) == WAIT_OBJECT_0)
+    g_ready_taken = true;
+  uint64_t presents = g_surface_info.presents;
+  draw_frame();
+  if (!ready || g_surface_info.presents == presents) return;
+  while (WaitForSingleObject(ready, 0) == WAIT_OBJECT_0) {}
+  if (WaitForSingleObject(ready, MODAL_READY_WAIT_MS) == WAIT_OBJECT_0) g_ready_taken = true;
 }
 
 // Whether the app's animation draws frames: not while the window is
@@ -566,7 +584,7 @@ static void modal_tick(void) {
   run_due_steps();
   if (WaitForSingleObject(g_wake_timer, 0) == WAIT_OBJECT_0) atomic_store(&g_needs_redraw, true);
   WaitForSingleObject(g_redraw_event, 0); // g_needs_redraw says the same
-  if (atomic_load(&g_needs_redraw) || animating()) draw_frame();
+  if (atomic_load(&g_needs_redraw) || animating()) draw_modal_frame();
 }
 
 static bool is_modifier(WPARAM vk) {
@@ -594,7 +612,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (wp != SIZE_MINIMIZED) {
       update_size();
       request_redraw();
-      if (g_in_size_move) draw_frame();
+      if (g_in_size_move) draw_modal_frame();
     }
     return 0;
   case WM_DPICHANGED: {
