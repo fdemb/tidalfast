@@ -5,7 +5,9 @@ package app
 //	[WARN ] --- [12:34:56] [settings.odin:79] app: ... isn't valid settings, using the defaults
 //
 // Info and up by default. TIDALFAST_LOG_HTTP=1 adds debug, which is mostly
-// the TIDAL library: a line per request and its token refreshes.
+// the TIDAL library: a line per request and its token refreshes. A Windows
+// release build started from Explorer has no stderr, and logs to a file
+// instead (logging_windows.odin).
 //
 // app_logger builds the logger from globals that log_init fills at start.
 // Threads the app starts set it in their context; the audio player keeps
@@ -29,9 +31,10 @@ log_options: log.Options
 log_init :: proc "contextless" () {
 	context = runtime.default_context()
 	log_data.file_handle = os.stderr
+	to_file := log_to_file(&log_data)
 	log_level = .Debug if os.get_env("TIDALFAST_LOG_HTTP", context.temp_allocator) != "" else .Info
 	log_options = {.Level, .Time, .Short_File_Path, .Line}
-	if terminal.is_terminal(os.stderr) {
+	if !to_file && terminal.is_terminal(os.stderr) {
 		log_options += {.Terminal_Color}
 	}
 }

@@ -26,6 +26,7 @@ State :: struct {
 	arena:        mem.Arena, // the rest of the persistent block
 	frame_arena:  mem.Arena, // reset at the start of every frame
 	renderer:     render.Renderer,
+	gpu_resets:   u32, // the renderer's device_resets the textures were made for
 	text:         text.State,
 	rows:         []Row,
 	last_stats:   render.Stats,
@@ -237,10 +238,12 @@ start :: proc(s: ^State, shell: ^platform.Shell) {
 
 	if !render.init(&s.renderer, shell.surface) {
 		log.error("app: renderer init failed")
+		show_fatal("TIDALfast couldn't start drawing, so its window will stay empty.")
 	}
 	measure_init_part(s, .Render)
 	if !text.init(&s.text, shell.request_redraw) {
 		log.error("app: text init failed")
+		show_fatal("TIDALfast couldn't load its fonts, so it can't show any text.")
 	}
 	measure_init_part(s, .Text)
 	ui.init(&s.ui)
