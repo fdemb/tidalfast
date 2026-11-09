@@ -613,7 +613,7 @@ browse_header :: proc(s: ^State) -> (title, subtitle: string, ok: bool) {
 		return
 	}
 	title = small_str(&v.name)
-	if !v.done {
+	if view_loading(v) {
 		subtitle = cat(kinds[v.source], " · loading, ", songs(v.loaded_rows), " so far")
 	} else {
 		subtitle = cat(kinds[v.source], " · ", songs(v.count))

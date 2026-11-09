@@ -79,7 +79,7 @@ liked_songs_load_past_short_pages :: proc(t: ^testing.T) {
 	defer app.view_close(d)
 	// What the workers would do with the jobs view_open and
 	// view_request_pages queue, one page at a time.
-	for !d.view.done {
+	for app.view_loading(&d.view) {
 		queued, ok := jobs.try_pop(&d.queue)
 		if !testing.expect(t, ok, "the view stopped asking for pages before the end") {
 			return
@@ -112,7 +112,7 @@ liked_songs_load_past_short_pages :: proc(t: ^testing.T) {
 		p := pages[i]
 		app.view_add_rows(&d.view, p.offset, p.limit, p.rows, p.total)
 	}
-	testing.expect(t, d.view.done)
+	testing.expect(t, !app.view_loading(&d.view))
 	testing.expect_value(t, d.view.count, len(want))
 	testing.expect_value(t, d.view.loaded_rows, len(want))
 	testing.expect(t, slice.equal(view_ids(&d.view), want), "out of order pages put rows in the wrong place")
@@ -120,7 +120,7 @@ liked_songs_load_past_short_pages :: proc(t: ^testing.T) {
 	// Without a total, a short page still ends the list.
 	app.view_open(d, .Search, "q", "Results", "", 0)
 	app.view_add_rows(&d.view, 0, 50, pages[0].rows[:20])
-	testing.expect(t, d.view.done)
+	testing.expect(t, !app.view_loading(&d.view))
 	testing.expect_value(t, d.view.count, 20)
 }
 

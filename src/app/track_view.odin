@@ -15,7 +15,9 @@ PAGES_IN_FLIGHT :: 2
 // Track_View is a track list: the open one, one kept in memory after it
 // closed (see lists.odin), or the open one being fetched again. Its rows,
 // their loaded flags and its gaps live in space, their strings in its arena.
-// gen tells its pages from those of other lists.
+// gen tells its pages from those of other lists. load says how far its rows
+// got, and in_flight counts its pages out to TIDAL in any state: a list can
+// end or fail with later pages still out, and their answers still land.
 Track_View :: struct {
 	gen:         u32,
 	source:      Source,
@@ -33,14 +35,80 @@ Track_View :: struct {
 	count:       int, // rows shown, loaded or not
 	next_offset: int, // in TIDAL's offsets, which count the gaps
 	in_flight:   int,
-	done:        bool,
-	error:       Small,
+	load:        List_Load,
 	gaps:        []Gap, // in space, by offset
 	longest:     int, // seconds, of the longest track loaded
 	version:     List_Version, // what TIDAL said the list was at when it was fetched
 	fetched:     i64, // unix seconds the rows came from TIDAL; 0 until they all have
-	reading:     bool, // waiting for its file
 	found:       Found_Lists, // .Search: the albums, artists and playlists found, in arena
+}
+
+// List_Load is how far a list's rows got. A list starts paging, or
+// reading its file, and ends up ended or failed.
+List_Load :: union #no_nil {
+	List_Paging,
+	List_Reading,
+	List_Ended,
+	List_Failed,
+}
+
+// List_Paging asks TIDAL for pages until one finds the end. It's the zero
+// value, so a list fetched from TIDAL starts here.
+List_Paging :: struct {}
+
+// List_Reading waits for the list's file, see list_open. It has no arena
+// until the file comes.
+List_Reading :: struct {}
+
+// List_Ended knows where the list ends: a page reached it, or the file had
+// every row. count no longer grows, and no more pages go out.
+List_Ended :: struct {}
+
+// List_Failed is a list a page failed for. The rows it has stay, and no
+// more pages go out.
+List_Failed :: struct {
+	error: Small,
+}
+
+// view_loading says whether a list's length isn't known yet: it's paging
+// or reading its file.
+view_loading :: proc(v: ^Track_View) -> bool {
+	switch _ in v.load {
+	case List_Paging, List_Reading:
+		return true
+	case List_Ended, List_Failed:
+	}
+	return false
+}
+
+// view_filling says whether rows are still to come: pages are out or due,
+// or the file is being read.
+view_filling :: proc(v: ^Track_View) -> bool {
+	if v.source == .None {
+		return false
+	}
+	switch _ in v.load {
+	case List_Paging, List_Reading:
+		return true
+	case List_Ended:
+		return v.in_flight > 0
+	case List_Failed:
+	}
+	return false
+}
+
+// view_complete says whether every row of a list is in and none failed.
+view_complete :: proc(v: ^Track_View) -> bool {
+	_, ended := v.load.(List_Ended)
+	return v.source != .None && ended && v.in_flight == 0
+}
+
+// view_error is why a page of the list failed, or "".
+view_error :: proc(v: ^Track_View) -> string {
+	if f, failed := &v.load.(List_Failed); failed {
+		return small_str(&f.error)
+	}
+	return ""
 }
 
 // Gap is where a page came back short before the end of its list: TIDAL
@@ -83,7 +151,7 @@ view_gen :: proc(d: ^Data) -> u32 {
 // freed. A refresh of it stops.
 view_close :: proc(d: ^Data) {
 	v := &d.view
-	if v.has_arena && v.gen == d.queue_view && !view_complete(v) && v.error.len == 0 && !v.reading {
+	if v.has_arena && v.gen == d.queue_view && view_filling(v) {
 		queued_drop(d)
 		d.queued = take(v)
 	}
@@ -294,11 +362,14 @@ view_add_rows :: proc(v: ^Track_View, offset, limit: int, rows: []Row, total := 
 		view_close_gap(v, offset, start, limit, len(rows))
 	}
 	end := start + len(rows)
-	if last && (!v.done || end < v.count) {
-		v.done = true
+	loading := view_loading(v)
+	if last && (loading || end < v.count) {
+		if loading {
+			v.load = List_Ended{}
+		}
 		v.count = end
 	}
-	if v.done {
+	if !view_loading(v) {
 		rows = rows[:clamp(v.count - start, 0, len(rows))]
 	} else {
 		v.count = max(v.count, end)
@@ -379,7 +450,8 @@ view_request_pages :: proc(d: ^Data) {
 // goes out ahead of an earlier one, and a page that ends the list leaves
 // only later ones held.
 view_pages :: proc(d: ^Data, v: ^Track_View) {
-	for v.source != .None && !v.done && !v.reading && v.in_flight < PAGES_IN_FLIGHT && (v.next_offset < v.hint || v.in_flight == 0) && !page_held(d, v.gen) {
+	_, paging := v.load.(List_Paging)
+	for paging && v.source != .None && v.in_flight < PAGES_IN_FLIGHT && (v.next_offset < v.hint || v.in_flight == 0) && !page_held(d, v.gen) {
 		limit := PAGE_FIRST if v.next_offset == 0 else PAGE_SIZE
 		push_job(d, {payload = Tracks_Job{view = v.gen, source = v.source, id = v.id, offset = i32(v.next_offset), limit = i32(limit)}})
 		v.next_offset += limit
@@ -430,14 +502,13 @@ tracks_result :: proc(s: ^State, res: ^Result, p: Tracks_Job) {
 			refresh_drop(d) // the rows on screen stay
 			return
 		}
-		v.error = res.message
-		v.done = true
+		v.load = List_Failed{res.message}
 		v.in_flight -= held_remove_if(d, page_of, &v.gen)
 		return
 	}
 	page, _ := res.payload.(Tracks_Result)
 	view_add_rows(v, int(p.offset), int(p.limit), page.rows, page.total)
-	if v.done {
+	if !view_loading(v) {
 		v.in_flight -= held_remove_if(d, page_of, &v.gen)
 	}
 	view_pages(d, v)

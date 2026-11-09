@@ -707,7 +707,7 @@ view_subtitle :: proc(s: ^State) -> string {
 	if v.source == .None {
 		return ""
 	}
-	if !v.done {
+	if view_loading(v) {
 		return cat("Playlist · ", songs(v.count), " · loading, ", num(v.loaded_rows), " so far")
 	}
 	return cat("Playlist · ", songs(v.count))

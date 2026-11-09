@@ -1178,6 +1178,67 @@ held_page_keeps_later_pages_back :: proc(t: ^testing.T) {
 	testing.expect_value(t, v.loaded_rows, 300)
 }
 
+// A list goes from paging to ended once a page finds the end, and is
+// complete only when the pages still out have landed too. A failed page
+// stops it for good: a later page that reaches the end doesn't make it
+// look whole, and its error stays for the toast.
+@(test)
+list_load_states :: proc(t: ^testing.T) {
+	s := data_state()
+	defer data_state_free(s)
+	d := &s.data
+	sign_in(s)
+	data_jobs(d)
+	v := &d.view
+
+	app.view_open(d, .Playlist, "pl", "pl", "", 120)
+	out := data_jobs(d)
+	testing.expect_value(t, len(out), 2)
+	_, paging := v.load.(app.List_Paging)
+	testing.expect(t, paging)
+	testing.expect(t, app.view_loading(v))
+	testing.expect(t, app.view_filling(v))
+	testing.expect(t, !app.view_complete(v))
+
+	// The second page ends the list while the first is still out.
+	last := app.Result{job = out[1], payload = app.Tracks_Result{rows = fake_rows(120 - app.PAGE_FIRST), total = 120}}
+	app.handle_result(s, &last, 0)
+	_, ended := v.load.(app.List_Ended)
+	testing.expect(t, ended)
+	testing.expect(t, !app.view_loading(v))
+	testing.expect(t, app.view_filling(v), "the first page is still out")
+	testing.expect(t, !app.view_complete(v))
+	testing.expect_value(t, len(data_jobs(d)), 0)
+	first := app.Result{job = out[0], payload = app.Tracks_Result{rows = fake_rows(app.PAGE_FIRST), total = 120}}
+	app.handle_result(s, &first, 0)
+	testing.expect(t, !app.view_filling(v))
+	testing.expect(t, app.view_complete(v))
+	testing.expect_value(t, v.loaded_rows, 120)
+
+	app.view_open(d, .Playlist, "pl2", "pl2", "", 120)
+	out = data_jobs(d)
+	testing.expect_value(t, len(out), 2)
+	failed := app.Result{job = out[0], err = .Network, message = app.small("Can't reach TIDAL")}
+	app.handle_result(s, &failed, 0)
+	_, is_failed := v.load.(app.List_Failed)
+	testing.expect(t, is_failed)
+	testing.expect_value(t, app.view_error(v), "Can't reach TIDAL")
+	testing.expect(t, !app.view_loading(v))
+	testing.expect(t, !app.view_filling(v))
+	app.view_request_pages(d)
+	testing.expect_value(t, len(data_jobs(d)), 0)
+	late := app.Result{job = out[1], payload = app.Tracks_Result{rows = fake_rows(120 - app.PAGE_FIRST), total = 120}}
+	app.handle_result(s, &late, 0)
+	_, is_failed = v.load.(app.List_Failed)
+	testing.expect(t, is_failed, "a late page brought a failed list back")
+	testing.expect(t, !app.view_complete(v))
+	testing.expect_value(t, app.view_error(v), "Can't reach TIDAL")
+	testing.expect_value(t, v.in_flight, 0)
+	src, msg := app.current_error(s)
+	testing.expect_value(t, src, app.Error_Source.List)
+	testing.expect_value(t, msg, "Can't reach TIDAL")
+}
+
 @(private = "file")
 fake_rows :: proc(n: int) -> []app.Row {
 	rows := make([]app.Row, n, context.temp_allocator)
@@ -1240,7 +1301,7 @@ view_grows_past_the_count :: proc(t: ^testing.T) {
 	v.in_flight -= 1
 	app.view_add_rows(v, 150, 100, fake_rows(80))
 	testing.expect_value(t, v.count, 230)
-	testing.expect(t, v.done)
+	testing.expect(t, !app.view_loading(v))
 	app.view_request_pages(d)
 	queued, _ = jobs.pending(&d.queue)
 	testing.expect_value(t, queued, 0)

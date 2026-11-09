@@ -275,10 +275,12 @@ list_file_of_another_format_is_deleted :: proc(t: ^testing.T) {
 		app.view_close(d)
 		app.lists_clear(d)
 		app.list_open(d, .Album, "12", "Album", "", 3)
-		testing.expect(t, d.view.reading)
+		_, reading := d.view.load.(app.List_Reading)
+		testing.expect(t, reading)
 		testing.expect_value(t, track_jobs(s), 0)
 		run_disk(s)
-		testing.expect(t, !d.view.reading)
+		_, reading = d.view.load.(app.List_Reading)
+		testing.expect(t, !reading)
 		testing.expect(t, !os.exists(path))
 		testing.expect(t, serve(s, rows_of({1, 2, 3})) > 0)
 		testing.expect_value(t, run_disk(s), 1)
@@ -378,7 +380,7 @@ unchanged_list_opens_without_requests :: proc(t: ^testing.T) {
 	app.select_playlist(s, 2)
 	testing.expect_value(t, track_jobs(s), 0)
 	testing.expect(t, slice.equal(view_ids(&d.view), []i64{1, 2, 3}))
-	testing.expect(t, d.view.done)
+	testing.expect(t, !app.view_loading(&d.view))
 	testing.expect_value(t, d.lists.count, 1)
 
 	// Changed on TIDAL while it's open.

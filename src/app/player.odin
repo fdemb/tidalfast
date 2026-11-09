@@ -871,7 +871,7 @@ playback_update :: proc(s: ^State, events: []platform.Event) {
 		}
 		queue_reorder(s, head)
 	}
-	if q := &d.queued; q.source != .None && (q.gen != d.queue_view || q.done && q.in_flight == 0 && (pb.index < 0 || pb.loaded == q.loaded_rows)) {
+	if q := &d.queued; q.source != .None && (q.gen != d.queue_view || !view_loading(q) && q.in_flight == 0 && (pb.index < 0 || pb.loaded == q.loaded_rows)) {
 		queued_drop(d)
 	}
 	s.library.playing = playing_row(s)
@@ -1099,7 +1099,7 @@ queue_save :: proc(s: ^State) {
 	}
 	ended := pb.status.state == .Ended && pb.status.serial == pb.cur.serial
 	count, loaded := u64(len(pb.entries)), u64(pb.loaded)
-	if v := queue_list(d); v != nil && v.error.len == 0 && !view_complete(v) {
+	if v := queue_list(d); v != nil && view_filling(v) {
 		count, loaded = 0, floor_pow2(loaded)
 	}
 	rows := fnv_u64({u64(pb.queue_gen), count, loaded})

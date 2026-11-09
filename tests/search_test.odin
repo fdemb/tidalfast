@@ -497,7 +497,7 @@ search_results_come_back_from_memory :: proc(t: ^testing.T) {
 		payload = app.Search_Result{rows = []app.Row{{title = "Found song", artist = "Someone", id = 1}, {title = "Other song", artist = "Someone", id = 2}}, found = {albums = albums}},
 	}
 	app.handle_result(s, &res, 0)
-	testing.expect(t, s.data.view.done)
+	testing.expect(t, !app.view_loading(&s.data.view))
 	library_frame(t, s, &f)
 
 	library_frame(t, s, &f, press(s, "Liked Songs"))

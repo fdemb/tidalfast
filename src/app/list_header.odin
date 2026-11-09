@@ -229,7 +229,7 @@ list_songs :: proc(s: ^State, kind: List_Kind) -> string {
 		if v.source == .None {
 			return view_subtitle(s)
 		}
-		if !v.done {
+		if view_loading(v) {
 			return cat("Loading, ", songs(v.loaded_rows), " so far")
 		}
 	}
