@@ -10,18 +10,23 @@
 // request_redraw sets and two waitable timers (wake_after and the test
 // driver), then handles everything that came and draws one frame for it
 // all. While the app is animating, the swapchain's FIFO present paces the
-// frames to the display. While the user drags the window's edge or title,
-// Windows runs its own modal loop and the main loop doesn't run; a timer
-// draws from inside it, so the window keeps up with the drag.
+// frames to the display. A minimized window still draws the frames asked
+// for, since the app does its work in frames (the queue moves on to the
+// next track in one), but it doesn't animate. While the user drags the
+// window's edge or title, or has the system menu open, Windows runs its
+// own modal loop and the main loop doesn't run; a timer does its work from
+// inside it, so the window keeps up with the drag.
 //
 // Text comes from WM_CHAR, and from an input method through IMM32: the
 // composition string becomes marked text and the result string is
-// inserted, as NSTextInputClient does on macOS. Keys are mapped by their
-// scan code, the key's place on the keyboard. Not here yet: accessibility
-// (UI Automation), Now Playing and the media overlay (System Media
-// Transport Controls), drag and drop and touchpad momentum (Windows sends
-// precision touchpad scrolls as fine wheel deltas, which arrive as precise
-// scrolls without phases).
+// inserted, as NSTextInputClient does on macOS. The input method is only
+// on while a text field has the focus. Letters and digits are mapped by
+// the virtual key the layout gives them, so shortcuts follow the layout,
+// and the other keys by their scan code, their place on the keyboard. Not
+// here yet: accessibility (UI Automation), Now Playing and the media
+// overlay (System Media Transport Controls), drag and drop and touchpad
+// momentum (Windows sends precision touchpad scrolls as fine wheel deltas,
+// which arrive as precise scrolls without phases).
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -48,7 +53,7 @@
 #define DEFAULT_HEIGHT 700
 #define MIN_WIDTH 480
 #define MIN_HEIGHT 360
-#define LIVE_RESIZE_TIMER 1
+#define MODAL_TIMER 1
 
 static bool g_app_started; // app_init has run, so frames can be drawn
 static Memory g_memory;
@@ -60,10 +65,17 @@ static float g_scale = 1;
 static bool g_key_window;
 static bool g_animating;
 static bool g_in_size_move; // inside the modal loop of a drag or resize
-static bool g_minimized; // no frames until restored, unless TIDALFAST_CAPTURE is set
+static int g_modal_loops; // modal loops running: a drag, a resize or the system menu
+static bool g_minimized; // frames only when asked, no animation, unless TIDALFAST_CAPTURE is set
 static bool g_capture;
+static bool g_in_frame; // inside app_frame, which a window message can re-enter
+static bool g_shut_down; // app_shutdown has run
 
-static HANDLE g_redraw_event; // set by request_redraw
+// Set by request_redraw. Auto-reset, so a wait it ends consumes it: a
+// request that comes while a frame is starting leaves it set at most until
+// the next wait, never with nothing to draw for it.
+static HANDLE g_redraw_event;
+static HANDLE g_shutdown_done; // set once app_shutdown has run, for the console handler
 static HANDLE g_wake_timer; // wake_after
 static HANDLE g_test_timer; // the next test step
 static LARGE_INTEGER g_qpc_frequency;
@@ -129,34 +141,48 @@ static char *utf8_of(const wchar_t *w, int n) {
   return out;
 }
 
+// The buttons held down now, in any app: the physical buttons, which
+// GetAsyncKeyState reads, swapped back to the logical ones when the user
+// swapped the left and right buttons. GetKeyState would be this thread's
+// view, which misses a release that went to another app.
+static uint32_t buttons_down(void) {
+  bool swapped = GetSystemMetrics(SM_SWAPBUTTON) != 0;
+  return (GetAsyncKeyState(swapped ? VK_RBUTTON : VK_LBUTTON) < 0 ? 1u << MOUSE_BUTTON_LEFT : 0) |
+         (GetAsyncKeyState(swapped ? VK_LBUTTON : VK_RBUTTON) < 0 ? 1u << MOUSE_BUTTON_RIGHT : 0) |
+         (GetAsyncKeyState(VK_MBUTTON) < 0 ? 1u << MOUSE_BUTTON_MIDDLE : 0) |
+         (GetAsyncKeyState(VK_XBUTTON1) < 0 ? 1u << MOUSE_BUTTON_BACK : 0) |
+         (GetAsyncKeyState(VK_XBUTTON2) < 0 ? 1u << MOUSE_BUTTON_FORWARD : 0);
+}
+
 // Frames
 
+// A frame's work can send the window a message: the input method's
+// answer to ImmNotifyIME, or a sent message from another thread while a
+// call waits. If that message asks for a frame, it gets the next one; the
+// app is never re-entered. Events it queues go to the next frame too,
+// since queue_take handed this frame's to the app.
 static void draw_frame(void) {
-  if (!g_app_started) return;
+  if (!g_app_started || g_in_frame) return;
   atomic_store(&g_needs_redraw, false);
-  ResetEvent(g_redraw_event);
   Frame_Input input = {
-      .events = g_events,
-      .event_count = g_event_count,
       .width = g_width,
       .height = g_height,
       .scale = g_scale,
       .time = now_seconds() - g_start_time,
-      .text = g_text,
-      .text_length = g_text_len,
       .key_window = g_key_window,
-      .mouse_buttons = (GetKeyState(VK_LBUTTON) < 0 ? 1u << MOUSE_BUTTON_LEFT : 0) |
-                       (GetKeyState(VK_RBUTTON) < 0 ? 1u << MOUSE_BUTTON_RIGHT : 0) |
-                       (GetKeyState(VK_MBUTTON) < 0 ? 1u << MOUSE_BUTTON_MIDDLE : 0) |
-                       (GetKeyState(VK_XBUTTON1) < 0 ? 1u << MOUSE_BUTTON_BACK : 0) |
-                       (GetKeyState(VK_XBUTTON2) < 0 ? 1u << MOUSE_BUTTON_FORWARD : 0),
+      .mouse_buttons = buttons_down(),
   };
+  queue_take(&input.events, &input.event_count, &input.text, &input.text_length);
+  g_in_frame = true;
   Frame_Result result = app_frame(&g_memory, &g_shell, &input);
-  g_event_count = 0;
-  g_text_len = 0;
+  g_in_frame = false;
   g_animating = result.animating;
   arm_timer(g_wake_timer, result.wake_after > 0 ? result.wake_after : 0);
 }
+
+// Whether the app's animation draws frames: not while the window is
+// minimized, unless a test captures them.
+static bool animating(void) { return g_animating && !(g_minimized && !g_capture); }
 
 // The window's size in points, from its client rect in pixels.
 static void update_size(void) {
@@ -195,41 +221,40 @@ static void modifiers_changed(void) {
   }
 }
 
-// Keys by scan code, the key's place on the keyboard, as the Linux shell
-// maps evdev codes (evdev codes are scan code set 1 for these). Extended
-// keys (arrows, Home, the keypad's Enter) have the E0 prefix, here 0x100.
-static uint32_t key_of_scan(uint32_t scan) {
-  static const uint8_t keys[0x60] = {
-      [0x1e] = KEY_A, [0x30] = KEY_B, [0x2e] = KEY_C, [0x20] = KEY_D, [0x12] = KEY_E, [0x21] = KEY_F, [0x22] = KEY_G,
-      [0x23] = KEY_H, [0x17] = KEY_I, [0x24] = KEY_J, [0x25] = KEY_K, [0x26] = KEY_L, [0x32] = KEY_M, [0x31] = KEY_N,
-      [0x18] = KEY_O, [0x19] = KEY_P, [0x10] = KEY_Q, [0x13] = KEY_R, [0x1f] = KEY_S, [0x14] = KEY_T, [0x16] = KEY_U,
-      [0x2f] = KEY_V, [0x11] = KEY_W, [0x2d] = KEY_X, [0x15] = KEY_Y, [0x2c] = KEY_Z,
-      [0x0b] = KEY_DIGIT_0, [0x02] = KEY_DIGIT_1, [0x03] = KEY_DIGIT_2, [0x04] = KEY_DIGIT_3, [0x05] = KEY_DIGIT_4,
-      [0x06] = KEY_DIGIT_5, [0x07] = KEY_DIGIT_6, [0x08] = KEY_DIGIT_7, [0x09] = KEY_DIGIT_8, [0x0a] = KEY_DIGIT_9,
-      [0x1c] = KEY_RETURN, [0x0f] = KEY_TAB, [0x39] = KEY_SPACE, [0x0e] = KEY_BACKSPACE, [0x01] = KEY_ESCAPE,
-      [0x29] = KEY_GRAVE,
-      [0x3b] = KEY_F1, [0x3c] = KEY_F2, [0x3d] = KEY_F3, [0x3e] = KEY_F4, [0x3f] = KEY_F5, [0x40] = KEY_F6,
-      [0x41] = KEY_F7, [0x42] = KEY_F8, [0x43] = KEY_F9, [0x44] = KEY_F10, [0x57] = KEY_F11, [0x58] = KEY_F12,
-  };
-  switch (scan) {
-  case 0x11c: return KEY_KEYPAD_ENTER;
-  case 0x153: return KEY_DELETE;
-  case 0x147: return KEY_HOME;
-  case 0x14f: return KEY_END;
-  case 0x149: return KEY_PAGE_UP;
-  case 0x151: return KEY_PAGE_DOWN;
-  case 0x14b: return KEY_LEFT;
-  case 0x14d: return KEY_RIGHT;
-  case 0x148: return KEY_UP;
-  case 0x150: return KEY_DOWN;
+// Keys for the app. Letters and digits come from the virtual key, which
+// the layout sets: Control+Z is undo on the key labelled Z on a German or
+// a French keyboard, and on Dvorak, and a Cyrillic or Greek layout gives
+// its letter keys the US letters' virtual keys, so the shortcuts still
+// work there. Editing and navigation keys come from the virtual key too,
+// which the keypad's keys with NumLock off share with the dedicated ones.
+// The rest go by scan code, the key's place on the keyboard, as the Linux
+// shell maps evdev codes: the key under Escape is the overlay's backtick
+// whatever it types. The keypad's Enter has the E0 prefix (bit 24 of
+// lParam), which tells it from Return.
+static uint32_t key_of(WPARAM vk, LPARAM lp) {
+  if (vk >= 'A' && vk <= 'Z') return KEY_A + (uint32_t)(vk - 'A');
+  if (vk >= '0' && vk <= '9') return KEY_DIGIT_0 + (uint32_t)(vk - '0');
+  if (vk >= VK_F1 && vk <= VK_F12) return KEY_F1 + (uint32_t)(vk - VK_F1);
+  switch (vk) {
+  case VK_RETURN: return (lp & (1 << 24)) ? KEY_KEYPAD_ENTER : KEY_RETURN;
+  case VK_TAB: return KEY_TAB;
+  case VK_SPACE: return KEY_SPACE;
+  case VK_BACK: return KEY_BACKSPACE;
+  case VK_ESCAPE: return KEY_ESCAPE;
+  case VK_DELETE: return KEY_DELETE;
+  case VK_HOME: return KEY_HOME;
+  case VK_END: return KEY_END;
+  case VK_PRIOR: return KEY_PAGE_UP;
+  case VK_NEXT: return KEY_PAGE_DOWN;
+  case VK_LEFT: return KEY_LEFT;
+  case VK_RIGHT: return KEY_RIGHT;
+  case VK_UP: return KEY_UP;
+  case VK_DOWN: return KEY_DOWN;
   }
-  return scan < sizeof keys ? keys[scan] : KEY_NONE;
-}
-
-static uint32_t scan_of(LPARAM lp) {
   uint32_t scan = (uint32_t)(lp >> 16) & 0xff;
-  if (lp & (1 << 24)) scan |= 0x100;
-  return scan;
+  bool extended = (lp & (1 << 24)) != 0;
+  if (scan == 0x29 && !extended) return KEY_GRAVE;
+  return KEY_NONE;
 }
 
 // While a text field has the focus, a key that types something with no
@@ -289,6 +314,10 @@ static struct {
   float x, y;
 } g_click;
 
+// The buttons that went down in the window and haven't come up, which
+// hold the mouse capture so a drag keeps going outside the window.
+static uint32_t g_held;
+
 static void mouse_button(uint32_t button, bool down) {
   double now = now_seconds();
   if (down) {
@@ -300,9 +329,12 @@ static void mouse_button(uint32_t button, bool down) {
     g_click.button = button;
     g_click.x = g_mouse_x;
     g_click.y = g_mouse_y;
-    SetCapture(g_window);
-  } else if (!(GetKeyState(VK_LBUTTON) < 0 || GetKeyState(VK_RBUTTON) < 0 || GetKeyState(VK_MBUTTON) < 0)) {
-    ReleaseCapture();
+    if (!g_held) SetCapture(g_window);
+    g_held |= 1u << button;
+  } else {
+    bool held = g_held != 0;
+    g_held &= ~(1u << button);
+    if (held && !g_held && GetCapture() == g_window) ReleaseCapture();
   }
   push_event((Event){
       .kind = down ? EVENT_MOUSE_DOWN : EVENT_MOUSE_UP,
@@ -356,8 +388,16 @@ static void wheel(int delta, bool horizontal) {
 // method has it, and its result string is inserted. The candidate window
 // goes under the caret the app reports. A composition the app ends itself,
 // by unmarking, is completed for the input method too.
+//
+// The window has an input method context only while a text field has the
+// focus. Without one, the input method is off: with a CJK input method
+// selected, keys such as Space would otherwise go to it as VK_PROCESSKEY
+// and never reach the app's shortcuts.
 
 static bool g_composing;
+// The app ended the composition and kept its text, so the result string
+// that completing it brings, now or later, is already in the field.
+static bool g_completed;
 
 static void place_candidates(HIMC imc) {
   float *c = g_ti.caret;
@@ -388,10 +428,14 @@ static void ime_composition(LPARAM lp) {
   HIMC imc = ImmGetContext(g_window);
   if (!imc) return;
   if (lp & GCS_RESULTSTR) {
-    LONG units;
-    char *s = ime_string(imc, GCS_RESULTSTR, &units);
-    text_insert(s, -1, -1);
-    free(s);
+    if (g_completed) {
+      g_completed = false;
+    } else {
+      LONG units;
+      char *s = ime_string(imc, GCS_RESULTSTR, &units);
+      text_insert(s, -1, -1);
+      free(s);
+    }
     g_composing = false;
   }
   if (lp & GCS_COMPSTR) {
@@ -409,29 +453,55 @@ static void ime_composition(LPARAM lp) {
   ImmReleaseContext(g_window, imc);
 }
 
+// The input method follows the focus: on with a text field, off without.
+static void ime_enable(bool on) {
+  if (on) {
+    ImmAssociateContextEx(g_window, NULL, IACE_DEFAULT);
+    return;
+  }
+  HIMC imc = ImmGetContext(g_window);
+  if (imc) {
+    ImmNotifyIME(imc, NI_COMPOSITIONSTR, CPS_CANCEL, 0);
+    ImmReleaseContext(g_window, imc);
+  }
+  g_composing = false;
+  g_completed = false;
+  ImmAssociateContextEx(g_window, NULL, 0);
+}
+
 static void set_text_input(const Text_Input *ti) {
-  bool was_marked = g_ti.marked_start >= 0;
+  bool was_active = g_ti.active, was_marked = g_ti.marked_start >= 0;
   if (!mirror_set(ti)) return;
+  if (g_ti.active != was_active) ime_enable(g_ti.active);
+  if (!g_ti.active) return;
   HIMC imc = ImmGetContext(g_window);
   if (!imc) return;
-  if (g_ti.active) {
-    place_candidates(imc);
-  } else {
-    ImmNotifyIME(imc, NI_COMPOSITIONSTR, CPS_CANCEL, 0);
-    g_composing = false;
-  }
+  place_candidates(imc);
   if (g_composing && was_marked && g_ti.marked_start < 0) {
     // The app ended the composition as it was.
-    ImmNotifyIME(imc, NI_COMPOSITIONSTR, CPS_COMPLETE, 0);
     g_composing = false;
+    g_completed = true;
+    ImmNotifyIME(imc, NI_COMPOSITIONSTR, CPS_COMPLETE, 0);
   }
   ImmReleaseContext(g_window, imc);
 }
 
 // Clipboard: UTF-16 text on the system clipboard, CF_UNICODETEXT.
+//
+// Only one window can have the clipboard open, and clipboard managers and
+// remote desktop clients open it for a moment after each change, so
+// opening it tries again for a while before giving up.
+static bool open_clipboard(void) {
+  for (int i = 0; i < 10; i++) {
+    if (OpenClipboard(g_window)) return true;
+    Sleep(i < 5 ? 2 : 10);
+  }
+  fprintf(stderr, "shell: couldn't open the clipboard, error %lu\n", GetLastError());
+  return false;
+}
 
 static void set_clipboard(const uint8_t *text, size_t length) {
-  if (!OpenClipboard(g_window)) return;
+  if (!open_clipboard()) return;
   EmptyClipboard();
   int units = MultiByteToWideChar(CP_UTF8, 0, (const char *)text, (int)length, NULL, 0);
   HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, ((size_t)units + 1) * sizeof(wchar_t));
@@ -446,7 +516,7 @@ static void set_clipboard(const uint8_t *text, size_t length) {
 }
 
 static size_t get_clipboard(uint8_t *buffer, size_t capacity) {
-  if (!OpenClipboard(g_window)) return 0;
+  if (!open_clipboard()) return 0;
   size_t length = 0;
   HANDLE mem = GetClipboardData(CF_UNICODETEXT);
   const wchar_t *w = mem ? GlobalLock(mem) : NULL;
@@ -468,10 +538,45 @@ static size_t get_clipboard(uint8_t *buffer, size_t capacity) {
 
 // The window
 
+static void shut_down(void);
+
+// A modal loop (a drag or resize of the window, or the system menu) keeps
+// the main loop from running until it ends. A timer does the main loop's
+// work from inside it: the test steps, the app's wake_after and the frames
+// asked for.
+static void modal_loop(bool entering) {
+  g_modal_loops += entering ? 1 : -1;
+  if (entering && g_modal_loops == 1) SetTimer(g_window, MODAL_TIMER, 8, NULL);
+  if (!entering && g_modal_loops == 0) KillTimer(g_window, MODAL_TIMER);
+}
+
+static void modal_tick(void) {
+  // Steps run whether their timer fired or not: a step can open the modal
+  // loop, as vkey=alt+space does, and the timer for the steps after it is
+  // only armed once that step returns.
+  WaitForSingleObject(g_test_timer, 0);
+  run_due_steps();
+  if (WaitForSingleObject(g_wake_timer, 0) == WAIT_OBJECT_0) atomic_store(&g_needs_redraw, true);
+  WaitForSingleObject(g_redraw_event, 0); // g_needs_redraw says the same
+  if (atomic_load(&g_needs_redraw) || animating()) draw_frame();
+}
+
+static bool is_modifier(WPARAM vk) {
+  return vk == VK_SHIFT || vk == VK_CONTROL || vk == VK_MENU || vk == VK_LWIN || vk == VK_RWIN || vk == VK_CAPITAL;
+}
+
 static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   switch (msg) {
   case WM_CLOSE:
     atomic_store(&g_quit, true);
+    return 0;
+  case WM_QUERYENDSESSION:
+    return TRUE;
+  case WM_ENDSESSION:
+    // The user is logging off or Windows is shutting down. The process
+    // can be ended any time after this returns, before the main loop
+    // gets to quit, so the app shuts down here.
+    if (wp) shut_down();
     return 0;
   case WM_SIZE:
     g_minimized = wp == SIZE_MINIMIZED;
@@ -498,14 +603,20 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   }
   case WM_ENTERSIZEMOVE:
     g_in_size_move = true;
-    SetTimer(hwnd, LIVE_RESIZE_TIMER, 8, NULL);
+    modal_loop(true);
     return 0;
   case WM_EXITSIZEMOVE:
     g_in_size_move = false;
-    KillTimer(hwnd, LIVE_RESIZE_TIMER);
+    modal_loop(false);
+    return 0;
+  case WM_ENTERMENULOOP:
+    modal_loop(true);
+    return 0;
+  case WM_EXITMENULOOP:
+    modal_loop(false);
     return 0;
   case WM_TIMER:
-    if (wp == LIVE_RESIZE_TIMER && (atomic_load(&g_needs_redraw) || g_animating)) draw_frame();
+    if (wp == MODAL_TIMER) modal_tick();
     return 0;
   case WM_PAINT:
     ValidateRect(hwnd, NULL);
@@ -521,6 +632,16 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   case WM_KILLFOCUS:
     g_key_window = false;
     request_redraw();
+    return 0;
+  case WM_CAPTURECHANGED:
+    // Another window took the mouse, as Alt+Tab does in the middle of a
+    // drag, and the buttons' releases may go to it. The app cancels a
+    // button the hardware says is up (Frame_Input.mouse_buttons) over two
+    // frames, so it needs a frame.
+    if ((HWND)lp != hwnd && g_held) {
+      g_held = 0;
+      request_redraw();
+    }
     return 0;
   case WM_MOUSEMOVE:
     mouse_at(lp);
@@ -566,9 +687,10 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   case WM_SYSKEYDOWN: {
     modifiers_changed();
     if (!(lp & (1 << 30)) && media_key(wp)) return 0;
-    // Alt+F4 and the rest of the system's keys stay the system's.
-    if (msg == WM_SYSKEYDOWN && wp == VK_F4) break;
-    if (wp == VK_SHIFT || wp == VK_CONTROL || wp == VK_MENU || wp == VK_LWIN || wp == VK_RWIN || wp == VK_CAPITAL) return 0;
+    // Alt+F4 closes the window and Alt+Space opens the system menu, as in
+    // any window. The menu opens from the WM_SYSCHAR that follows.
+    if (msg == WM_SYSKEYDOWN && (wp == VK_F4 || wp == VK_SPACE)) break;
+    if (is_modifier(wp)) return 0;
     if (wp == VK_PROCESSKEY || types_text(wp)) {
       // WM_CHAR or the input method brings the text.
       if (msg == WM_SYSKEYDOWN) break;
@@ -578,7 +700,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         .kind = EVENT_KEY_DOWN,
         .modifiers = g_modifiers,
         .time = now_seconds(),
-        .key = key_of_scan(scan_of(lp)),
+        .key = key_of(wp, lp),
         .repeat = (lp & (1 << 30)) != 0,
     });
     return 0;
@@ -587,16 +709,19 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   case WM_SYSKEYUP:
     modifiers_changed();
     // Alt up returns here too, so there's no menu bar to activate.
-    if (wp == VK_SHIFT || wp == VK_CONTROL || wp == VK_MENU || wp == VK_LWIN || wp == VK_RWIN || wp == VK_CAPITAL) return 0;
-    push_event((Event){.kind = EVENT_KEY_UP, .modifiers = g_modifiers, .time = now_seconds(), .key = key_of_scan(scan_of(lp))});
+    if (is_modifier(wp)) return 0;
+    if (msg == WM_SYSKEYUP && (wp == VK_F4 || wp == VK_SPACE)) break;
+    push_event((Event){.kind = EVENT_KEY_UP, .modifiers = g_modifiers, .time = now_seconds(), .key = key_of(wp, lp)});
     return 0;
   case WM_CHAR:
     on_char((wchar_t)wp);
     return 0;
   case WM_SYSCHAR:
+    if (wp == ' ') break; // Alt+Space: the system menu
     return 0; // no beep for Alt shortcuts
   case WM_IME_STARTCOMPOSITION:
     g_composing = true;
+    g_completed = false;
     return 0;
   case WM_IME_COMPOSITION:
     ime_composition(lp);
@@ -604,6 +729,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   case WM_IME_ENDCOMPOSITION:
     if (g_ti.marked_start >= 0) text_set_marked("", 0, 0, -1, -1);
     g_composing = false;
+    g_completed = false;
     return 0;
   case WM_IME_SETCONTEXT:
     // The app draws the composition itself.
@@ -631,12 +757,18 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 //   move=x,y            the pointer moves to x, y in points
 //   click=x,y           a left click at x, y in points
 //   type=text           each UTF-16 unit of text as a WM_CHAR, surrogate pairs as two
-//   vkey=name           WM_KEYDOWN and WM_KEYUP for a key: escape, return, backspace, left, right, a to z
+//   vkey=ctrl+name      WM_KEYDOWN and WM_KEYUP for a virtual key, with modifiers (ctrl, alt, shift) held:
+//                       escape, return, enter (the keypad's), backspace, tab, space, delete, home, end,
+//                       pageup, pagedown, left, right, up, down, a to z, 0 to 9, and the keypad's
+//                       keys with NumLock off as kp-home, kp-left and so on. With alt, WM_SYSKEYDOWN,
+//                       and WM_SYSCHAR for space, as TranslateMessage makes.
 //   wheel=n             n wheel notches down, negative for up, where the pointer is
 //   touchpad=dy         a precision touchpad scroll moving content up by dy points
 //   scrolled            print the scroll the app was sent: points from touchpads, lines from wheels
 //   snapshot            ask the app for a memory snapshot, as SIGUSR1 does elsewhere
 //   minimize, restore   minimize the window, and show it again
+//   endsession          WM_QUERYENDSESSION and WM_ENDSESSION, as when the user logs off
+//   endmenu             print how many modal loops run, and close the open menu, such as alt+space's
 
 // app_take_snapshot is in src/app/snapshot_windows.odin.
 void app_take_snapshot(void);
@@ -651,6 +783,54 @@ static void test_wheel(int delta) {
   POINT p = {(LONG)(g_mouse_x * g_scale), (LONG)(g_mouse_y * g_scale)};
   ClientToScreen(g_window, &p);
   SendMessageW(g_window, WM_MOUSEWHEEL, MAKEWPARAM(0, delta), MAKELPARAM(p.x, p.y));
+}
+
+// The modifiers go into the thread's keyboard state, which GetKeyState
+// reads, for as long as the key is down.
+static void test_vkey(char *spec) {
+  static const struct {
+    const char *name;
+    UINT vk;
+    bool extended;
+  } keys[] = {
+      {"escape", VK_ESCAPE, false},     {"return", VK_RETURN, false},   {"enter", VK_RETURN, true},
+      {"backspace", VK_BACK, false},    {"tab", VK_TAB, false},         {"space", VK_SPACE, false},
+      {"delete", VK_DELETE, true},      {"home", VK_HOME, true},        {"end", VK_END, true},
+      {"pageup", VK_PRIOR, true},       {"pagedown", VK_NEXT, true},    {"left", VK_LEFT, true},
+      {"right", VK_RIGHT, true},        {"up", VK_UP, true},            {"down", VK_DOWN, true},
+      {"kp-delete", VK_DELETE, false},  {"kp-home", VK_HOME, false},    {"kp-end", VK_END, false},
+      {"kp-pageup", VK_PRIOR, false},   {"kp-pagedown", VK_NEXT, false}, {"kp-left", VK_LEFT, false},
+      {"kp-right", VK_RIGHT, false},    {"kp-up", VK_UP, false},        {"kp-down", VK_DOWN, false},
+  };
+  BYTE state[256], held[256];
+  GetKeyboardState(state);
+  memcpy(held, state, sizeof held);
+  bool alt = false;
+  char *name = spec;
+  for (char *plus = strchr(name, '+'); plus; plus = strchr(name, '+')) {
+    *plus = 0;
+    if (!strcmp(name, "ctrl")) held[VK_CONTROL] = held[VK_LCONTROL] = 0x80;
+    else if (!strcmp(name, "shift")) held[VK_SHIFT] = held[VK_LSHIFT] = 0x80;
+    else if (!strcmp(name, "alt")) held[VK_MENU] = held[VK_LMENU] = 0x80, alt = true;
+    name = plus + 1;
+  }
+  UINT vk = 0;
+  bool extended = false;
+  for (size_t i = 0; i < sizeof keys / sizeof keys[0]; i++)
+    if (!strcmp(keys[i].name, name)) vk = keys[i].vk, extended = keys[i].extended;
+  if (!vk && strlen(name) == 1 && name[0] >= 'a' && name[0] <= 'z') vk = (UINT)(name[0] - 'a' + 'A');
+  if (!vk && strlen(name) == 1 && name[0] >= '0' && name[0] <= '9') vk = (UINT)name[0];
+  if (!vk) {
+    fprintf(stderr, "shell: test: no key named %s\n", name);
+    return;
+  }
+  UINT scan = MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
+  LPARAM lp = 1 | (LPARAM)scan << 16 | (extended ? 1 << 24 : 0) | (alt ? 1 << 29 : 0);
+  SetKeyboardState(held);
+  SendMessageW(g_window, alt ? WM_SYSKEYDOWN : WM_KEYDOWN, vk, lp);
+  if (alt && vk == VK_SPACE) SendMessageW(g_window, WM_SYSCHAR, ' ', lp);
+  SendMessageW(g_window, alt ? WM_SYSKEYUP : WM_KEYUP, vk, lp | (LPARAM)3 << 30);
+  SetKeyboardState(state);
 }
 
 bool os_test_step(const char *command, char *arg) {
@@ -680,22 +860,7 @@ bool os_test_step(const char *command, char *arg) {
     for (int i = 0; i + 1 < n; i++) SendMessageW(g_window, WM_CHAR, w[i], 1);
     free(w);
   } else if (!strcmp(command, "vkey")) {
-    static const struct {
-      const char *name;
-      UINT vk;
-    } keys[] = {{"escape", VK_ESCAPE}, {"return", VK_RETURN}, {"backspace", VK_BACK}, {"left", VK_LEFT}, {"right", VK_RIGHT}};
-    UINT vk = 0;
-    for (size_t i = 0; i < sizeof keys / sizeof keys[0]; i++)
-      if (!strcmp(keys[i].name, arg)) vk = keys[i].vk;
-    if (!vk && strlen(arg) == 1 && arg[0] >= 'a' && arg[0] <= 'z') vk = (UINT)(arg[0] - 'a' + 'A');
-    if (!vk) {
-      fprintf(stderr, "shell: test: no key named %s\n", arg);
-      return true;
-    }
-    UINT scan = MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
-    LPARAM extended = (vk == VK_LEFT || vk == VK_RIGHT) ? (1 << 24) : 0;
-    SendMessageW(g_window, WM_KEYDOWN, vk, 1 | (LPARAM)scan << 16 | extended);
-    SendMessageW(g_window, WM_KEYUP, vk, 1 | (LPARAM)scan << 16 | extended | (LPARAM)3 << 30);
+    test_vkey(arg);
   } else if (!strcmp(command, "wheel")) {
     test_wheel(-atoi(arg) * WHEEL_DELTA);
   } else if (!strcmp(command, "touchpad")) {
@@ -711,6 +876,11 @@ bool os_test_step(const char *command, char *arg) {
   } else if (!strcmp(command, "restore")) {
     ShowWindow(g_window, SW_RESTORE);
     request_redraw();
+  } else if (!strcmp(command, "endmenu")) {
+    fprintf(stderr, "shell: test: %d modal loops, ending the menu\n", g_modal_loops);
+    EndMenu();
+  } else if (!strcmp(command, "endsession")) {
+    if (SendMessageW(g_window, WM_QUERYENDSESSION, 0, ENDSESSION_LOGOFF)) SendMessageW(g_window, WM_ENDSESSION, TRUE, ENDSESSION_LOGOFF);
   } else {
     return false;
   }
@@ -721,16 +891,66 @@ void os_arm_test_timer(double after) { arm_timer(g_test_timer, after); }
 
 // App
 
+// A release build has the windows subsystem, so a launch from Explorer or
+// the Start menu has no stderr. The app's log then goes to tidalfast.log
+// in %LOCALAPPDATA%\tidalfast, which src/app/logging_windows.odin opens
+// before shell_main runs, and the shell's own lines go to the end of the
+// same file.
+static bool g_no_stderr;
+
+static void log_to_file(void) {
+  HANDLE err = GetStdHandle(STD_ERROR_HANDLE);
+  g_no_stderr = !err || err == INVALID_HANDLE_VALUE;
+  if (!g_no_stderr) return;
+  // Windows sets LOCALAPPDATA for every session; the app looks there first
+  // too (os_services.cache_dir).
+  wchar_t dir[MAX_PATH];
+  DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", dir, MAX_PATH);
+  if (n == 0 || n >= MAX_PATH) return;
+  wchar_t path[MAX_PATH + 32];
+  _snwprintf(path, sizeof path / sizeof path[0], L"%ls\\tidalfast\\tidalfast.log", dir);
+  path[sizeof path / sizeof path[0] - 1] = 0;
+  _wfreopen(path, L"a", stderr);
+}
+
+// fatal is for an error the app can't start after. Without a console to
+// show it in, it shows in a message box too.
+static void fatal(const char *message) {
+  fprintf(stderr, "shell: %s\n", message);
+  if (!g_no_stderr) return;
+  int n = MultiByteToWideChar(CP_UTF8, 0, message, -1, NULL, 0);
+  wchar_t *w = malloc((size_t)n * sizeof(wchar_t));
+  MultiByteToWideChar(CP_UTF8, 0, message, -1, w, n);
+  MessageBoxW(NULL, w, L"TIDALfast can't start", MB_OK | MB_ICONERROR);
+  free(w);
+}
+
 static void *reserve(size_t size) {
   // Committed but untouched pages take no RAM until written, and start
   // zeroed, as mmap's do. They count toward the commit charge, the
   // process's private bytes, from the start.
   void *p = VirtualAlloc(NULL, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
   if (!p) {
-    fprintf(stderr, "shell: VirtualAlloc of %zu bytes failed\n", size);
+    char message[128];
+    snprintf(message, sizeof message, "couldn't reserve %zu MB of memory, error %lu", size >> 20, GetLastError());
+    fatal(message);
     exit(1);
   }
   return p;
+}
+
+// shut_down runs the app's shutdown once, which saves the settings. The
+// main loop runs it when it quits, and WM_ENDSESSION when Windows ends the
+// session first. A frame can't be re-entered, so inside one it only asks
+// the main loop to quit, which runs it as soon as the frame is done.
+static void shut_down(void) {
+  atomic_store(&g_quit, true);
+  SetEvent(g_redraw_event);
+  if (g_shut_down || g_in_frame || !g_app_started) return;
+  g_shut_down = true;
+  g_app_started = false; // no frames after it
+  app_shutdown(&g_memory);
+  SetEvent(g_shutdown_done);
 }
 
 // Ctrl-C in the console, and SIGTERM, which the app raises to quit cleanly
@@ -741,10 +961,14 @@ static void quit_signal(int sig) {
   signal(sig, quit_signal);
 }
 
+// The console calls this on a thread of its own. Closing the console ends
+// the process as soon as it returns, so it waits for the shutdown first,
+// for a little less than the five seconds Windows gives it.
 static BOOL WINAPI console_handler(DWORD type) {
   if (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT || type == CTRL_CLOSE_EVENT) {
     atomic_store(&g_quit, true);
     SetEvent(g_redraw_event);
+    if (type == CTRL_CLOSE_EVENT) WaitForSingleObject(g_shutdown_done, 4500);
     return TRUE;
   }
   return FALSE;
@@ -761,8 +985,10 @@ static bool open_window(void) {
       .hCursor = LoadCursorW(NULL, IDC_ARROW),
       .lpszClassName = L"TIDALfast",
   };
+  char message[128];
   if (!RegisterClassExW(&wc)) {
-    fprintf(stderr, "shell: RegisterClassEx failed: %lu\n", GetLastError());
+    snprintf(message, sizeof message, "RegisterClassEx failed, error %lu", GetLastError());
+    fatal(message);
     return false;
   }
   // The window opens at its default size in points, on the monitor the
@@ -780,7 +1006,8 @@ static bool open_window(void) {
   g_window = CreateWindowExW(0, L"TIDALfast", L"TIDALfast", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left,
                              r.bottom - r.top, NULL, NULL, instance, NULL);
   if (!g_window) {
-    fprintf(stderr, "shell: CreateWindowEx failed: %lu\n", GetLastError());
+    snprintf(message, sizeof message, "CreateWindowEx failed, error %lu", GetLastError());
+    fatal(message);
     return false;
   }
   // A dark title bar, to go with the app. Windows 10 before 20H1 has no
@@ -788,6 +1015,8 @@ static bool open_window(void) {
   BOOL dark = TRUE;
   DwmSetWindowAttribute(g_window, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof dark);
   g_surface_info = (Win32_Surface){.instance = instance, .window = g_window};
+  // No text field has the focus yet, so no input method.
+  ime_enable(false);
   update_size();
   return true;
 }
@@ -810,21 +1039,20 @@ static void main_loop(void) {
     // A frame is due now when something asked for one; otherwise wait for
     // a message, a request or a timer. While animating, present's vsync
     // wait is the pacing, so the loop doesn't wait at all. A minimized
-    // window, whose present doesn't wait, draws nothing and waits only for
-    // messages and test steps; restoring it asks for a frame.
-    bool hidden = g_minimized && !g_capture;
-    bool due = !hidden && (atomic_load(&g_needs_redraw) || g_animating);
-    DWORD r = hidden ? MsgWaitForMultipleObjectsEx(1, &handles[2], INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE) + 2
-                     : MsgWaitForMultipleObjectsEx(3, handles, due ? 0 : INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+    // window, whose present doesn't wait, doesn't animate, but it still
+    // draws the frames asked for, in which the app does its work.
+    bool due = atomic_load(&g_needs_redraw) || animating();
+    DWORD r = MsgWaitForMultipleObjectsEx(3, handles, due ? 0 : INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
     if (r == WAIT_OBJECT_0 + 1) atomic_store(&g_needs_redraw, true);
     if (r == WAIT_OBJECT_0 + 2) run_due_steps();
     pump_messages();
     if (atomic_load(&g_quit)) break;
-    if (!(g_minimized && !g_capture) && (atomic_load(&g_needs_redraw) || g_animating)) draw_frame();
+    if (atomic_load(&g_needs_redraw) || animating()) draw_frame();
   }
 }
 
 int shell_main(int argc, char **argv) {
+  log_to_file();
   // The CRT buffers stderr whole when it isn't a console, and the app
   // leaves through ExitProcess, which doesn't flush it: a log sent to a
   // file or a pipe would lose the shell's lines.
@@ -844,7 +1072,8 @@ int shell_main(int argc, char **argv) {
       .frame_size = FRAME_SIZE,
   };
 
-  g_redraw_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+  g_redraw_event = CreateEventW(NULL, FALSE, FALSE, NULL);
+  g_shutdown_done = CreateEventW(NULL, TRUE, FALSE, NULL);
   g_wake_timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
   if (!g_wake_timer) g_wake_timer = CreateWaitableTimerW(NULL, FALSE, NULL);
   g_test_timer = CreateWaitableTimerW(NULL, FALSE, NULL);
@@ -877,7 +1106,7 @@ int shell_main(int argc, char **argv) {
   setup_shell_test();
   request_redraw();
   main_loop();
-  app_shutdown(&g_memory);
+  shut_down();
   DestroyWindow(g_window);
   return 0;
 }
