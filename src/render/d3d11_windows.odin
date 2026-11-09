@@ -40,6 +40,9 @@ PS_BLUR_UP :: #load("shaders/dxbc/ps_blur_up.dxbc")
 
 SWAP_BUFFERS :: 2
 
+// Present's success code for a window that can't be seen.
+DXGI_STATUS_OCCLUDED :: 0x087A0001
+
 // Frame_Constants matches the Frame cbuffer in rect.hlsl.
 Frame_Constants :: struct {
 	target:     [4]f32,
@@ -452,6 +455,7 @@ map_instances :: proc(r: ^Renderer) -> [^]Instance {
 grow_instances :: proc(r: ^Renderer) {
 	g := &r.gpu
 	old, old_srv, old_bytes := g.instances, g.instances_srv, g.instance_bytes
+	old_capacity := r.capacity[r.slot]
 	old_data := r.instances
 	g.instances, g.instances_srv = nil, nil
 	if !set_instance_buffer(r, r.capacity[r.slot] * 2) {
@@ -460,6 +464,15 @@ grow_instances :: proc(r: ^Renderer) {
 	}
 	next := map_instances(r)
 	if next == nil {
+		// Back to the old buffer, still mapped, and its capacity.
+		sync.atomic_sub(&g.allocated, g.instance_bytes)
+		com_release(&g.instances_srv)
+		com_release(&g.instances)
+		g.instances, g.instances_srv, g.instance_bytes = old, old_srv, old_bytes
+		g.mapped = true
+		for &c in r.capacity {
+			c = old_capacity
+		}
 		return
 	}
 	mem.copy(next, old_data, r.instance_count * size_of(Instance))
@@ -627,6 +640,11 @@ end_frame :: proc(r: ^Renderer) {
 	wait := time.tick_now()
 	hr := g.swapchain->Present(1, {})
 	r.drawable_wait_ms = f32(time.duration_milliseconds(time.tick_since(wait)))
+	if u32(hr) == DXGI_STATUS_OCCLUDED {
+		// A window nobody can see presents without waiting for vsync, so
+		// the wait an animation is paced by is done here.
+		time.sleep(16 * time.Millisecond)
+	}
 	if hr == dxgi.ERROR_DEVICE_REMOVED || hr == dxgi.ERROR_DEVICE_RESET {
 		reason := g.device->GetDeviceRemovedReason()
 		log.errorf("render: the GPU device was lost (0x%x), drawing nothing from now on", u32(reason))

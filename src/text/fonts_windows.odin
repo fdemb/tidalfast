@@ -5,9 +5,8 @@ package text
 // the character. They are the UI fonts Windows 10 and 11 use for each
 // script, in about the order Windows' own fallback tries them; some come
 // in optional font packages, so a font that isn't there is skipped. Segoe
-// UI Emoji comes first for
-// characters drawn as emoji, but its colour layers (COLR) aren't drawn
-// yet: the emoji come out in black and white.
+// UI Emoji comes first for characters drawn as emoji, its colour layers
+// (COLR) drawn in colour by fonts_freetype.odin.
 //
 // DirectWrite's IDWriteFontFallback would also find fonts the user
 // installed. It is COM, and this list covers what a stock system draws.

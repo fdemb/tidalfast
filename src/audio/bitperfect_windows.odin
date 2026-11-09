@@ -291,8 +291,10 @@ hal_start :: proc(h: ^Hal, p: ^Player) -> bool {
 		return false
 	}
 	o.player = p
+	// The first buffer goes in before running is set, so the render thread,
+	// which fills only while running, can't fill it at the same time.
+	fill(o, prefill = true)
 	sync.atomic_store(&o.running, true)
-	fill(o)
 	if o.client.vtbl.Start(o.client) < 0 {
 		sync.atomic_store(&o.running, false)
 		return false
@@ -301,8 +303,8 @@ hal_start :: proc(h: ^Hal, p: ^Player) -> bool {
 }
 
 // hal_stop stops the stream. When it returns the render thread no longer
-// touches the player, and a stopped stream sends no events, so a paused
-// app uses no CPU.
+// touches the player or the buffer, and a stopped stream sends no events,
+// so the render thread sleeps until the next start.
 hal_stop :: proc(h: ^Hal) {
 	o := h.out
 	if o == nil || o.client == nil {
@@ -314,6 +316,9 @@ hal_stop :: proc(h: ^Hal) {
 	}
 	o.client.vtbl.Stop(o.client)
 	o.client.vtbl.Reset(o.client)
+	// An event the engine sent before it stopped would wake the thread for
+	// a buffer that isn't due.
+	win.ResetEvent(o.event)
 }
 
 // hal_close ends the stream, which gives the device back to the shared
@@ -354,7 +359,8 @@ device_change_undo :: proc(c: ^Device_Change) -> bool {
 
 // render_main is the render thread: one buffer per event from the engine,
 // as a "Pro Audio" task so the scheduler keeps it on time. A second
-// without an event while playing means the device has stopped.
+// without an event while playing means the device has stopped; while
+// stopped it waits without a timeout.
 @(private = "file")
 render_main :: proc "system" (arg: rawptr) -> u32 {
 	o := (^Wasapi_Output)(arg)
@@ -363,7 +369,8 @@ render_main :: proc "system" (arg: rawptr) -> u32 {
 	mmcss := AvSetMmThreadCharacteristicsW(win.L("Pro Audio"), &task)
 	handles := [2]win.HANDLE{o.event, o.quit}
 	for {
-		r := win.WaitForMultipleObjects(2, &handles[0], false, 1000)
+		timeout: u32 = 1000 if sync.atomic_load(&o.running) else win.INFINITE
+		r := win.WaitForMultipleObjects(2, &handles[0], false, timeout)
 		if r == win.WAIT_OBJECT_0 + 1 {
 			break
 		}
@@ -373,7 +380,7 @@ render_main :: proc "system" (arg: rawptr) -> u32 {
 			}
 			continue
 		}
-		fill(o)
+		fill(o, prefill = false)
 	}
 	if mmcss != nil {
 		AvRevertMmThreadCharacteristics(mmcss)
@@ -382,18 +389,30 @@ render_main :: proc "system" (arg: rawptr) -> u32 {
 	return 0
 }
 
-// fill hands the engine one buffer: the ring's frames while playing,
-// silence otherwise. No locks, allocation or logging, as in an IOProc.
+// fill hands the engine one buffer: the ring's frames while playing or for
+// hal_start's prefill, silence otherwise. The render thread fills only
+// while running. busy covers the whole of it, GetBuffer to ReleaseBuffer,
+// so hal_stop doesn't reset the stream while a buffer is out. No locks,
+// allocation or logging, as in an IOProc.
 @(private = "file")
-fill :: proc "contextless" (o: ^Wasapi_Output) {
+fill :: proc "contextless" (o: ^Wasapi_Output, prefill: bool) {
+	sync.atomic_store(&o.busy, true)
+	defer sync.atomic_store(&o.busy, false)
+	playing := prefill || sync.atomic_load(&o.running)
+	if !playing {
+		return
+	}
 	data: [^]u8
-	if o.render.vtbl.GetBuffer(o.render, o.frames, &data) < 0 {
-		lose(o)
+	if hr := o.render.vtbl.GetBuffer(o.render, o.frames, &data); hr < 0 {
+		// A buffer that's already full needs nothing; a wake that came late
+		// across a stop and start can ask for one.
+		if hr != AUDCLNT_E_BUFFER_TOO_LARGE {
+			lose(o)
+		}
 		return
 	}
 	flags: u32
-	sync.atomic_store(&o.busy, true)
-	if sync.atomic_load(&o.running) && o.player != nil {
+	if o.player != nil {
 		list := Audio_Buffer_List {
 			count   = 1,
 			buffers = {{channels = u32(o.channels), size = o.frames * u32(o.channels) * size_of(f32), data = raw_data(o.scratch)}},
@@ -403,7 +422,6 @@ fill :: proc "contextless" (o: ^Wasapi_Output) {
 	} else {
 		flags = AUDCLNT_BUFFERFLAGS_SILENT
 	}
-	sync.atomic_store(&o.busy, false)
 	if o.render.vtbl.ReleaseBuffer(o.render, o.frames, flags) < 0 {
 		lose(o)
 	}
@@ -714,6 +732,8 @@ AUDCLNT_BUFFERFLAGS_SILENT :: 0x2
 // AUDCLNT_E_* HRESULTs, 0x8889_00xx as signed.
 @(private = "file")
 AUDCLNT_E_DEVICE_INVALIDATED :: i32(-2004287484)
+@(private = "file")
+AUDCLNT_E_BUFFER_TOO_LARGE :: i32(-2004287482)
 @(private = "file")
 AUDCLNT_E_UNSUPPORTED_FORMAT :: i32(-2004287480)
 @(private = "file")

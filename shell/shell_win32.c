@@ -60,6 +60,8 @@ static float g_scale = 1;
 static bool g_key_window;
 static bool g_animating;
 static bool g_in_size_move; // inside the modal loop of a drag or resize
+static bool g_minimized; // no frames until restored, unless TIDALFAST_CAPTURE is set
+static bool g_capture;
 
 static HANDLE g_redraw_event; // set by request_redraw
 static HANDLE g_wake_timer; // wake_after
@@ -143,11 +145,11 @@ static void draw_frame(void) {
       .text = g_text,
       .text_length = g_text_len,
       .key_window = g_key_window,
-      .mouse_buttons = (GetAsyncKeyState(VK_LBUTTON) < 0 ? 1u << MOUSE_BUTTON_LEFT : 0) |
-                       (GetAsyncKeyState(VK_RBUTTON) < 0 ? 1u << MOUSE_BUTTON_RIGHT : 0) |
-                       (GetAsyncKeyState(VK_MBUTTON) < 0 ? 1u << MOUSE_BUTTON_MIDDLE : 0) |
-                       (GetAsyncKeyState(VK_XBUTTON1) < 0 ? 1u << MOUSE_BUTTON_BACK : 0) |
-                       (GetAsyncKeyState(VK_XBUTTON2) < 0 ? 1u << MOUSE_BUTTON_FORWARD : 0),
+      .mouse_buttons = (GetKeyState(VK_LBUTTON) < 0 ? 1u << MOUSE_BUTTON_LEFT : 0) |
+                       (GetKeyState(VK_RBUTTON) < 0 ? 1u << MOUSE_BUTTON_RIGHT : 0) |
+                       (GetKeyState(VK_MBUTTON) < 0 ? 1u << MOUSE_BUTTON_MIDDLE : 0) |
+                       (GetKeyState(VK_XBUTTON1) < 0 ? 1u << MOUSE_BUTTON_BACK : 0) |
+                       (GetKeyState(VK_XBUTTON2) < 0 ? 1u << MOUSE_BUTTON_FORWARD : 0),
   };
   Frame_Result result = app_frame(&g_memory, &g_shell, &input);
   g_event_count = 0;
@@ -472,8 +474,10 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     atomic_store(&g_quit, true);
     return 0;
   case WM_SIZE:
+    g_minimized = wp == SIZE_MINIMIZED;
     if (wp != SIZE_MINIMIZED) {
       update_size();
+      request_redraw();
       if (g_in_size_move) draw_frame();
     }
     return 0;
@@ -582,9 +586,9 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   case WM_KEYUP:
   case WM_SYSKEYUP:
     modifiers_changed();
+    // Alt up returns here too, so there's no menu bar to activate.
     if (wp == VK_SHIFT || wp == VK_CONTROL || wp == VK_MENU || wp == VK_LWIN || wp == VK_RWIN || wp == VK_CAPITAL) return 0;
     push_event((Event){.kind = EVENT_KEY_UP, .modifiers = g_modifiers, .time = now_seconds(), .key = key_of_scan(scan_of(lp))});
-    if (msg == WM_SYSKEYUP && wp == VK_MENU) return 0; // no menu bar to activate
     return 0;
   case WM_CHAR:
     on_char((wchar_t)wp);
@@ -718,8 +722,9 @@ void os_arm_test_timer(double after) { arm_timer(g_test_timer, after); }
 // App
 
 static void *reserve(size_t size) {
-  // Committed but untouched pages cost nothing until written, and start
-  // zeroed, as mmap's do.
+  // Committed but untouched pages take no RAM until written, and start
+  // zeroed, as mmap's do. They count toward the commit charge, the
+  // process's private bytes, from the start.
   void *p = VirtualAlloc(NULL, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
   if (!p) {
     fprintf(stderr, "shell: VirtualAlloc of %zu bytes failed\n", size);
@@ -804,14 +809,18 @@ static void main_loop(void) {
   while (!atomic_load(&g_quit)) {
     // A frame is due now when something asked for one; otherwise wait for
     // a message, a request or a timer. While animating, present's vsync
-    // wait is the pacing, so the loop doesn't wait at all.
-    bool due = atomic_load(&g_needs_redraw) || g_animating;
-    DWORD r = MsgWaitForMultipleObjectsEx(3, handles, due ? 0 : INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+    // wait is the pacing, so the loop doesn't wait at all. A minimized
+    // window, whose present doesn't wait, draws nothing and waits only for
+    // messages and test steps; restoring it asks for a frame.
+    bool hidden = g_minimized && !g_capture;
+    bool due = !hidden && (atomic_load(&g_needs_redraw) || g_animating);
+    DWORD r = hidden ? MsgWaitForMultipleObjectsEx(1, &handles[2], INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE) + 2
+                     : MsgWaitForMultipleObjectsEx(3, handles, due ? 0 : INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
     if (r == WAIT_OBJECT_0 + 1) atomic_store(&g_needs_redraw, true);
     if (r == WAIT_OBJECT_0 + 2) run_due_steps();
     pump_messages();
     if (atomic_load(&g_quit)) break;
-    if (atomic_load(&g_needs_redraw) || g_animating) draw_frame();
+    if (!(g_minimized && !g_capture) && (atomic_load(&g_needs_redraw) || g_animating)) draw_frame();
   }
 }
 
@@ -823,6 +832,8 @@ int shell_main(int argc, char **argv) {
   QueryPerformanceFrequency(&g_qpc_frequency);
   measure_init();
   measure_mark("main");
+  const char *capture = getenv("TIDALFAST_CAPTURE");
+  g_capture = capture && *capture;
   g_start_time = now_seconds();
   SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 

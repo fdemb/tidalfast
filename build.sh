@@ -128,7 +128,10 @@ if [ "$target_os" = windows ]; then
 		if [ ! -d "$ft" ]; then
 			mkdir -p build/windows
 			curl -fsSL -o "$ft.tar.xz" https://download.savannah.gnu.org/releases/freetype/freetype-2.13.3.tar.xz
-			echo "0550350666d427c74daeb85d5ac7bb353acba5f76956395995311a9c6f063289  $ft.tar.xz" | sha256sum -c --quiet -
+			# Older macOS has shasum but no sha256sum.
+			sha256=sha256sum
+			command -v sha256sum >/dev/null || sha256="shasum -a 256"
+			echo "0550350666d427c74daeb85d5ac7bb353acba5f76956395995311a9c6f063289  $ft.tar.xz" | $sha256 -c --quiet -
 			tar xf "$ft.tar.xz" -C build/windows
 			rm "$ft.tar.xz"
 		fi

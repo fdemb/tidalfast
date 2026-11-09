@@ -93,7 +93,13 @@ secret_set :: proc(service, account: string, data: []u8) -> Status {
 			user_name            = user,
 		}
 		if !CredWriteW(&cred, 0) {
-			return error_status("CredWriteW")
+			status := error_status("CredWriteW")
+			// The parts written so far would join the old ones into neither
+			// secret, so none is left.
+			if part > 0 {
+				secret_delete(service, account)
+			}
+			return status
 		}
 	}
 	// A shorter secret leaves no parts of a longer one behind.
