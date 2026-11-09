@@ -58,6 +58,7 @@
 #define MIN_HEIGHT 360
 #define MODAL_TIMER 1
 #define MODAL_READY_WAIT_MS 33 // a swap chain whose frames go nowhere may never signal frame_ready
+#define READY_WAIT_SECONDS 0.1 // the same for the main loop, which has no drag to keep up with
 
 static bool g_app_started; // app_init has run, so frames can be drawn
 static Memory g_memory;
@@ -1062,18 +1063,24 @@ static void pump_messages(void) {
   }
 }
 
+// Whether a frame has to wait for the swap chain. A minimized window doesn't
+// animate and presents nothing, so its frames don't wait, but it still draws
+// the frames asked for, in which the app does its work.
+static bool frame_must_wait(HANDLE ready) { return ready && !g_ready_taken && !(g_minimized && !g_capture); }
+
 static void main_loop(void) {
+  double wait_began = 0; // when the due frame started waiting for the swap chain
   while (!atomic_load(&g_quit)) {
     // A frame is due when something asked for one or the app animates;
     // otherwise wait for a message, a request or a timer. A due frame
     // waits until the swap chain can take it (frame_ready), once per
     // present, or draws at once where there's nothing to wait on and
-    // present's vsync wait paces it. A minimized window doesn't animate and
-    // presents nothing, so its frames don't wait, but it still draws the
-    // frames asked for, in which the app does its work.
+    // present's vsync wait paces it.
     bool due = atomic_load(&g_needs_redraw) || animating();
     HANDLE ready = (HANDLE)g_surface_info.frame_ready;
-    bool wait_ready = due && ready && !g_ready_taken && !(g_minimized && !g_capture);
+    bool wait_ready = due && frame_must_wait(ready);
+    if (!wait_ready) wait_began = 0;
+    else if (wait_began == 0) wait_began = now_seconds();
     HANDLE handles[3];
     DWORD n = 0, timeout = INFINITE;
     if (!due) {
@@ -1082,9 +1089,9 @@ static void main_loop(void) {
     }
     handles[n++] = g_test_timer;
     if (wait_ready) {
-      // A swap chain whose frames go nowhere may never signal it.
       handles[n++] = ready;
-      timeout = 100;
+      double left = READY_WAIT_SECONDS - (now_seconds() - wait_began);
+      timeout = left > 0 ? (DWORD)(left * 1000) + 1 : 0;
     } else if (due) {
       timeout = 0;
     }
@@ -1092,13 +1099,26 @@ static void main_loop(void) {
     HANDLE signalled = r < WAIT_OBJECT_0 + n ? handles[r - WAIT_OBJECT_0] : NULL;
     if (signalled == g_wake_timer) atomic_store(&g_needs_redraw, true);
     if (signalled == g_test_timer) run_due_steps();
-    if (signalled == ready && ready) g_ready_taken = true;
+    if (signalled == ready && ready) {
+      // Signals beyond this one, as a resize leaves, would let the next
+      // frames start before this one is on screen.
+      while (WaitForSingleObject(ready, 0) == WAIT_OBJECT_0) {}
+      g_ready_taken = true;
+    }
     pump_messages();
     if (atomic_load(&g_quit)) break;
     // Input that came while the frame waited for the swap chain goes into
-    // that frame, once the swap chain can take it.
-    bool may_draw = !wait_ready || g_ready_taken || r == WAIT_TIMEOUT;
-    if ((atomic_load(&g_needs_redraw) || animating()) && may_draw) draw_frame();
+    // that frame, once the swap chain can take it. Input that ended an idle
+    // wait goes round again to wait too: a frame that takes no signal leaves
+    // it for the next one, which would then queue behind this one and show
+    // what was under the mouse a refresh ago. The wait has a limit, since a
+    // swap chain whose frames go nowhere may never signal, and it counts
+    // from the start so that a moving mouse doesn't restart it.
+    bool overdue = wait_began != 0 && now_seconds() - wait_began >= READY_WAIT_SECONDS;
+    if ((atomic_load(&g_needs_redraw) || animating()) && (!frame_must_wait(ready) || overdue)) {
+      draw_frame();
+      wait_began = 0;
+    }
   }
 }
 

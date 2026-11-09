@@ -346,6 +346,58 @@ static void check_resize_paced(void) {
   CloseHandle(ready);
 }
 
+// Moves the mouse over the window as often as a message round trip allows.
+static void move_mouse(int moves) {
+  for (int i = 0; i < moves; i++) SendMessageW(g_window, WM_MOUSEMOVE, 0, MAKELPARAM(60 + i, 60));
+}
+
+// Every present takes one signal from the frame latency object, the first
+// frame after an idle wait too. One that takes none leaves its signal for
+// the next frame, which then starts before this one is on screen, and that
+// frame queues behind it: what's lit on screen trails the mouse. The object
+// starts with extra signals, as a resize leaves them.
+static void check_idle_frame_paced(void) {
+  HANDLE ready = CreateSemaphoreW(NULL, 3, 1024, NULL);
+  g_surface_info.frame_ready = ready;
+  LONG before = frames();
+  // The main loop reads the handle at the top of its next pass.
+  request_redraw();
+  frame_after(before, 500);
+  Sleep(30);
+  InterlockedExchange(&g_presenting, 1);
+
+  before = frames();
+  move_mouse(1);
+  check(frame_after(before, 500), "input on an idle window draws", NULL);
+  Sleep(30);
+  check(WaitForSingleObject(ready, 0) != WAIT_OBJECT_0, "a frame after idle takes the swap chain's signals", "signals left for the next frame");
+
+  // The display hasn't shown that frame, so input waits for it.
+  before = frames();
+  move_mouse(5);
+  Sleep(30);
+  char detail[64];
+  snprintf(detail, sizeof detail, "%ld frames before the display was ready", frames() - before);
+  check(frames() == before, "input waits for the frame before it to show", detail);
+  ReleaseSemaphore(ready, 1, NULL);
+  check(frame_after(before, 200), "and draws once the display is ready", NULL);
+  Sleep(30);
+
+  // A swap chain whose frames go nowhere never signals, and moving the
+  // mouse mustn't keep restarting the wait.
+  before = frames();
+  for (int i = 0; i < 60 && frames() == before; i++) {
+    move_mouse(1);
+    Sleep(5);
+  }
+  check(frames() > before, "a swap chain that never signals still draws under input", NULL);
+
+  InterlockedExchange(&g_presenting, 0);
+  g_surface_info.frame_ready = NULL;
+  Sleep(150); // the main loop can be in a wait on the handle for this long
+  CloseHandle(ready);
+}
+
 static void check_clipboard(void) {
   // Another app holds the clipboard for a moment, as clipboard managers do
   // after each change.
@@ -389,6 +441,7 @@ static unsigned __stdcall driver(void *arg) {
   check_stray_event();
   check_capture();
   check_clipboard();
+  check_idle_frame_paced();
   check_resize_paced();
   check_menu();
   check_minimized();
