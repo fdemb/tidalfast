@@ -35,6 +35,12 @@ extern uint32_t g_text_len;
 
 void push_event(Event e);
 void push_text(Event *e, const char *text, size_t n);
+// queue_take hands the queued events and their text to a frame, and starts
+// an empty queue in other buffers for what comes while it runs, so a
+// window procedure re-entered from inside app_frame doesn't move or reset
+// what the app is reading. The handed buffers stay valid until the next
+// queue_take. The Wayland shell resets the queue after app_frame instead.
+void queue_take(Event **events, uint32_t *count, const uint8_t **text, uint32_t *text_length);
 
 // The shell's mirror of the focused text field. The app sends it after each
 // frame (set_text_input), and the shell applies each edit it sends on to

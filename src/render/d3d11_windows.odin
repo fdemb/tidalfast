@@ -24,9 +24,9 @@
 // as the swap chain allows and present doesn't block.
 //
 // A driver update, a GPU reset or a GPU switch takes the device away. The
-// renderer then releases everything, sets Renderer.lost and makes a new
-// device at a later begin_frame, and Renderer.resets tells the textures'
-// owners to make theirs again.
+// renderer then releases everything, sets Renderer.device_lost and makes a
+// new device at a later begin_frame, and Renderer.device_resets tells the
+// textures' owners to make theirs again.
 package render
 
 import "base:runtime"
@@ -204,7 +204,7 @@ make_device :: proc(r: ^Renderer, allow_warp: bool) -> (ok: bool) {
 		return false
 	}
 	log_adapter(g)
-	if !r.lost {
+	if !r.device_lost {
 		init_step(&r.init_steps, "render_device")
 	}
 	if debug && g.device->QueryInterface(d3d.IInfoQueue_UUID, (^rawptr)(&g.info)) < 0 {
@@ -503,8 +503,8 @@ release :: proc(r: ^Renderer) {
 }
 
 // lose checks whether the device is gone, after a call that failed with
-// hr. If it is, it releases everything and sets r.lost, and begin_frame
-// makes a new device. False if the device is fine.
+// hr. If it is, it releases everything and sets r.device_lost, and
+// begin_frame makes a new device. False if the device is fine.
 @(private)
 lose :: proc(r: ^Renderer, hr: win.HRESULT) -> bool {
 	g := &r.gpu
@@ -517,7 +517,7 @@ lose :: proc(r: ^Renderer, hr: win.HRESULT) -> bool {
 	}
 	log.errorf("render: the GPU device was lost (0x%x, reason 0x%x), making a new one", u32(hr), u32(reason))
 	release(r)
-	r.lost = true
+	r.device_lost = true
 	r.hidden = true
 	r.poll_after = 0.01
 	g.retry_at = time.tick_now()
@@ -539,8 +539,8 @@ recover :: proc(r: ^Renderer) {
 	}
 	log.infof("render: made a new device after losing the last, in %d tries", g.tries)
 	g.tries = 0
-	r.lost = false
-	r.resets += 1
+	r.device_lost = false
+	r.device_resets += 1
 }
 
 // gpu_allocated is the memory the renderer's textures and buffers take, in
@@ -678,7 +678,7 @@ gpu_texture_copy :: proc(r: ^Renderer, from, to: ^Texture_Slot, w, h: int) {
 @(private)
 gpu_frame_begin :: proc(r: ^Renderer) -> [^]Instance {
 	g := &r.gpu
-	if r.lost && g.device == nil {
+	if r.device_lost && g.device == nil {
 		recover(r)
 	}
 	if g.device == nil {
@@ -927,7 +927,7 @@ end_frame :: proc(r: ^Renderer) {
 	defer r.frame_index += 1
 	r.hidden, r.poll_after = true, 0
 	if g.device == nil {
-		if r.lost {
+		if r.device_lost {
 			r.poll_after = RETRY_SECONDS
 		}
 		return

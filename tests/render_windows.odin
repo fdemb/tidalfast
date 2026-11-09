@@ -71,12 +71,12 @@ d3d11_renderer_recovers_from_a_lost_device :: proc(t: ^testing.T) {
 
 	// What the renderer does when present says the device is gone.
 	render.release(r)
-	r.lost = true
+	r.device_lost = true
 	testing.expect(t, w.surface.frame_ready == nil)
 	draw_rects(r, 10)
 	testing.expect(t, r.gpu.device != nil)
-	testing.expect(t, !r.lost)
-	testing.expect_value(t, r.resets, 1)
+	testing.expect(t, !r.device_lost)
+	testing.expect_value(t, r.device_resets, 1)
 	testing.expect_value(t, render.texture_size(r, cover_page), [2]int{})
 	testing.expect_value(t, render.texture_size(r, 0), [2]int{1, 1})
 	testing.expect_value(t, w.surface.presents, 2)

@@ -138,39 +138,6 @@ cover_pages_fill_then_reuse_the_least_recently_used :: proc(t: ^testing.T) {
 	testing.expect_value(t, c.ready, 2 * slots)
 }
 
-// After a lost GPU device the pages' textures are gone, and handles made
-// while there was no device can match new textures. The cache forgets its
-// pages without handing them back to destroy, and the covers load again.
-@(test)
-cover_cache_forgets_textures_of_a_lost_device :: proc(t: ^testing.T) {
-	c := new(cover.Cache, context.temp_allocator)
-	cover.init(c, 64 << 20)
-	for i in 0 ..< 70 {
-		add_ready(c, fmt.tprint(i), 80, 1)
-	}
-	add_ready(c, "big", 184, 1)
-	cover.want(c, .Album, "wanted", 80, 80, 1, 1)
-	testing.expect_value(t, c.ready, 71)
-
-	cover.forget_textures(c)
-	testing.expect_value(t, c.ready, 0)
-	testing.expect_value(t, c.bytes, 0)
-	testing.expect_value(t, c.used, 1) // the one not loaded yet stays
-	for pg in c.pages {
-		testing.expect_value(t, pg, cover.Page{})
-	}
-	testing.expect(t, cover.lookup(c, cover.key_of("3", 80)) == nil)
-	e := cover.lookup(c, cover.key_of("wanted", 80))
-	testing.expect(t, e != nil && e.state == .Wanted)
-	out: [4]render.Texture
-	testing.expect_value(t, cover.trim(c, 2, out[:]), 0)
-
-	// A cover loads into a new page, as at the start.
-	again := add_ready(c, "3", 80, 2)
-	testing.expect_value(t, [2]u8{again.page, again.slot}, [2]u8{0, 0})
-	testing.expect_value(t, c.bytes, cover.page_bytes(80))
-}
-
 @(test)
 cover_slots_drawn_lately_are_never_overwritten :: proc(t: ^testing.T) {
 	c := new(cover.Cache, context.temp_allocator)
@@ -196,6 +163,32 @@ cover_slots_drawn_lately_are_never_overwritten :: proc(t: ^testing.T) {
 	testing.expect_value(t, out[0], render.Texture(1012)) // the second page
 	testing.expect(t, cover.lookup(c, cover.key_of("late", 80)) == nil)
 	testing.expect_value(t, c.ready, slots)
+	testing.expect_value(t, c.bytes, cover.page_bytes(80))
+}
+
+// After the renderer loses its GPU device, every page's texture is gone:
+// forget hands them all back and keeps the covers still on their way.
+@(test)
+cover_forget_gives_back_every_page :: proc(t: ^testing.T) {
+	c := new(cover.Cache, context.temp_allocator)
+	cover.init(c, 64 << 20)
+	add_ready(c, "a", 80, 1)
+	add_ready(c, "a", 184, 2)
+	cover.want(c, .Album, "waiting", 80, 80, 3, 1)
+	out: [cover.MAX_PAGES]render.Texture
+	testing.expect_value(t, cover.forget(c, out[:]), 2)
+	testing.expect_value(t, out[0], render.Texture(1001))
+	testing.expect_value(t, out[1], render.Texture(1002))
+	testing.expect_value(t, c.ready, 0)
+	testing.expect_value(t, c.bytes, 0)
+	testing.expect_value(t, c.used, 1)
+	testing.expect(t, cover.lookup(c, cover.key_of("a", 80)) == nil)
+	waiting := cover.lookup(c, cover.key_of("waiting", 80))
+	testing.expect(t, waiting != nil && waiting.state == .Wanted)
+
+	// It goes in a new page, which needs a texture, when it comes.
+	e, page := cover.place(c, cover.key_of("waiting", 80), 4, 0)
+	testing.expect(t, e != nil && page != nil && page.texture == 0)
 	testing.expect_value(t, c.bytes, cover.page_bytes(80))
 }
 

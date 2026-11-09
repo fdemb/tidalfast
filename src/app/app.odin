@@ -13,7 +13,6 @@ import "core:prof/spall"
 import "core:sync"
 import "core:time"
 
-import "../cover"
 import "../platform"
 import "../render"
 import "../text"
@@ -27,10 +26,10 @@ State :: struct {
 	arena:        mem.Arena, // the rest of the persistent block
 	frame_arena:  mem.Arena, // reset at the start of every frame
 	renderer:     render.Renderer,
+	gpu_resets:   u32, // the renderer's device_resets the textures were made for
 	text:         text.State,
 	rows:         []Row,
 	last_stats:   render.Stats,
-	renderer_resets: u32, // render.Renderer.resets the textures were made for
 	frame_count:  u64,
 	frame_ms:     [FRAME_HISTORY]f32,
 	ui_ms:        f32, // last frame's time building the frame, before end_frame
@@ -239,10 +238,12 @@ start :: proc(s: ^State, shell: ^platform.Shell) {
 
 	if !render.init(&s.renderer, shell.surface) {
 		log.error("app: renderer init failed")
+		show_fatal("TIDALfast couldn't start drawing, so its window will stay empty.")
 	}
 	measure_init_part(s, .Render)
 	if !text.init(&s.text, shell.request_redraw) {
 		log.error("app: text init failed")
+		show_fatal("TIDALfast couldn't load its fonts, so it can't show any text.")
 	}
 	measure_init_part(s, .Text)
 	ui.init(&s.ui)
@@ -303,8 +304,12 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input, shell: ^platfor
 	s.titlebar_h = input.titlebar_height
 	r := &s.renderer
 	render.begin_frame(r, w, h, input.scale, CLEAR_COLOR)
-	if r.resets != s.renderer_resets {
-		textures_lost(s)
+	if r.device_resets != s.gpu_resets {
+		// The renderer lost its GPU device and every texture with it.
+		s.gpu_resets = r.device_resets
+		text.forget_glyphs(&s.text, r)
+		covers_forget(s)
+		dev_start(s)
 	}
 	ui_begin := time.tick_now()
 	measure_frame_begin(s)
@@ -374,17 +379,6 @@ frame_result :: proc(r: ^render.Renderer, animating: bool, wake_after: f32) -> p
 	}
 	result.animating = false
 	return result
-}
-
-// textures_lost forgets the textures that went with a lost GPU device
-// (render.Renderer.resets), so each is made again as it's next needed:
-// the glyphs, the cover pages and the dev screens' textures.
-textures_lost :: proc(s: ^State) {
-	log.info("app: the renderer has a new device, making the textures again")
-	s.renderer_resets = s.renderer.resets
-	text.forget_textures(&s.text)
-	cover.forget_textures(&s.data.covers)
-	dev_start(s)
 }
 
 // hsv returns an opaque sRGB colour. Hue wraps, so any value works.
