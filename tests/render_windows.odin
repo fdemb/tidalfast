@@ -67,19 +67,16 @@ d3d11_renderer_recovers_from_a_lost_device :: proc(t: ^testing.T) {
 	}
 	cover_page := render.texture_create(r, 64, 64, .RGBA8)
 	draw_rects(r, 10)
-	testing.expect_value(t, w.surface.presents, 1)
 
 	// What the renderer does when present says the device is gone.
 	render.release(r)
 	r.device_lost = true
-	testing.expect(t, w.surface.frame_ready == nil)
 	draw_rects(r, 10)
 	testing.expect(t, r.gpu.device != nil)
 	testing.expect(t, !r.device_lost)
 	testing.expect_value(t, r.device_resets, 1)
 	testing.expect_value(t, render.texture_size(r, cover_page), [2]int{})
 	testing.expect_value(t, render.texture_size(r, 0), [2]int{1, 1})
-	testing.expect_value(t, w.surface.presents, 2)
 	testing.expect_value(t, r.stats.instances, 10)
 }
 
@@ -107,8 +104,7 @@ d3d11_instances_are_built_in_ordinary_memory :: proc(t: ^testing.T) {
 }
 
 // A minimized window gives back its buffers, shrunk to a pixel, and gets
-// them back at full size when it's restored. The swap chain hands the shell
-// its frame latency object to wait on.
+// them back at full size when it's restored.
 @(test)
 d3d11_minimized_window_parks_its_buffers :: proc(t: ^testing.T) {
 	w, ok := open_test_window(t)
@@ -123,18 +119,15 @@ d3d11_minimized_window_parks_its_buffers :: proc(t: ^testing.T) {
 	}
 	draw_rects(r, 10)
 	testing.expect_value(t, r.gpu.extent, [2]u32{400, 300})
-	testing.expect(t, w.surface.frame_ready != nil, "no frame latency waitable object")
 
 	win.ShowWindow(w.hwnd, win.SW_SHOWMINNOACTIVE)
 	draw_rects(r, 10)
 	testing.expect(t, r.hidden)
 	testing.expect(t, r.gpu.parked)
 	testing.expect_value(t, r.gpu.extent, [2]u32{1, 1})
-	testing.expect_value(t, w.surface.presents, 1)
 
 	win.ShowWindow(w.hwnd, win.SW_RESTORE)
 	draw_rects(r, 10)
 	testing.expect(t, !r.gpu.parked)
 	testing.expect_value(t, r.gpu.extent, [2]u32{400, 300})
-	testing.expect_value(t, w.surface.presents, 2)
 }

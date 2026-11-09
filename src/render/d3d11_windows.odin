@@ -18,10 +18,9 @@
 // The swap chain uses the flip model, whose buffers can't be sRGB, so the
 // render target view is: the buffers are BGRA8 and the view over them
 // B8G8R8A8_UNORM_SRGB, and blending happens in linear space as on the
-// other backends. Its frame latency waitable object goes to the shell
-// through the Win32_Surface, and the shell waits on it with the window's
-// messages before it starts a frame, so a frame reads its input as late
-// as the swap chain allows and present doesn't block.
+// other backends. The device's maximum frame latency is 1, and present
+// blocks until the display takes the frame, which paces the app's
+// animation.
 //
 // A driver update, a GPU reset or a GPU switch takes the device away. The
 // renderer then releases everything, sets Renderer.device_lost and makes a
@@ -110,8 +109,6 @@ Gpu :: struct {
 	ctx:             ^d3d.IDeviceContext,
 	window:          dxgi.HWND,
 	swapchain:       ^dxgi.ISwapChain1,
-	swap_flags:      dxgi.SWAP_CHAIN, // made with, and so resized with
-	frame_ready:     dxgi.HANDLE, // the frame latency waitable object, or nil
 	target:          ^d3d.IRenderTargetView, // the back buffer, sRGB
 	extent:          [2]u32,
 	vs_rect:         ^d3d.IVertexShader,
@@ -473,12 +470,6 @@ release :: proc(r: ^Renderer) {
 	com_release(&g.ps_blur_up)
 	com_release(&g.target)
 	com_release(&g.swapchain)
-	if g.frame_ready != nil {
-		win.CloseHandle(g.frame_ready)
-	}
-	if g.surface != nil {
-		g.surface.frame_ready = nil
-	}
 	if g.ctx != nil {
 		// Direct3D frees released objects only when the context flushes,
 		// and a new swap chain for the same window fails while the old one
@@ -792,9 +783,8 @@ swapchain_stale :: proc(g: ^Gpu, want: [2]u32) -> bool {
 }
 
 // make_swapchain makes the swap chain at want pixels, or resizes the one
-// there is. The flip model with two buffers, presented on vsync. One frame
-// may wait for the display: the shell waits on frame_ready before it
-// starts the next, where there is one, and otherwise present waits.
+// there is. The flip model with two buffers, presented on vsync, so a
+// present waits when the display is behind and paces animation.
 @(private)
 make_swapchain :: proc(r: ^Renderer, want: [2]u32) -> (hr: win.HRESULT) {
 	g := &r.gpu
@@ -806,6 +796,9 @@ make_swapchain :: proc(r: ^Renderer, want: [2]u32) -> (hr: win.HRESULT) {
 			return
 		}
 		defer dd->Release()
+		// One frame queued ahead of the display keeps input close to what's
+		// on screen; the app draws only when something changed.
+		dd->SetMaximumFrameLatency(1)
 		adapter: ^dxgi.IAdapter
 		if hr = dd->GetAdapter(&adapter); hr < 0 {
 			return
@@ -826,12 +819,9 @@ make_swapchain :: proc(r: ^Renderer, want: [2]u32) -> (hr: win.HRESULT) {
 			Scaling     = .NONE,
 			SwapEffect  = .FLIP_DISCARD,
 			AlphaMode   = .IGNORE,
-			Flags       = {.FRAME_LATENCY_WAITABLE_OBJECT},
 		}
-		// Windows before 10 has no FLIP_DISCARD, and before 8.1 no waitable
-		// object.
+		// Windows before 10 has no FLIP_DISCARD.
 		effects := [2]dxgi.SWAP_EFFECT{.FLIP_DISCARD, .FLIP_SEQUENTIAL}
-		flag_sets := [2]dxgi.SWAP_CHAIN{{.FRAME_LATENCY_WAITABLE_OBJECT}, {}}
 		tries := 2
 		// TIDALFAST_D3D_BLT=1 makes a blt-model swap chain instead: each
 		// present is copied into the window's surface, which the compositor
@@ -839,42 +829,25 @@ make_swapchain :: proc(r: ^Renderer, want: [2]u32) -> (hr: win.HRESULT) {
 		// (independent flip, overlay planes). It's for telling a fault in
 		// that path from one in the frames. Its one buffer is sRGB itself,
 		// since only a flip-model buffer takes an sRGB view over UNORM, and
-		// it has no unscaled mode and no waitable object, so present waits.
+		// it has no unscaled mode.
 		blt := os.get_env("TIDALFAST_D3D_BLT", context.temp_allocator) != ""
 		if blt {
 			desc.Format = .B8G8R8A8_UNORM_SRGB
 			desc.BufferCount = 1
 			desc.Scaling = .STRETCH
-			effects[0], flag_sets[0], tries = .DISCARD, {}, 1
+			effects[0], tries = .DISCARD, 1
 		}
 		log.infof("render: %s swap chain", "blt-model" if blt else "flip-model")
 		for effect in effects[:tries] {
-			for flags in flag_sets[:tries] {
-				desc.SwapEffect, desc.Flags = effect, flags
-				if hr = factory->CreateSwapChainForHwnd((^dxgi.IUnknown)(g.device), g.window, &desc, nil, nil, &g.swapchain); hr >= 0 {
-					break
-				}
-				g.swapchain = nil
-			}
-			if g.swapchain != nil {
+			desc.SwapEffect = effect
+			if hr = factory->CreateSwapChainForHwnd((^dxgi.IUnknown)(g.device), g.window, &desc, nil, nil, &g.swapchain); hr >= 0 {
 				break
 			}
+			g.swapchain = nil
 		}
 		if hr < 0 {
 			return
 		}
-		g.swap_flags = desc.Flags
-		// One frame queued ahead of the display keeps input close to what's
-		// on screen; the app draws only when something changed.
-		sc2: ^dxgi.ISwapChain2
-		if .FRAME_LATENCY_WAITABLE_OBJECT in g.swap_flags && g.swapchain->QueryInterface(dxgi.ISwapChain2_UUID, (^rawptr)(&sc2)) >= 0 {
-			sc2->SetMaximumFrameLatency(1)
-			g.frame_ready = sc2->GetFrameLatencyWaitableObject()
-			sc2->Release()
-		} else {
-			dd->SetMaximumFrameLatency(1)
-		}
-		g.surface.frame_ready = rawptr(g.frame_ready)
 		// What shows where the buffers don't reach while the window grows,
 		// before the next frame resizes them. The buffers aren't sRGB, so
 		// it's the sRGB clear colour, not the linear one the sRGB view clears
@@ -885,7 +858,7 @@ make_swapchain :: proc(r: ^Renderer, want: [2]u32) -> (hr: win.HRESULT) {
 		factory->MakeWindowAssociation(g.window, {.NO_ALT_ENTER})
 	} else {
 		g.ctx->OMSetRenderTargets(0, nil, nil)
-		if hr = g.swapchain->ResizeBuffers(0, want.x, want.y, .UNKNOWN, g.swap_flags); hr < 0 {
+		if hr = g.swapchain->ResizeBuffers(0, want.x, want.y, .UNKNOWN, {}); hr < 0 {
 			return
 		}
 	}
@@ -1016,7 +989,6 @@ end_frame :: proc(r: ^Renderer) {
 		}
 		return
 	}
-	g.surface.presents += 1
 	r.stats = {draw_calls, r.instance_count}
 	read_gpu_time(r)
 	if u32(hr) == DXGI_STATUS_OCCLUDED {

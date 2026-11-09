@@ -42,9 +42,6 @@ enum {
 static volatile LONG g_ime_context; // whether the window had an input method context, -1 before asked
 static volatile LONG g_menu_allowed; // let SC_KEYMENU open the system menu
 static volatile LONG g_menu_open; // between WM_ENTERMENULOOP and WM_EXITMENULOOP
-static volatile LONG g_presenting; // each frame counts as a present, for check_resize_paced
-static volatile LONG g_display_on; // the display thread signals frame_ready
-static volatile LONG g_refreshes; // how many times it has
 
 static void check(bool ok, const char *name, const char *detail) {
   fprintf(stdout, "%s %s%s%s\n", ok ? "PASS" : "FAIL", name, ok || !detail ? "" : ": ", ok || !detail ? "" : detail);
@@ -111,7 +108,6 @@ Frame_Result app_frame(Memory *mem, Shell *shell, Frame_Input *input) {
     if ((e.kind == EVENT_KEY_DOWN || e.kind == EVENT_KEY_UP || e.kind == EVENT_TEXT) && g_seen_count < MAX_SEEN) g_seen[g_seen_count++] = e;
   }
   LeaveCriticalSection(&g_lock);
-  if (InterlockedCompareExchange(&g_presenting, 0, 0)) g_surface_info.presents++;
   Frame_Result result = {0};
   LONG what = InterlockedExchange(&g_ask, ASK_NONE);
   switch (what) {
@@ -307,97 +303,6 @@ static void check_menu(void) {
   InterlockedExchange(&g_menu_allowed, 0);
 }
 
-// A swap chain's frame latency object, as a display that refreshes every
-// 16 ms signals it.
-static unsigned __stdcall display(void *ready) {
-  while (InterlockedCompareExchange(&g_display_on, 0, 0)) {
-    Sleep(16);
-    ReleaseSemaphore((HANDLE)ready, 1, NULL);
-    InterlockedIncrement(&g_refreshes);
-  }
-  return 0;
-}
-
-// Present doesn't block on such a swap chain, so frames drawn during a drag
-// must wait for the display, or the content falls behind the window. A
-// resize leaves extra signals on the object, which mustn't count as the
-// display being ready. Sizes change as fast as the driver can send them.
-static void check_resize_paced(void) {
-  HANDLE ready = CreateSemaphoreW(NULL, 8, 1024, NULL);
-  InterlockedExchange(&g_presenting, 1);
-  g_surface_info.frame_ready = ready;
-  InterlockedExchange(&g_display_on, 1);
-  HANDLE thread = (HANDLE)_beginthreadex(NULL, 0, display, ready, 0, NULL);
-  SendMessageW(g_window, WM_ENTERSIZEMOVE, 0, 0);
-  LONG before = frames(), refreshes = InterlockedCompareExchange(&g_refreshes, 0, 0);
-  for (int i = 0; i < 30; i++)
-    SetWindowPos(g_window, NULL, 0, 0, 800 + i * 4, 600, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
-  LONG drawn = frames() - before, shown = InterlockedCompareExchange(&g_refreshes, 0, 0) - refreshes;
-  SendMessageW(g_window, WM_EXITSIZEMOVE, 0, 0);
-  g_surface_info.frame_ready = NULL;
-  InterlockedExchange(&g_presenting, 0);
-  InterlockedExchange(&g_display_on, 0);
-  WaitForSingleObject(thread, INFINITE);
-  CloseHandle(thread);
-  char detail[96];
-  snprintf(detail, sizeof detail, "%ld frames in %ld refreshes", drawn, shown);
-  check(drawn >= 5 && drawn <= shown + 4, "a drag's frames wait for the display", detail);
-  Sleep(150); // the main loop can be in a wait on the handle for this long
-  CloseHandle(ready);
-}
-
-// Moves the mouse over the window as often as a message round trip allows.
-static void move_mouse(int moves) {
-  for (int i = 0; i < moves; i++) SendMessageW(g_window, WM_MOUSEMOVE, 0, MAKELPARAM(60 + i, 60));
-}
-
-// Every present takes one signal from the frame latency object, the first
-// frame after an idle wait too. One that takes none leaves its signal for
-// the next frame, which then starts before this one is on screen, and that
-// frame queues behind it: what's lit on screen trails the mouse. The object
-// starts with extra signals, as a resize leaves them.
-static void check_idle_frame_paced(void) {
-  HANDLE ready = CreateSemaphoreW(NULL, 3, 1024, NULL);
-  g_surface_info.frame_ready = ready;
-  LONG before = frames();
-  // The main loop reads the handle at the top of its next pass.
-  request_redraw();
-  frame_after(before, 500);
-  Sleep(30);
-  InterlockedExchange(&g_presenting, 1);
-
-  before = frames();
-  move_mouse(1);
-  check(frame_after(before, 500), "input on an idle window draws", NULL);
-  Sleep(30);
-  check(WaitForSingleObject(ready, 0) != WAIT_OBJECT_0, "a frame after idle takes the swap chain's signals", "signals left for the next frame");
-
-  // The display hasn't shown that frame, so input waits for it.
-  before = frames();
-  move_mouse(5);
-  Sleep(30);
-  char detail[64];
-  snprintf(detail, sizeof detail, "%ld frames before the display was ready", frames() - before);
-  check(frames() == before, "input waits for the frame before it to show", detail);
-  ReleaseSemaphore(ready, 1, NULL);
-  check(frame_after(before, 200), "and draws once the display is ready", NULL);
-  Sleep(30);
-
-  // A swap chain whose frames go nowhere never signals, and moving the
-  // mouse mustn't keep restarting the wait.
-  before = frames();
-  for (int i = 0; i < 60 && frames() == before; i++) {
-    move_mouse(1);
-    Sleep(5);
-  }
-  check(frames() > before, "a swap chain that never signals still draws under input", NULL);
-
-  InterlockedExchange(&g_presenting, 0);
-  g_surface_info.frame_ready = NULL;
-  Sleep(150); // the main loop can be in a wait on the handle for this long
-  CloseHandle(ready);
-}
-
 static void check_clipboard(void) {
   // Another app holds the clipboard for a moment, as clipboard managers do
   // after each change.
@@ -441,8 +346,6 @@ static unsigned __stdcall driver(void *arg) {
   check_stray_event();
   check_capture();
   check_clipboard();
-  check_idle_frame_paced();
-  check_resize_paced();
   check_menu();
   check_minimized();
   if (g_endsession_run) {
