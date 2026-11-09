@@ -830,8 +830,26 @@ make_swapchain :: proc(r: ^Renderer, want: [2]u32) -> (hr: win.HRESULT) {
 		}
 		// Windows before 10 has no FLIP_DISCARD, and before 8.1 no waitable
 		// object.
-		for effect in ([]dxgi.SWAP_EFFECT{.FLIP_DISCARD, .FLIP_SEQUENTIAL}) {
-			for flags in ([]dxgi.SWAP_CHAIN{{.FRAME_LATENCY_WAITABLE_OBJECT}, {}}) {
+		effects := [2]dxgi.SWAP_EFFECT{.FLIP_DISCARD, .FLIP_SEQUENTIAL}
+		flag_sets := [2]dxgi.SWAP_CHAIN{{.FRAME_LATENCY_WAITABLE_OBJECT}, {}}
+		tries := 2
+		// TIDALFAST_D3D_BLT=1 makes a blt-model swap chain instead: each
+		// present is copied into the window's surface, which the compositor
+		// always composes, so the display never scans a buffer out directly
+		// (independent flip, overlay planes). It's for telling a fault in
+		// that path from one in the frames. Its one buffer is sRGB itself,
+		// since only a flip-model buffer takes an sRGB view over UNORM, and
+		// it has no unscaled mode and no waitable object, so present waits.
+		blt := os.get_env("TIDALFAST_D3D_BLT", context.temp_allocator) != ""
+		if blt {
+			desc.Format = .B8G8R8A8_UNORM_SRGB
+			desc.BufferCount = 1
+			desc.Scaling = .STRETCH
+			effects[0], flag_sets[0], tries = .DISCARD, {}, 1
+		}
+		log.infof("render: %s swap chain", "blt-model" if blt else "flip-model")
+		for effect in effects[:tries] {
+			for flags in flag_sets[:tries] {
 				desc.SwapEffect, desc.Flags = effect, flags
 				if hr = factory->CreateSwapChainForHwnd((^dxgi.IUnknown)(g.device), g.window, &desc, nil, nil, &g.swapchain); hr >= 0 {
 					break
