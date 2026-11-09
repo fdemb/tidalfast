@@ -1257,7 +1257,14 @@ box_make :: proc(id: string, flags: Box_Flags = {}, width: Size = {}, height: Si
 			hot = u.focus == b.key
 		}
 		ring := u.focus == b.key && u.focus_visible && .No_Focus_Ring not_in b.flags
-		b.hot_t = approach(u, b.hot_t, 1 if hot else 0, rate, 0.002)
+		// One frame is a whole refresh of fade however short the mouse stayed,
+		// so a box it only crosses would light up and fade behind it. The fade
+		// starts on the frame after the mouse arrives.
+		hot_rate := rate
+		if hot && b.hot_t == 0 && u.hot_since == u.time {
+			hot_rate = 0
+		}
+		b.hot_t = approach(u, b.hot_t, 1 if hot else 0, hot_rate, 0.002)
 		b.active_t = approach(u, b.active_t, 1 if u.active[.Left] == b.key else 0, rate, 0.002)
 		b.focus_t = approach(u, b.focus_t, 1 if ring else 0, rate, 0.002)
 	}

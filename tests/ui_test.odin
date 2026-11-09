@@ -317,6 +317,54 @@ button_frame :: proc(u: ^ui.State, events: []platform.Event, time: f64) -> (ui.S
 	return sig, ui.end_frame()
 }
 
+// A row the mouse crosses within one frame stays dark. Where a frame is drawn
+// once per refresh it would otherwise get a whole refresh of fade, however
+// short the mouse stayed, and a trail of fading rows would follow the mouse.
+// A row the mouse stays on, and one fading out, fade as ever.
+@(test)
+test_ui_hover_crossed_in_one_frame_stays_dark :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	now := 0.0
+	frame :: proc(u: ^ui.State, now: ^f64, events: ..platform.Event) -> (a, b: ^ui.Box, animating: bool) {
+		now^ += 1.0 / 60
+		ui.begin_frame(u, events, nil, nil, 300, 200, now^)
+		a = ui.box_make("a", {.Clickable}, ui.px(100), ui.px(40))
+		b = ui.box_make("b", {.Clickable}, ui.px(100), ui.px(40))
+		_ = ui.signal(a)
+		_ = ui.signal(b)
+		animating = ui.end_frame()
+		return
+	}
+	a, b: ^ui.Box
+	animating: bool
+	frame(&u, &now)
+	frame(&u, &now)
+
+	a, _, animating = frame(&u, &now, {kind = .Mouse_Move, x = 20, y = 20})
+	testing.expect_value(t, a.hot_t, f32(0))
+	testing.expect(t, animating, "the next frame starts the fade")
+	a, b, _ = frame(&u, &now, {kind = .Mouse_Move, x = 20, y = 60})
+	testing.expect_value(t, a.hot_t, f32(0))
+
+	a, b, _ = frame(&u, &now)
+	testing.expect_value(t, a.hot_t, f32(0))
+	testing.expect(t, b.hot_t > 0, "the mouse stayed, so the fade starts")
+	for _ in 0 ..< 200 {
+		if a, b, animating = frame(&u, &now); !animating {
+			break
+		}
+	}
+	testing.expect_value(t, b.hot_t, f32(1))
+
+	a, b, _ = frame(&u, &now, {kind = .Mouse_Move, x = 20, y = 20})
+	fading := b.hot_t
+	testing.expect(t, fading > 0 && fading < 1, "the row the mouse left fades out")
+	a, b, _ = frame(&u, &now, {kind = .Mouse_Move, x = 20, y = 60})
+	testing.expect(t, b.hot_t > fading, "a row still fading picks up at once")
+}
+
 @(test)
 test_ui_interaction :: proc(t: ^testing.T) {
 	u: ui.State
