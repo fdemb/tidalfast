@@ -13,6 +13,7 @@ import "core:prof/spall"
 import "core:sync"
 import "core:time"
 
+import "../cover"
 import "../platform"
 import "../render"
 import "../text"
@@ -29,6 +30,7 @@ State :: struct {
 	text:         text.State,
 	rows:         []Row,
 	last_stats:   render.Stats,
+	renderer_resets: u32, // render.Renderer.resets the textures were made for
 	frame_count:  u64,
 	frame_ms:     [FRAME_HISTORY]f32,
 	ui_ms:        f32, // last frame's time building the frame, before end_frame
@@ -301,6 +303,9 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input, shell: ^platfor
 	s.titlebar_h = input.titlebar_height
 	r := &s.renderer
 	render.begin_frame(r, w, h, input.scale, CLEAR_COLOR)
+	if r.resets != s.renderer_resets {
+		textures_lost(s)
+	}
 	ui_begin := time.tick_now()
 	measure_frame_begin(s)
 	text.begin_frame(&s.text, r)
@@ -348,7 +353,38 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input, shell: ^platfor
 		}
 		s.last_stats = r.stats
 	}
-	return {animating = b32(animating || acted || s.dev.sliding || s.text.needs_redraw), wake_after = ui.wake_after(&s.ui)}
+	return frame_result(r, animating || acted || s.dev.sliding || s.text.needs_redraw, ui.wake_after(&s.ui))
+}
+
+// frame_result is what the shell is told after a frame. While the renderer
+// can't show frames, nothing paces them, so the app doesn't animate: a
+// frame it wanted comes after render.HIDDEN_POLL instead, and one the
+// renderer asks for after poll_after.
+frame_result :: proc(r: ^render.Renderer, animating: bool, wake_after: f32) -> platform.Frame_Result {
+	result := platform.Frame_Result{animating = b32(animating), wake_after = wake_after}
+	if !r.hidden {
+		return result
+	}
+	wake := r.poll_after
+	if animating && (wake <= 0 || wake > render.HIDDEN_POLL) {
+		wake = render.HIDDEN_POLL
+	}
+	if wake > 0 && (result.wake_after <= 0 || wake < result.wake_after) {
+		result.wake_after = wake
+	}
+	result.animating = false
+	return result
+}
+
+// textures_lost forgets the textures that went with a lost GPU device
+// (render.Renderer.resets), so each is made again as it's next needed:
+// the glyphs, the cover pages and the dev screens' textures.
+textures_lost :: proc(s: ^State) {
+	log.info("app: the renderer has a new device, making the textures again")
+	s.renderer_resets = s.renderer.resets
+	text.forget_textures(&s.text)
+	cover.forget_textures(&s.data.covers)
+	dev_start(s)
 }
 
 // hsv returns an opaque sRGB colour. Hue wraps, so any value works.

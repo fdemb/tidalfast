@@ -374,6 +374,23 @@ trim :: proc(c: ^Cache, frame: u64, out: []render.Texture) -> int {
 	return n
 }
 
+// forget_textures forgets every Ready cover and every page, without
+// destroying the pages' textures, which went with a lost GPU device
+// (render.Renderer.resets): a page made while there was none has a handle
+// the next texture in its slot can match. The covers load again when
+// they're next drawn.
+forget_textures :: proc(c: ^Cache) {
+	for &e in c.entries {
+		if e.state == .Ready {
+			remove(c, &e)
+		}
+	}
+	for &pg in c.pages {
+		pg = {}
+	}
+	c.bytes = 0
+}
+
 // alpha is how far a Ready entry has faded in, 0 to 1.
 alpha :: proc(e: ^Entry, now: f64) -> f32 {
 	if e == nil || e.state != .Ready {

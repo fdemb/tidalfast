@@ -217,13 +217,19 @@ Wayland_Surface :: struct {
 }
 #assert(size_of(Wayland_Surface) == 16)
 
-// What Shell.surface points to on Windows: the module and the window, for
-// the renderer to make a Vulkan surface from. The shell owns both.
+// What Shell.surface points to on Windows. The shell owns the module and
+// the window. The renderer writes the rest, on the main thread, as it
+// draws.
 Win32_Surface :: struct {
-	instance: rawptr, // HINSTANCE
-	window:   rawptr, // HWND
+	instance:    rawptr, // HINSTANCE
+	window:      rawptr, // HWND
+	// The swap chain's frame latency waitable object (a HANDLE), signalled
+	// when it can take another frame, or nil. The shell waits on it before
+	// a frame, once per present. The renderer owns it.
+	frame_ready: rawptr,
+	presents:    u64, // frames presented so far
 }
-#assert(size_of(Win32_Surface) == 16)
+#assert(size_of(Win32_Surface) == 32)
 
 // What the shell gives the app. The surface and the procedures belong to
 // the shell and stay valid while the app runs, so the app may keep them.

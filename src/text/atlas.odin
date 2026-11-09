@@ -171,6 +171,14 @@ atlas_clear :: proc(a: ^Atlas, r: ^render.Renderer) {
 	for t in a.outgrown[:a.outgrown_count] {
 		render.texture_destroy(r, t)
 	}
+	atlas_forget(a)
+}
+
+// atlas_forget drops every glyph and page without destroying the pages'
+// textures, for when they went with a lost device: a page made while there
+// was none has a handle the next texture in its slot can match.
+@(private)
+atlas_forget :: proc(a: ^Atlas) {
 	a.outgrown_count = 0
 	a.page_count = 0
 	mem.zero_slice(a.entries)

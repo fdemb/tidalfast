@@ -303,6 +303,14 @@ begin_frame :: proc(t: ^State, r: ^render.Renderer) {
 	t.stats.pages = atlas_pages(t)
 }
 
+// forget_textures drops the glyph atlas without destroying its textures,
+// which went with a lost GPU device (render.Renderer.resets). Glyphs are
+// rasterized again as they're drawn.
+forget_textures :: proc(t: ^State) {
+	atlas_forget(&t.atlas)
+	t.needs_redraw = true
+}
+
 // atlas_pages counts the glyph pages in use now.
 atlas_pages :: proc(t: ^State) -> int {
 	n := 0
