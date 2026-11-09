@@ -309,6 +309,7 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input, shell: ^platfor
 		s.gpu_resets = r.device_resets
 		text.forget_glyphs(&s.text, r)
 		covers_forget(s)
+		dev_start(s)
 	}
 	ui_begin := time.tick_now()
 	measure_frame_begin(s)
@@ -357,12 +358,27 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input, shell: ^platfor
 		}
 		s.last_stats = r.stats
 	}
-	wake := ui.wake_after(&s.ui)
-	if r.device_lost {
-		// Frames try again for a new device.
-		wake = 1 if wake <= 0 else min(wake, 1)
+	return frame_result(r, animating || acted || s.dev.sliding || s.text.needs_redraw, ui.wake_after(&s.ui))
+}
+
+// frame_result is what the shell is told after a frame. While the renderer
+// can't show frames, nothing paces them, so the app doesn't animate: a
+// frame it wanted comes after render.HIDDEN_POLL instead, and one the
+// renderer asks for after poll_after.
+frame_result :: proc(r: ^render.Renderer, animating: bool, wake_after: f32) -> platform.Frame_Result {
+	result := platform.Frame_Result{animating = b32(animating), wake_after = wake_after}
+	if !r.hidden {
+		return result
 	}
-	return {animating = b32(animating || acted || s.dev.sliding || s.text.needs_redraw), wake_after = wake}
+	wake := r.poll_after
+	if animating && (wake <= 0 || wake > render.HIDDEN_POLL) {
+		wake = render.HIDDEN_POLL
+	}
+	if wake > 0 && (result.wake_after <= 0 || wake < result.wake_after) {
+		result.wake_after = wake
+	}
+	result.animating = false
+	return result
 }
 
 // hsv returns an opaque sRGB colour. Hue wraps, so any value works.

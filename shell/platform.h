@@ -242,12 +242,19 @@ typedef struct {
 } Wayland_Surface;
 _Static_assert(sizeof(Wayland_Surface) == 16, "Wayland_Surface size must match platform.odin");
 
-// What Shell.surface points to on Windows. The shell owns both.
+// What Shell.surface points to on Windows. The shell owns the module and
+// the window. The renderer writes the rest, on the main thread, as it
+// draws.
 typedef struct {
   void *instance; // HINSTANCE
   void *window; // HWND
+  // The swap chain's frame latency waitable object (a HANDLE), signalled
+  // when it can take another frame, or NULL. The shell waits on it before
+  // a frame, once per present. The renderer owns it.
+  void *frame_ready;
+  uint64_t presents; // frames presented so far
 } Win32_Surface;
-_Static_assert(sizeof(Win32_Surface) == 16, "Win32_Surface size must match platform.odin");
+_Static_assert(sizeof(Win32_Surface) == 32, "Win32_Surface size must match platform.odin");
 
 typedef struct {
   void *surface; // what the renderer draws to: a CAMetalLayer with its device, a Wayland_Surface or a Win32_Surface

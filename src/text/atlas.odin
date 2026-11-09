@@ -200,8 +200,65 @@ glyph_sizes :: proc(px_size, size: f32) -> u64 {
 }
 
 // glyph_key packs what identifies a glyph bitmap. Never 0.
-glyph_key :: proc(face: u8, id: u16, sizes: u64, bucket: u8) -> u64 {
-	return 1 << 63 | u64(face) << 56 | u64(id) << 40 | sizes << 8 | u64(bucket)
+glyph_key :: proc(face: u8, id: u16, sizes: u64, bucket: u8, tone := Tone.None) -> u64 {
+	#assert(SUBPIXEL_STEPS <= 4 && len(Tone) <= 4)
+	return 1 << 63 | u64(face) << 56 | u64(id) << 40 | sizes << 8 | u64(tone) << 2 | u64(bucket)
+}
+
+// Tone is how a glyph's coverage is bent for the colour it's drawn in.
+// The renderer blends in linear light, which draws light text on a dark
+// ground heavier, and dark text on a light one thinner, than text blended
+// in sRGB, which is how text looks everywhere else on Windows. It shows
+// at 100% to 150% scaling, where FreeType's unhinted glyphs are a few
+// pixels across. Where TONES is set, coverage goes through a curve for the
+// text's tone before it goes in the atlas: light text is taken to be on a
+// dark ground and dark text on a light one. macOS draws at 2x, and
+// CoreText's glyphs blended this way look as other Mac apps' do.
+Tone :: enum u8 {
+	None,
+	Light, // coverage^TONE_GAMMA: thinner
+	Dark, // 1 - (1 - coverage)^TONE_GAMMA: heavier
+}
+
+TONES :: ODIN_OS == .Windows
+// Sharing a gamma of 2.2 would be text blended in sRGB exactly on black
+// or white; 1.6 is most of the way there and keeps 12 px text from going
+// faint.
+TONE_GAMMA :: 1.6
+// Text is dark below this luminance, in linear light: about sRGB 0.35.
+TONE_DARK_BELOW :: 0.1
+
+// tone_of is the tone of text drawn in color.
+tone_of :: proc(color: render.Color) -> Tone {
+	when !TONES {
+		return .None
+	}
+	y := 0.2126 * render.linear_from_srgb(color.r) + 0.7152 * render.linear_from_srgb(color.g) + 0.0722 * render.linear_from_srgb(color.b)
+	return .Dark if y < TONE_DARK_BELOW else .Light
+}
+
+// tone_curves[tone][c] is what coverage c becomes for tone. Built at start.
+tone_curves: [Tone][256]u8
+
+@(init, private)
+build_tone_curves :: proc "contextless" () {
+	for c in 0 ..< 256 {
+		a := f32(c) / 255
+		tone_curves[.None][c] = u8(c)
+		tone_curves[.Light][c] = u8(math.round(math.pow(a, TONE_GAMMA) * 255))
+		tone_curves[.Dark][c] = u8(math.round((1 - math.pow(1 - a, TONE_GAMMA)) * 255))
+	}
+}
+
+// apply_tone bends coverage pixels in place for tone.
+apply_tone :: proc(pixels: []byte, tone: Tone) {
+	if tone == .None {
+		return
+	}
+	curve := &tone_curves[tone]
+	for &p in pixels {
+		p = curve[p]
+	}
 }
 
 // draw_run draws a run with its top left at pos (points), truncated with an
@@ -225,16 +282,17 @@ draw_run :: proc(t: ^State, r: ^render.Renderer, run: ^Run, pos: [2]f32, color: 
 	baseline := math.round((pos.y + run.ascent) * scale)
 	x0 := pos.x * scale
 	sizes := glyph_sizes(run.size * scale, run.size)
+	tone := tone_of(color)
 	for g in glyphs {
 		// A pending run's missing glyphs wait for their font, blank.
 		if run.pending && g.id == 0 {
 			continue
 		}
-		#force_inline draw_glyph(t, r, g, run.size, sizes, x0 + (g.pen + g.offset.x + shift) * scale, baseline + math.round(g.offset.y * scale), color)
+		#force_inline draw_glyph(t, r, g, run.size, sizes, tone, x0 + (g.pen + g.offset.x + shift) * scale, baseline + math.round(g.offset.y * scale), color)
 	}
 	if ellipsis != nil {
 		for g in ellipsis.glyphs {
-			draw_glyph(t, r, g, run.size, sizes, x0 + (ellipsis_x + g.pen + g.offset.x) * scale, baseline + math.round(g.offset.y * scale), color)
+			draw_glyph(t, r, g, run.size, sizes, tone, x0 + (ellipsis_x + g.pen + g.offset.x) * scale, baseline + math.round(g.offset.y * scale), color)
 		}
 	}
 	return {width = width, height = run.ascent + run.descent, ascent = run.ascent, truncated = ellipsis != nil}
@@ -246,15 +304,17 @@ draw :: proc(t: ^State, r: ^render.Renderer, font: Font, size: f32, pos: [2]f32,
 }
 
 // draw_glyph draws one glyph of a run of size points, whose glyph_sizes are
-// sizes, with its pen at pixel x on pixel row baseline.
+// sizes, with its pen at pixel x on pixel row baseline, in color, whose
+// tone_of is tone.
 @(private)
-draw_glyph :: proc(t: ^State, r: ^render.Renderer, g: Glyph, size: f32, sizes: u64, x, baseline: f32, color: render.Color) {
+draw_glyph :: proc(t: ^State, r: ^render.Renderer, g: Glyph, size: f32, sizes: u64, tone: Tone, x, baseline: f32, color: render.Color) {
 	face := &t.faces[g.face]
 	whole, bucket := subpixel(x)
+	tone := tone
 	if face.color {
-		whole, bucket = math.round(x), 0
+		whole, bucket, tone = math.round(x), 0, .None
 	}
-	e := glyph_entry(t, r, g.face, g.id, size, sizes, bucket)
+	e := glyph_entry(t, r, g.face, g.id, size, sizes, bucket, tone)
 	if e == nil || e.w == 0 {
 		return
 	}
@@ -269,9 +329,9 @@ draw_glyph :: proc(t: ^State, r: ^render.Renderer, g: Glyph, size: f32, sizes: u
 // are sizes, rasterizing it on a miss. nil if the atlas is full; the glyph
 // then shows up from the next frame.
 @(private)
-glyph_entry :: proc(t: ^State, r: ^render.Renderer, face_index: u8, id: u16, size: f32, sizes: u64, bucket: u8) -> ^Atlas_Entry {
+glyph_entry :: proc(t: ^State, r: ^render.Renderer, face_index: u8, id: u16, size: f32, sizes: u64, bucket: u8, tone: Tone) -> ^Atlas_Entry {
 	a := &t.atlas
-	key := glyph_key(face_index, id, sizes, bucket)
+	key := glyph_key(face_index, id, sizes, bucket, tone)
 	slot, found := entry_slot(a, key)
 	if found {
 		e := &a.entries[slot]
@@ -281,14 +341,14 @@ glyph_entry :: proc(t: ^State, r: ^render.Renderer, face_index: u8, id: u16, siz
 		}
 		return e
 	}
-	return glyph_add(t, r, slot, key, face_index, id, size * r.scale, size, bucket)
+	return glyph_add(t, r, slot, key, face_index, id, size * r.scale, size, bucket, tone)
 }
 
 // glyph_add rasterizes a glyph that glyph_entry didn't find and puts it in
 // entry slot. It stays out of line so the lookup every drawn glyph makes
 // stays small.
 @(private)
-glyph_add :: #force_no_inline proc(t: ^State, r: ^render.Renderer, slot: int, key: u64, face_index: u8, id: u16, px_size, size: f32, bucket: u8) -> ^Atlas_Entry {
+glyph_add :: #force_no_inline proc(t: ^State, r: ^render.Renderer, slot: int, key: u64, face_index: u8, id: u16, px_size, size: f32, bucket: u8, tone: Tone) -> ^Atlas_Entry {
 	a := &t.atlas
 	if a.full == .No && a.entry_count >= len(a.entries) * 3 / 4 {
 		a.full = .Entries
@@ -321,9 +381,12 @@ glyph_add :: #force_no_inline proc(t: ^State, r: ^render.Renderer, slot: int, ke
 			return nil
 		}
 		pixels := rasterize(a, face, px_size, size, id, w, h, {-left + f64(bucket) / SUBPIXEL_STEPS, -bottom})
-		// rasterize hands back its own copy, so a colour glyph converts in place.
+		// rasterize hands back its own copy, so a colour glyph converts in
+		// place, and coverage bends in place.
 		if face.color {
 			render.convert_premultiplied(pixels)
+		} else {
+			apply_tone(pixels, tone)
 		}
 		render.texture_update(r, a.pages[page].texture, pixels, x, y, w, h, converted = true)
 		a.pages[page].packed += (w + 1) * (h + 1)

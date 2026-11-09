@@ -8,20 +8,32 @@
 // Direct3D 11 keeps a released object alive until the GPU is done with
 // it, renames a buffer mapped with WRITE_DISCARD and orders texture writes
 // with the draws around them, so this backend needs none of Vulkan's
-// staging buffers, fences and barriers. The instances go in one dynamic
-// structured buffer, mapped by begin_frame and unmapped by end_frame;
-// both shaders index it, and a constant buffer gives each draw its first
-// instance, since SV_InstanceID starts at 0 for every draw.
+// staging buffers, fences and barriers. A frame's instances are built in
+// an array in ordinary memory, which the push procs and backdrop_hash read
+// back, and end_frame copies them into one dynamic structured buffer. The
+// buffer's mapping is write-combined, often uncached, and reading it back
+// is slow. Both shaders index the buffer, and a constant buffer gives each
+// draw its first instance, since SV_InstanceID starts at 0 for every draw.
 //
 // The swap chain uses the flip model, whose buffers can't be sRGB, so the
 // render target view is: the buffers are BGRA8 and the view over them
 // B8G8R8A8_UNORM_SRGB, and blending happens in linear space as on the
-// other backends.
+// other backends. Its frame latency waitable object goes to the shell
+// through the Win32_Surface, and the shell waits on it with the window's
+// messages before it starts a frame, so a frame reads its input as late
+// as the swap chain allows and present doesn't block.
+//
+// A driver update, a GPU reset or a GPU switch takes the device away. The
+// renderer then releases everything, sets Renderer.device_lost and makes a
+// new device at a later begin_frame, and Renderer.device_resets tells the
+// textures' owners to make theirs again.
 package render
 
+import "base:runtime"
 import "core:log"
 import "core:math"
 import "core:mem"
+import "core:os"
 import "core:sync"
 import win "core:sys/windows"
 import "core:time"
@@ -42,6 +54,25 @@ SWAP_BUFFERS :: 2
 
 // Present's success code for a window that can't be seen.
 DXGI_STATUS_OCCLUDED :: 0x087A0001
+// D3D11CreateDevice's answer to the debug flag without the SDK layers,
+// which come with Windows' optional Graphics Tools.
+DXGI_ERROR_SDK_COMPONENT_MISSING :: 0x887A002D
+
+// A lost device is made again at the next frame, then every RETRY_SECONDS
+// while that fails. A device lost on a GPU is made on a GPU again: WARP,
+// the CPU rasterizer, only stands in after WARP_AFTER tries, since a
+// driver being installed can take a while.
+RETRY_SECONDS :: 1
+WARP_AFTER :: 10
+
+// While the window is covered or the screen locked, frames aren't drawn.
+// After one that wasn't, the app gets a frame in HIDDEN_POLL seconds to
+// look again, then twice as long each time up to OCCLUDED_POLL_MAX, so
+// what it missed is drawn soon after the window shows again.
+OCCLUDED_POLL_MAX :: 1.0
+
+// Frames whose GPU time can be waiting to be read.
+TIMED_FRAMES :: 4
 
 // Frame_Constants matches the Frame cbuffer in rect.hlsl.
 Frame_Constants :: struct {
@@ -62,36 +93,60 @@ Blur_Image :: struct {
 	size:    int,
 }
 
+// Timestamps around each frame's drawing, for Renderer.gpu_ms. A frame's
+// queries are read a frame or more later, without waiting for them.
+Gpu_Timer :: struct {
+	disjoint: [TIMED_FRAMES]^d3d.IQuery,
+	start:    [TIMED_FRAMES]^d3d.IQuery,
+	end:      [TIMED_FRAMES]^d3d.IQuery,
+	issued:   [TIMED_FRAMES]bool,
+	next:     int,
+}
+
 Gpu :: struct {
-	device:        ^d3d.IDevice,
-	ctx:           ^d3d.IDeviceContext,
-	window:        dxgi.HWND,
-	swapchain:     ^dxgi.ISwapChain1,
-	target:        ^d3d.IRenderTargetView, // the back buffer, sRGB
-	extent:        [2]u32,
-	vs_rect:       ^d3d.IVertexShader,
-	ps_rect:       ^d3d.IPixelShader,
-	vs_blur:       ^d3d.IVertexShader,
-	ps_blur_down:  ^d3d.IPixelShader,
-	ps_blur_up:    ^d3d.IPixelShader,
-	blend:         ^d3d.IBlendState, // premultiplied over; the blur passes replace
-	raster:        ^d3d.IRasterizerState,
-	samplers:      [2]^d3d.ISamplerState, // linear with mips, nearest
-	constants:     ^d3d.IBuffer,
-	instances:     ^d3d.IBuffer,
-	instances_srv: ^d3d.IShaderResourceView,
-	instance_bytes: int,
-	mapped:        bool, // instances is mapped, between begin_frame and end_frame
+	// The shell's, kept through a lost device.
+	surface:         ^platform.Win32_Surface,
+	device:          ^d3d.IDevice,
+	ctx:             ^d3d.IDeviceContext,
+	window:          dxgi.HWND,
+	swapchain:       ^dxgi.ISwapChain1,
+	swap_flags:      dxgi.SWAP_CHAIN, // made with, and so resized with
+	frame_ready:     dxgi.HANDLE, // the frame latency waitable object, or nil
+	target:          ^d3d.IRenderTargetView, // the back buffer, sRGB
+	extent:          [2]u32,
+	vs_rect:         ^d3d.IVertexShader,
+	ps_rect:         ^d3d.IPixelShader,
+	vs_blur:         ^d3d.IVertexShader,
+	ps_blur_down:    ^d3d.IPixelShader,
+	ps_blur_up:      ^d3d.IPixelShader,
+	blend:           ^d3d.IBlendState, // premultiplied over; the blur passes replace
+	raster:          ^d3d.IRasterizerState,
+	samplers:        [2]^d3d.ISamplerState, // linear with mips, nearest
+	constants:       ^d3d.IBuffer,
+	// The frame's instances, built here and copied to the buffer by
+	// end_frame, which grows the buffer to the array's size when it's short.
+	cpu_instances:   []Instance,
+	instances:       ^d3d.IBuffer,
+	instances_srv:   ^d3d.IShaderResourceView,
+	instance_bytes:  int,
 	// The backdrop, as on Vulkan: the scene at half the region's size in
 	// the drawable's format, and the levels in RGBA16 float, made for the
 	// region's size and kept until it changes.
-	scene:         Blur_Image,
-	levels:        [MAX_BLUR_LEVELS]Blur_Image,
-	level_size:    [MAX_BLUR_LEVELS + 1][2]int,
-	region_size:   [2]int,
-	blurred_hash:  u64,
-	allocated:     int, // bytes of textures and buffers; atomic
-	tried_at:      time.Tick, // the last try at a new device, after losing one
+	scene:           Blur_Image,
+	levels:          [MAX_BLUR_LEVELS]Blur_Image,
+	level_size:      [MAX_BLUR_LEVELS + 1][2]int,
+	region_size:     [2]int,
+	blurred_hash:    u64,
+	timer:           Gpu_Timer,
+	info:            ^d3d.IInfoQueue, // the debug layer's messages, with TIDALFAST_D3D11_DEBUG
+	parked:          bool, // minimized: the buffers are a pixel and the backdrop is gone
+	occluded:        bool, // present said nobody can see the window
+	occluded_poll:   f32, // seconds until the next look, see OCCLUDED_POLL_MAX
+	swapchain_error: bool, // logged; not again until a swap chain is made
+	// Making a new device after a lost one. Kept through release.
+	retry_at:        time.Tick,
+	tries:           int,
+	allocated:       int, // bytes of textures and buffers; atomic
 }
 
 Gpu_Texture :: struct {
@@ -102,42 +157,58 @@ Gpu_Texture :: struct {
 
 // init draws to surface, a platform.Win32_Surface. If it fails, it tears
 // down what it made, so g.device is nil and the renderer draws nothing.
-init :: proc(r: ^Renderer, surface: rawptr) -> (ok: bool) {
-	g := &r.gpu
-	defer if !ok {
-		release(r)
-	}
+init :: proc(r: ^Renderer, surface: rawptr) -> bool {
 	ws := (^platform.Win32_Surface)(surface)
 	if ws == nil || ws.window == nil {
 		log.error("render: no window")
 		return false
 	}
-	g.window = dxgi.HWND(ws.window)
-	return make_device(r, first = true)
+	r.gpu.surface = ws
+	return make_device(r, allow_warp = true)
 }
 
-// make_device makes the device and what the renderer keeps for its
-// lifetime, for the window in g.window. On failure the caller releases
-// what it made.
+// make_device makes the device and what lasts as long as it. The swap
+// chain comes with the first frame. If it fails, it tears down what it
+// made.
 @(private)
-make_device :: proc(r: ^Renderer, first: bool) -> bool {
+make_device :: proc(r: ^Renderer, allow_warp: bool) -> (ok: bool) {
 	g := &r.gpu
-	// A machine without a GPU driver, a VM or Wine without one, still draws
-	// through WARP, Direct3D's CPU rasterizer.
-	levels := [2]d3d.FEATURE_LEVEL{._11_0, ._10_0}
+	defer if !ok {
+		release(r)
+	}
+	g.window = dxgi.HWND(g.surface.window)
+
+	// The shaders are shader model 5, which needs feature level 11_0. A
+	// machine without such a GPU, or a VM or Wine without a GPU driver,
+	// still draws through WARP, Direct3D's CPU rasterizer.
+	level := d3d.FEATURE_LEVEL._11_0
 	flags := d3d.CREATE_DEVICE_FLAGS{.BGRA_SUPPORT, .SINGLETHREADED}
-	hr := d3d.CreateDevice(nil, .HARDWARE, nil, flags, &levels[0], len(levels), d3d.SDK_VERSION, &g.device, nil, &g.ctx)
-	if hr < 0 {
+	debug := os.get_env("TIDALFAST_D3D11_DEBUG", context.temp_allocator) != ""
+	if debug {
+		flags += {.DEBUG}
+	}
+	hr := d3d.CreateDevice(nil, .HARDWARE, nil, flags, &level, 1, d3d.SDK_VERSION, &g.device, nil, &g.ctx)
+	if debug && u32(hr) == DXGI_ERROR_SDK_COMPONENT_MISSING {
+		log.warn("render: the Direct3D debug layer isn't installed (Settings, Optional features, Graphics Tools)")
+		flags -= {.DEBUG}
+		debug = false
+		hr = d3d.CreateDevice(nil, .HARDWARE, nil, flags, &level, 1, d3d.SDK_VERSION, &g.device, nil, &g.ctx)
+	}
+	if hr < 0 && allow_warp {
 		log.warnf("render: no hardware Direct3D 11 device (0x%x), trying WARP", u32(hr))
-		hr = d3d.CreateDevice(nil, .WARP, nil, flags, &levels[0], len(levels), d3d.SDK_VERSION, &g.device, nil, &g.ctx)
+		hr = d3d.CreateDevice(nil, .WARP, nil, flags, &level, 1, d3d.SDK_VERSION, &g.device, nil, &g.ctx)
 	}
 	if hr < 0 {
 		log.errorf("render: D3D11CreateDevice failed: 0x%x", u32(hr))
+		g.device, g.ctx = nil, nil
 		return false
 	}
 	log_adapter(g)
-	if first {
+	if !r.device_lost {
 		init_step(&r.init_steps, "render_device")
+	}
+	if debug && g.device->QueryInterface(d3d.IInfoQueue_UUID, (^rawptr)(&g.info)) < 0 {
+		g.info = nil
 	}
 
 	if !make_shaders(g) || !make_states(g) {
@@ -153,8 +224,10 @@ make_device :: proc(r: ^Renderer, first: bool) -> bool {
 		log.error("render: can't make the constant buffer")
 		return false
 	}
+	make_timer(g)
 
-	// Slot 0 is the white texture behind the zero handle.
+	// Slot 0 is the white texture behind the zero handle, so its
+	// generation stays 0, also after a lost device.
 	r.textures[0] = new_texture_slot(r, 1, 1, .RGBA8, false)
 	if r.textures[0].width == 0 {
 		log.error("render: can't make the white texture")
@@ -162,6 +235,7 @@ make_device :: proc(r: ^Renderer, first: bool) -> bool {
 	}
 	white := [4]u8{255, 255, 255, 255}
 	texture_update(r, 0, white[:], 0, 0, 1, 1)
+	log_debug_messages(g)
 	return true
 }
 
@@ -234,6 +308,122 @@ make_states :: proc(g: ^Gpu) -> bool {
 	return ok
 }
 
+// make_timer makes the timestamp queries. Without them gpu_ms stays 0.
+@(private)
+make_timer :: proc(g: ^Gpu) {
+	disjoint := d3d.QUERY_DESC {
+		Query = .TIMESTAMP_DISJOINT,
+	}
+	stamp := d3d.QUERY_DESC {
+		Query = .TIMESTAMP,
+	}
+	t := &g.timer
+	for i in 0 ..< TIMED_FRAMES {
+		ok := g.device->CreateQuery(&disjoint, &t.disjoint[i]) >= 0
+		ok &&= g.device->CreateQuery(&stamp, &t.start[i]) >= 0
+		ok &&= g.device->CreateQuery(&stamp, &t.end[i]) >= 0
+		if !ok {
+			free_timer(t)
+			return
+		}
+	}
+}
+
+@(private)
+free_timer :: proc(t: ^Gpu_Timer) {
+	for i in 0 ..< TIMED_FRAMES {
+		com_release(&t.disjoint[i])
+		com_release(&t.start[i])
+		com_release(&t.end[i])
+	}
+	t^ = {}
+}
+
+// timer_begin and timer_end bracket a frame's drawing with timestamps.
+@(private)
+timer_begin :: proc(g: ^Gpu) {
+	t := &g.timer
+	if t.disjoint[0] == nil {
+		return
+	}
+	g.ctx->Begin((^d3d.IAsynchronous)(t.disjoint[t.next]))
+	g.ctx->End((^d3d.IAsynchronous)(t.start[t.next]))
+}
+
+@(private)
+timer_end :: proc(g: ^Gpu) {
+	t := &g.timer
+	if t.disjoint[0] == nil {
+		return
+	}
+	g.ctx->End((^d3d.IAsynchronous)(t.end[t.next]))
+	g.ctx->End((^d3d.IAsynchronous)(t.disjoint[t.next]))
+	t.issued[t.next] = true
+	t.next = (t.next + 1) % TIMED_FRAMES
+}
+
+// read_gpu_time sets gpu_ms from the newest frame whose timestamps are
+// in, oldest first, and stops at the first that isn't, without waiting.
+@(private)
+read_gpu_time :: proc(r: ^Renderer) {
+	g := &r.gpu
+	t := &g.timer
+	DONOTFLUSH :: u32(1)
+	for k in 0 ..< TIMED_FRAMES {
+		i := (t.next + k) % TIMED_FRAMES
+		if !t.issued[i] {
+			continue
+		}
+		disjoint: d3d.QUERY_DATA_TIMESTAMP_DISJOINT
+		start, end: u64
+		if g.ctx->GetData((^d3d.IAsynchronous)(t.disjoint[i]), &disjoint, size_of(disjoint), DONOTFLUSH) != 0 {
+			return
+		}
+		if g.ctx->GetData((^d3d.IAsynchronous)(t.start[i]), &start, size_of(start), DONOTFLUSH) != 0 {
+			return
+		}
+		if g.ctx->GetData((^d3d.IAsynchronous)(t.end[i]), &end, size_of(end), DONOTFLUSH) != 0 {
+			return
+		}
+		t.issued[i] = false
+		if !disjoint.Disjoint && disjoint.Frequency > 0 && end >= start {
+			r.gpu_ms = f32(f64(end - start) * 1000 / f64(disjoint.Frequency))
+		}
+	}
+}
+
+// log_debug_messages logs what the debug layer said since last time.
+@(private)
+log_debug_messages :: proc(g: ^Gpu) {
+	if g.info == nil {
+		return
+	}
+	n := g.info->GetNumStoredMessages()
+	for i in 0 ..< n {
+		size: d3d.SIZE_T
+		if g.info->GetMessage(i, nil, &size) < 0 || size < size_of(d3d.MESSAGE) {
+			continue
+		}
+		buf, err := mem.alloc_bytes(int(size), align_of(d3d.MESSAGE), context.temp_allocator)
+		if err != nil {
+			break
+		}
+		m := (^d3d.MESSAGE)(raw_data(buf))
+		if g.info->GetMessage(i, m, &size) < 0 {
+			continue
+		}
+		switch m.Severity {
+		case .CORRUPTION, .ERROR:
+			log.errorf("render: d3d11: %s", m.pDescription)
+		case .WARNING:
+			log.warnf("render: d3d11: %s", m.pDescription)
+		case .INFO, .MESSAGE:
+			log.infof("render: d3d11: %s", m.pDescription)
+		}
+	}
+	g.info->ClearStoredMessages()
+}
+
 destroy :: proc(r: ^Renderer) {
 	release(r)
 	r^ = {}
@@ -248,21 +438,14 @@ com_release :: proc(p: ^$T) {
 }
 
 // release frees the GPU objects, so g.device is nil and the renderer draws
-// nothing. It keeps the frame's counts, batches and clips, which a lost
-// device can leave halfway, the capture path the shell set, and the window
-// and the time of the last try at a device, for making a new one. Each
-// slot's generation moves on, as in texture_destroy, so no old handle
+// nothing. It keeps the frame's counts, batches and clips, the capture
+// path the shell set, the surface and how the device is being made again.
+// Each slot's generation moves on, as in texture_destroy, so no old handle
 // matches.
 release :: proc(r: ^Renderer) {
 	g := &r.gpu
 	if g.ctx != nil {
-		if g.mapped {
-			g.ctx->Unmap((^d3d.IResource)(g.instances), 0)
-		}
 		g.ctx->ClearState()
-		// Destroys what was released now, so a new swap chain can take the
-		// window.
-		g.ctx->Flush()
 	}
 	for &slot in r.textures {
 		if slot.width != 0 {
@@ -273,6 +456,8 @@ release :: proc(r: ^Renderer) {
 	for &l in g.levels {
 		free_blur_image(&l)
 	}
+	free_timer(&g.timer)
+	com_release(&g.info)
 	com_release(&g.instances_srv)
 	com_release(&g.instances)
 	com_release(&g.constants)
@@ -288,15 +473,74 @@ release :: proc(r: ^Renderer) {
 	com_release(&g.ps_blur_up)
 	com_release(&g.target)
 	com_release(&g.swapchain)
+	if g.frame_ready != nil {
+		win.CloseHandle(g.frame_ready)
+	}
+	if g.surface != nil {
+		g.surface.frame_ready = nil
+	}
+	if g.ctx != nil {
+		// Direct3D frees released objects only when the context flushes,
+		// and a new swap chain for the same window fails while the old one
+		// is still there.
+		g.ctx->Flush()
+	}
 	com_release(&g.ctx)
 	com_release(&g.device)
-	window, tried_at := g.window, g.tried_at
-	r.gpu = {window = window, tried_at = tried_at}
+	if g.cpu_instances != nil {
+		delete(g.cpu_instances, runtime.heap_allocator())
+	}
+	r.gpu = {
+		surface  = g.surface,
+		retry_at = g.retry_at,
+		tries    = g.tries,
+	}
 	for &slot in r.textures {
 		slot = {generation = slot.generation + 1}
 	}
 	r.instances = nil
 	r.capacity = {}
+}
+
+// lose checks whether the device is gone, after a call that failed with
+// hr. If it is, it releases everything and sets r.device_lost, and
+// begin_frame makes a new device. False if the device is fine.
+@(private)
+lose :: proc(r: ^Renderer, hr: win.HRESULT) -> bool {
+	g := &r.gpu
+	if g.device == nil {
+		return true
+	}
+	reason := g.device->GetDeviceRemovedReason()
+	if reason >= 0 {
+		return false
+	}
+	log.errorf("render: the GPU device was lost (0x%x, reason 0x%x), making a new one", u32(hr), u32(reason))
+	release(r)
+	r.device_lost = true
+	r.hidden = true
+	r.poll_after = 0.01
+	g.retry_at = time.tick_now()
+	g.tries = 0
+	return true
+}
+
+// recover makes a new device after a lost one, if it's time to try.
+@(private)
+recover :: proc(r: ^Renderer) {
+	g := &r.gpu
+	if time.tick_diff(g.retry_at, time.tick_now()) < 0 {
+		return
+	}
+	g.tries += 1
+	if !make_device(r, allow_warp = g.tries > WARP_AFTER) {
+		g.retry_at = time.tick_add(time.tick_now(), RETRY_SECONDS * time.Second)
+		return
+	}
+	log.infof("render: made a new device after losing the last, in %d tries", g.tries)
+	g.tries = 0
+	r.device_lost = false
+	r.device_resets += 1
 }
 
 // gpu_allocated is the memory the renderer's textures and buffers take, in
@@ -428,85 +672,86 @@ gpu_texture_copy :: proc(r: ^Renderer, from, to: ^Texture_Slot, w, h: int) {
 
 // Frame
 
-// gpu_frame_begin maps the instance buffer for the frame and returns it,
-// or nil if there is none. WRITE_DISCARD gives fresh memory while the GPU
-// may still read the last frame's.
+// gpu_frame_begin returns the array the frame's instances go in, or nil if
+// there is no device. After a lost device it first tries to make a new
+// one.
 @(private)
 gpu_frame_begin :: proc(r: ^Renderer) -> [^]Instance {
 	g := &r.gpu
-	if g.device == nil && r.device_lost {
-		new_device(r)
+	if r.device_lost && g.device == nil {
+		recover(r)
 	}
 	if g.device == nil {
 		return nil
 	}
 	r.slot_wait_ms = 0
 	r.drawable_wait_ms = 0
-	if g.instances == nil {
-		set_instance_buffer(r, INITIAL_INSTANCES)
-	}
-	if g.mapped {
-		g.ctx->Unmap((^d3d.IResource)(g.instances), 0)
-		g.mapped = false
-	}
-	return map_instances(r)
-}
-
-@(private)
-map_instances :: proc(r: ^Renderer) -> [^]Instance {
-	g := &r.gpu
-	if g.instances == nil {
+	if g.cpu_instances == nil && !set_cpu_instances(r, INITIAL_INSTANCES) {
 		return nil
 	}
-	m: d3d.MAPPED_SUBRESOURCE
-	if g.ctx->Map((^d3d.IResource)(g.instances), 0, .WRITE_DISCARD, {}, &m) < 0 {
-		log.error("render: can't map the instance buffer")
-		return nil
-	}
-	g.mapped = true
-	return ([^]Instance)(m.pData)
+	return raw_data(g.cpu_instances)
 }
 
-// grow_instances replaces the buffer with one twice the size and copies
-// over what this frame has pushed so far. If there's no memory for it, the
-// old buffer and capacity stay.
+// grow_instances doubles the frame's array, keeping what this frame has
+// pushed so far. If there's no memory for it, the old array and capacity
+// stay.
 @(private)
 grow_instances :: proc(r: ^Renderer) {
-	g := &r.gpu
-	old, old_srv, old_bytes := g.instances, g.instances_srv, g.instance_bytes
-	old_capacity := r.capacity[r.slot]
-	old_data := r.instances
-	g.instances, g.instances_srv = nil, nil
-	if !set_instance_buffer(r, r.capacity[r.slot] * 2) {
-		g.instances, g.instances_srv, g.instance_bytes = old, old_srv, old_bytes
-		return
-	}
-	next := map_instances(r)
-	if next == nil {
-		// Back to the old buffer, still mapped, and its capacity.
-		sync.atomic_sub(&g.allocated, g.instance_bytes)
-		com_release(&g.instances_srv)
-		com_release(&g.instances)
-		g.instances, g.instances_srv, g.instance_bytes = old, old_srv, old_bytes
-		g.mapped = true
-		for &c in r.capacity {
-			c = old_capacity
-		}
-		return
-	}
-	mem.copy(next, old_data, r.instance_count * size_of(Instance))
-	g.ctx->Unmap((^d3d.IResource)(old), 0)
-	sync.atomic_sub(&g.allocated, old_bytes)
-	com_release(&old_srv)
-	com_release(&old)
-	r.instances = next
+	set_cpu_instances(r, 2 * len(r.gpu.cpu_instances))
 }
 
-// set_instance_buffer makes the instance buffer, unmapped, for capacity
-// instances. Every slot gets the capacity: there is one buffer.
+// set_cpu_instances makes the array capacity instances long, keeping the
+// ones this frame has pushed. Every slot gets the capacity: there is one
+// array.
 @(private)
-set_instance_buffer :: proc(r: ^Renderer, capacity: int) -> bool {
+set_cpu_instances :: proc(r: ^Renderer, capacity: int) -> bool {
 	g := &r.gpu
+	next, err := make([]Instance, capacity, runtime.heap_allocator())
+	if err != nil {
+		log.error("render: out of memory for instances")
+		return false
+	}
+	if g.cpu_instances != nil {
+		copy(next, g.cpu_instances[:r.instance_count])
+		delete(g.cpu_instances, runtime.heap_allocator())
+	}
+	g.cpu_instances = next
+	r.instances = raw_data(next)
+	for &c in r.capacity {
+		c = capacity
+	}
+	return true
+}
+
+// upload_instances copies the frame's instances into the instance buffer,
+// first making the buffer as long as the array if it's shorter than the
+// frame. WRITE_DISCARD gives fresh memory while the GPU may still read the
+// last frame's. False if there's no buffer to draw from.
+@(private)
+upload_instances :: proc(r: ^Renderer) -> bool {
+	g := &r.gpu
+	if r.instance_count == 0 {
+		return true
+	}
+	if r.instance_count * size_of(Instance) > g.instance_bytes && !set_instance_buffer(g, len(g.cpu_instances)) {
+		return false
+	}
+	m: d3d.MAPPED_SUBRESOURCE
+	if hr := g.ctx->Map((^d3d.IResource)(g.instances), 0, .WRITE_DISCARD, {}, &m); hr < 0 {
+		if !lose(r, hr) {
+			log.errorf("render: can't map the instance buffer: 0x%x", u32(hr))
+		}
+		return false
+	}
+	mem.copy_non_overlapping(m.pData, raw_data(g.cpu_instances), r.instance_count * size_of(Instance))
+	g.ctx->Unmap((^d3d.IResource)(g.instances), 0)
+	return true
+}
+
+// set_instance_buffer replaces the instance buffer with one of capacity
+// instances. If it can't, the old one stays.
+@(private)
+set_instance_buffer :: proc(g: ^Gpu, capacity: int) -> bool {
 	desc := d3d.BUFFER_DESC {
 		ByteWidth           = u32(capacity * size_of(Instance)),
 		Usage               = .DYNAMIC,
@@ -531,13 +776,12 @@ set_instance_buffer :: proc(r: ^Renderer, capacity: int) -> bool {
 		log.error("render: can't view the instance buffer")
 		return false
 	}
+	sync.atomic_sub(&g.allocated, g.instance_bytes)
+	com_release(&g.instances_srv)
+	com_release(&g.instances)
 	g.instances, g.instances_srv = buffer, srv
 	g.instance_bytes = int(desc.ByteWidth)
-	g.mapped = false
 	sync.atomic_add(&g.allocated, g.instance_bytes)
-	for &c in r.capacity {
-		c = capacity
-	}
 	return true
 }
 
@@ -548,29 +792,28 @@ swapchain_stale :: proc(g: ^Gpu, want: [2]u32) -> bool {
 }
 
 // make_swapchain makes the swap chain at want pixels, or resizes the one
-// there is. The flip model with two buffers, presented on vsync, so a
-// present waits when the display is behind and paces animation.
+// there is. The flip model with two buffers, presented on vsync. One frame
+// may wait for the display: the shell waits on frame_ready before it
+// starts the next, where there is one, and otherwise present waits.
 @(private)
-make_swapchain :: proc(g: ^Gpu, want: [2]u32) -> bool {
+make_swapchain :: proc(r: ^Renderer, want: [2]u32) -> (hr: win.HRESULT) {
+	g := &r.gpu
 	com_release(&g.target)
 	g.extent = {}
 	if g.swapchain == nil {
 		dd: ^dxgi.IDevice1
-		if g.device->QueryInterface(dxgi.IDevice1_UUID, (^rawptr)(&dd)) < 0 {
-			return false
+		if hr = g.device->QueryInterface(dxgi.IDevice1_UUID, (^rawptr)(&dd)); hr < 0 {
+			return
 		}
 		defer dd->Release()
-		// One frame queued ahead of the display keeps input close to what's
-		// on screen; the app draws only when something changed.
-		dd->SetMaximumFrameLatency(1)
 		adapter: ^dxgi.IAdapter
-		if dd->GetAdapter(&adapter) < 0 {
-			return false
+		if hr = dd->GetAdapter(&adapter); hr < 0 {
+			return
 		}
 		defer adapter->Release()
 		factory: ^dxgi.IFactory2
-		if adapter->GetParent(dxgi.IFactory2_UUID, (^rawptr)(&factory)) < 0 {
-			return false
+		if hr = adapter->GetParent(dxgi.IFactory2_UUID, (^rawptr)(&factory)); hr < 0 {
+			return
 		}
 		defer factory->Release()
 		desc := dxgi.SWAP_CHAIN_DESC1 {
@@ -583,100 +826,150 @@ make_swapchain :: proc(g: ^Gpu, want: [2]u32) -> bool {
 			Scaling     = .NONE,
 			SwapEffect  = .FLIP_DISCARD,
 			AlphaMode   = .IGNORE,
+			Flags       = {.FRAME_LATENCY_WAITABLE_OBJECT},
 		}
-		if hr := factory->CreateSwapChainForHwnd((^dxgi.IUnknown)(g.device), g.window, &desc, nil, nil, &g.swapchain); hr < 0 {
-			// Windows before 10 has no FLIP_DISCARD.
-			desc.SwapEffect = .FLIP_SEQUENTIAL
-			if hr = factory->CreateSwapChainForHwnd((^dxgi.IUnknown)(g.device), g.window, &desc, nil, nil, &g.swapchain); hr < 0 {
-				log.errorf("render: CreateSwapChainForHwnd failed: 0x%x", u32(hr))
+		// Windows before 10 has no FLIP_DISCARD, and before 8.1 no waitable
+		// object.
+		for effect in ([]dxgi.SWAP_EFFECT{.FLIP_DISCARD, .FLIP_SEQUENTIAL}) {
+			for flags in ([]dxgi.SWAP_CHAIN{{.FRAME_LATENCY_WAITABLE_OBJECT}, {}}) {
+				desc.SwapEffect, desc.Flags = effect, flags
+				if hr = factory->CreateSwapChainForHwnd((^dxgi.IUnknown)(g.device), g.window, &desc, nil, nil, &g.swapchain); hr >= 0 {
+					break
+				}
 				g.swapchain = nil
-				return false
+			}
+			if g.swapchain != nil {
+				break
 			}
 		}
+		if hr < 0 {
+			return
+		}
+		g.swap_flags = desc.Flags
+		// One frame queued ahead of the display keeps input close to what's
+		// on screen; the app draws only when something changed.
+		sc2: ^dxgi.ISwapChain2
+		if .FRAME_LATENCY_WAITABLE_OBJECT in g.swap_flags && g.swapchain->QueryInterface(dxgi.ISwapChain2_UUID, (^rawptr)(&sc2)) >= 0 {
+			sc2->SetMaximumFrameLatency(1)
+			g.frame_ready = sc2->GetFrameLatencyWaitableObject()
+			sc2->Release()
+		} else {
+			dd->SetMaximumFrameLatency(1)
+		}
+		g.surface.frame_ready = rawptr(g.frame_ready)
+		// What shows where the buffers don't reach while the window grows,
+		// before the next frame resizes them. The buffers aren't sRGB, so
+		// it's the sRGB clear colour, not the linear one the sRGB view clears
+		// with.
+		background := dxgi.RGBA{r.clear.r, r.clear.g, r.clear.b, 1}
+		g.swapchain->SetBackgroundColor(&background)
 		// The shell owns the window and its keys; Alt-Enter isn't fullscreen.
 		factory->MakeWindowAssociation(g.window, {.NO_ALT_ENTER})
 	} else {
 		g.ctx->OMSetRenderTargets(0, nil, nil)
-		if hr := g.swapchain->ResizeBuffers(0, want.x, want.y, .UNKNOWN, {}); hr < 0 {
-			log.errorf("render: ResizeBuffers failed: 0x%x", u32(hr))
-			return false
+		if hr = g.swapchain->ResizeBuffers(0, want.x, want.y, .UNKNOWN, g.swap_flags); hr < 0 {
+			return
 		}
 	}
 	back: ^d3d.ITexture2D
-	if g.swapchain->GetBuffer(0, d3d.ITexture2D_UUID, (^rawptr)(&back)) < 0 {
-		return false
+	if hr = g.swapchain->GetBuffer(0, d3d.ITexture2D_UUID, (^rawptr)(&back)); hr < 0 {
+		return
 	}
 	defer back->Release()
 	rtv := d3d.RENDER_TARGET_VIEW_DESC {
 		Format        = .B8G8R8A8_UNORM_SRGB,
 		ViewDimension = .TEXTURE2D,
 	}
-	if g.device->CreateRenderTargetView((^d3d.IResource)(back), &rtv, &g.target) < 0 {
+	if hr = g.device->CreateRenderTargetView((^d3d.IResource)(back), &rtv, &g.target); hr < 0 {
 		g.target = nil
-		return false
+		return
 	}
 	g.extent = want
-	return true
+	g.swapchain_error = false
+	return 0
 }
 
-// lose_device lets go of a device Windows took away, as on a driver update
-// or a GPU reset, and every texture with it. The next begin_frame makes a
-// new one.
+// park gives back what a minimized window doesn't need: the backdrop's
+// textures, the swap chain's buffers, shrunk to a pixel, and what the
+// driver keeps for the device's objects that are gone (IDXGIDevice3::Trim).
+// The next frame that's seen makes them again. macOS shrinks its drawables
+// the same way.
 @(private)
-lose_device :: proc(r: ^Renderer, reason: u32) {
-	log.errorf("render: the GPU device was lost (0x%x), making a new one", reason)
-	release(r)
-	r.device_lost = true
-}
-
-// device_gone says whether the device is gone, after a call failed, and
-// why.
-@(private)
-device_gone :: proc(g: ^Gpu) -> (reason: u32, gone: bool) {
-	hr := g.device->GetDeviceRemovedReason()
-	return u32(hr), hr < 0
-}
-
-// new_device tries to make a device again after losing one, at most once a
-// second: until the driver is back, as during an update, it fails.
-@(private)
-new_device :: proc(r: ^Renderer) {
+park :: proc(r: ^Renderer) {
 	g := &r.gpu
-	if g.tried_at != {} && time.tick_since(g.tried_at) < time.Second {
+	if g.parked {
 		return
 	}
-	g.tried_at = time.tick_now()
-	if !make_device(r, first = false) {
-		release(r)
-		return
+	g.parked = true
+	free_blur_image(&g.scene, g)
+	for &l in g.levels {
+		free_blur_image(&l, g)
 	}
-	r.device_lost = false
-	r.device_resets += 1
-	log.info("render: made a new GPU device")
+	g.region_size = {}
+	g.blurred_hash = 0
+	if g.swapchain != nil {
+		if hr := make_swapchain(r, {1, 1}); hr < 0 && lose(r, hr) {
+			return
+		}
+	}
+	g.ctx->ClearState()
+	d3: ^dxgi.IDevice3
+	if g.device->QueryInterface(dxgi.IDevice3_UUID, (^rawptr)(&d3)) >= 0 {
+		d3->Trim()
+		d3->Release()
+	}
 }
 
-// end_frame draws the frame and presents it.
+// end_frame draws the frame and presents it. A frame that can't be seen
+// isn't drawn: r.hidden says so, and r.poll_after when to look again.
 end_frame :: proc(r: ^Renderer) {
 	g := &r.gpu
 	defer r.frame_index += 1
+	r.hidden, r.poll_after = true, 0
 	if g.device == nil {
+		if r.device_lost {
+			r.poll_after = RETRY_SECONDS
+		}
 		return
 	}
-	if g.mapped {
-		g.ctx->Unmap((^d3d.IResource)(g.instances), 0)
-		g.mapped = false
-	}
+	defer log_debug_messages(g)
 	want := [2]u32{u32(math.round(r.width * r.scale)), u32(math.round(r.height * r.scale))}
 	if want.x == 0 || want.y == 0 {
 		return
 	}
-	if swapchain_stale(g, want) && !make_swapchain(g, want) {
-		if reason, gone := device_gone(g); gone {
-			lose_device(r, reason)
+	// The shell draws one frame as the window is minimized, then none
+	// until it's restored. Captures keep drawing, as on macOS.
+	if r.capture_path == "" && win.IsIconic(win.HWND(g.window)) {
+		park(r)
+		return
+	}
+	g.parked = false
+	if g.occluded && r.capture_path == "" {
+		hr := g.swapchain->Present(0, {.TEST})
+		if u32(hr) == DXGI_STATUS_OCCLUDED {
+			r.poll_after = g.occluded_poll
+			g.occluded_poll = min(2 * g.occluded_poll, OCCLUDED_POLL_MAX)
+			return
 		}
+		if hr < 0 && lose(r, hr) {
+			return
+		}
+		g.occluded = false
+	}
+	if swapchain_stale(g, want) {
+		if hr := make_swapchain(r, want); hr < 0 {
+			if !lose(r, hr) && !g.swapchain_error {
+				log.errorf("render: can't make or resize the swap chain: 0x%x", u32(hr))
+				g.swapchain_error = true
+			}
+			return
+		}
+	}
+	if !upload_instances(r) {
 		return
 	}
 
+	timer_begin(g)
 	draw_calls := 0
 	blurred := r.textures[0].gpu.srv
 	if r.backdrop.batch >= 0 {
@@ -691,6 +984,7 @@ end_frame :: proc(r: ^Renderer) {
 	g.ctx->ClearRenderTargetView(g.target, &clear)
 	whole := [4]f32{0, 0, f32(g.extent.x), f32(g.extent.y)}
 	draw_calls += draw_batches(r, r.batches[:r.batch_count], g.extent, whole, {0, 0, 1, 1}, blurred)
+	timer_end(g)
 
 	if r.capture_path != "" {
 		capture(r)
@@ -698,18 +992,31 @@ end_frame :: proc(r: ^Renderer) {
 	wait := time.tick_now()
 	hr := g.swapchain->Present(1, {})
 	r.drawable_wait_ms = f32(time.duration_milliseconds(time.tick_since(wait)))
-	if u32(hr) == DXGI_STATUS_OCCLUDED {
-		// A window nobody can see presents without waiting for vsync, so
-		// the wait an animation is paced by is done here.
-		time.sleep(16 * time.Millisecond)
-	}
-	if hr == dxgi.ERROR_DEVICE_REMOVED || hr == dxgi.ERROR_DEVICE_RESET {
-		reason, _ := device_gone(g)
-		lose_device(r, reason)
+	if hr < 0 {
+		if !lose(r, hr) {
+			log.errorf("render: present failed: 0x%x", u32(hr))
+		}
 		return
 	}
+	g.surface.presents += 1
 	r.stats = {draw_calls, r.instance_count}
+	read_gpu_time(r)
+	if u32(hr) == DXGI_STATUS_OCCLUDED {
+		if r.capture_path != "" {
+			// A capture keeps drawing while nobody can see the window, and
+			// present doesn't wait for vsync then, so this paces it.
+			time.sleep(16 * time.Millisecond)
+		} else {
+			// This frame went up and shows when the window does. The next
+			// one only checks, and polls if it can't be seen.
+			g.occluded = true
+			g.occluded_poll = HIDDEN_POLL
+			return
+		}
+	}
+	r.hidden = false
 }
+
 
 // clear_color is the frame's clear colour. The targets are sRGB, so it's
 // given in linear.

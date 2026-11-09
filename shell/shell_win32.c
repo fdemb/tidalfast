@@ -9,13 +9,16 @@
 // MsgWaitForMultipleObjectsEx on the window's messages, an event that
 // request_redraw sets and two waitable timers (wake_after and the test
 // driver), then handles everything that came and draws one frame for it
-// all. While the app is animating, the swapchain's FIFO present paces the
-// frames to the display. A minimized window still draws the frames asked
-// for, since the app does its work in frames (the queue moves on to the
-// next track in one), but it doesn't animate. While the user drags the
-// window's edge or title, or has the system menu open, Windows runs its
-// own modal loop and the main loop doesn't run; a timer does its work from
-// inside it, so the window keeps up with the drag.
+// all. Once a frame is due, it waits on the swap chain's frame latency
+// object (Win32_Surface.frame_ready) with the messages still coming in,
+// so the frame starts when the swap chain can take it, with the newest
+// input, and present doesn't block. That paces animation to the display.
+// A minimized window still draws the frames asked for, since the app does
+// its work in frames (the queue moves on to the next track in one), but it
+// doesn't animate. While the user drags the window's edge or title, or has
+// the system menu open, Windows runs its own modal loop and the main loop
+// doesn't run; a timer does its work from inside it, so the window keeps
+// up with the drag.
 //
 // Text comes from WM_CHAR, and from an input method through IMM32: the
 // composition string becomes marked text and the result string is
@@ -70,6 +73,9 @@ static bool g_minimized; // frames only when asked, no animation, unless TIDALFA
 static bool g_capture;
 static bool g_in_frame; // inside app_frame, which a window message can re-enter
 static bool g_shut_down; // app_shutdown has run
+// The swap chain's frame_ready was waited on and no frame has been
+// presented since, so the next frame doesn't wait for it again.
+static bool g_ready_taken;
 
 // Set by request_redraw. Auto-reset, so a wait it ends consumes it: a
 // request that comes while a frame is starting leaves it set at most until
@@ -173,9 +179,11 @@ static void draw_frame(void) {
       .mouse_buttons = buttons_down(),
   };
   queue_take(&input.events, &input.event_count, &input.text, &input.text_length);
+  uint64_t presents = g_surface_info.presents;
   g_in_frame = true;
   Frame_Result result = app_frame(&g_memory, &g_shell, &input);
   g_in_frame = false;
+  if (g_surface_info.presents != presents) g_ready_taken = false;
   g_animating = result.animating;
   arm_timer(g_wake_timer, result.wake_after > 0 ? result.wake_after : 0);
 }
@@ -580,6 +588,9 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     return 0;
   case WM_SIZE:
     g_minimized = wp == SIZE_MINIMIZED;
+    // A frame as the window goes, for the renderer to see it's minimized
+    // and give back its buffers.
+    if (g_minimized) draw_frame();
     if (wp != SIZE_MINIMIZED) {
       update_size();
       request_redraw();
@@ -1034,20 +1045,42 @@ static void pump_messages(void) {
 }
 
 static void main_loop(void) {
-  HANDLE handles[3] = {g_redraw_event, g_wake_timer, g_test_timer};
   while (!atomic_load(&g_quit)) {
-    // A frame is due now when something asked for one; otherwise wait for
-    // a message, a request or a timer. While animating, present's vsync
-    // wait is the pacing, so the loop doesn't wait at all. A minimized
-    // window, whose present doesn't wait, doesn't animate, but it still
-    // draws the frames asked for, in which the app does its work.
+    // A frame is due when something asked for one or the app animates;
+    // otherwise wait for a message, a request or a timer. A due frame
+    // waits until the swap chain can take it (frame_ready), once per
+    // present, or draws at once where there's nothing to wait on and
+    // present's vsync wait paces it. A minimized window doesn't animate and
+    // presents nothing, so its frames don't wait, but it still draws the
+    // frames asked for, in which the app does its work.
     bool due = atomic_load(&g_needs_redraw) || animating();
-    DWORD r = MsgWaitForMultipleObjectsEx(3, handles, due ? 0 : INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
-    if (r == WAIT_OBJECT_0 + 1) atomic_store(&g_needs_redraw, true);
-    if (r == WAIT_OBJECT_0 + 2) run_due_steps();
+    HANDLE ready = (HANDLE)g_surface_info.frame_ready;
+    bool wait_ready = due && ready && !g_ready_taken && !(g_minimized && !g_capture);
+    HANDLE handles[3];
+    DWORD n = 0, timeout = INFINITE;
+    if (!due) {
+      handles[n++] = g_redraw_event;
+      handles[n++] = g_wake_timer;
+    }
+    handles[n++] = g_test_timer;
+    if (wait_ready) {
+      // A swap chain whose frames go nowhere may never signal it.
+      handles[n++] = ready;
+      timeout = 100;
+    } else if (due) {
+      timeout = 0;
+    }
+    DWORD r = MsgWaitForMultipleObjectsEx(n, handles, timeout, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+    HANDLE signalled = r < WAIT_OBJECT_0 + n ? handles[r - WAIT_OBJECT_0] : NULL;
+    if (signalled == g_wake_timer) atomic_store(&g_needs_redraw, true);
+    if (signalled == g_test_timer) run_due_steps();
+    if (signalled == ready && ready) g_ready_taken = true;
     pump_messages();
     if (atomic_load(&g_quit)) break;
-    if (atomic_load(&g_needs_redraw) || animating()) draw_frame();
+    // Input that came while the frame waited for the swap chain goes into
+    // that frame, once the swap chain can take it.
+    bool may_draw = !wait_ready || g_ready_taken || r == WAIT_TIMEOUT;
+    if ((atomic_load(&g_needs_redraw) || animating()) && may_draw) draw_frame();
   }
 }
 

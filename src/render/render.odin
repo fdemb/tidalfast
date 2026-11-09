@@ -53,6 +53,7 @@ import "../sys"
 
 FRAMES_IN_FLIGHT :: 3
 INITIAL_INSTANCES :: 4096
+HIDDEN_POLL :: 0.25 // seconds, see Renderer.hidden
 MAX_BATCHES :: 4096
 MAX_CLIP_DEPTH :: 64
 MAX_TEXTURES :: 4096
@@ -189,6 +190,15 @@ Renderer :: struct {
 	backdrop:       Backdrop_Pass, // batch is -1 without one
 
 	stats:          Stats, // of the last frame end_frame drew
+	// Set by end_frame when the frame didn't reach the screen: the window
+	// can't be seen, or there is no device. The app then stops animating,
+	// since nothing paces frames that aren't presented, and waits
+	// HIDDEN_POLL to try again if it wanted another frame. Where poll_after
+	// is above 0, the frame wasn't drawn at all and the app should draw
+	// again after that many seconds even if it wants nothing new, so what
+	// it missed shows when the window does.
+	hidden:         bool,
+	poll_after:     f32,
 	// Milliseconds the GPU took on the newest frame it has finished, a frame
 	// or two behind; 0 where the backend can't tell.
 	gpu_ms:         f32,
@@ -203,7 +213,8 @@ Renderer :: struct {
 	init_steps:     Init_Steps,
 	// The Direct3D 11 backend makes a new device when it loses one, as a
 	// driver update does. device_lost is set while it has none and tries
-	// again, once a second at most, at each begin_frame. device_resets
+	// again, once a second at most, at each begin_frame (see recover in
+	// d3d11_windows.odin). device_resets
 	// counts the new devices: every texture went with the old one, so on a
 	// change the app makes what it keeps in textures again.
 	device_lost:    bool,
