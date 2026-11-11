@@ -1240,46 +1240,84 @@ test_ui_instant_hover_has_no_fade :: proc(t: ^testing.T) {
 	testing.expect(t, !animating, "going dark takes no frames")
 }
 
-// An Instant_Hover box that comes under a still mouse fades in, as a row
-// does that scrolls past: hot is a frame behind then, so a row lit at once
-// would be lit in the wrong place.
+// Ten 40 pt Instant_Hover rows in a 300 by 200 scroll view, each with a
+// mark that shows while its row is lit, as a track row's buttons do.
+@(private = "file")
+Scrolled_Rows :: struct {
+	rows:      [10]^ui.Box,
+	marks:     [10]^ui.Box,
+	animating: bool,
+}
+
+@(private = "file")
+scrolled_rows_frame :: proc(u: ^ui.State, now: ^f64, events: ..platform.Event) -> (f: Scrolled_Rows) {
+	now^ += 1.0 / 120
+	ui.begin_frame(u, events, nil, nil, 300, 200, now^)
+	list := ui.box_make("list", {.View_Scroll, .Allow_Overflow_Y, .Clip}, ui.px(300), ui.px(200))
+	list.child_axis = .Y
+	ui.push_parent(list)
+	for i in 0 ..< len(f.rows) {
+		f.rows[i] = ui.box_make(fmt.tprintf("##row%d", i), {.Clickable, .Instant_Hover}, ui.fill(), ui.px(40))
+		ui.signal(f.rows[i])
+		ui.push_parent(f.rows[i])
+		f.marks[i] = ui.box_make("", {}, ui.px(10), ui.px(10))
+		f.marks[i].opacity = 0
+		ui.show_on_hover(f.marks[i], f.rows[i])
+		ui.pop_parent()
+	}
+	ui.pop_parent()
+	f.animating = ui.end_frame()
+	return
+}
+
+// only_lit says whether row lit is the only lit one, and its mark the
+// only one showing.
+@(private = "file")
+only_lit :: proc(f: Scrolled_Rows, lit: int) -> bool {
+	for i in 0 ..< len(f.rows) {
+		want := f32(1 if i == lit else 0)
+		if f.rows[i].hot_t != want || ui.drawn_opacity(f.marks[i]) != want {
+			return false
+		}
+	}
+	return true
+}
+
+// A row that scrolls under a still mouse is lit in the frame it gets
+// there, and the lit row is the one under the mouse in that frame's
+// layout, not the one that was there before. What shows with the row,
+// though built before the layout, agrees with it.
 @(test)
-test_ui_instant_hover_fades_under_a_still_mouse :: proc(t: ^testing.T) {
+test_ui_instant_hover_follows_rows_scrolled_under_a_still_mouse :: proc(t: ^testing.T) {
 	u: ui.State
 	ui.init(&u)
 	defer ui_destroy(&u)
 	now := 0.0
-	frame :: proc(u: ^ui.State, now: ^f64, above: f32, events: ..platform.Event) -> (^ui.Box, bool) {
-		now^ += 1.0 / 120
-		ui.begin_frame(u, events, nil, nil, 300, 200, now^)
-		ui.spacer(ui.px(above))
-		b := ui.box_make("row", {.Clickable, .Instant_Hover}, ui.px(100), ui.px(40))
-		ui.signal(b)
-		return b, ui.end_frame()
-	}
+	scrolled_rows_frame(&u, &now)
+	scrolled_rows_frame(&u, &now, {kind = .Mouse_Move, x = 50, y = 60})
+	f := scrolled_rows_frame(&u, &now)
+	testing.expect(t, only_lit(f, 1), "row 1 is lit")
+	testing.expect(t, !f.animating)
 
-	frame(&u, &now, 100)
-	frame(&u, &now, 100, {kind = .Mouse_Move, x = 20, y = 20})
-	b, animating := frame(&u, &now, 100)
-	testing.expect_value(t, b.hot_t, f32(0))
-	testing.expect(t, !animating)
+	// One row up, at once: row 2 is under the mouse now.
+	f = scrolled_rows_frame(&u, &now, {kind = .Scroll, x = 50, y = 60, dy = -40, precise = true, phase = .Began})
+	testing.expect_value(t, f.rows[2].rect.y, f32(40))
+	testing.expect(t, only_lit(f, 2), "row 2 is lit in the frame it comes under the mouse")
 
-	// The row moves under the mouse. The frame after has it hot.
-	frame(&u, &now, 0)
-	b, animating = frame(&u, &now, 0)
-	testing.expect(t, b.hot_t > 0 && b.hot_t < 0.5, "the row starts to fade in")
-	testing.expect(t, animating)
-	for _ in 0 ..< 200 {
-		if b, animating = frame(&u, &now, 0); !animating {
+	// The next frames agree, and nothing fades.
+	for _ in 0 ..< 10 {
+		if f = scrolled_rows_frame(&u, &now); !f.animating {
 			break
 		}
+		testing.expect(t, only_lit(f, 2), "row 2 stays lit")
 	}
-	testing.expect_value(t, b.hot_t, f32(1))
+	testing.expect(t, !f.animating, "the rows settle")
+	testing.expect(t, only_lit(f, 2), "row 2 stays lit")
 
-	// The mouse leaving still takes the light off at once.
-	b, animating = frame(&u, &now, 0, {kind = .Mouse_Move, x = 250, y = 150})
-	testing.expect_value(t, b.hot_t, f32(0))
-	testing.expect(t, !animating)
+	// To the end, 200 pt down: row 6 is at 40.
+	f = scrolled_rows_frame(&u, &now, {kind = .Scroll, x = 50, y = 60, dy = -5000, precise = true, phase = .Changed})
+	testing.expect_value(t, f.rows[6].rect.y, f32(40))
+	testing.expect(t, only_lit(f, 6), "row 6 is lit in the frame it comes under the mouse")
 }
 
 // hover_run moves the mouse onto the button, or off it, and runs frames

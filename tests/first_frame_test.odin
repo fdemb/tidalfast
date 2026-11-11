@@ -140,7 +140,7 @@ expect_next_frame_same :: proc(t: ^testing.T, s: ^app.State, f: ^Frame, at, page
 placed_boxes :: proc(u: ^ui.State, a: mem.Allocator) -> []Placed {
 	out := make([dynamic]Placed, a)
 	walk :: proc(b: ^ui.Box, name: string, out: ^[dynamic]Placed, a: mem.Allocator) {
-		if b.opacity <= 0 {
+		if ui.drawn_opacity(b) <= 0 {
 			return
 		}
 		name := strings.clone(b.id, a) if b.id != "" else name

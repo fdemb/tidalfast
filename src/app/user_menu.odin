@@ -71,16 +71,20 @@ draw_user_row :: proc(s: ^State) {
 	if ui.signal(b).clicked {
 		ui.open_menu(USER_MENU, {b.rect.x, b.rect.y - 4}, up = true)
 	}
-	shown := max(b.hot_t, b.focus_t, 1 if open else 0)
+	shown := max(b.focus_t, 1 if open else 0)
 	// The avatar's centre is level with Home's and Search's icons.
 	ui.spacer(ui.px(ROW_PAD - 3))
 	draw_avatar(s, small_str(&d.profile.picture), name)
 	ui.spacer(ui.px(10))
 	ui.text_style(.Medium, 13, NAV_TEXT)
-	ui.label(label, ui.fill(), ui.fill()).opacity = shown
+	name_box := ui.label(label, ui.fill(), ui.fill())
+	name_box.opacity = shown
+	ui.show_on_hover(name_box, b)
 	ui.text_style(.Icon, 14, QUIET)
 	ui.set_next_text_align(.Center)
-	ui.label(text.ICON_CARET_UP_DOWN, ui.px(18), ui.fill()).opacity = shown
+	caret := ui.label(text.ICON_CARET_UP_DOWN, ui.px(18), ui.fill())
+	caret.opacity = shown
+	ui.show_on_hover(caret, b)
 	ui.spacer(ui.px(ROW_PAD - 3))
 
 	if ui.menu(USER_MENU, b.rect.w) {

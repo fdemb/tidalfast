@@ -98,7 +98,7 @@ Box_Flag :: enum u32 {
 	Shrink_From_End, // children that don't fit give up room from the end, not in proportion: the one crossing the edge is cut short and those after it get none
 	Center_Children, // children sit in the middle of the room along the child axis, as between two fill() spacers, for a box that's only there to centre something
 	Draw_Glass, // a lens of glass tinted by background, lit while hot and swelling while pressed, see render.push_glass
-	Instant_Hover, // hot_t jumps with no fade when the mouse moves on or off, for list rows and tiles: a fast mouse is on one for a few frames, and a fade would light neighbours unevenly
+	Instant_Hover, // hot_t jumps with no fade, for list rows and tiles: a fast mouse is on one for a few frames, and a fade would light neighbours unevenly. end_frame lights the one under the mouse in this frame's layout
 }
 Box_Flags :: bit_set[Box_Flag; u32]
 
@@ -152,6 +152,7 @@ Build :: struct {
 	texture_src:               render.Rect, // texels of texture to draw; zero for all of it
 	rim:                       render.Rim, // a hairline inside the edge, see render.push_rim
 	opacity:                   f32, // multiplies the box and everything inside it
+	shown_by:                  ^Box, // drawn at least as opaque as this box's hot_t, see show_on_hover
 	run:                       ^text.Run,
 	text_size:                 [2]f32, // the label's size with padding, measured in end_frame
 	// What assistive apps see: a role puts the box in the accessibility
@@ -1071,6 +1072,20 @@ end_frame :: proc() -> bool {
 		u.focus_reveal = false
 		reveal_focus(u)
 	}
+	// Hot came from the last frame's rects, so a row that scrolled under a
+	// still mouse would be lit a frame late, in the wrong place. An
+	// Instant_Hover box has no fade to keep, so it's lit by this frame's.
+	hot := hit_at(u, u.input.mouse) if u.input.mouse_inside else 0
+	if active := u.active[.Left]; active != 0 && hot != active {
+		hot = 0
+	}
+	if hot != u.hot {
+		h, _ := find_hit(u, hot)
+		relight(u, u.hot, false)
+		relight(u, u.hot_parent, false)
+		relight(u, hot, true)
+		relight(u, h.click_parent, true)
+	}
 	// The build used sizes or offsets the layout didn't keep, so what's on
 	// screen may be missing rows. One more frame builds it right. The limit
 	// stops a layout that never settles from drawing forever once nothing
@@ -1101,11 +1116,39 @@ end_frame :: proc() -> bool {
 	}
 	// Rows moved under a still mouse, or a box appeared that has no rect to
 	// test against yet: one more frame settles hot.
-	hot := hit_at(u, u.input.mouse) if u.input.mouse_inside else 0
 	if hot != u.hot && u.active[.Left] == 0 {
 		u.animating = true
 	}
 	return u.animating
+}
+
+// relight lights or darkens key's box at once, if it's an Instant_Hover
+// box built this frame.
+@(private)
+relight :: proc(u: ^State, key: Key, on: bool) {
+	b := box_lookup(u, key)
+	if b == nil || b.last_frame != u.frame || .Instant_Hover not_in b.flags || .Focus_Is_Hot in b.flags {
+		return
+	}
+	b.hot_fade = 1 if on else 0
+	b.hot_t = b.hot_fade
+}
+
+// show_on_hover draws b at least as opaque as box's hover, as the buttons
+// on a list row show while the row is hovered. It goes by box's hot_t when
+// b is drawn, so it agrees with the row once end_frame has lit the
+// Instant_Hover box under the mouse.
+show_on_hover :: proc(b, box: ^Box) {
+	b.shown_by = box
+}
+
+// drawn_opacity is the opacity b is drawn with: its own, or more with
+// show_on_hover.
+drawn_opacity :: proc(b: ^Box) -> f32 {
+	if b.shown_by != nil {
+		return max(b.opacity, b.shown_by.hot_t)
+	}
+	return b.opacity
 }
 
 // fit_floating moves the floating boxes that keep_in_window into the
@@ -1281,15 +1324,11 @@ box_make :: proc(id: string, flags: Box_Flags = {}, width: Size = {}, height: Si
 
 	if b.key != 0 {
 		hot := u.hot == b.key || u.hot_parent == b.key
-		// Rows that scroll under a still mouse fade: hot is from the last
-		// frame's rects, so each is lit a frame late and for a frame only.
-		instant := .Instant_Hover in b.flags && u.hot_by_mouse
 		if .Focus_Is_Hot in b.flags {
 			hot = menu_highlight(u) == b.key
-			instant = .Instant_Hover in b.flags
 		}
 		ring := u.focus == b.key && u.focus_visible && .No_Focus_Ring not_in b.flags
-		b.hot_fade = (1 if hot else 0) if instant else step_fade(u, b.hot_fade, hot)
+		b.hot_fade = (1 if hot else 0) if .Instant_Hover in b.flags else step_fade(u, b.hot_fade, hot)
 		b.hot_t = math.smoothstep(f32(0), 1, b.hot_fade)
 		b.active_t = step_fade(u, b.active_t, u.active[.Left] == b.key)
 		b.focus_t = step_fade(u, b.focus_t, ring)
