@@ -36,6 +36,8 @@ STACK_DEPTH :: 64
 TOOLTIP_DELAY :: 0.5 // seconds of hovering before a tooltip shows
 TOOLTIP_WARM :: 1 // seconds after a tooltip that the next one shows without the delay
 DRAG_THRESHOLD :: 4 // points the mouse moves before a press becomes a drag
+FADE_IN :: 0.08 // seconds hot_t, active_t and focus_t take from 0 to 1
+FADE_OUT :: 0.16 // seconds they take from 1 to 0
 MAX_SETTLE_FRAMES :: 3 // extra frames in a row that a layout mismatch may ask for
 
 Key :: distinct u64
@@ -94,6 +96,7 @@ Box_Flag :: enum u32 {
 	Shrink_From_End, // children that don't fit give up room from the end, not in proportion: the one crossing the edge is cut short and those after it get none
 	Center_Children, // children sit in the middle of the room along the child axis, as between two fill() spacers, for a box that's only there to centre something
 	Draw_Glass, // a lens of glass tinted by background, lit while hot and swelling while pressed, see render.push_glass
+	Instant_Hover, // hot_t jumps with no fade, for list rows and tiles: a fast mouse is on one for a few frames, and a fade would light neighbours unevenly
 }
 Box_Flags :: bit_set[Box_Flag; u32]
 
@@ -116,6 +119,7 @@ Box :: struct {
 	bar_focused:     bool, // the focus was in the view then
 	bar_grab:        f32, // where in the thumb the mouse took it
 	hot_t:           f32,
+	hot_fade:        f32, // hot_t's linear progress, before its curve
 	active_t:        f32,
 	focus_t:         f32,
 	open_t:          f32, // menus and tooltips fading in
@@ -248,7 +252,6 @@ State :: struct {
 	dt:             f32,
 	frame_dt:       f32, // a normal frame's length, measured between animating frames
 	animated_before: bool, // the frame before last ended with animating set
-	ease:          f32, // how far this frame's dt takes active_t, focus_t and a fading hot_t to their targets
 	width, height:  f32,
 	renderer:       ^render.Renderer, // this frame's
 	texts:          ^text.State,
@@ -464,7 +467,6 @@ begin_frame :: proc(u: ^State, events: []platform.Event, r: ^render.Renderer, t:
 	}
 	u.dt = elapsed if u.animating else u.frame_dt
 	u.animated_before = u.animating
-	u.ease = 1 - math.exp(-u.dt * 18)
 	u.time = time
 	u.width = width
 	u.height = height
@@ -1262,17 +1264,15 @@ box_make :: proc(id: string, flags: Box_Flags = {}, width: Size = {}, height: Si
 	}
 
 	if b.key != 0 {
-		rate := u.ease
 		hot := u.hot == b.key || u.hot_parent == b.key
 		if .Focus_Is_Hot in b.flags {
 			hot = u.focus == b.key
 		}
 		ring := u.focus == b.key && u.focus_visible && .No_Focus_Ring not_in b.flags
-		// Lit at once: a fast mouse is on a row for one to three frames, and
-		// an eased peak would differ between neighbouring rows.
-		b.hot_t = 1 if hot else approach(u, b.hot_t, 0, rate, 0.002)
-		b.active_t = approach(u, b.active_t, 1 if u.active[.Left] == b.key else 0, rate, 0.002)
-		b.focus_t = approach(u, b.focus_t, 1 if ring else 0, rate, 0.002)
+		b.hot_fade = (1 if hot else 0) if .Instant_Hover in b.flags else step_fade(u, b.hot_fade, hot)
+		b.hot_t = math.smoothstep(f32(0), 1, b.hot_fade)
+		b.active_t = step_fade(u, b.active_t, u.active[.Left] == b.key)
+		b.focus_t = step_fade(u, b.focus_t, ring)
 	}
 	if .View_Scroll in b.flags && b.key != 0 {
 		scroll_box(u, b)
@@ -1326,6 +1326,18 @@ ui_scale :: proc(u: ^State) -> f32 {
 view_offset :: proc(view: ^Box) -> [2]f32 {
 	s := ui_scale(ctx)
 	return {drawn_off(view, 0, s), drawn_off(view, 1, s)}
+}
+
+// step_fade moves t toward 1 if on and toward 0 if not, at a constant speed,
+// so a fade that reverses partway takes only as long as the distance back.
+@(private)
+step_fade :: proc(u: ^State, t: f32, on: bool) -> f32 {
+	step := u.dt / FADE_IN if on else -u.dt / FADE_OUT
+	next := clamp(t + step, 0, 1)
+	if next != (1 if on else 0) {
+		u.animating = true
+	}
+	return next
 }
 
 // approach eases v toward target by rate and snaps once it's within eps.

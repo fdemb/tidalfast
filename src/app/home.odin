@@ -165,7 +165,7 @@ sidebar_nav_row :: proc(id, name, icon: string, current: bool, hint := "") -> (c
 	{
 		ui.set_next_radius(8)
 		sidebar_selected(current)
-		b := ui.row(id, {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects}, ui.fill(), ui.fill())
+		b := ui.row(id, {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects, .Instant_Hover}, ui.fill(), ui.fill())
 		ui.accessible(b, .Button, name, selected = current)
 		clicked = ui.signal(b).clicked
 		ui.spacer(ui.px(ROW_PAD))
@@ -299,7 +299,7 @@ shortcut :: proc(s: ^State, i: int, width: f32) -> ui.Signal {
 	ui.set_next_radius(6)
 	ui.set_next_background(SURFACE)
 	ui.set_next_hover_color(SURFACE_ACTIVE)
-	b := ui.row(fmt.tprintf("##shortcut%d", i), {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects, .Clip}, ui.px(width), ui.px(SHORTCUT_H))
+	b := ui.row(fmt.tprintf("##shortcut%d", i), {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects, .Clip, .Instant_Hover}, ui.px(width), ui.px(SHORTCUT_H))
 	ui.accessible(b, .Button, entry.name)
 	cover_art(s, .Playlist, entry.image, entry.seed, SHORTCUT_H, ui.px(SHORTCUT_H), 6)
 	ui.spacer(ui.px(14))

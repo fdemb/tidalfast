@@ -431,7 +431,7 @@ menu :: proc(id: string, width: f32 = 220) -> bool {
 
 menu_item :: proc(id: string) -> Signal {
 	u := ctx
-	flags := Box_Flags{.Clickable, .Focusable, .Draw_Text, .Draw_Hot_Effects, .Focus_Is_Hot, .No_Focus_Ring}
+	flags := Box_Flags{.Clickable, .Focusable, .Draw_Text, .Draw_Hot_Effects, .Focus_Is_Hot, .No_Focus_Ring, .Instant_Hover}
 	if !u.menu_open {
 		flags += {.Disabled}
 	}

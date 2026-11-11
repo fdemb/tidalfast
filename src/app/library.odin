@@ -469,7 +469,7 @@ draw_playlist_row :: proc(s: ^State, i: int) {
 	queued := sidebar_queued(s, i)
 	ui.set_next_radius(10)
 	sidebar_selected(current)
-	item := ui.row(cat("##playlist", num(i)), {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects, .Draw_Border}, ui.fill(), ui.px(PLAYLIST_ROW_H - PLAYLIST_GAP))
+	item := ui.row(cat("##playlist", num(i)), {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects, .Draw_Border, .Instant_Hover}, ui.fill(), ui.px(PLAYLIST_ROW_H - PLAYLIST_GAP))
 	ui.accessible(item, .Row, cat(entry.name, ", ", entry.subtitle), selected = current)
 	if ui.drop_hover(item) {
 		item.border_color = ACCENT
@@ -768,7 +768,7 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 	ui.radius(6)
 	selected := lib.selected == i
 	row_highlight(LIST_ROWS, selected)
-	row := ui.row(cat("##track", num(i)), {.Clickable, .Draw_Background, .Draw_Hot_Effects}, ui.fill(), ui.px(TRACK_ROW_H))
+	row := ui.row(cat("##track", num(i)), {.Clickable, .Draw_Background, .Draw_Hot_Effects, .Instant_Hover}, ui.fill(), ui.px(TRACK_ROW_H))
 	ui.accessible(row, .Row, cat(track.title, ", ", track.artist, ", ", track.album), selected = selected)
 	sig := ui.signal(row)
 	if sig.pressed || sig.right_clicked {
