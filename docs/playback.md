@@ -151,7 +151,7 @@ The button opens the signal path: a row per step from the track to the device (T
 
 ## Scrollbars
 
-Every `ui.scroll_view` draws a 6 pt scrollbar over its right edge while its content is taller than it. The "Settings" button in the sidebar's header opens a menu with three modes, saved as `scrollbars` in the settings file. Floating, the default, fades in when the view moves and out a second after it stops, unless the mouse is on it; it asks for one wake-up to hide and draws nothing in between. Docked always shows and takes a 10 pt gutter from the rows. Never draws none. Pressing the thumb drags it; pressing beside it centres the thumb there. The drag is applied when the view is built, before its rows, so the virtual rows match the new offset.
+Every `ui.scroll_view` draws a 6 pt scrollbar over its right edge while its content is taller than it. Settings in the user menu, at the bottom of the sidebar, opens a menu with three modes, saved as `scrollbars` in the settings file. Floating, the default, fades in when the view moves and out a second after it stops, unless the mouse is on it; it asks for one wake-up to hide and draws nothing in between. Docked always shows and takes a 10 pt gutter from the rows. Never draws none. Pressing the thumb drags it; pressing beside it centres the thumb there. The drag is applied when the view is built, before its rows, so the virtual rows match the new offset.
 
 Under the scrollbar modes the same menu has the player bar's, saved as `bar`, only where the renderer has backdrops (macOS). Blurred, the default, floats the bar over the views' bottoms and blurs them (see [UI](ui.md#the-window-on-macos)). Solid puts it back under the views, with nothing drawn under it.
 
