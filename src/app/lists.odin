@@ -42,11 +42,11 @@ import "core:os"
 import "core:slice"
 import "core:strings"
 import "core:sync"
-import "core:sys/posix"
 import "core:time"
 
 import "../jobs"
 import "../os_services"
+import "../sys"
 
 LIST_MEMORY_BUDGET :: 16 << 20
 LIST_MEMORY_MAX :: 64
@@ -100,7 +100,7 @@ Lists :: struct {
 	bytes:   int,
 	clock:   u64,
 	queue:   jobs.Queue(Job, DISK_QUEUE),
-	thread:  posix.pthread_t,
+	thread:  sys.Thread,
 	running: bool,
 	mutex:   sync.Mutex, // a write against sign-out's delete
 	covers_written: int, // cover files written this session (atomic)
@@ -797,7 +797,7 @@ disk_start :: proc(d: ^Data) {
 		return
 	}
 	jobs.start(&l.queue)
-	if posix.pthread_create(&l.thread, nil, disk_main, d) != .NONE {
+	if !sys.thread_start(&l.thread, disk_main, d) {
 		log.error("lists: couldn't start the disk thread")
 		jobs.stop(&l.queue)
 		return
@@ -811,7 +811,7 @@ disk_stop :: proc(d: ^Data) {
 		return
 	}
 	jobs.stop(&l.queue)
-	posix.pthread_join(l.thread)
+	sys.thread_join(l.thread)
 	l.running = false
 }
 
@@ -1085,7 +1085,9 @@ disk_write :: proc(dir, path: string, blob: []u8) -> bool {
 		werr = cerr
 	}
 	if werr == nil {
-		werr = os.rename(tmp, path)
+		if !sys.replace_file(tmp, path) {
+			werr = .Unknown
+		}
 	}
 	if werr != nil {
 		os.remove(tmp)

@@ -28,6 +28,7 @@ import "core:sync"
 
 import "../audio"
 import "../render"
+import "../sys"
 import "../text"
 import "../ui"
 
@@ -141,7 +142,9 @@ settings_save :: proc(path: string, st: Settings) -> bool {
 		werr = cerr
 	}
 	if werr == nil {
-		werr = os.rename(tmp, path)
+		if !sys.replace_file(tmp, path) {
+			werr = .Unknown
+		}
 	}
 	if werr != nil {
 		os.remove(tmp)

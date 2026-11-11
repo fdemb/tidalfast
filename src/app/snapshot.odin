@@ -22,65 +22,63 @@ import "core:log"
 import "core:os"
 import "core:strings"
 import "core:sync"
-import "core:sys/posix"
 import "core:time"
 
 import "../os_services"
+import "../sys"
 
-// What goes down the snapshot thread's pipe.
-SNAPSHOT_ASK :: 's' // from the signal handler
-SNAPSHOT_WRITE :: 'w' // Measure.snapshot is ready
-SNAPSHOT_QUIT :: 'q'
+// What the snapshot thread is woken for, flags in Measure.snap_asks.
+Snapshot_Ask :: enum u32 {
+	Ask, // from the signal handler
+	Write, // Measure.snapshot is ready
+	Quit,
+}
 
-// The pipe's write end, a global so the signal handler can reach it.
+// The Measure the signal handler wakes, a global so it can reach it.
 @(private = "file")
-snapshot_fd: posix.FD = -1
+snapshot_measure: ^Measure
 
 snapshot_start :: proc(m: ^Measure) {
 	if m.snap_running {
 		return
 	}
-	if posix.pipe(&m.snap_pipe) != .OK {
-		return
-	}
-	if posix.pthread_create(&m.snap_thread, nil, snapshot_main, m) != .NONE {
-		posix.close(m.snap_pipe[0])
-		posix.close(m.snap_pipe[1])
+	if !sys.thread_start(&m.snap_thread, snapshot_main, m) {
 		return
 	}
 	m.snap_running = true
-	sync.atomic_store(&snapshot_fd, m.snap_pipe[1])
-	// SA_RESTART, so the signal doesn't cut short a read or a request on
-	// another thread.
-	act := posix.sigaction_t{sa_handler = snapshot_signal, sa_flags = {.RESTART}}
-	posix.sigaction(.SIGUSR1, &act, nil)
+	sync.atomic_store(&snapshot_measure, m)
+	snapshot_signal_start()
 }
 
-// snapshot_stop ignores the signal before closing the pipe, so no handler
-// writes to an fd that may be reused.
+// snapshot_stop stops the signal before the thread, so no handler wakes a
+// thread that's gone.
 snapshot_stop :: proc(m: ^Measure) {
 	if !m.snap_running {
 		return
 	}
-	act := posix.sigaction_t{sa_handler = auto_cast posix.SIG_IGN}
-	posix.sigaction(.SIGUSR1, &act, nil)
-	sync.atomic_store(&snapshot_fd, -1)
-	quit := u8(SNAPSHOT_QUIT)
-	posix.write(m.snap_pipe[1], &quit, 1)
-	posix.pthread_join(m.snap_thread)
-	posix.close(m.snap_pipe[0])
-	posix.close(m.snap_pipe[1])
+	snapshot_signal_stop()
+	sync.atomic_store(&snapshot_measure, nil)
+	snapshot_send(m, .Quit)
+	sys.thread_join(m.snap_thread)
 	m.snap_running = false
 	m.snap_wanted = false
 	m.snap_busy = false
+	m.snap_asks = 0
+	m.snap_sema = {}
 }
 
-@(private = "file")
-snapshot_signal :: proc "c" (_: posix.Signal) {
-	err := posix.get_errno()
-	ask := u8(SNAPSHOT_ASK)
-	posix.write(sync.atomic_load(&snapshot_fd), &ask, 1)
-	posix.set_errno(err)
+// snapshot_send wakes the snapshot thread for ask. Only atomics and a
+// futex wake, so the signal handler may call it.
+snapshot_send :: proc "contextless" (m: ^Measure, ask: Snapshot_Ask) {
+	sync.atomic_or(&m.snap_asks, 1 << u32(ask))
+	sync.sema_post(&m.snap_sema)
+}
+
+// snapshot_asked is what the signal handler calls.
+snapshot_asked :: proc "contextless" () {
+	if m := sync.atomic_load(&snapshot_measure); m != nil {
+		snapshot_send(m, .Ask)
+	}
 }
 
 @(private = "file")
@@ -88,25 +86,20 @@ snapshot_main :: proc "c" (arg: rawptr) -> rawptr {
 	context = runtime.default_context()
 	context.logger = app_logger()
 	m := (^Measure)(arg)
-	loop: for {
-		b: u8
-		n := posix.read(m.snap_pipe[0], &b, 1)
-		if n < 0 && posix.get_errno() == .EINTR {
-			continue
-		}
-		if n <= 0 {
-			break
-		}
-		switch b {
-		case SNAPSHOT_ASK:
+	for {
+		sync.sema_wait(&m.snap_sema)
+		asks := sync.atomic_exchange(&m.snap_asks, 0)
+		if asks & (1 << u32(Snapshot_Ask.Ask)) != 0 {
 			sync.atomic_store(&m.snap_wanted, true)
 			m.wake()
-		case SNAPSHOT_WRITE:
+		}
+		if asks & (1 << u32(Snapshot_Ask.Write)) != 0 {
 			snapshot_save(string(m.snapshot[:m.snap_len]))
 			free_all(context.temp_allocator)
 			sync.atomic_store(&m.snap_busy, false)
-		case SNAPSHOT_QUIT:
-			break loop
+		}
+		if asks & (1 << u32(Snapshot_Ask.Quit)) != 0 {
+			break
 		}
 	}
 	runtime.default_temp_allocator_destroy(&runtime.global_default_temp_allocator_data)
@@ -123,10 +116,7 @@ snapshot_frame :: proc(s: ^State) {
 	sync.atomic_store(&m.snap_wanted, false)
 	m.snap_len = len(snapshot_json(s, m.snapshot[:]))
 	sync.atomic_store(&m.snap_busy, true)
-	write := u8(SNAPSHOT_WRITE)
-	if posix.write(m.snap_pipe[1], &write, 1) != 1 {
-		sync.atomic_store(&m.snap_busy, false)
-	}
+	snapshot_send(m, .Write)
 }
 
 // snapshot_json writes the snapshot into buf and returns it.
@@ -172,7 +162,7 @@ snapshot_save :: proc(json: string) {
 	_ = os.make_directory_all(dir)
 	path := strings.concatenate({dir, "/", name, ".json"}, context.temp_allocator)
 	tmp := strings.concatenate({path, ".tmp"}, context.temp_allocator)
-	if os.write_entire_file(tmp, transmute([]u8)json) != nil || os.rename(tmp, path) != nil {
+	if os.write_entire_file(tmp, transmute([]u8)json) != nil || !sys.replace_file(tmp, path) {
 		log.errorf("snapshot: couldn't write %s", path)
 		return
 	}

@@ -21,12 +21,12 @@ import vmem "core:mem/virtual"
 import "core:os"
 import "core:strings"
 import "core:sync"
-import "core:sys/posix"
 import "core:time"
 import "core:unicode/utf8"
 
 import "../cover"
 import "../jobs"
+import "../sys"
 import "../tidal"
 
 WORKERS :: 4
@@ -337,7 +337,7 @@ workers_start :: proc(d: ^Data) {
 	tidal.session_abort(d.session, false)
 	d.thread_count = 0
 	for _ in d.threads {
-		if posix.pthread_create(&d.threads[d.thread_count], nil, worker_main, d) != .NONE {
+		if !sys.thread_start(&d.threads[d.thread_count], worker_main, d) {
 			log.error("app: couldn't start a worker thread")
 			continue
 		}
@@ -357,7 +357,7 @@ workers_stop :: proc(d: ^Data) {
 	jobs.stop(&d.queue)
 	jobs.stop(&d.results)
 	for t in d.threads[:d.thread_count] {
-		posix.pthread_join(t)
+		sys.thread_join(t)
 	}
 	d.thread_count = 0
 	disk_stop(d)
@@ -505,7 +505,7 @@ temp_range :: proc() -> (start: rawptr, size: uint) {
 	if b == nil {
 		return nil, 0
 	}
-	return temp_tail(uintptr(b.base), b.capacity, TEMP_KEEP, uint(posix.sysconf(._PAGESIZE)))
+	return temp_tail(uintptr(b.base), b.capacity, TEMP_KEEP, uint(sys.page_size()))
 }
 
 // Worker_Temp is where a worker's temp block is, for the memory breakdown
@@ -1059,13 +1059,12 @@ join_artists :: proc(artists: []tidal.Artist, artist: ^tidal.Artist, alloc: mem.
 
 // local_date is t's date in the user's time zone, month 1 for January.
 local_date :: proc(t: time.Time) -> (year, month, day: int) {
-	secs := posix.time_t(time.to_unix_seconds(t))
-	tm: posix.tm
-	if posix.localtime_r(&secs, &tm) == nil {
+	lt, ok := sys.local_time(time.to_unix_seconds(t))
+	if !ok {
 		y, m, d := time.date(t)
 		return y, int(m), d
 	}
-	return int(tm.tm_year) + 1900, int(tm.tm_mon) + 1, int(tm.tm_mday)
+	return lt.year, lt.month, lt.day
 }
 
 // row_from_track turns a track into the strings the table shows.

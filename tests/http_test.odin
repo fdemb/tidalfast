@@ -185,7 +185,11 @@ session_file_is_private_even_when_overwriting :: proc(t: ^testing.T) {
 
 	info, serr := os.stat(path, context.temp_allocator)
 	testing.expect_value(t, serr, nil)
-	testing.expect_value(t, info.mode & {.Read_Group, .Write_Group, .Read_Other, .Write_Other}, os.Permissions{})
+	// Windows keeps a file private with the folder's ACL, which os.stat
+	// doesn't show as permission bits.
+	if ODIN_OS != .Windows {
+		testing.expect_value(t, info.mode & {.Read_Group, .Write_Group, .Read_Other, .Write_Other}, os.Permissions{})
+	}
 	data, _ := os.read_entire_file(path, context.temp_allocator)
 	testing.expect(t, strings.contains(string(data), `"access_token": {"data": "access"}`), string(data))
 

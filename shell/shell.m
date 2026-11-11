@@ -126,6 +126,7 @@ static void draw_frame(void) {
       .mouse_buttons = held_mouse_buttons(),
       .titlebar_height = titlebar > 0 ? titlebar : 0,
       .titlebar_inset = titlebar > 0 && zoom ? NSMaxX(zoom.frame) : 0,
+      .frame_interval = g_tick_interval,
   };
   Frame_Result result;
   @autoreleasepool {

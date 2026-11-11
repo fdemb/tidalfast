@@ -25,11 +25,11 @@ import "core:os"
 import "core:slice"
 import "core:strings"
 import "core:sync"
-import "core:sys/posix"
 import "core:time"
 
 import "../platform"
 import "../render"
+import "../sys"
 import "../text"
 import "../ui"
 
@@ -97,7 +97,7 @@ Measure :: struct {
 	wake_at:      i64, // the deadline for the thread, which wakes the UI at it (atomic)
 	wake:         proc "c" (),
 	renderer:     ^render.Renderer,
-	thread:       posix.pthread_t,
+	thread:       sys.Thread,
 	running:      bool,
 	stop:         bool, // atomic
 	sema:         sync.Sema, // posted to stop the thread early
@@ -107,8 +107,9 @@ Measure :: struct {
 	stage_limit:  i64, // STAGE_LIMIT or STAGE_LIMIT_REAL in nanoseconds, 0 until the first frame (atomic)
 	init_offsets: [Init_Part]int, // the persistent arena's offset after each step of start
 	// Memory snapshots, see snapshot.odin.
-	snap_pipe:    [2]posix.FD,
-	snap_thread:  posix.pthread_t,
+	snap_sema:    sync.Sema, // wakes the snapshot thread for snap_asks
+	snap_asks:    u32, // bit set of Snapshot_Ask (atomic)
+	snap_thread:  sys.Thread,
 	snap_running: bool,
 	snap_wanted:  bool, // a SIGUSR1 came (atomic)
 	snap_busy:    bool, // snapshot is being written (atomic)
@@ -179,7 +180,7 @@ measure_stop :: proc(s: ^State) {
 	}
 	sync.atomic_store(&m.stop, true)
 	sync.sema_post(&m.sema)
-	posix.pthread_join(m.thread, nil)
+	sys.thread_join(m.thread)
 	m.running = false
 	m.stop = false
 	m.sema = {}
@@ -191,7 +192,7 @@ measure_thread_start :: proc(m: ^Measure) {
 		if m.stage_since == 0 {
 			m.stage_since = time.tick_now()._nsec
 		}
-		m.running = posix.pthread_create(&m.thread, nil, measure_thread, m) == .NONE
+		m.running = sys.thread_start(&m.thread, measure_thread, m)
 	}
 }
 
@@ -553,7 +554,7 @@ first_playable :: proc(s: ^State) -> int {
 // shutdown runs.
 @(private = "file")
 measure_quit :: proc() {
-	posix.kill(posix.getpid(), .SIGTERM)
+	sys.quit()
 }
 
 @(private = "file")
@@ -589,7 +590,7 @@ measure_write :: proc(json: string) {
 		buf[n] = '\n'
 		n += 1
 	}
-	posix.write(posix.STDERR_FILENO, raw_data(buf[:]), uint(n))
+	sys.write_stderr(buf[:n])
 }
 
 measure_ms :: proc "contextless" (m: ^Measure) -> f64 {

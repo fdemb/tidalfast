@@ -8,9 +8,9 @@ package text
 import "core:hash"
 import "core:slice"
 import "core:strings"
-import "core:sys/posix"
 
 import "../../third_party/kbts"
+import "../sys"
 
 SIZED_FONTS :: 16
 SCRATCH_SIZE :: 256 // glyphs bigger than this get their own bitmap context
@@ -119,13 +119,13 @@ load_system :: proc(t: ^State, font: Font) -> bool {
 		}
 	}
 	if !shared {
-		data, ok := map_file(cstring(&path[0]))
+		data, ok := sys.map_file(cstring(&path[0]))
 		if !ok {
 			return false
 		}
 		index := collection_index(data, ct) if kbts.FontCount(data) > 1 else 0
 		if !load_face(face, ct, data, index, true) {
-			posix.munmap(raw_data(data), uint(len(data)))
+			sys.unmap_file(data)
 			return false
 		}
 	}
@@ -224,7 +224,7 @@ known_or_load :: proc(l: ^Loader, ct: CTFontRef, need: rune, res: ^Load_Result) 
 	if !font_path(ct, path[:]) {
 		return false
 	}
-	data, ok := map_file(cstring(&path[0]))
+	data, ok := sys.map_file(cstring(&path[0]))
 	if !ok {
 		return false
 	}
@@ -234,7 +234,7 @@ known_or_load :: proc(l: ^Loader, ct: CTFontRef, need: rune, res: ^Load_Result) 
 	}
 	face: Face
 	if !load_face(&face, ct, data, index, true, need) {
-		posix.munmap(raw_data(data), uint(len(data)))
+		sys.unmap_file(data)
 		return false
 	}
 	if need >= 0 {
@@ -599,12 +599,4 @@ glyph_box :: proc(a: ^Atlas, face: ^Face, px_size, size: f32, glyph: u16) -> [4]
 		return {}
 	}
 	return {bounds.origin.x, bounds.origin.y, bounds.origin.x + bounds.size.width, bounds.origin.y + bounds.size.height}
-}
-
-foreign import system "system:System.framework"
-
-@(default_calling_convention = "c")
-foreign system {
-	@(private)
-	mincore :: proc(addr: rawptr, length: uint, vec: [^]u8) -> i32 ---
 }

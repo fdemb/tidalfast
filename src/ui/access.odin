@@ -61,7 +61,7 @@ access_cstring :: proc(w: ^Access_Walk, s: string) -> cstring {
 // access_skips says whether the walk leaves out b and everything inside it.
 @(private)
 access_skips :: proc(b: ^Box) -> bool {
-	return b.opacity <= 0 || (.Clip in b.flags && (b.clip.w <= 0 || b.clip.h <= 0))
+	return drawn_opacity(b) <= 0 || (.Clip in b.flags && (b.clip.w <= 0 || b.clip.h <= 0))
 }
 
 // access_shields collects the shields in the order access_walk reaches them.

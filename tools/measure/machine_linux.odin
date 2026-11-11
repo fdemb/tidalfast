@@ -10,6 +10,7 @@ import "../../src/os_services"
 // OS_LABEL goes before Machine.os when it is printed. On Linux the os
 // field holds the distribution's name and version already.
 OS_LABEL :: ""
+EXE_SUFFIX :: ""
 
 // delete_keychain_item deletes the mock login the runs saved, made for
 // this run alone, from the Secret Service.

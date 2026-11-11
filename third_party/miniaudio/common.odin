@@ -15,10 +15,10 @@ when MINIAUDIO_SHARED {
 }
 
 @(private)
-LIB :: "../../build/miniaudio/miniaudio.a"
+LIB :: "../../build/windows/miniaudio/miniaudio.lib" when ODIN_OS == .Windows else "../../build/miniaudio/miniaudio.a"
 
 when !#exists(LIB) {
-	#panic("build/miniaudio/miniaudio.a is missing: run ./build.sh first")
+	#panic(LIB + " is missing: run ./build.sh first")
 }
 
 foreign import lib { LIB }

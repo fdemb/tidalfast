@@ -13,6 +13,8 @@ import "core:strings"
 import "core:sync"
 import "core:time"
 
+import "../sys"
+
 Print_Proc :: proc(text: string)
 Read_Line_Proc :: proc(prompt: string, allocator := context.allocator) -> string
 
@@ -527,7 +529,9 @@ write_private_file :: proc(path: string, data: []u8) -> Error {
 		werr = cerr
 	}
 	if werr == nil {
-		werr = os.rename(tmp_path, path)
+		if !sys.replace_file(tmp_path, path) {
+			werr = .Unknown
+		}
 	}
 	if werr != nil {
 		_ = os.remove(tmp_path)

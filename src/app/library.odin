@@ -823,7 +823,10 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 	cell(track.added, cols.added, .Left)
 	key := i64(fake_row_index(s, i)) if s.data.fake else track.id
 	liked := liked_has(&s.data, key)
-	heart_sig := heart_button("heart", liked, cat("Unlike " if liked else "Like ", track.title), TEXT, max(row.hot_t, 1 if selected else 0), cols.heart)
+	// The buttons show while the row is lit, which end_frame may settle
+	// after this build: a row that scrolled under the mouse.
+	heart_sig := heart_button("heart", liked, cat("Unlike " if liked else "Like ", track.title), TEXT, 1 if selected else 0, cols.heart)
+	ui.show_on_hover(heart_sig.box, row)
 	if heart_sig.clicked {
 		lib.selected = i
 		liked_toggle(s, key)
@@ -831,7 +834,8 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 	}
 	cell(track.duration, cols.duration, .Right)
 
-	more, more_sig := icon_button("more", text.ICON_DOTS_THREE, .Icon, cat("More options for ", track.title), TEXT, max(row.hot_t, 1 if selected else 0), cols.more)
+	more, more_sig := icon_button("more", text.ICON_DOTS_THREE, .Icon, cat("More options for ", track.title), TEXT, 1 if selected else 0, cols.more)
+	ui.show_on_hover(more, row)
 	if more_sig.clicked {
 		lib.selected = i
 		open_track_menu(s, i, {more.rect.x, more.rect.y + more.rect.h})

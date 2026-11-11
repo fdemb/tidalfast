@@ -11,9 +11,8 @@ foreign import libc "system:c"
 
 @(default_calling_convention = "c")
 foreign libc {
-	mincore :: proc(addr: rawptr, length: uint, vec: [^]u8) -> i32 ---
-	@(link_name = "malloc_usable_size")
-	malloc_size :: proc(ptr: rawptr) -> uint ---
+	@(private = "file")
+	malloc_usable_size :: proc(ptr: rawptr) -> uint ---
 }
 
 // mincore's resident bit. Linux doesn't say whether a page is dirty, and
@@ -149,4 +148,10 @@ process_counters :: proc "contextless" () -> Counters {
 
 thread_counters :: proc "contextless" () -> Counters {
 	return {}
+}
+
+
+// heap_bytes is what malloc gave for ptr, 0 for nil.
+heap_bytes :: proc(ptr: rawptr) -> int {
+	return int(malloc_usable_size(ptr)) if ptr != nil else 0
 }

@@ -3,11 +3,12 @@ package tidal_tests
 import "core:fmt"
 import "core:os"
 import "core:strings"
-import "core:sys/posix"
+import "core:mem/virtual"
 import "core:testing"
 import "core:time"
 
 import app "../src/app"
+import "../src/sys"
 import measure "../tools/measure"
 
 @(test)
@@ -332,11 +333,12 @@ test_breakdown_settle :: proc(t: ^testing.T) {
 // is in the range.
 @(test)
 test_pages_counted :: proc(t: ^testing.T) {
-	page := int(posix.sysconf(._PAGESIZE))
+	page := sys.page_size()
 	n := 8 * page
-	p := posix.mmap(nil, uint(n), {.READ, .WRITE}, {.PRIVATE, .ANONYMOUS})
-	testing.expect(t, p != posix.MAP_FAILED)
-	defer posix.munmap(p, uint(n))
+	mem, merr := virtual.reserve_and_commit(uint(n))
+	testing.expect(t, merr == nil)
+	defer virtual.release(raw_data(mem), uint(n))
+	p := rawptr(raw_data(mem))
 	bytes := ([^]u8)(p)
 	testing.expect_value(t, app.pages_counted(p, n), 0)
 	for i in 0 ..< 3 {

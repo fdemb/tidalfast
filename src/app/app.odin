@@ -11,7 +11,6 @@ import "core:mem"
 import "core:os"
 import "core:prof/spall"
 import "core:sync"
-import "core:sys/posix"
 import "core:time"
 
 import "../platform"
@@ -27,6 +26,7 @@ State :: struct {
 	arena:        mem.Arena, // the rest of the persistent block
 	frame_arena:  mem.Arena, // reset at the start of every frame
 	renderer:     render.Renderer,
+	gpu_resets:   u32, // the renderer's device_resets the textures were made for
 	text:         text.State,
 	rows:         []Row,
 	last_stats:   render.Stats,
@@ -72,7 +72,7 @@ main :: proc() {
 }
 
 // Linked in by build.sh: shell/shell.m on macOS, shell/shell_wayland.c on
-// Linux.
+// Linux and shell/shell_win32.c on Windows.
 foreign {
 	shell_main :: proc "c" (argc: i32, argv: [^]cstring) -> i32 ---
 }
@@ -92,7 +92,7 @@ app_shutdown :: proc "c" (m: ^platform.Memory) {
 	context = app_context(s)
 	if s.profiling {
 		spall.buffer_destroy(&s.spall_ctx, &s.spall_buf)
-		posix.close(posix.FD(s.spall_ctx.fd))
+		spall.context_destroy(&s.spall_ctx)
 	}
 	measure_stop(s)
 	workers_stop(&s.data)
@@ -238,10 +238,12 @@ start :: proc(s: ^State, shell: ^platform.Shell) {
 
 	if !render.init(&s.renderer, shell.surface) {
 		log.error("app: renderer init failed")
+		show_fatal("TIDALfast couldn't start drawing, so its window will stay empty.")
 	}
 	measure_init_part(s, .Render)
 	if !text.init(&s.text, shell.request_redraw) {
 		log.error("app: text init failed")
+		show_fatal("TIDALfast couldn't load its fonts, so it can't show any text.")
 	}
 	measure_init_part(s, .Text)
 	ui.init(&s.ui)
@@ -302,10 +304,17 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input, shell: ^platfor
 	s.titlebar_h = input.titlebar_height
 	r := &s.renderer
 	render.begin_frame(r, w, h, input.scale, CLEAR_COLOR)
+	if r.device_resets != s.gpu_resets {
+		// The renderer lost its GPU device and every texture with it.
+		s.gpu_resets = r.device_resets
+		text.forget_glyphs(&s.text, r)
+		covers_forget(s)
+		dev_start(s)
+	}
 	ui_begin := time.tick_now()
 	measure_frame_begin(s)
 	text.begin_frame(&s.text, r)
-	ui.begin_frame(&s.ui, events, r, &s.text, w, h, input.time, input.mouse_buttons, input.text[:input.text_length])
+	ui.begin_frame(&s.ui, events, r, &s.text, w, h, input.time, input.mouse_buttons, input.text[:input.text_length], input.frame_interval)
 	ui.set_window_key(&s.ui, bool(input.key_window))
 	ui.set_clipboard(&s.ui, shell.get_clipboard, shell.set_clipboard)
 	data_update(s, input.time)
@@ -349,7 +358,27 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input, shell: ^platfor
 		}
 		s.last_stats = r.stats
 	}
-	return {animating = b32(animating || acted || s.dev.sliding || s.text.needs_redraw), wake_after = ui.wake_after(&s.ui)}
+	return frame_result(r, animating || acted || s.dev.sliding || s.text.needs_redraw, ui.wake_after(&s.ui))
+}
+
+// frame_result is what the shell is told after a frame. While the renderer
+// can't show frames, nothing paces them, so the app doesn't animate: a
+// frame it wanted comes after render.HIDDEN_POLL instead, and one the
+// renderer asks for after poll_after.
+frame_result :: proc(r: ^render.Renderer, animating: bool, wake_after: f32) -> platform.Frame_Result {
+	result := platform.Frame_Result{animating = b32(animating), wake_after = wake_after}
+	if !r.hidden {
+		return result
+	}
+	wake := r.poll_after
+	if animating && (wake <= 0 || wake > render.HIDDEN_POLL) {
+		wake = render.HIDDEN_POLL
+	}
+	if wake > 0 && (result.wake_after <= 0 || wake < result.wake_after) {
+		result.wake_after = wake
+	}
+	result.animating = false
+	return result
 }
 
 // hsv returns an opaque sRGB colour. Hue wraps, so any value works.

@@ -23,10 +23,11 @@ odin check src/app -no-entry-point -vet -strict-style -target:linux_amd64
 
 ```
 shell/          the platform side: window, event queue, input methods and clipboard. shell.m is
-                the macOS one (CAMetalLayer, media keys, Now Playing, accessibility), shell_wayland.c the Linux one
+                the macOS one (CAMetalLayer, media keys, Now Playing, accessibility), shell_wayland.c the Linux one,
+                shell_win32.c the Windows one, and common.c what those two share
 src/platform/   the ABI between shell and app (shell/platform.h mirrors it)
 src/app/        the app, with main
-src/render/     renderer, with Metal (metal_darwin.odin) or Vulkan (vulkan_linux.odin) as its backend
+src/render/     renderer, with Metal (metal_darwin.odin) or Vulkan (vulkan.odin) as its backend
 src/text/       fonts, shaping (kb_text_shape), rasterizing (CoreText or FreeType), glyph atlas
 src/ui/         box tree, layout, input, animation, menus, tooltips and the text field
 assets/fonts/   the Phosphor icon fonts (tools/icons.sh, MIT) and Noto Sans for Linux (tools/noto.sh, OFL)

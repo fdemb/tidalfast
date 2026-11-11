@@ -61,7 +61,10 @@ Scroll_Phase :: enum u32 {
 	Cancelled,
 }
 
-// Keys by their place on a US keyboard, whatever the layout says they type.
+// Keys by their place on a US keyboard, whatever the layout says they type,
+// on macOS and Linux. On Windows, letters and digits follow the layout's
+// virtual keys, as Windows apps' shortcuts do, so Control+Z is undo on the
+// key labelled Z on a German or French keyboard, and the rest go by place.
 // Text comes in Text events; these are for shortcuts and editing. The shell
 // maps its own key codes to these, and keys not listed here to None.
 Key :: enum u32 {
@@ -217,11 +220,19 @@ Wayland_Surface :: struct {
 }
 #assert(size_of(Wayland_Surface) == 16)
 
+// What Shell.surface points to on Windows: the module and the window, for
+// the renderer to make its swap chain from. The shell owns both.
+Win32_Surface :: struct {
+	instance: rawptr, // HINSTANCE
+	window:   rawptr, // HWND
+}
+#assert(size_of(Win32_Surface) == 16)
+
 // What the shell gives the app. The surface and the procedures belong to
 // the shell and stay valid while the app runs, so the app may keep them.
 Shell :: struct {
 	// What the renderer draws to, set up by the shell: a CAMetalLayer with its
-	// device on macOS, a Wayland_Surface on Linux.
+	// device on macOS, a Wayland_Surface on Linux, a Win32_Surface on Windows.
 	surface:           rawptr,
 	// Safe from any thread. Wakes the main run loop and draws one frame.
 	request_redraw:  proc "c" (),
@@ -238,7 +249,7 @@ Shell :: struct {
 	set_accessibility: proc "c" (nodes: [^]Access_Node, count: u32),
 	// Where a press moves the window, as x, y, w, h in view points: the
 	// empty parts of the titlebar the view draws under. The shell copies
-	// them. nil on Linux.
+	// them. nil on Linux and Windows.
 	set_drag_regions:  proc "c" (rects: [^][4]f32, count: u32),
 }
 #assert(size_of(Shell) == 64)
@@ -260,7 +271,9 @@ Frame_Input :: struct {
 	// window has its own titlebar, or none, as in full screen.
 	titlebar_height: f32,
 	titlebar_inset:  f32,
-	_:               u32,
+	// Seconds between the display's refreshes, 0 when the shell doesn't
+	// know. A frame after an idle gap steps this long.
+	frame_interval:  f32,
 }
 
 Frame_Result :: struct {

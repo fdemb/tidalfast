@@ -25,6 +25,7 @@ platform_h_matches_platform_odin :: proc(t: ^testing.T) {
 		{"Text_Input", platform.Text_Input},
 		{"Access_Node", platform.Access_Node},
 		{"Wayland_Surface", platform.Wayland_Surface},
+		{"Win32_Surface", platform.Win32_Surface},
 		{"Shell", platform.Shell},
 		{"Frame_Input", platform.Frame_Input},
 		{"Frame_Result", platform.Frame_Result},
@@ -49,12 +50,19 @@ platform_h_matches_platform_odin :: proc(t: ^testing.T) {
 	src := fmt.tprintf("%s/abi.c", dir)
 	exe := fmt.tprintf("%s/abi", dir)
 	testing.expect_value(t, os.write_entire_file(src, transmute([]u8)strings.to_string(c)), nil)
-	build, _, cc_err, err := os.process_exec({command = {"cc", "-Ishell", src, "-o", exe}}, context.temp_allocator)
-	if !testing.expectf(t, err == nil && build.success, "cc failed: %v %s", err, string(cc_err)) {
+	when ODIN_OS == .Windows {
+		exe = fmt.tprintf("%s\\abi.exe", dir)
+		command := []string{"cl", "/nologo", "/std:c11", "/Ishell", src, fmt.tprintf("/Fe%s", exe), fmt.tprintf("/Fo%s\\abi.obj", dir)}
+	} else {
+		command := []string{"cc", "-Ishell", src, "-o", exe}
+	}
+	build, cc_out, cc_err, err := os.process_exec({command = command}, context.temp_allocator)
+	// Odin's process_wait on Windows says success whatever the exit code.
+	if !testing.expectf(t, err == nil && build.success && build.exit_code == 0, "cc failed: %v %s %s", err, string(cc_out), string(cc_err)) {
 		return
 	}
-	run, got, _, rerr := os.process_exec({command = {exe}}, context.temp_allocator)
-	testing.expect(t, rerr == nil && run.success)
+	run, got, run_err, rerr := os.process_exec({command = {exe}}, context.temp_allocator)
+	testing.expectf(t, rerr == nil && run.success && run.exit_code == 0, "%s failed: %v %v %s", exe, rerr, run, string(run_err))
 
 	want_lines := strings.split_lines(strings.trim_space(strings.to_string(want)), context.temp_allocator)
 	got_lines := strings.split_lines(strings.trim_space(string(got)), context.temp_allocator)

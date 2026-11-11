@@ -133,9 +133,9 @@ main :: proc() {
 	if cfg.app == "" {
 		// The measure build reads TIDALFAST_API; a release build doesn't. The
 		// real account's Keychain item belongs to build/tidalfast.
-		cfg.app = join(cfg.root, "build", "tidalfast") if cfg.real else join(cfg.out_dir, "app", "tidalfast")
+		cfg.app = join(cfg.root, "build", "tidalfast" + EXE_SUFFIX) if cfg.real else join(cfg.out_dir, "app", "tidalfast" + EXE_SUFFIX)
 	}
-	cfg.mock = join(cfg.out_dir, "mock_tidal")
+	cfg.mock = join(cfg.out_dir, "mock_tidal" + EXE_SUFFIX)
 	if !os.exists(cfg.app) {
 		fmt.eprintfln("measure: no app at %s; run ./build.sh measure (or ./build.sh release for -real)", cfg.app)
 		os.exit(1)
@@ -158,7 +158,7 @@ main :: proc() {
 		machine = machine(),
 		app     = strings.trim_prefix(cfg.app, strings.concatenate({cfg.root, "/"})),
 	}
-	fmt.printfln("%s, %s, macOS %s (%s), %.0f GB", results.machine.model, results.machine.cpu, results.machine.os, results.machine.os_build, results.machine.memory_gb)
+	fmt.printfln("%s, %s, %s%s (%s), %.0f GB", results.machine.model, results.machine.cpu, OS_LABEL, results.machine.os, results.machine.os_build, results.machine.memory_gb)
 	fmt.printfln("app %s, logs in %s\n", cfg.app, cfg.log_dir)
 
 	has_mock := false
@@ -324,7 +324,7 @@ app_env :: proc(cfg: ^Config, side: ^Side, setup, scenario: string) -> []string 
 // quits, or stops it after timeout. It returns the log and whether the app
 // quit by itself.
 run_app :: proc(app: string, env: []string, log_path: string, timeout: time.Duration) -> (log: string, finished: bool) {
-	f, err := os.create(log_path)
+	f, err := child_log(log_path)
 	if err != nil {
 		fmt.eprintfln("measure: can't write %s: %v", log_path, err)
 		return "", false
@@ -335,8 +335,8 @@ run_app :: proc(app: string, env: []string, log_path: string, timeout: time.Dura
 		fmt.eprintfln("measure: can't start %s: %v", app, perr)
 		return "", false
 	}
-	_, werr := os.process_wait(p, timeout)
-	finished = werr == nil
+	st, werr := os.process_wait(p, timeout)
+	finished = werr == nil && st.exited
 	if !finished {
 		stop(p)
 	}
@@ -345,9 +345,17 @@ run_app :: proc(app: string, env: []string, log_path: string, timeout: time.Dura
 	return string(data), finished
 }
 
-// stop asks a process we started to quit, and kills it after 5 s.
+// stop asks a process we started to quit, and kills it after 5 s. On
+// Windows, Odin's process_terminate sends a console Ctrl-C, which reaches
+// every process on the console, this tool and whatever started it too, so
+// there the mock, which has no shutdown to run, is killed outright, and an
+// app gets WM_CLOSE through stop_windows.
 stop :: proc(p: os.Process) {
-	_ = os.process_terminate(p)
+	when ODIN_OS == .Windows {
+		stop_windows(p)
+	} else {
+		_ = os.process_terminate(p)
+	}
 	if _, err := os.process_wait(p, 5 * time.Second); err != nil {
 		_ = os.process_kill(p)
 		_, _ = os.process_wait(p)
@@ -376,7 +384,7 @@ stop_side_mock :: proc(side: ^Side) {
 // files first, which takes a few seconds; later ones read them back.
 start_mock :: proc(cfg: ^Config, log_dir: string) -> (p: os.Process, url: string, ok: bool) {
 	log_path := join(log_dir, "mock.log")
-	f, err := os.create(log_path)
+	f, err := child_log(log_path)
 	if err != nil {
 		return
 	}
@@ -404,6 +412,15 @@ start_mock :: proc(cfg: ^Config, log_dir: string) -> (p: os.Process, url: string
 	fmt.eprintfln("measure: the mock didn't start listening, see %s", log_path)
 	stop(p)
 	return
+}
+
+// child_log creates the file at path, empty, for a child process's output.
+// Windows passes a child only handles marked inheritable, which os.create's
+// aren't.
+child_log :: proc(path: string, append := false) -> (^os.File, os.Error) {
+	flags := os.File_Flags{.Write, .Create, .Inheritable}
+	flags += {.Append} if append else {.Trunc}
+	return os.open(path, flags)
 }
 
 join :: proc(elems: ..string) -> string {

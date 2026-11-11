@@ -52,7 +52,8 @@ typedef enum {
   SCROLL_PHASE_CANCELLED,
 } Scroll_Phase;
 
-// Keys by their place on a US keyboard. See Key in platform.odin.
+// Keys by their place on a US keyboard, or on Windows letters and digits by
+// the layout's virtual keys. See Key in platform.odin.
 typedef enum {
   KEY_NONE,
   KEY_A,
@@ -241,8 +242,16 @@ typedef struct {
 } Wayland_Surface;
 _Static_assert(sizeof(Wayland_Surface) == 16, "Wayland_Surface size must match platform.odin");
 
+// What Shell.surface points to on Windows: the module and the window, for
+// the renderer to make its swap chain from. The shell owns both.
 typedef struct {
-  void *surface; // what the renderer draws to: a CAMetalLayer with its device, or a Wayland_Surface
+  void *instance; // HINSTANCE
+  void *window; // HWND
+} Win32_Surface;
+_Static_assert(sizeof(Win32_Surface) == 16, "Win32_Surface size must match platform.odin");
+
+typedef struct {
+  void *surface; // what the renderer draws to: a CAMetalLayer with its device, a Wayland_Surface or a Win32_Surface
   void (*request_redraw)(void);
   // The rest are main thread only.
   void (*set_now_playing)(const Now_Playing *info);
@@ -268,7 +277,7 @@ typedef struct {
   uint32_t mouse_buttons; // 1 << Mouse_Button for each held down now, in any app
   float titlebar_height; // points of the view's top under the window's buttons, 0 for none
   float titlebar_inset; // where the window's buttons end, from the left edge
-  uint32_t _pad;
+  float frame_interval; // seconds between the display's refreshes, 0 when unknown
 } Frame_Input;
 _Static_assert(sizeof(Frame_Input) == 64, "Frame_Input size must match platform.odin");
 

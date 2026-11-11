@@ -55,7 +55,7 @@ xattr -dr com.apple.quarantine /Applications/TIDALfast.app
 
 TIDALfast is in early pre-release, so expect rough edges.
 
-On Linux, bit-perfect output, media keys, Now Playing and screen readers aren't done yet. On compositors without server-side decorations, such as GNOME, the window has no title bar. Windows isn't supported.
+On Linux, bit-perfect output, media keys, Now Playing and screen readers aren't done yet. On compositors without server-side decorations, such as GNOME, the window has no title bar. Windows has a first build, cross-compiled from macOS or Linux, without bit-perfect output, Now Playing or screen readers yet; [docs/windows.md](docs/windows.md) has how to build it.
 
 ## Contributing
 

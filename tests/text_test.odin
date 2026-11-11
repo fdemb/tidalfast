@@ -47,6 +47,53 @@ test_cache_keys :: proc(t: ^testing.T) {
 	testing.expect_value(t, text.glyph_key(0, 0, text.glyph_sizes(26.01, 13), 0), g) // quarter pixel steps
 }
 
+// Coverage blended in linear light draws light text on dark heavier and
+// dark text on light thinner than other Windows apps' text, so a glyph's
+// coverage bends by its text's tone, and each tone has its own bitmap.
+@(test)
+glyph_tones_bend_coverage :: proc(t: ^testing.T) {
+	sizes := text.glyph_sizes(13, 13)
+	none := text.glyph_key(0, 0, sizes, 3)
+	light := text.glyph_key(0, 0, sizes, 3, .Light)
+	dark := text.glyph_key(0, 0, sizes, 3, .Dark)
+	testing.expect(t, none != light && light != dark && none != dark)
+	testing.expect(t, text.glyph_key(0, 0, sizes, 0, .Dark) != text.glyph_key(0, 0, sizes, 3, .None))
+
+	ramp: [256]u8
+	for &c, i in ramp {
+		c = u8(i)
+	}
+	for tone in text.Tone {
+		bent := ramp
+		text.apply_tone(bent[:], tone)
+		// Nothing and everything stay as they are, and the curve keeps
+		// the order of what it bends.
+		testing.expect_value(t, bent[0], 0)
+		testing.expect_value(t, bent[255], 255)
+		for i in 1 ..< 256 {
+			testing.expect(t, bent[i] >= bent[i - 1])
+		}
+		half := int(bent[128])
+		switch tone {
+		case .None:
+			testing.expect_value(t, half, 128)
+		case .Light:
+			testing.expectf(t, half < 100 && half > 60, "light text's half coverage is %d", half)
+		case .Dark:
+			testing.expectf(t, half > 155 && half < 195, "dark text's half coverage is %d", half)
+		}
+	}
+
+	when text.TONES {
+		testing.expect_value(t, text.tone_of({0xf3 / 255.0, 0xf3 / 255.0, 0xf3 / 255.0, 1}), text.Tone.Light)
+		testing.expect_value(t, text.tone_of({0x74 / 255.0, 0x74 / 255.0, 0x74 / 255.0, 1}), text.Tone.Light)
+		testing.expect_value(t, text.tone_of({0, 0, 0, 1}), text.Tone.Dark)
+		testing.expect_value(t, text.tone_of({0.2, 0.2, 0.2, 0.5}), text.Tone.Dark)
+	} else {
+		testing.expect_value(t, text.tone_of({1, 1, 1, 1}), text.Tone.None)
+	}
+}
+
 // glyphs makes a run of n glyphs, each 10 wide, with spaces at the given
 // indices.
 @(private = "file")

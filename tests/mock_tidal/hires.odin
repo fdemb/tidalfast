@@ -46,12 +46,7 @@ hires_prepare :: proc(dir: string) -> bool {
 		if !write_wav_int(wav, pcm, h.rate, h.bits, 2) {
 			return false
 		}
-		desc := os.Process_Desc {
-			command = {"afconvert", "-f", "flac", "-d", "flac", wav, flac},
-		}
-		state, _, stderr, err := os.process_exec(desc, context.temp_allocator)
-		if err != nil || !state.success {
-			fmt.eprintfln("mock: afconvert failed for %s: %v %s", h.name, err, string(stderr))
+		if !flac_file(h.name, wav, flac, pcm, h.rate, h.bits) {
 			return false
 		}
 		data, rerr := os.read_entire_file(flac, context.allocator)

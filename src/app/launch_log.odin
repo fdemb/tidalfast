@@ -24,6 +24,7 @@ import "core:time"
 
 import "../jobs"
 import "../os_services"
+import "../sys"
 
 TIDALFAST_COMMIT :: #config(TIDALFAST_COMMIT, "")
 LAUNCH_LOG_LIMIT :: 512 * 1024
@@ -97,7 +98,7 @@ launch_log_append :: proc(path: string, line: []u8) -> bool {
 				keep = keep[nl + 1:]
 			}
 			tmp := strings.concatenate({path, ".tmp"}, context.temp_allocator)
-			if os.write_entire_file(tmp, keep) != nil || os.rename(tmp, path) != nil {
+			if os.write_entire_file(tmp, keep) != nil || !sys.replace_file(tmp, path) {
 				return false
 			}
 		}

@@ -4,9 +4,9 @@ import "base:runtime"
 import "core:c"
 import "core:c/libc"
 import "core:sync"
-import "core:sys/posix"
 
 import "../../third_party/kbts"
+import "../sys"
 
 // Fallback fonts load on a worker thread. Finding one can mean CoreText
 // going through every installed font, and loading one maps the file and
@@ -50,7 +50,7 @@ Loader :: struct {
 	stop:          bool,
 	running:       bool,
 	busy:          bool, // the worker is loading a request
-	thread:        posix.pthread_t,
+	thread:        sys.Thread,
 	wake:          proc "c" (), // the shell's request_redraw
 	requests:      [LOAD_QUEUE]Load_Request, // a ring
 	request_head:  int,
@@ -72,7 +72,7 @@ loader_start :: proc(l: ^Loader) {
 		return
 	}
 	l.stop = false
-	l.running = posix.pthread_create(&l.thread, nil, loader_main, l) == .NONE
+	l.running = sys.thread_start(&l.thread, loader_main, l)
 }
 
 // loader_stop waits for the worker to finish the request in hand and exit.
@@ -86,7 +86,7 @@ loader_stop :: proc(l: ^Loader) {
 	l.stop = true
 	sync.cond_broadcast(&l.cond)
 	sync.mutex_unlock(&l.mutex)
-	posix.pthread_join(l.thread)
+	sys.thread_join(l.thread)
 	l.running = false
 }
 
@@ -223,29 +223,10 @@ load_kb_font :: proc(f: ^kbts.font, data: []byte, index: int) -> (blob: rawptr, 
 free_face :: proc(face: ^Face) {
 	face_native_free(face)
 	if face.mapped {
-		posix.munmap(raw_data(face.file), uint(len(face.file)))
+		sys.unmap_file(face.file)
 	}
 	libc.free(face.blob)
 	face^ = {}
-}
-
-@(private)
-map_file :: proc(path: cstring) -> ([]byte, bool) {
-	fd := posix.open(path, {})
-	if fd < 0 {
-		return nil, false
-	}
-	defer posix.close(fd)
-	st: posix.stat_t
-	if posix.fstat(fd, &st) != .OK || st.st_size <= 0 {
-		return nil, false
-	}
-	size := uint(st.st_size)
-	p := posix.mmap(nil, size, {.READ}, {.PRIVATE}, fd, 0)
-	if p == posix.MAP_FAILED {
-		return nil, false
-	}
-	return ([^]byte)(p)[:size], true
 }
 
 // mapped_fonts counts the fallback font files mapped with mmap, their bytes
@@ -253,7 +234,7 @@ map_file :: proc(path: cstring) -> ([]byte, bool) {
 // process's resident size but not its footprint: the kernel can drop their
 // pages and read them back from the file. UI thread only.
 mapped_fonts :: proc(t: ^State) -> (count, mapped, resident: int) {
-	page := uintptr(posix.sysconf(._PAGESIZE))
+	page := uintptr(sys.page_size())
 	vec: [1024]u8
 	for &face in t.faces[:t.face_count] {
 		if !face.mapped {
@@ -264,7 +245,7 @@ mapped_fonts :: proc(t: ^State) -> (count, mapped, resident: int) {
 		end := uintptr(raw_data(face.file)) + uintptr(len(face.file))
 		for at := uintptr(raw_data(face.file)) &~ (page - 1); at < end; {
 			n := min(int((end - at + page - 1) / page), len(vec))
-			if mincore(rawptr(at), uint(n) * uint(page), &vec[0]) != 0 {
+			if !sys.page_flags(rawptr(at), vec[:n]) {
 				break
 			}
 			for v in vec[:n] {

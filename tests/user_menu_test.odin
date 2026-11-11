@@ -152,7 +152,7 @@ name_opacity :: proc(s: ^app.State, name: string) -> f32 {
 	b := node_box(s, name)
 	for c := b.first; c != nil; c = c.next {
 		if c.label == name {
-			return c.opacity
+			return ui.drawn_opacity(c)
 		}
 	}
 	return -1
