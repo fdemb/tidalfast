@@ -1,6 +1,6 @@
 #!/bin/sh
 # tools/icon.sh  renders packaging/icon.svg to the macOS AppIcon.icns and the
-# Linux tidalfast.png that ./build.sh dist packs. Run it on macOS after
+# Linux tidalfast.png that ./build.py dist packs. Run it on macOS after
 # changing the SVG and commit what it writes. Needs rsvg-convert (brew install
 # librsvg) and iconutil.
 #

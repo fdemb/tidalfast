@@ -5,7 +5,7 @@
 // The same pipeline as Metal: one instanced quad per rect, the instances in
 // a storage buffer per frame slot that both shaders index, a colour and a
 // coverage texture bound per batch. The shaders are GLSL in shaders/,
-// compiled to SPIR-V by build.sh and #loaded.
+// compiled to SPIR-V by build.py and #loaded.
 //
 // Metal writes textures straight from the CPU and keeps released objects
 // alive until the GPU is done with them; Vulkan does neither. So texture

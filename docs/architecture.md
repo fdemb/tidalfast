@@ -19,7 +19,7 @@ src/cover/        cover art sizes, decoding on a worker, and the texture cache
 src/cacert/       where libcurl finds CA certificates on Linux when its built-in path is missing
 src/os_services/  secret store (Keychain, libsecret, Credential Manager), opening URLs, settings and cache paths
 src/sys/          threads, local time, page size and file mappings for shared code, per OS
-third_party/      C libraries with their Odin bindings, which build.sh compiles into build/<name>: kbts (kb_text_shape), miniaudio and dr_flac.
+third_party/      C libraries with their Odin bindings, which build.py compiles into build/<name>: kbts (kb_text_shape), miniaudio and dr_flac.
                   The Windows build adds FreeType, from its release, and keeps its libraries in build/windows
 tests/            `odin test tests`
 examples/cli/     CLI on top of src/tidal
@@ -28,9 +28,8 @@ tools/save_cost/  times what a list save and a queue save cost the UI thread
 tools/audio_top/  macOS's pw-top: each output device's rate and formats, and the processes playing to it
 tools/icons.sh    cuts the Phosphor icon fonts down to the icons the app draws
 tools/icon.sh     renders the app icon in packaging/ for macOS and Linux
-tools/winsdk_case.sh  makes the Windows SDK from xwin usable on a case-sensitive file system
-packaging/        Info.plist, the .desktop file and the app icon for `./build.sh dist`
-build.sh          builds everything; `./build.sh dist` packages a release
+packaging/        Info.plist, the .desktop file and the app icon for `./build.py dist`
+build.py          builds everything, on every OS; `./build.py dist` packages a release
 .github/          the release workflow: a v* tag publishes the .dmg and the AppImage
 ```
 
@@ -49,7 +48,7 @@ Read-only checkouts in `~/.t3/scratch/2026-10-14-please-analyze-how-spotifast-is
 ## Decisions
 
 - **Platform shell.** The shell owns the window and the GPU layer. On macOS that's `NSApplication` and a `CAMetalLayer`, with IME (`NSTextInputClient`), media keys and Now Playing (`MPRemoteCommandCenter`, `MPNowPlayingInfoCenter`), Keychain, clipboard and drag and drop in `shell.m` too. `docs/linux.md` covers the Wayland shell.
-- **One executable.** `build.sh` compiles the shell to an object and Odin links it into the app. The app's `main` calls `shell_main`, and the shell calls `app_init`, `app_frame` and `app_shutdown`, declared in `platform.h`. State lives in memory the shell maps, see [Memory](memory.md).
+- **One executable.** `build.py` compiles the shell to an object and Odin links it into the app. The app's `main` calls `shell_main`, and the shell calls `app_init`, `app_frame` and `app_shutdown`, declared in `platform.h`. State lives in memory the shell maps, see [Memory](memory.md).
 - **Memory.** Arenas. A per-frame arena holds the box tree and temporary strings and resets every frame. Persistent arenas hold caches and app data.
 - **Renderer.** One instanced pipeline. Each instance is a rect with corner radii, border width, edge softness (shadows), two colours for gradients, a clip rect, and a texture and UV rect. Glyphs, cover art, rounded boxes and shadows all go through it. Fleury's `R_Rect2DInst` in raddebugger's `src/render/` is the reference.
 - **Threads.** The main thread runs UI and rendering. Workers handle network and image decoding; miniaudio runs its own audio thread. Workers send results over queues and wake the main thread with `CFRunLoopWakeUp` on macOS, an eventfd on Linux and an event on Windows.
