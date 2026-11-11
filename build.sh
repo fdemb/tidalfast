@@ -146,8 +146,8 @@ if [ "$target_os" = windows ]; then
 	fi
 	[ "$target" = libs ] && exit 0
 
-	# The Direct3D 11 shaders are the bytecode in src/render/shaders/dxbc,
-	# which build.bat compiles with fxc on Windows.
+	# The shaders are the bytecode in src/render/shaders/dxbc and spirv,
+	# which build.bat compiles on Windows.
 
 	# The icon and the version go into the executable as resources.
 	mkdir -p build/windows/shell

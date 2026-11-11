@@ -1,6 +1,7 @@
 #+build windows
-// The Direct3D 11 backend, for Windows. It draws what the Vulkan backend
-// draws on Linux, with the shaders ported to HLSL in shaders/rect.hlsl.
+// The Direct3D 11 backend, Windows' default (see backend_windows.odin). It
+// draws what the Vulkan backend draws, with the shaders ported to HLSL in
+// shaders/rect.hlsl.
 // Direct3D 11 because its driver costs a fraction of Vulkan's memory: on
 // an NVIDIA card a window clearing and presenting took 11 MB of private
 // working set with Direct3D 11 against 69 MB with Vulkan (docs/windows.md).
@@ -40,8 +41,6 @@ import d3d "vendor:directx/d3d11"
 import "vendor:directx/dxgi"
 
 import "../platform"
-
-BACKDROPS :: true
 
 VS_RECT :: #load("shaders/dxbc/vs_rect.dxbc")
 PS_RECT :: #load("shaders/dxbc/ps_rect.dxbc")
@@ -85,6 +84,7 @@ Frame_Constants :: struct {
 
 // A texture an offscreen pass draws into and later ones sample: the
 // backdrop's scene or one of the blur's levels.
+@(private = "file")
 Blur_Image :: struct {
 	texture: ^d3d.ITexture2D,
 	rtv:     ^d3d.IRenderTargetView,
@@ -102,7 +102,7 @@ Gpu_Timer :: struct {
 	next:     int,
 }
 
-Gpu :: struct {
+D3d11_Gpu :: struct {
 	// The shell's, kept through a lost device.
 	surface:         ^platform.Win32_Surface,
 	device:          ^d3d.IDevice,
@@ -146,21 +146,21 @@ Gpu :: struct {
 	allocated:       int, // bytes of textures and buffers; atomic
 }
 
-Gpu_Texture :: struct {
+D3d11_Texture :: struct {
 	texture: ^d3d.ITexture2D,
 	srv:     ^d3d.IShaderResourceView,
 	size:    int,
 }
 
-// init draws to surface, a platform.Win32_Surface. If it fails, it tears
+// d3d11_init draws to surface, a platform.Win32_Surface. If it fails, it tears
 // down what it made, so g.device is nil and the renderer draws nothing.
-init :: proc(r: ^Renderer, surface: rawptr) -> bool {
+d3d11_init :: proc(r: ^Renderer, surface: rawptr) -> bool {
 	ws := (^platform.Win32_Surface)(surface)
 	if ws == nil || ws.window == nil {
 		log.error("render: no window")
 		return false
 	}
-	r.gpu.surface = ws
+	r.gpu.d3d.surface = ws
 	return make_device(r, allow_warp = true)
 }
 
@@ -169,9 +169,9 @@ init :: proc(r: ^Renderer, surface: rawptr) -> bool {
 // made.
 @(private)
 make_device :: proc(r: ^Renderer, allow_warp: bool) -> (ok: bool) {
-	g := &r.gpu
+	g := &r.gpu.d3d
 	defer if !ok {
-		release(r)
+		d3d11_release(r)
 	}
 	g.window = dxgi.HWND(g.surface.window)
 
@@ -225,7 +225,7 @@ make_device :: proc(r: ^Renderer, allow_warp: bool) -> (ok: bool) {
 
 	// Slot 0 is the white texture behind the zero handle, so its
 	// generation stays 0, also after a lost device.
-	r.textures[0] = new_texture_slot(r, 1, 1, .RGBA8, false)
+	r.textures[0] = d3d11_new_texture_slot(r, 1, 1, .RGBA8, false)
 	if r.textures[0].width == 0 {
 		log.error("render: can't make the white texture")
 		return false
@@ -237,7 +237,7 @@ make_device :: proc(r: ^Renderer, allow_warp: bool) -> (ok: bool) {
 }
 
 @(private)
-log_adapter :: proc(g: ^Gpu) {
+log_adapter :: proc(g: ^D3d11_Gpu) {
 	dd: ^dxgi.IDevice
 	if g.device->QueryInterface(dxgi.IDevice_UUID, (^rawptr)(&dd)) < 0 {
 		return
@@ -255,7 +255,7 @@ log_adapter :: proc(g: ^Gpu) {
 }
 
 @(private)
-make_shaders :: proc(g: ^Gpu) -> bool {
+make_shaders :: proc(g: ^D3d11_Gpu) -> bool {
 	ok := g.device->CreateVertexShader(raw_data(VS_RECT), len(VS_RECT), nil, &g.vs_rect) >= 0
 	ok &&= g.device->CreatePixelShader(raw_data(PS_RECT), len(PS_RECT), nil, &g.ps_rect) >= 0
 	ok &&= g.device->CreateVertexShader(raw_data(VS_BLUR), len(VS_BLUR), nil, &g.vs_blur) >= 0
@@ -268,7 +268,7 @@ make_shaders :: proc(g: ^Gpu) -> bool {
 }
 
 @(private)
-make_states :: proc(g: ^Gpu) -> bool {
+make_states :: proc(g: ^D3d11_Gpu) -> bool {
 	blend: d3d.BLEND_DESC
 	blend.RenderTarget[0] = {
 		BlendEnable           = true,
@@ -307,7 +307,7 @@ make_states :: proc(g: ^Gpu) -> bool {
 
 // make_timer makes the timestamp queries. Without them gpu_ms stays 0.
 @(private)
-make_timer :: proc(g: ^Gpu) {
+make_timer :: proc(g: ^D3d11_Gpu) {
 	disjoint := d3d.QUERY_DESC {
 		Query = .TIMESTAMP_DISJOINT,
 	}
@@ -338,7 +338,7 @@ free_timer :: proc(t: ^Gpu_Timer) {
 
 // timer_begin and timer_end bracket a frame's drawing with timestamps.
 @(private)
-timer_begin :: proc(g: ^Gpu) {
+timer_begin :: proc(g: ^D3d11_Gpu) {
 	t := &g.timer
 	if t.disjoint[0] == nil {
 		return
@@ -348,7 +348,7 @@ timer_begin :: proc(g: ^Gpu) {
 }
 
 @(private)
-timer_end :: proc(g: ^Gpu) {
+timer_end :: proc(g: ^D3d11_Gpu) {
 	t := &g.timer
 	if t.disjoint[0] == nil {
 		return
@@ -363,7 +363,7 @@ timer_end :: proc(g: ^Gpu) {
 // in, oldest first, and stops at the first that isn't, without waiting.
 @(private)
 read_gpu_time :: proc(r: ^Renderer) {
-	g := &r.gpu
+	g := &r.gpu.d3d
 	t := &g.timer
 	DONOTFLUSH :: u32(1)
 	for k in 0 ..< TIMED_FRAMES {
@@ -391,7 +391,7 @@ read_gpu_time :: proc(r: ^Renderer) {
 
 // log_debug_messages logs what the debug layer said since last time.
 @(private)
-log_debug_messages :: proc(g: ^Gpu) {
+log_debug_messages :: proc(g: ^D3d11_Gpu) {
 	if g.info == nil {
 		return
 	}
@@ -421,8 +421,8 @@ log_debug_messages :: proc(g: ^Gpu) {
 	g.info->ClearStoredMessages()
 }
 
-destroy :: proc(r: ^Renderer) {
-	release(r)
+d3d11_destroy :: proc(r: ^Renderer) {
+	d3d11_release(r)
 	r^ = {}
 }
 
@@ -434,19 +434,19 @@ com_release :: proc(p: ^$T) {
 	}
 }
 
-// release frees the GPU objects, so g.device is nil and the renderer draws
+// d3d11_release frees the GPU objects, so g.device is nil and the renderer draws
 // nothing. It keeps the frame's counts, batches and clips, the capture
 // path the shell set, the surface and how the device is being made again.
 // Each slot's generation moves on, as in texture_destroy, so no old handle
 // matches.
-release :: proc(r: ^Renderer) {
-	g := &r.gpu
+d3d11_release :: proc(r: ^Renderer) {
+	g := &r.gpu.d3d
 	if g.ctx != nil {
 		g.ctx->ClearState()
 	}
 	for &slot in r.textures {
 		if slot.width != 0 {
-			free_texture_now(g, slot.gpu)
+			free_texture_now(g, slot.gpu.d3d)
 		}
 	}
 	free_blur_image(&g.scene)
@@ -481,7 +481,7 @@ release :: proc(r: ^Renderer) {
 	if g.cpu_instances != nil {
 		delete(g.cpu_instances, runtime.heap_allocator())
 	}
-	r.gpu = {
+	r.gpu.d3d = {
 		surface  = g.surface,
 		retry_at = g.retry_at,
 		tries    = g.tries,
@@ -498,7 +498,7 @@ release :: proc(r: ^Renderer) {
 // begin_frame makes a new device. False if the device is fine.
 @(private)
 lose :: proc(r: ^Renderer, hr: win.HRESULT) -> bool {
-	g := &r.gpu
+	g := &r.gpu.d3d
 	if g.device == nil {
 		return true
 	}
@@ -507,7 +507,7 @@ lose :: proc(r: ^Renderer, hr: win.HRESULT) -> bool {
 		return false
 	}
 	log.errorf("render: the GPU device was lost (0x%x, reason 0x%x), making a new one", u32(hr), u32(reason))
-	release(r)
+	d3d11_release(r)
 	r.device_lost = true
 	r.hidden = true
 	r.poll_after = 0.01
@@ -519,7 +519,7 @@ lose :: proc(r: ^Renderer, hr: win.HRESULT) -> bool {
 // recover makes a new device after a lost one, if it's time to try.
 @(private)
 recover :: proc(r: ^Renderer) {
-	g := &r.gpu
+	g := &r.gpu.d3d
 	if time.tick_diff(g.retry_at, time.tick_now()) < 0 {
 		return
 	}
@@ -534,29 +534,29 @@ recover :: proc(r: ^Renderer) {
 	r.device_resets += 1
 }
 
-// gpu_allocated is the memory the renderer's textures and buffers take, in
+// d3d11_allocated is the memory the renderer's textures and buffers take, in
 // bytes, as their sizes add up; Direct3D 11 doesn't say what the driver
 // allocated. Safe from any thread.
-gpu_allocated :: proc "contextless" (r: ^Renderer) -> int {
-	return sync.atomic_load(&r.gpu.allocated)
+d3d11_allocated :: proc "contextless" (r: ^Renderer) -> int {
+	return sync.atomic_load(&r.gpu.d3d.allocated)
 }
 
-// gpu_memory is what the renderer's own buffers take. The textures made
+// d3d11_memory is what the renderer's own buffers take. The textures made
 // with texture_create aren't in it, see texture_bytes. There are no upload
 // buffers: Direct3D 11 copies texture writes itself.
-gpu_memory :: proc(r: ^Renderer) -> Gpu_Memory {
+d3d11_memory :: proc(r: ^Renderer) -> Gpu_Memory {
 	m: Gpu_Memory
-	m.instances = r.gpu.instance_bytes
-	m.backdrop = r.gpu.scene.size
-	for l in r.gpu.levels {
+	m.instances = r.gpu.d3d.instance_bytes
+	m.backdrop = r.gpu.d3d.scene.size
+	for l in r.gpu.d3d.levels {
 		m.backdrop += l.size
 	}
 	return m
 }
 
 @(private)
-gpu_texture_bytes :: proc(slot: ^Texture_Slot) -> int {
-	return slot.gpu.size
+d3d11_texture_bytes :: proc(_: ^Renderer, slot: ^Texture_Slot) -> int {
+	return slot.gpu.d3d.size
 }
 
 // Textures
@@ -574,11 +574,11 @@ dxgi_format :: proc(format: Texture_Format) -> dxgi.FORMAT {
 	return .UNKNOWN
 }
 
-// new_texture_slot returns a zero slot if Direct3D can't make the texture.
+// d3d11_new_texture_slot returns a zero slot if Direct3D can't make the texture.
 // A mipmapped texture can be a render target, which GenerateMips needs.
 @(private)
-new_texture_slot :: proc(r: ^Renderer, width, height: int, format: Texture_Format, mipmapped: bool) -> Texture_Slot {
-	g := &r.gpu
+d3d11_new_texture_slot :: proc(r: ^Renderer, width, height: int, format: Texture_Format, mipmapped: bool) -> Texture_Slot {
+	g := &r.gpu.d3d
 	if g.device == nil {
 		return {}
 	}
@@ -600,7 +600,7 @@ new_texture_slot :: proc(r: ^Renderer, width, height: int, format: Texture_Forma
 		desc.BindFlags += {.RENDER_TARGET}
 		desc.MiscFlags = {.GENERATE_MIPS}
 	}
-	t: Gpu_Texture
+	t: D3d11_Texture
 	if g.device->CreateTexture2D(&desc, nil, &t.texture) < 0 {
 		return {}
 	}
@@ -614,20 +614,20 @@ new_texture_slot :: proc(r: ^Renderer, width, height: int, format: Texture_Forma
 		t.size = t.size * 4 / 3
 	}
 	sync.atomic_add(&g.allocated, t.size)
-	return {gpu = t, width = i32(width), height = i32(height), format = format, mipmapped = mipmapped}
+	return {gpu = {d3d = t}, width = i32(width), height = i32(height), format = format, mipmapped = mipmapped}
 }
 
-// gpu_texture_free releases the texture. Direct3D keeps it until the
+// d3d11_texture_free releases the texture. Direct3D keeps it until the
 // frames that sample it are done.
 @(private)
-gpu_texture_free :: proc(r: ^Renderer, t: Gpu_Texture) {
-	if r.gpu.device != nil {
-		free_texture_now(&r.gpu, t)
+d3d11_texture_free :: proc(r: ^Renderer, t: Gpu_Texture) {
+	if r.gpu.d3d.device != nil {
+		free_texture_now(&r.gpu.d3d, t.d3d)
 	}
 }
 
-@(private)
-free_texture_now :: proc(g: ^Gpu, t: Gpu_Texture) {
+@(private = "file")
+free_texture_now :: proc(g: ^D3d11_Gpu, t: D3d11_Texture) {
 	t := t
 	if t.texture != nil {
 		sync.atomic_sub(&g.allocated, t.size)
@@ -636,39 +636,39 @@ free_texture_now :: proc(g: ^Gpu, t: Gpu_Texture) {
 	com_release(&t.texture)
 }
 
-// gpu_texture_write copies the pixels into the texture, ordered with the
+// d3d11_texture_write copies the pixels into the texture, ordered with the
 // draws before and after it, and makes the mips again if it has them.
 @(private)
-gpu_texture_write :: proc(r: ^Renderer, slot: ^Texture_Slot, pixels: []byte, x, y, w, h, bpp: int) {
-	g := &r.gpu
+d3d11_texture_write :: proc(r: ^Renderer, slot: ^Texture_Slot, pixels: []byte, x, y, w, h, bpp: int) {
+	g := &r.gpu.d3d
 	if g.device == nil {
 		return
 	}
 	box := d3d.BOX{u32(x), u32(y), 0, u32(x + w), u32(y + h), 1}
-	g.ctx->UpdateSubresource((^d3d.IResource)(slot.gpu.texture), 0, &box, raw_data(pixels), u32(w * bpp), 0)
+	g.ctx->UpdateSubresource((^d3d.IResource)(slot.gpu.d3d.texture), 0, &box, raw_data(pixels), u32(w * bpp), 0)
 	if slot.mipmapped {
-		g.ctx->GenerateMips(slot.gpu.srv)
+		g.ctx->GenerateMips(slot.gpu.d3d.srv)
 	}
 }
 
 @(private)
-gpu_texture_copy :: proc(r: ^Renderer, from, to: ^Texture_Slot, w, h: int) {
-	g := &r.gpu
+d3d11_texture_copy :: proc(r: ^Renderer, from, to: ^Texture_Slot, w, h: int) {
+	g := &r.gpu.d3d
 	if g.device == nil {
 		return
 	}
 	box := d3d.BOX{0, 0, 0, u32(w), u32(h), 1}
-	g.ctx->CopySubresourceRegion((^d3d.IResource)(to.gpu.texture), 0, 0, 0, 0, (^d3d.IResource)(from.gpu.texture), 0, &box)
+	g.ctx->CopySubresourceRegion((^d3d.IResource)(to.gpu.d3d.texture), 0, 0, 0, 0, (^d3d.IResource)(from.gpu.d3d.texture), 0, &box)
 }
 
 // Frame
 
-// gpu_frame_begin returns the array the frame's instances go in, or nil if
+// d3d11_frame_begin returns the array the frame's instances go in, or nil if
 // there is no device. After a lost device it first tries to make a new
 // one.
 @(private)
-gpu_frame_begin :: proc(r: ^Renderer) -> [^]Instance {
-	g := &r.gpu
+d3d11_frame_begin :: proc(r: ^Renderer) -> [^]Instance {
+	g := &r.gpu.d3d
 	if r.device_lost && g.device == nil {
 		recover(r)
 	}
@@ -683,12 +683,12 @@ gpu_frame_begin :: proc(r: ^Renderer) -> [^]Instance {
 	return raw_data(g.cpu_instances)
 }
 
-// grow_instances doubles the frame's array, keeping what this frame has
+// d3d11_grow_instances doubles the frame's array, keeping what this frame has
 // pushed so far. If there's no memory for it, the old array and capacity
 // stay.
 @(private)
-grow_instances :: proc(r: ^Renderer) {
-	set_cpu_instances(r, 2 * len(r.gpu.cpu_instances))
+d3d11_grow_instances :: proc(r: ^Renderer) {
+	set_cpu_instances(r, 2 * len(r.gpu.d3d.cpu_instances))
 }
 
 // set_cpu_instances makes the array capacity instances long, keeping the
@@ -696,7 +696,7 @@ grow_instances :: proc(r: ^Renderer) {
 // array.
 @(private)
 set_cpu_instances :: proc(r: ^Renderer, capacity: int) -> bool {
-	g := &r.gpu
+	g := &r.gpu.d3d
 	next, err := make([]Instance, capacity, runtime.heap_allocator())
 	if err != nil {
 		log.error("render: out of memory for instances")
@@ -720,7 +720,7 @@ set_cpu_instances :: proc(r: ^Renderer, capacity: int) -> bool {
 // last frame's. False if there's no buffer to draw from.
 @(private)
 upload_instances :: proc(r: ^Renderer) -> bool {
-	g := &r.gpu
+	g := &r.gpu.d3d
 	if r.instance_count == 0 {
 		return true
 	}
@@ -741,8 +741,8 @@ upload_instances :: proc(r: ^Renderer) -> bool {
 
 // set_instance_buffer replaces the instance buffer with one of capacity
 // instances. If it can't, the old one stays.
-@(private)
-set_instance_buffer :: proc(g: ^Gpu, capacity: int) -> bool {
+@(private = "file")
+set_instance_buffer :: proc(g: ^D3d11_Gpu, capacity: int) -> bool {
 	desc := d3d.BUFFER_DESC {
 		ByteWidth           = u32(capacity * size_of(Instance)),
 		Usage               = .DYNAMIC,
@@ -778,16 +778,17 @@ set_instance_buffer :: proc(g: ^Gpu, capacity: int) -> bool {
 
 // swapchain_stale says whether the swap chain has to be made or resized
 // for a window of want pixels.
-swapchain_stale :: proc(g: ^Gpu, want: [2]u32) -> bool {
+@(private = "file")
+swapchain_stale :: proc(g: ^D3d11_Gpu, want: [2]u32) -> bool {
 	return g.swapchain == nil || g.target == nil || g.extent != want
 }
 
 // make_swapchain makes the swap chain at want pixels, or resizes the one
 // there is. The flip model with two buffers, presented on vsync, so a
 // present waits when the display is behind and paces animation.
-@(private)
+@(private = "file")
 make_swapchain :: proc(r: ^Renderer, want: [2]u32) -> (hr: win.HRESULT) {
-	g := &r.gpu
+	g := &r.gpu.d3d
 	com_release(&g.target)
 	g.extent = {}
 	if g.swapchain == nil {
@@ -887,7 +888,7 @@ make_swapchain :: proc(r: ^Renderer, want: [2]u32) -> (hr: win.HRESULT) {
 // the same way.
 @(private)
 park :: proc(r: ^Renderer) {
-	g := &r.gpu
+	g := &r.gpu.d3d
 	if g.parked {
 		return
 	}
@@ -911,10 +912,10 @@ park :: proc(r: ^Renderer) {
 	}
 }
 
-// end_frame draws the frame and presents it. A frame that can't be seen
+// d3d11_end_frame draws the frame and presents it. A frame that can't be seen
 // isn't drawn: r.hidden says so, and r.poll_after when to look again.
-end_frame :: proc(r: ^Renderer) {
-	g := &r.gpu
+d3d11_end_frame :: proc(r: ^Renderer) {
+	g := &r.gpu.d3d
 	defer r.frame_index += 1
 	r.hidden, r.poll_after = true, 0
 	if g.device == nil {
@@ -962,7 +963,7 @@ end_frame :: proc(r: ^Renderer) {
 
 	timer_begin(g)
 	draw_calls := 0
-	blurred := r.textures[0].gpu.srv
+	blurred := r.textures[0].gpu.d3d.srv
 	if r.backdrop.batch >= 0 {
 		srv, calls := encode_backdrop(r)
 		draw_calls += calls
@@ -1016,7 +1017,7 @@ clear_color :: proc(r: ^Renderer) -> [4]f32 {
 }
 
 @(private)
-set_constants :: proc(g: ^Gpu, c: Frame_Constants) {
+set_constants :: proc(g: ^D3d11_Gpu, c: Frame_Constants) {
 	m: d3d.MAPPED_SUBRESOURCE
 	if g.ctx->Map((^d3d.IResource)(g.constants), 0, .WRITE_DISCARD, {}, &m) >= 0 {
 		(^Frame_Constants)(m.pData)^ = c
@@ -1028,9 +1029,9 @@ set_constants :: proc(g: ^Gpu, c: Frame_Constants) {
 // covering target (x, y, w, h) of the drawable's pixels. origin is the
 // target's origin in the drawable and the drawable pixels per target
 // pixel, and backdrop the blurred texture. Returns the draw calls.
-@(private)
+@(private = "file")
 draw_batches :: proc(r: ^Renderer, batches: []Batch, size: [2]u32, target, origin: [4]f32, backdrop: ^d3d.IShaderResourceView) -> int {
-	g := &r.gpu
+	g := &r.gpu.d3d
 	if r.instance_count == 0 {
 		return 0
 	}
@@ -1047,7 +1048,7 @@ draw_batches :: proc(r: ^Renderer, batches: []Batch, size: [2]u32, target, origi
 	ctx->PSSetConstantBuffers(0, 1, &g.constants)
 	ctx->VSSetShaderResources(0, 1, &g.instances_srv)
 	ctx->PSSetSamplers(0, 2, &g.samplers[0])
-	white := r.textures[0].gpu.srv
+	white := r.textures[0].gpu.d3d.srv
 	views := [4]^d3d.IShaderResourceView{g.instances_srv, white, white, backdrop}
 	ctx->PSSetShaderResources(0, 4, &views[0])
 	bound := [2]^d3d.IShaderResourceView{white, white}
@@ -1058,7 +1059,7 @@ draw_batches :: proc(r: ^Renderer, batches: []Batch, size: [2]u32, target, origi
 		}
 		for t, index in b.textures {
 			slot := texture_slot(r, t)
-			srv := slot.gpu.srv if slot != nil else white
+			srv := slot.gpu.d3d.srv if slot != nil else white
 			if srv != bound[index] {
 				ctx->PSSetShaderResources(u32(1 + index), 1, &srv)
 				bound[index] = srv
@@ -1076,9 +1077,9 @@ draw_batches :: proc(r: ^Renderer, batches: []Batch, size: [2]u32, target, origi
 // returns the level the backdrop samples and the draw calls it took. When
 // what the blur reads hasn't changed since it last ran, it returns that
 // blur as it is. nil if there's no blur to sample.
-@(private)
+@(private = "file")
 encode_backdrop :: proc(r: ^Renderer) -> (blurred: ^d3d.IShaderResourceView, draw_calls: int) {
-	g := &r.gpu
+	g := &r.gpu.d3d
 	bd := r.backdrop
 	w, h := int(bd.region.z - bd.region.x), int(bd.region.w - bd.region.y)
 	if !backdrop_textures(r, w, h) {
@@ -1097,7 +1098,7 @@ encode_backdrop :: proc(r: ^Renderer) -> (blurred: ^d3d.IShaderResourceView, dra
 	scale := [2]f32{f32(w) / f32(scene.x), f32(h) / f32(scene.y)}
 	target := [4]f32{bd.region.x, bd.region.y, f32(w), f32(h)}
 	origin := [4]f32{bd.region.x, bd.region.y, scale.x, scale.y}
-	draw_calls = draw_batches(r, r.batches[:bd.batch], {u32(scene.x), u32(scene.y)}, target, origin, r.textures[0].gpu.srv)
+	draw_calls = draw_batches(r, r.batches[:bd.batch], {u32(scene.x), u32(scene.y)}, target, origin, r.textures[0].gpu.d3d.srv)
 
 	// Drawing the scene at half size was the first halving.
 	src := g.scene
@@ -1115,8 +1116,8 @@ encode_backdrop :: proc(r: ^Renderer) -> (blurred: ^d3d.IShaderResourceView, dra
 // blur_pass draws one pass of the dual filter from src, src_size texels,
 // into dst, dst_size texels. The target goes first, which unbinds it from
 // the shaders, then the source, which the last pass drew.
-@(private)
-blur_pass :: proc(g: ^Gpu, shader: ^d3d.IPixelShader, src, dst: Blur_Image, src_size, dst_size: [2]int) {
+@(private = "file")
+blur_pass :: proc(g: ^D3d11_Gpu, shader: ^d3d.IPixelShader, src, dst: Blur_Image, src_size, dst_size: [2]int) {
 	ctx := g.ctx
 	none: ^d3d.IShaderResourceView
 	ctx->PSSetShaderResources(1, 1, &none)
@@ -1138,9 +1139,9 @@ blur_pass :: proc(g: ^Gpu, shader: ^d3d.IPixelShader, src, dst: Blur_Image, src_
 
 // backdrop_textures makes the scene texture for a region w by h pixels and
 // the levels under it, unless they're that size already.
-@(private)
+@(private = "file")
 backdrop_textures :: proc(r: ^Renderer, w, h: int) -> bool {
-	g := &r.gpu
+	g := &r.gpu.d3d
 	if g.scene.texture != nil && g.region_size == {w, h} {
 		return true
 	}
@@ -1165,8 +1166,8 @@ backdrop_textures :: proc(r: ^Renderer, w, h: int) -> bool {
 	return ok
 }
 
-@(private)
-make_blur_image :: proc(g: ^Gpu, b: ^Blur_Image, format: dxgi.FORMAT, bpp: int, size: [2]int) -> bool {
+@(private = "file")
+make_blur_image :: proc(g: ^D3d11_Gpu, b: ^Blur_Image, format: dxgi.FORMAT, bpp: int, size: [2]int) -> bool {
 	desc := d3d.TEXTURE2D_DESC {
 		Width      = u32(size.x),
 		Height     = u32(size.y),
@@ -1188,8 +1189,8 @@ make_blur_image :: proc(g: ^Gpu, b: ^Blur_Image, format: dxgi.FORMAT, bpp: int, 
 	return ok
 }
 
-@(private)
-free_blur_image :: proc(b: ^Blur_Image, g: ^Gpu = nil) {
+@(private = "file")
+free_blur_image :: proc(b: ^Blur_Image, g: ^D3d11_Gpu = nil) {
 	if b.texture != nil && g != nil {
 		sync.atomic_sub(&g.allocated, b.size)
 	}
@@ -1203,7 +1204,7 @@ free_blur_image :: proc(b: ^Blur_Image, g: ^Gpu = nil) {
 // writes it to the capture path.
 @(private)
 capture :: proc(r: ^Renderer) {
-	g := &r.gpu
+	g := &r.gpu.d3d
 	back: ^d3d.ITexture2D
 	if g.swapchain->GetBuffer(0, d3d.ITexture2D_UUID, (^rawptr)(&back)) < 0 {
 		return

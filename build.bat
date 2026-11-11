@@ -9,9 +9,10 @@ rem                        the mock server and the measure tool
 rem
 rem Builds on Windows itself. Run it from a "x64 Native Tools Command Prompt"
 rem for Visual Studio, so cl, lib, rc and link are on PATH, with odin on PATH
-rem too. fxc, from the Windows SDK, compiles the shaders when it's on PATH;
-rem otherwise the build uses the bytecode in src\render\shaders\dxbc. curl
-rem and tar come with Windows 10 and later. TIDALFAST_VERSION=1.2.3 sets the
+rem too. fxc, from the Windows SDK, and glslangValidator, from the Vulkan SDK,
+rem compile the shaders when they're on PATH; otherwise the build uses the
+rem bytecode in src\render\shaders\dxbc and src\render\shaders\spirv. curl and
+rem tar come with Windows 10 and later. TIDALFAST_VERSION=1.2.3 sets the
 rem version.
 rem build.sh windows cross-builds the same executable from macOS or Linux.
 setlocal EnableExtensions EnableDelayedExpansion
@@ -66,6 +67,13 @@ rem is checked in, so a build without fxc, or a cross-build, still has it.
 where fxc >nul 2>&1 && (
 	for %%e in (vs_rect:vs ps_rect:ps vs_blur:vs ps_blur_down:ps ps_blur_up:ps) do for /f "tokens=1,2 delims=:" %%a in ("%%e") do (
 		fxc /nologo /O3 /WX /T %%b_5_0 /E %%a /Fo src\render\shaders\dxbc\%%a.dxbc src\render\shaders\rect.hlsl >nul || exit /b 1
+	)
+)
+
+rem The Vulkan shaders, for TIDALFAST_RENDERER=vulkan, checked in the same way.
+where glslangValidator >nul 2>&1 && (
+	for %%s in (src\render\shaders\*.vert src\render\shaders\*.frag) do (
+		glslangValidator -V --quiet "%%s" -o "src\render\shaders\spirv\%%~nxs.spv" || exit /b 1
 	)
 )
 

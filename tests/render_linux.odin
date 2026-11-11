@@ -75,7 +75,7 @@ writes_inside_the_box_around_earlier_ones_wait :: proc(t: ^testing.T) {
 // the window's size changes, not on every frame its extent differs.
 @(test)
 clamped_swapchain_is_not_made_every_frame :: proc(t: ^testing.T) {
-	g := render.Gpu {
+	g := render.Vulkan_Gpu {
 		swapchain = vk.SwapchainKHR(1),
 		extent    = {640, 480},
 		requested = {800, 600},

@@ -7,8 +7,8 @@ import "core:testing"
 import "../src/platform"
 import "../src/render"
 
-// The Direct3D 11 renderer drawing to a real window that's never shown, on
-// the GPU or WARP.
+// The renderer drawing to a real window that's never shown: Direct3D 11 on
+// the GPU or WARP, and Vulkan where the machine has it.
 
 @(private = "file")
 Test_Window :: struct {
@@ -72,7 +72,7 @@ d3d11_renderer_recovers_from_a_lost_device :: proc(t: ^testing.T) {
 	render.release(r)
 	r.device_lost = true
 	draw_rects(r, 10)
-	testing.expect(t, r.gpu.device != nil)
+	testing.expect(t, r.gpu.d3d.device != nil)
 	testing.expect(t, !r.device_lost)
 	testing.expect_value(t, r.device_resets, 1)
 	testing.expect_value(t, render.texture_size(r, cover_page), [2]int{})
@@ -97,10 +97,10 @@ d3d11_instances_are_built_in_ordinary_memory :: proc(t: ^testing.T) {
 	}
 	n := render.INITIAL_INSTANCES + 100
 	draw_rects(r, n)
-	testing.expect(t, rawptr(r.instances) == raw_data(r.gpu.cpu_instances))
-	testing.expect(t, len(r.gpu.cpu_instances) >= n)
+	testing.expect(t, rawptr(r.instances) == raw_data(r.gpu.d3d.cpu_instances))
+	testing.expect(t, len(r.gpu.d3d.cpu_instances) >= n)
 	testing.expect_value(t, r.stats.instances, n)
-	testing.expect(t, r.gpu.instance_bytes >= n * size_of(render.Instance))
+	testing.expect(t, r.gpu.d3d.instance_bytes >= n * size_of(render.Instance))
 }
 
 // A minimized window gives back its buffers, shrunk to a pixel, and gets
@@ -118,16 +118,83 @@ d3d11_minimized_window_parks_its_buffers :: proc(t: ^testing.T) {
 		return
 	}
 	draw_rects(r, 10)
-	testing.expect_value(t, r.gpu.extent, [2]u32{400, 300})
+	testing.expect_value(t, r.gpu.d3d.extent, [2]u32{400, 300})
 
 	win.ShowWindow(w.hwnd, win.SW_SHOWMINNOACTIVE)
 	draw_rects(r, 10)
 	testing.expect(t, r.hidden)
-	testing.expect(t, r.gpu.parked)
-	testing.expect_value(t, r.gpu.extent, [2]u32{1, 1})
+	testing.expect(t, r.gpu.d3d.parked)
+	testing.expect_value(t, r.gpu.d3d.extent, [2]u32{1, 1})
 
 	win.ShowWindow(w.hwnd, win.SW_RESTORE)
 	draw_rects(r, 10)
-	testing.expect(t, !r.gpu.parked)
-	testing.expect_value(t, r.gpu.extent, [2]u32{400, 300})
+	testing.expect(t, !r.gpu.d3d.parked)
+	testing.expect_value(t, r.gpu.d3d.extent, [2]u32{400, 300})
+}
+
+// TIDALFAST_RENDERER picks the backend. Direct3D 11 is the default, and
+// what a name it doesn't know gets.
+@(test)
+renderer_flag_picks_the_backend :: proc(t: ^testing.T) {
+	cases := []struct {
+		name:    string,
+		backend: render.Backend,
+		known:   bool,
+	} {
+		{"", .D3D11, true},
+		{"d3d11", .D3D11, true},
+		{"vulkan", .Vulkan, true},
+		{"metal", .D3D11, false},
+	}
+	for c in cases {
+		backend, known := render.backend_from_name(c.name)
+		testing.expect_value(t, backend, c.backend)
+		testing.expect_value(t, known, c.known)
+	}
+}
+
+// Vulkan draws through the same entry points, and a minimized window, which
+// has no size for a swapchain, draws nothing and comes back when restored.
+@(test)
+vulkan_renderer_draws_and_survives_minimizing :: proc(t: ^testing.T) {
+	if win.LoadLibraryW(win.L("vulkan-1.dll")) == nil {
+		return
+	}
+	w, ok := open_test_window(t)
+	if !ok {
+		return
+	}
+	defer close_test_window(w)
+	r := new(render.Renderer, context.temp_allocator)
+	defer render.destroy(r)
+	if !testing.expect(t, render.init_backend(r, &w.surface, .Vulkan), "no Vulkan device") {
+		return
+	}
+	testing.expect_value(t, r.gpu.backend, render.Backend.Vulkan)
+	cover := render.texture_create(r, 64, 64, .RGBA8)
+	testing.expect_value(t, render.texture_size(r, cover), [2]int{64, 64})
+	testing.expect(t, render.texture_bytes(r, cover) >= 64 * 64 * 4)
+	draw_rects(r, 10)
+	testing.expect_value(t, r.stats.instances, 10)
+
+	n := render.INITIAL_INSTANCES + 100
+	draw_rects(r, n)
+	testing.expect_value(t, r.stats.instances, n)
+
+	win.ShowWindow(w.hwnd, win.SW_SHOWMINNOACTIVE)
+	for _ in 0 ..< 4 {
+		draw_rects(r, 10)
+	}
+
+	win.ShowWindow(w.hwnd, win.SW_RESTORE)
+	draw_rects(r, 20)
+	testing.expect_value(t, r.gpu.vulkan.extent.width, 400 - frame_width(w))
+	testing.expect_value(t, r.stats.instances, 20)
+}
+
+@(private = "file")
+frame_width :: proc(w: ^Test_Window) -> u32 {
+	client: win.RECT
+	win.GetClientRect(w.hwnd, &client)
+	return 400 - u32(client.right - client.left)
 }

@@ -347,7 +347,7 @@ gpu_memory :: proc(r: ^Renderer) -> Gpu_Memory {
 }
 
 @(private)
-gpu_texture_bytes :: proc(slot: ^Texture_Slot) -> int {
+gpu_texture_bytes :: proc(_: ^Renderer, slot: ^Texture_Slot) -> int {
 	return resource_bytes(slot.gpu.texture)
 }
 

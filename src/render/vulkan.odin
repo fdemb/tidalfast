@@ -1,6 +1,7 @@
-#+build linux
-// The Vulkan backend, for Linux on Wayland. The surface comes from
-// vulkan_linux.odin.
+#+build linux, windows
+// The Vulkan backend: the only one on Linux, on Wayland, and on Windows the
+// one TIDALFAST_RENDERER=vulkan picks over Direct3D 11. The surface, the
+// loader and the SPIR-V come from vulkan_linux.odin and vulkan_windows.odin.
 //
 // The same pipeline as Metal: one instanced quad per rect, the instances in
 // a storage buffer per frame slot that both shaders index, a colour and a
@@ -37,12 +38,6 @@ MAX_DEAD :: 512 // textures freed in one frame before they wait for the GPU inst
 STAGING_START :: 4 << 20
 MAX_WRITES :: 64 // images one upload holds as transfer destinations
 
-VERTEX_SPIRV :: #load("../../build/shaders/rect.vert.spv")
-FRAGMENT_SPIRV :: #load("../../build/shaders/rect.frag.spv")
-BLUR_VERTEX_SPIRV :: #load("../../build/shaders/blur.vert.spv")
-BLUR_DOWN_SPIRV :: #load("../../build/shaders/blur_down.frag.spv")
-BLUR_UP_SPIRV :: #load("../../build/shaders/blur_up.frag.spv")
-
 Gpu_Frame :: struct {
 	cmd:            vk.CommandBuffer,
 	upload:         vk.CommandBuffer,
@@ -60,7 +55,7 @@ Gpu_Frame :: struct {
 	staging_used:   int,
 	writes:         [MAX_WRITES]Image_Write,
 	write_count:    int,
-	dead:           [MAX_DEAD]Gpu_Texture,
+	dead:           [MAX_DEAD]Vulkan_Texture,
 	dead_count:     int,
 	dead_buffers:   [8]Gpu_Buffer, // staging buffers outgrown this frame
 	dead_buffer_count: int,
@@ -85,10 +80,9 @@ Gpu_Buffer :: struct {
 	allocated: int, // bytes of memory behind it, which can be more
 }
 
-BACKDROPS :: true
-
 // An image an offscreen pass draws into and later ones sample: the
 // backdrop's scene or one of the blur's levels.
+@(private = "file")
 Blur_Image :: struct {
 	image:       vk.Image,
 	view:        vk.ImageView,
@@ -98,7 +92,7 @@ Blur_Image :: struct {
 	set:         vk.DescriptorSet, // the image as a texture, for the passes that sample it
 }
 
-Gpu :: struct {
+Vulkan_Gpu :: struct {
 	instance:         vk.Instance,
 	physical:         vk.PhysicalDevice,
 	device:           vk.Device,
@@ -146,7 +140,7 @@ Gpu :: struct {
 	allocated:        int, // bytes of device memory; atomic
 }
 
-Gpu_Texture :: struct {
+Vulkan_Texture :: struct {
 	image:  vk.Image,
 	view:   vk.ImageView,
 	memory: vk.DeviceMemory,
@@ -155,13 +149,13 @@ Gpu_Texture :: struct {
 	levels: u32,
 }
 
-// init draws to surface, what the shell gave (see vulkan_surface). If it
+// vulkan_init draws to surface, what the shell gave (see vulkan_surface). If it
 // fails, it tears down what it made, so g.device is nil and the renderer
 // draws nothing.
-init :: proc(r: ^Renderer, surface: rawptr) -> (ok: bool) {
-	g := &r.gpu
+vulkan_init :: proc(r: ^Renderer, surface: rawptr) -> (ok: bool) {
+	g := &r.gpu.vulkan
 	defer if !ok {
-		release(r)
+		vulkan_release(r)
 	}
 	if !vulkan_surface_valid(surface) {
 		return false
@@ -278,7 +272,7 @@ init :: proc(r: ^Renderer, surface: rawptr) -> (ok: bool) {
 	}
 
 	// Slot 0 is the white texture behind the zero handle.
-	r.textures[0] = new_texture_slot(r, 1, 1, .RGBA8, false)
+	r.textures[0] = vulkan_new_texture_slot(r, 1, 1, .RGBA8, false)
 	if r.textures[0].width == 0 {
 		log.error("render: can't make the white texture")
 		return false
@@ -293,17 +287,17 @@ init :: proc(r: ^Renderer, surface: rawptr) -> (ok: bool) {
 	return g.pipeline != 0
 }
 
-destroy :: proc(r: ^Renderer) {
-	release(r)
+vulkan_destroy :: proc(r: ^Renderer) {
+	vulkan_release(r)
 	r^ = {}
 }
 
-// release frees the GPU objects, so g.device is nil and the renderer draws
+// vulkan_release frees the GPU objects, so g.device is nil and the renderer draws
 // nothing. It keeps the frame's counts, batches and clips, which a failed
 // submit can leave halfway, and the capture path the shell set. Each slot's
 // generation moves on, as in texture_destroy, so no old handle matches.
-release :: proc(r: ^Renderer) {
-	g := &r.gpu
+vulkan_release :: proc(r: ^Renderer) {
+	g := &r.gpu.vulkan
 	if g.device != nil {
 		vk.DeviceWaitIdle(g.device)
 		for &f in g.frames {
@@ -316,7 +310,7 @@ release :: proc(r: ^Renderer) {
 		}
 		for slot in r.textures {
 			if slot.width != 0 {
-				free_texture_now(g, slot.gpu)
+				free_texture_now(g, slot.gpu.vulkan)
 			}
 		}
 		destroy_swapchain(g)
@@ -349,7 +343,7 @@ release :: proc(r: ^Renderer) {
 		}
 		vk.DestroyInstance(g.instance, nil)
 	}
-	r.gpu = {}
+	r.gpu.vulkan = {}
 	for &slot in r.textures {
 		slot = {generation = slot.generation + 1}
 	}
@@ -357,36 +351,36 @@ release :: proc(r: ^Renderer) {
 	r.capacity = {}
 }
 
-// gpu_allocated is the device memory the renderer holds, in bytes. Safe
+// vulkan_allocated is the device memory the renderer holds, in bytes. Safe
 // from any thread.
-gpu_allocated :: proc "contextless" (r: ^Renderer) -> int {
-	return sync.atomic_load(&r.gpu.allocated)
+vulkan_allocated :: proc "contextless" (r: ^Renderer) -> int {
+	return sync.atomic_load(&r.gpu.vulkan.allocated)
 }
 
-// gpu_memory is what the renderer's own buffers take. The textures made
+// vulkan_memory is what the renderer's own buffers take. The textures made
 // with texture_create aren't in it, see texture_bytes.
-gpu_memory :: proc(r: ^Renderer) -> Gpu_Memory {
+vulkan_memory :: proc(r: ^Renderer) -> Gpu_Memory {
 	m: Gpu_Memory
-	for &f in r.gpu.frames {
+	for &f in r.gpu.vulkan.frames {
 		m.instances += f.instances.allocated
 		m.staging += f.staging.allocated + f.capture.allocated
 	}
-	m.backdrop = r.gpu.scene.size
-	for l in r.gpu.levels {
+	m.backdrop = r.gpu.vulkan.scene.size
+	for l in r.gpu.vulkan.levels {
 		m.backdrop += l.size
 	}
 	return m
 }
 
 @(private)
-gpu_texture_bytes :: proc(slot: ^Texture_Slot) -> int {
-	return slot.gpu.size
+vulkan_texture_bytes :: proc(_: ^Renderer, slot: ^Texture_Slot) -> int {
+	return slot.gpu.vulkan.size
 }
 
 // pick_device takes the first device with a queue that draws and presents
 // to the surface, a GPU before a CPU implementation such as lavapipe.
 @(private)
-pick_device :: proc(g: ^Gpu) -> bool {
+pick_device :: proc(g: ^Vulkan_Gpu) -> bool {
 	count: u32
 	vk.EnumeratePhysicalDevices(g.instance, &count, nil)
 	devices := make([]vk.PhysicalDevice, count, context.temp_allocator)
@@ -434,7 +428,7 @@ pick_device :: proc(g: ^Gpu) -> bool {
 // pick_format takes an sRGB swapchain format, so blending happens in
 // linear space. See render.odin.
 @(private)
-pick_format :: proc(g: ^Gpu) -> bool {
+pick_format :: proc(g: ^Vulkan_Gpu) -> bool {
 	count: u32
 	vk.GetPhysicalDeviceSurfaceFormatsKHR(g.physical, g.surface, &count, nil)
 	formats := make([]vk.SurfaceFormatKHR, count, context.temp_allocator)
@@ -452,7 +446,7 @@ pick_format :: proc(g: ^Gpu) -> bool {
 }
 
 @(private)
-make_render_pass :: proc(g: ^Gpu) -> bool {
+make_render_pass :: proc(g: ^Vulkan_Gpu) -> bool {
 	attachment := vk.AttachmentDescription {
 		format         = g.format,
 		samples        = {._1},
@@ -524,7 +518,7 @@ make_render_pass :: proc(g: ^Gpu) -> bool {
 }
 
 @(private)
-make_layouts :: proc(g: ^Gpu) -> bool {
+make_layouts :: proc(g: ^Vulkan_Gpu) -> bool {
 	linear := vk.SamplerCreateInfo {
 		sType        = .SAMPLER_CREATE_INFO,
 		magFilter    = .LINEAR,
@@ -593,8 +587,8 @@ make_layouts :: proc(g: ^Gpu) -> bool {
 // With blend, the fragment shader's premultiplied colour goes over what's
 // there; without, it replaces it.
 @(private)
-build_pipeline :: proc(g: ^Gpu, vertex, fragment: []byte, layout: vk.PipelineLayout, render_pass: vk.RenderPass, topology: vk.PrimitiveTopology, blend: bool) -> vk.Pipeline {
-	module :: proc(g: ^Gpu, spirv: []byte) -> vk.ShaderModule {
+build_pipeline :: proc(g: ^Vulkan_Gpu, vertex, fragment: []byte, layout: vk.PipelineLayout, render_pass: vk.RenderPass, topology: vk.PrimitiveTopology, blend: bool) -> vk.Pipeline {
+	module :: proc(g: ^Vulkan_Gpu, spirv: []byte) -> vk.ShaderModule {
 		// #load data has no alignment; SPIR-V is read as u32s.
 		words := make([]u32, (len(spirv) + 3) / 4, context.temp_allocator)
 		mem.copy(raw_data(words), raw_data(spirv), len(spirv))
@@ -690,7 +684,7 @@ build_pipeline :: proc(g: ^Gpu, vertex, fragment: []byte, layout: vk.PipelineLay
 // Memory
 
 @(private)
-memory_type :: proc(g: ^Gpu, bits: u32, want: vk.MemoryPropertyFlags) -> (u32, bool) {
+memory_type :: proc(g: ^Vulkan_Gpu, bits: u32, want: vk.MemoryPropertyFlags) -> (u32, bool) {
 	for i in 0 ..< g.memory.memoryTypeCount {
 		if bits & (1 << i) != 0 && want <= g.memory.memoryTypes[i].propertyFlags {
 			return i, true
@@ -700,7 +694,7 @@ memory_type :: proc(g: ^Gpu, bits: u32, want: vk.MemoryPropertyFlags) -> (u32, b
 }
 
 @(private)
-allocate :: proc(g: ^Gpu, req: vk.MemoryRequirements, want: vk.MemoryPropertyFlags) -> vk.DeviceMemory {
+allocate :: proc(g: ^Vulkan_Gpu, req: vk.MemoryRequirements, want: vk.MemoryPropertyFlags) -> vk.DeviceMemory {
 	index, ok := memory_type(g, req.memoryTypeBits, want)
 	if !ok && .DEVICE_LOCAL in want {
 		index, ok = memory_type(g, req.memoryTypeBits, want - {.DEVICE_LOCAL})
@@ -722,7 +716,7 @@ allocate :: proc(g: ^Gpu, req: vk.MemoryRequirements, want: vk.MemoryPropertyFla
 }
 
 @(private)
-free_memory :: proc(g: ^Gpu, m: vk.DeviceMemory, size: int) {
+free_memory :: proc(g: ^Vulkan_Gpu, m: vk.DeviceMemory, size: int) {
 	if m != 0 {
 		vk.FreeMemory(g.device, m, nil)
 		sync.atomic_sub(&g.allocated, size)
@@ -731,7 +725,7 @@ free_memory :: proc(g: ^Gpu, m: vk.DeviceMemory, size: int) {
 
 // new_buffer makes a host-visible, coherent buffer, mapped for good.
 @(private)
-new_buffer :: proc(g: ^Gpu, size: int, usage: vk.BufferUsageFlags) -> (b: Gpu_Buffer, ok: bool) {
+new_buffer :: proc(g: ^Vulkan_Gpu, size: int, usage: vk.BufferUsageFlags) -> (b: Gpu_Buffer, ok: bool) {
 	info := vk.BufferCreateInfo {
 		sType       = .BUFFER_CREATE_INFO,
 		size        = vk.DeviceSize(size),
@@ -758,7 +752,7 @@ new_buffer :: proc(g: ^Gpu, size: int, usage: vk.BufferUsageFlags) -> (b: Gpu_Bu
 }
 
 @(private)
-free_buffer :: proc(g: ^Gpu, b: ^Gpu_Buffer) {
+free_buffer :: proc(g: ^Vulkan_Gpu, b: ^Gpu_Buffer) {
 	if b.buffer != 0 {
 		vk.DestroyBuffer(g.device, b.buffer, nil)
 		free_memory(g, b.memory, b.allocated)
@@ -773,7 +767,7 @@ free_buffer :: proc(g: ^Gpu, b: ^Gpu_Buffer) {
 // over. Once per submit; later calls return at once.
 @(private)
 slot_ready :: proc(r: ^Renderer) -> ^Gpu_Frame {
-	g := &r.gpu
+	g := &r.gpu.vulkan
 	f := &g.frames[r.frame_index % FRAMES_IN_FLIGHT]
 	if f.ready {
 		return f
@@ -797,7 +791,7 @@ flush_slot :: proc(r: ^Renderer) -> ^Gpu_Frame {
 		return nil
 	}
 	wait := time.tick_now()
-	vk.DeviceWaitIdle(r.gpu.device)
+	vk.DeviceWaitIdle(r.gpu.vulkan.device)
 	f.wait_ms += f32(time.duration_milliseconds(time.tick_since(wait)))
 	f.ready = true
 	free_dead(r, f)
@@ -808,7 +802,7 @@ flush_slot :: proc(r: ^Renderer) -> ^Gpu_Frame {
 // empties its staging buffer.
 @(private)
 free_dead :: proc(r: ^Renderer, f: ^Gpu_Frame) {
-	g := &r.gpu
+	g := &r.gpu.vulkan
 	for t in f.dead[:f.dead_count] {
 		free_texture_now(g, t)
 	}
@@ -854,7 +848,7 @@ upload_cmd :: proc(r: ^Renderer) -> vk.CommandBuffer {
 // for it there, flush_slot runs those copies first.
 @(private)
 stage :: proc(r: ^Renderer, bytes: []byte) -> (buffer: vk.Buffer, offset: int, ok: bool) {
-	g := &r.gpu
+	g := &r.gpu.vulkan
 	f := slot_ready(r)
 	at := mem.align_forward_int(f.staging_used, 16)
 	if at + len(bytes) > f.staging.size && f.staging_used > 0 && f.dead_buffer_count == len(f.dead_buffers) {
@@ -904,11 +898,11 @@ image_barrier :: proc(cmd: vk.CommandBuffer, image: vk.Image, from, to: vk.Image
 	vk.CmdPipelineBarrier(cmd, src_stage, dst_stage, {}, 0, nil, 0, nil, 1, &barrier)
 }
 
-// new_texture_slot returns a zero slot if Vulkan can't make the texture.
+// vulkan_new_texture_slot returns a zero slot if Vulkan can't make the texture.
 // The image starts out ready to sample, with undefined contents.
 @(private)
-new_texture_slot :: proc(r: ^Renderer, width, height: int, format: Texture_Format, mipmapped: bool) -> Texture_Slot {
-	g := &r.gpu
+vulkan_new_texture_slot :: proc(r: ^Renderer, width, height: int, format: Texture_Format, mipmapped: bool) -> Texture_Slot {
+	g := &r.gpu.vulkan
 	if g.device == nil {
 		return {}
 	}
@@ -925,7 +919,7 @@ new_texture_slot :: proc(r: ^Renderer, width, height: int, format: Texture_Forma
 	if mipmapped {
 		levels = u32(math.floor(math.log2(f32(max(width, height))))) + 1
 	}
-	t: Gpu_Texture
+	t: Vulkan_Texture
 	t.levels = levels
 	info := vk.ImageCreateInfo {
 		sType         = .IMAGE_CREATE_INFO,
@@ -987,14 +981,14 @@ new_texture_slot :: proc(r: ^Renderer, width, height: int, format: Texture_Forma
 	}
 	vk.UpdateDescriptorSets(g.device, 1, &write, 0, nil)
 	image_barrier(upload_cmd(r), t.image, .UNDEFINED, .SHADER_READ_ONLY_OPTIMAL, 0, levels, {.TOP_OF_PIPE}, {.FRAGMENT_SHADER}, {}, {.SHADER_READ})
-	return {gpu = t, width = i32(width), height = i32(height), format = format, mipmapped = mipmapped}
+	return {gpu = {vulkan = t}, width = i32(width), height = i32(height), format = format, mipmapped = mipmapped}
 }
 
-// gpu_texture_free frees the texture once the frames that may sample it
+// vulkan_texture_free frees the texture once the frames that may sample it
 // are done.
 @(private)
-gpu_texture_free :: proc(r: ^Renderer, t: Gpu_Texture) {
-	if r.gpu.device == nil {
+vulkan_texture_free :: proc(r: ^Renderer, t: Gpu_Texture) {
+	if r.gpu.vulkan.device == nil {
 		return
 	}
 	f := slot_ready(r)
@@ -1004,12 +998,12 @@ gpu_texture_free :: proc(r: ^Renderer, t: Gpu_Texture) {
 			return
 		}
 	}
-	f.dead[f.dead_count] = t
+	f.dead[f.dead_count] = t.vulkan
 	f.dead_count += 1
 }
 
-@(private)
-free_texture_now :: proc(g: ^Gpu, t: Gpu_Texture) {
+@(private = "file")
+free_texture_now :: proc(g: ^Vulkan_Gpu, t: Vulkan_Texture) {
 	if t.set != 0 {
 		set := t.set
 		vk.FreeDescriptorSets(g.device, g.descriptors, 1, &set)
@@ -1023,18 +1017,18 @@ free_texture_now :: proc(g: ^Gpu, t: Gpu_Texture) {
 	free_memory(g, t.memory, t.size)
 }
 
-// gpu_texture_write queues a copy of the pixels into the texture ahead of
+// vulkan_texture_write queues a copy of the pixels into the texture ahead of
 // the next frame. The mips, if it has them, are made again once the
 // upload's writes to it end.
 @(private)
-gpu_texture_write :: proc(r: ^Renderer, slot: ^Texture_Slot, pixels: []byte, x, y, w, h, bpp: int) {
-	if r.gpu.device == nil {
+vulkan_texture_write :: proc(r: ^Renderer, slot: ^Texture_Slot, pixels: []byte, x, y, w, h, bpp: int) {
+	if r.gpu.vulkan.device == nil {
 		return
 	}
 	buffer, offset, ok := stage(r, pixels[:w * h * bpp])
 	if !ok {
 		// A failed flush in stage released the renderer and logged it.
-		if r.gpu.device != nil {
+		if r.gpu.vulkan.device != nil {
 			log.error("render: out of staging memory")
 		}
 		return
@@ -1074,7 +1068,7 @@ write_region :: proc(written: ^[4]i32, region: [4]i32) -> (overlaps: bool) {
 write_target :: proc(r: ^Renderer, slot: ^Texture_Slot) -> ^Image_Write {
 	cmd := upload_cmd(r)
 	f := slot_ready(r)
-	t := slot.gpu
+	t := slot.gpu.vulkan
 	for &w in f.writes[:f.write_count] {
 		if w.image == t.image {
 			return &w
@@ -1130,12 +1124,12 @@ generate_mips :: proc(cmd: vk.CommandBuffer, t: Image_Write) {
 }
 
 @(private)
-gpu_texture_copy :: proc(r: ^Renderer, from, to: ^Texture_Slot, w, h: int) {
-	if r.gpu.device == nil {
+vulkan_texture_copy :: proc(r: ^Renderer, from, to: ^Texture_Slot, w, h: int) {
+	if r.gpu.vulkan.device == nil {
 		return
 	}
 	cmd := upload_cmd(r)
-	src, dst := from.gpu.image, to.gpu.image
+	src, dst := from.gpu.vulkan.image, to.gpu.vulkan.image
 	// Both images must be ready to sample, as the barriers below expect.
 	f := slot_ready(r)
 	for i := 0; i < f.write_count; {
@@ -1161,11 +1155,11 @@ gpu_texture_copy :: proc(r: ^Renderer, from, to: ^Texture_Slot, w, h: int) {
 
 // Frame
 
-// gpu_frame_begin waits until the GPU is done with this frame's slot and
+// vulkan_frame_begin waits until the GPU is done with this frame's slot and
 // returns its instance buffer, or nil if there is none.
 @(private)
-gpu_frame_begin :: proc(r: ^Renderer) -> [^]Instance {
-	if r.gpu.device == nil {
+vulkan_frame_begin :: proc(r: ^Renderer) -> [^]Instance {
+	if r.gpu.vulkan.device == nil {
 		return nil
 	}
 	f := slot_ready(r)
@@ -1178,26 +1172,26 @@ gpu_frame_begin :: proc(r: ^Renderer) -> [^]Instance {
 	return ([^]Instance)(f.instances.mapped)
 }
 
-// grow_instances replaces the current slot's buffer with one twice the
+// vulkan_grow_instances replaces the current slot's buffer with one twice the
 // size and copies over what this frame has pushed so far. Nothing has read
 // this frame's buffer yet, so the old one can go at once. If there's no
 // memory for it, the old buffer and capacity stay.
 @(private)
-grow_instances :: proc(r: ^Renderer) {
-	f := &r.gpu.frames[r.slot]
+vulkan_grow_instances :: proc(r: ^Renderer) {
+	f := &r.gpu.vulkan.frames[r.slot]
 	old := f.instances
 	set_instance_buffer(r, f, r.capacity[r.slot] * 2)
 	if f.instances.buffer == old.buffer {
 		return
 	}
 	mem.copy(f.instances.mapped, old.mapped, r.instance_count * size_of(Instance))
-	free_buffer(&r.gpu, &old)
+	free_buffer(&r.gpu.vulkan, &old)
 	r.instances = ([^]Instance)(f.instances.mapped)
 }
 
-@(private)
+@(private = "file")
 set_instance_buffer :: proc(r: ^Renderer, f: ^Gpu_Frame, capacity: int) {
-	g := &r.gpu
+	g := &r.gpu.vulkan
 	b, ok := new_buffer(g, capacity * size_of(Instance), {.STORAGE_BUFFER})
 	if !ok {
 		log.error("render: out of memory for instances")
@@ -1221,7 +1215,7 @@ set_instance_buffer :: proc(r: ^Renderer, f: ^Gpu_Frame, capacity: int) {
 }
 
 @(private)
-destroy_swapchain :: proc(g: ^Gpu) {
+destroy_swapchain :: proc(g: ^Vulkan_Gpu) {
 	for i in 0 ..< g.image_count {
 		vk.DestroyFramebuffer(g.device, g.framebuffers[i], nil)
 		vk.DestroyImageView(g.device, g.views[i], nil)
@@ -1231,16 +1225,23 @@ destroy_swapchain :: proc(g: ^Gpu) {
 }
 
 // make_swapchain makes the swapchain at width by height pixels, in place
-// of the old one. Wayland lets the client pick the size. Mailbox when the
-// driver has it, so a present never blocks and the shell's frame callbacks
-// pace animation; FIFO otherwise.
-@(private)
+// of the old one. Wayland lets the client pick the size; Windows doesn't.
+// With VULKAN_MAILBOX it's mailbox when the driver has it, so a present
+// never blocks, and on Linux the shell's frame callbacks pace animation; FIFO
+// otherwise. A minimized window on Windows has no size, and no swapchain
+// until it has one again.
+@(private = "file")
 make_swapchain :: proc(r: ^Renderer, width, height: u32) -> bool {
-	g := &r.gpu
+	g := &r.gpu.vulkan
 	vk.DeviceWaitIdle(g.device)
 	destroy_swapchain(g)
 	caps: vk.SurfaceCapabilitiesKHR
 	vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(g.physical, g.surface, &caps)
+	if caps.currentExtent.width == 0 || caps.currentExtent.height == 0 {
+		vk.DestroySwapchainKHR(g.device, g.swapchain, nil)
+		g.swapchain = 0
+		return false
+	}
 	extent := vk.Extent2D{width, height}
 	if caps.currentExtent.width != max(u32) {
 		extent = caps.currentExtent
@@ -1254,7 +1255,7 @@ make_swapchain :: proc(r: ^Renderer, width, height: u32) -> bool {
 	vk.GetPhysicalDeviceSurfacePresentModesKHR(g.physical, g.surface, &count, raw_data(modes))
 	mode := vk.PresentModeKHR.FIFO
 	for m in modes {
-		if m == .MAILBOX {
+		if VULKAN_MAILBOX && m == .MAILBOX {
 			mode = .MAILBOX
 		}
 	}
@@ -1335,10 +1336,10 @@ make_swapchain :: proc(r: ^Renderer, width, height: u32) -> bool {
 	return true
 }
 
-// end_frame records the frame and presents it, after the uploads queued
+// vulkan_end_frame records the frame and presents it, after the uploads queued
 // since the last one.
-end_frame :: proc(r: ^Renderer) {
-	g := &r.gpu
+vulkan_end_frame :: proc(r: ^Renderer) {
+	g := &r.gpu.vulkan
 	// Counts frames that drew nothing too, so frame_index - FRAMES_IN_FLIGHT
 	// is always a frame the GPU has finished once begin_frame returns.
 	defer r.frame_index += 1
@@ -1366,7 +1367,7 @@ end_frame :: proc(r: ^Renderer) {
 	cmd := f.cmd
 	vk.BeginCommandBuffer(cmd, &begin)
 	draw_calls := 0
-	blurred := r.textures[0].gpu.set
+	blurred := r.textures[0].gpu.vulkan.set
 	if r.backdrop.batch >= 0 {
 		set, calls := encode_backdrop(r, cmd, f)
 		draw_calls += calls
@@ -1454,9 +1455,9 @@ clear_value :: proc(r: ^Renderer) -> vk.ClearValue {
 // drawable's pixels. origin is the target's
 // origin in the drawable and the drawable pixels per target pixel, and
 // backdrop the blurred texture's set. Returns the draw calls.
-@(private)
+@(private = "file")
 draw_batches :: proc(r: ^Renderer, cmd: vk.CommandBuffer, f: ^Gpu_Frame, pipeline: vk.Pipeline, batches: []Batch, size: vk.Extent2D, target, origin: [4]f32, backdrop: vk.DescriptorSet) -> int {
-	g := &r.gpu
+	g := &r.gpu.vulkan
 	if r.instance_count == 0 {
 		return 0
 	}
@@ -1478,7 +1479,7 @@ draw_batches :: proc(r: ^Renderer, cmd: vk.CommandBuffer, f: ^Gpu_Frame, pipelin
 		}
 		for t, index in b.textures {
 			slot := texture_slot(r, t)
-			set := slot.gpu.set if slot != nil else r.textures[0].gpu.set
+			set := slot.gpu.vulkan.set if slot != nil else r.textures[0].gpu.vulkan.set
 			if set != bound[index] {
 				vk.CmdBindDescriptorSets(cmd, .GRAPHICS, g.pipeline_layout, u32(1 + index), 1, &set, 0, nil)
 				bound[index] = set
@@ -1495,9 +1496,9 @@ draw_batches :: proc(r: ^Renderer, cmd: vk.CommandBuffer, f: ^Gpu_Frame, pipelin
 // the set of the level the backdrop samples and the draw calls it took.
 // When what the blur reads hasn't changed since it last ran, it returns
 // that blur as it is and records nothing. 0 if there's no blur to sample.
-@(private)
+@(private = "file")
 encode_backdrop :: proc(r: ^Renderer, cmd: vk.CommandBuffer, f: ^Gpu_Frame) -> (blurred: vk.DescriptorSet, draw_calls: int) {
-	g := &r.gpu
+	g := &r.gpu.vulkan
 	bd := r.backdrop
 	w, h := int(bd.region.z - bd.region.x), int(bd.region.w - bd.region.y)
 	if g.scene_pipeline == 0 || g.blur_down == 0 || g.blur_up == 0 || !backdrop_textures(r, w, h) {
@@ -1521,7 +1522,7 @@ encode_backdrop :: proc(r: ^Renderer, cmd: vk.CommandBuffer, f: ^Gpu_Frame) -> (
 	scale := [2]f32{f32(w) / f32(scene.x), f32(h) / f32(scene.y)}
 	target := [4]f32{bd.region.x, bd.region.y, f32(w), f32(h)}
 	origin := [4]f32{bd.region.x, bd.region.y, scale.x, scale.y}
-	draw_calls = draw_batches(r, cmd, f, g.scene_pipeline, r.batches[:bd.batch], extent, target, origin, r.textures[0].gpu.set)
+	draw_calls = draw_batches(r, cmd, f, g.scene_pipeline, r.batches[:bd.batch], extent, target, origin, r.textures[0].gpu.vulkan.set)
 	vk.CmdEndRenderPass(cmd)
 
 	// Drawing the scene at half size was the first halving.
@@ -1539,9 +1540,9 @@ encode_backdrop :: proc(r: ^Renderer, cmd: vk.CommandBuffer, f: ^Gpu_Frame) -> (
 
 // blur_pass records one pass of the dual filter from src, src_size texels,
 // into dst, dst_size texels.
-@(private)
+@(private = "file")
 blur_pass :: proc(r: ^Renderer, cmd: vk.CommandBuffer, f: ^Gpu_Frame, pipeline: vk.Pipeline, src, dst: Blur_Image, src_size, dst_size: [2]int) {
-	g := &r.gpu
+	g := &r.gpu.vulkan
 	extent := vk.Extent2D{u32(dst_size.x), u32(dst_size.y)}
 	pass := vk.RenderPassBeginInfo {
 		sType       = .RENDER_PASS_BEGIN_INFO,
@@ -1565,9 +1566,9 @@ blur_pass :: proc(r: ^Renderer, cmd: vk.CommandBuffer, f: ^Gpu_Frame, pipeline: 
 
 // backdrop_textures makes the scene image for a region w by h pixels and
 // the levels under it, unless they're that size already.
-@(private)
+@(private = "file")
 backdrop_textures :: proc(r: ^Renderer, w, h: int) -> bool {
-	g := &r.gpu
+	g := &r.gpu.vulkan
 	if g.scene.image != 0 && g.region_size == {w, h} {
 		return true
 	}
@@ -1599,8 +1600,8 @@ backdrop_textures :: proc(r: ^Renderer, w, h: int) -> bool {
 
 // make_blur_image makes an image that render_pass draws into and the
 // passes after it sample.
-@(private)
-make_blur_image :: proc(g: ^Gpu, b: ^Blur_Image, format: vk.Format, render_pass: vk.RenderPass, size: [2]int) -> bool {
+@(private = "file")
+make_blur_image :: proc(g: ^Vulkan_Gpu, b: ^Blur_Image, format: vk.Format, render_pass: vk.RenderPass, size: [2]int) -> bool {
 	info := vk.ImageCreateInfo {
 		sType         = .IMAGE_CREATE_INFO,
 		imageType     = .D2,
@@ -1676,8 +1677,8 @@ make_blur_image :: proc(g: ^Gpu, b: ^Blur_Image, format: vk.Format, render_pass:
 }
 
 // free_blur_image frees what make_blur_image made of b, at once.
-@(private)
-free_blur_image :: proc(g: ^Gpu, b: ^Blur_Image) {
+@(private = "file")
+free_blur_image :: proc(g: ^Vulkan_Gpu, b: ^Blur_Image) {
 	if b.set != 0 {
 		vk.FreeDescriptorSets(g.device, g.descriptors, 1, &b.set)
 	}
@@ -1698,7 +1699,7 @@ free_blur_image :: proc(g: ^Gpu, b: ^Blur_Image) {
 // window of want pixels. It compares with the size last asked for, not the
 // extent the surface clamped it to, so a clamped size doesn't remake it on
 // every frame.
-swapchain_stale :: proc(g: ^Gpu, want: vk.Extent2D) -> bool {
+swapchain_stale :: proc(g: ^Vulkan_Gpu, want: vk.Extent2D) -> bool {
 	return g.swapchain == 0 || g.requested != want
 }
 
@@ -1706,7 +1707,7 @@ swapchain_stale :: proc(g: ^Gpu, want: vk.Extent2D) -> bool {
 // it's out of date. max(u32) if there is none to draw to.
 @(private)
 acquire :: proc(r: ^Renderer, f: ^Gpu_Frame, want: vk.Extent2D) -> u32 {
-	g := &r.gpu
+	g := &r.gpu.vulkan
 	for _ in 0 ..< 2 {
 		if g.swapchain == 0 {
 			return max(u32)
@@ -1749,11 +1750,11 @@ submit_uploads :: proc(r: ^Renderer, f: ^Gpu_Frame) -> bool {
 // lost, so the renderer stops and draws nothing from then on.
 @(private)
 submit :: proc(r: ^Renderer, f: ^Gpu_Frame, info: ^vk.SubmitInfo) -> bool {
-	g := &r.gpu
+	g := &r.gpu.vulkan
 	vk.ResetFences(g.device, 1, &f.fence)
 	if res := vk.QueueSubmit(g.queue, 1, info, f.fence); res != .SUCCESS {
 		log.errorf("render: vkQueueSubmit failed, drawing nothing from now on: %v", res)
-		release(r)
+		vulkan_release(r)
 		return false
 	}
 	f.ready = false
@@ -1764,7 +1765,7 @@ submit :: proc(r: ^Renderer, f: ^Gpu_Frame, info: ^vk.SubmitInfo) -> bool {
 // render pass, and puts it back for presenting.
 @(private)
 record_capture :: proc(r: ^Renderer, cmd: vk.CommandBuffer, image: u32) -> Gpu_Buffer {
-	g := &r.gpu
+	g := &r.gpu.vulkan
 	w, h := g.extent.width, g.extent.height
 	buf, ok := new_buffer(g, int(w * h * 4), {.TRANSFER_DST})
 	if !ok {
