@@ -8,16 +8,13 @@ TIDALfast is written in Odin. A small shell owns the window and talks to the OS:
 ./build.py              # debug: build/tidalfast
 ./build.py release      # optimized
 ./build.py dist         # TIDALfast.app and a .dmg on macOS, an AppImage on Linux
+./build.py test         # what the tests link, then odin test tests
 ./build/tidalfast
 ```
 
-It needs macOS 14 or later, Odin, Python 3 and the Xcode command line tools. Linux needs a few packages first; see [docs/linux.md](docs/linux.md). Run `./build.py` once before `odin test tests`. `TIDALFAST_FAKE=1` runs the app on fake data without an account. The environment variables, keys and the patches to kb_text_shape are in [docs/building.md](docs/building.md).
+It needs macOS 14 or later, Odin, Python 3 and the Xcode command line tools. Linux needs a few packages first; see [docs/linux.md](docs/linux.md). `TIDALFAST_FAKE=1` runs the app on fake data without an account. The environment variables, keys and the patches to kb_text_shape are in [docs/building.md](docs/building.md).
 
-Keep `./build.py` clean with `-vet -strict-style`. Per-OS code lives in `_darwin.odin` and `_linux.odin` files, so after touching shared code, type-check the other OS too:
-
-```
-odin check src/app -no-entry-point -vet -strict-style -target:linux_amd64
-```
+Keep `./build.py` clean with `-vet -strict-style`. Per-OS code lives in `_darwin.odin`, `_linux.odin` and `_windows.odin` files. CI builds and tests all three on every push and pull request, so a branch shows whether shared code still builds on the other systems.
 
 ## Layout
 

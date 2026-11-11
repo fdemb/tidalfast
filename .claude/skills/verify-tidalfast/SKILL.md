@@ -11,7 +11,7 @@ Read `AGENTS.md` at the repo root first. Its "Things that hurt the user" section
 
 ```
 V=.claude/skills/verify-tidalfast/verify.sh
-$V build                        # app and mock into /tmp/tidalfast-verify/bin
+$V build                        # app and mock into /tmp/tidalfast-verify/build
 $V doctor                       # is this setup worth driving?
 $V search "Jóga"                # the search proof at 1100, 820 and 1600 pt, fake data
 $V mock-start                   # then the same against the mock server:
@@ -22,7 +22,7 @@ $V cleanup                      # stop what we started, delete the test keychain
 
 ## Launch
 
-`$V build` compiles `shell/shell.m`, `src/app` and `tests/mock_tidal` into `/tmp/tidalfast-verify/bin`. It never writes `build/tidalfast`, so the user's next launch doesn't run your work and keeps its Keychain signature. The app is optimized with `-define:TIDALFAST_MOCK_API=true`, as `./build.py measure` does, so it honours `TIDALFAST_API` and `TIDALFAST_PKCE_REDIRECT`. A build takes about 40 s. Rebuild after every source change; `doctor` fails when `src/` or `shell/` is newer than the build.
+`$V build` runs `./build.py measure --out /tmp/tidalfast-verify/build`, which builds the app, `tests/mock_tidal` and the measure tool there. It never writes `build/tidalfast`, so the user's next launch doesn't run your work and keeps its Keychain signature. The app is optimized with `-define:TIDALFAST_MOCK_API=true`, as `./build.py measure` does, so it honours `TIDALFAST_API` and `TIDALFAST_PKCE_REDIRECT`. A build takes about 40 s. Rebuild after every source change; `doctor` fails when `src/` or `shell/` is newer than the build.
 
 There are two data modes:
 
@@ -87,7 +87,7 @@ A proof follows these rules:
 
 ## Cleanup
 
-`$V cleanup` kills the app and mock it recorded, by PID and only if they run from `/tmp/tidalfast-verify/bin`. It deletes every `tidalfast-verify-*` keychain item it created, then removes `/tmp/tidalfast-verify/run`. It keeps `bin/` (`$V cleanup --bin` removes it too) and never touches `evidence/`. Run it after every session, and after any failed run before you retry.
+`$V cleanup` kills the app and mock it recorded, by PID and only if they run from `/tmp/tidalfast-verify/build`. It deletes every `tidalfast-verify-*` keychain item it created, then removes `/tmp/tidalfast-verify/run`. It keeps `build/` (`$V cleanup --bin` removes it too) and never touches `evidence/`. Run it after every session, and after any failed run before you retry.
 
 Never `pkill tidalfast`. The user may have the real app open.
 
@@ -101,6 +101,6 @@ Never `pkill tidalfast`. The user may have the real app open.
 
 ## Limits
 
-- `verify.sh` is macOS only. On Linux, run the Wayland shell under headless weston as `docs/linux.md` shows. Its shell test steps include `size=` too.
+- `verify.sh` is macOS only.
 - Without AeroSpace, `float_window` does nothing and `size=` works as is. Another tiling window manager needs its own float command in `float_window`.
 - The window can be larger than the screen. macOS still renders and captures it.

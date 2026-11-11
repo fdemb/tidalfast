@@ -1,3 +1,4 @@
 build/
 *.dSYM/
 tests.bin
+__pycache__/

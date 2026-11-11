@@ -7,7 +7,7 @@
 ./build/measure/measure all         # both
 ./build/measure/measure frames      # frame rate and frame times, scrolling the fake data, 3 runs
 ./build/measure/measure compare a.json b.json
-./build/measure/measure ab /tmp/a build/measure/app/tidalfast   # two builds, taking turns
+./build/measure/measure ab /tmp/a/measure/app/tidalfast build/measure/app/tidalfast   # two builds, taking turns
 ./build/measure/measure launches     # your own launches, from the app's launch log
 ./build/measure/measure html         # the app's memory snapshots as a page
 ```
@@ -34,12 +34,12 @@ The window has to be on screen and the Mac awake: a covered window parks its dra
 
 Times measured on different days don't compare. On 17 October a commit measured again came out 50 ms (fake) and 109 ms (mock) slower to `tracks` than two days before. The code was the same; the machine wasn't. Load, heat and background work such as Spotlight, Photos analysis and XProtect's scans move startup by tens of percent.
 
-`measure ab <app a> <app b>` measures two builds against each other in one sitting. How they are built is up to you. With the mock setup both have to be measure builds, since only those take `TIDALFAST_API`. For a change against the code before it, build the measure app on each side and keep a copy of the first:
+`measure ab <app a> <app b>` measures two builds against each other in one sitting. How they are built is up to you. With the mock setup both have to be measure builds, since only those take `TIDALFAST_API`. For a change against the code before it, build that code with `--out`, which leaves `build/` alone:
 
 ```
-git stash && ./build.py measure && cp build/measure/app/tidalfast /tmp/a && git stash pop
+git stash && ./build.py measure --out /tmp/a && git stash pop
 ./build.py measure
-./build/measure/measure ab /tmp/a build/measure/app/tidalfast
+./build/measure/measure ab /tmp/a/measure/app/tidalfast build/measure/app/tidalfast
 ```
 
 The two take turns, a then b, then b then a, so whatever the machine does during the run weighs on both. Each build has its own settings, list cache, Keychain item and mock, both started from `build/measure/mock_tidal`. A shared mock keeps one refresh token per user, so each build's login would end the other's. Flags are the same as `startup`'s, apart from `-app`. With the fake data the frames scenario runs three times each, taking turns, compared by its medians and marked as `compare` marks. With `-memory` the memory scenario also runs once each after the startup runs.
