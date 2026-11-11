@@ -7,7 +7,7 @@ setlocal EnableDelayedExpansion
 cd /d "%~dp0\.."
 for /f "delims=" %%r in ('odin root') do set root=%%r
 set made=
-for %%l in (build\dr_flac\dr_flac.a build\kbts\kb_text_shape.a build\miniaudio\miniaudio.a) do call :stub "%%l"
+for %%l in (build\dr_flac\dr_flac.a build\kbts\kb_text_shape.a) do call :stub "%%l"
 for %%l in (stb_image stb_image_write stb_image_resize stb_rect_pack) do (
 	call :stub "!root!vendor\stb\lib\%%l.a"
 	call :stub "!root!vendor\stb\lib\darwin\%%l.a"

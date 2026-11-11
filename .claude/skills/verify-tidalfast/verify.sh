@@ -31,7 +31,7 @@ newest_source() {
 cmd_build() {
 	mkdir -p "$BIN"
 	cd "$REPO" || die "no repo at $REPO"
-	# The app links the C libraries in build/kbts and build/miniaudio.
+	# The app links the C libraries in build/kbts and build/dr_flac.
 	./build.sh libs || die "C library build failed"
 	echo "verify: building shell"
 	clang -c shell/shell.m -o "$BIN/shell.o" -fobjc-arc -mmacosx-version-min=14.0 \

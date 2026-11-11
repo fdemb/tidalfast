@@ -119,7 +119,6 @@ if [ "$target_os" = windows ]; then
 		fi
 	}
 	win_lib kbts kb_text_shape
-	win_lib miniaudio miniaudio
 	win_lib dr_flac dr_flac
 
 	# FreeType 2.13.3, with the modules and options in third_party/freetype.
@@ -171,7 +170,6 @@ if [ "$target_os" = windows ]; then
 fi
 
 c_lib kbts kb_text_shape
-c_lib miniaudio miniaudio
 c_lib dr_flac dr_flac
 [ "$target" = libs ] && exit 0
 

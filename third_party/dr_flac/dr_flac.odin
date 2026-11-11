@@ -1,7 +1,6 @@
 // Bindings for the dr_flac procedures the app uses. dr_flac.h next to this
-// file is dr_flac 0.13.3 from github.com/mackron/dr_libs (commit 69d777c),
-// the same release miniaudio 0.11.24 bundled. build.sh compiles it from
-// dr_flac.c, without stdio and Ogg.
+// file is dr_flac 0.13.3 from github.com/mackron/dr_libs (commit 69d777c).
+// build.sh compiles it from dr_flac.c, without stdio and Ogg.
 package dr_flac
 
 import "core:c"

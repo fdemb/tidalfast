@@ -29,14 +29,15 @@ package audio
 // initialization segment, then the frames from each fragment
 // (fmp4.odin). A seek starts again at the segment holding the target.
 //
-// Output goes through miniaudio, which plays at whatever rate the device
-// runs at and converts. In bit-perfect mode it goes to the CoreAudio HAL on
-// macOS (bitperfect_darwin.odin) or a PipeWire stream on Linux
-// (bitperfect_linux.odin) instead: the device is switched to the track's
-// rate, ReplayGain and the volume are skipped, and the samples reach the
-// device as they were decoded. A rate change between tracks lets the ring play
-// out, re-clocks the device and starts again: a short gap. Tracks at the
-// same rate stay gapless.
+// Output goes through the system's mixer, as floats at the track's rate,
+// and the system converts to whatever rate the device runs at: the default
+// output AudioUnit on macOS, a PipeWire stream on Linux, WASAPI's shared
+// mode on Windows (mixer_open in bitperfect_<os>.odin). In bit-perfect mode
+// the same file takes the device itself instead (hal_configure): the device
+// is switched to the track's rate, ReplayGain and the volume are skipped,
+// and the samples reach the device as they were decoded. A rate change
+// between tracks lets the ring play out, re-clocks the device and starts
+// again: a short gap. Tracks at the same rate stay gapless.
 
 import "base:intrinsics"
 import "base:runtime"
@@ -52,7 +53,6 @@ import "core:os"
 import "core:sync"
 import "core:time"
 import drflac "../../third_party/dr_flac"
-import ma "../../third_party/miniaudio"
 
 import "../sys"
 
@@ -188,6 +188,7 @@ Device_Watch :: struct {
 	default_changed: bool, // the system's default output changed (atomic)
 	lost_for_test:   bool, // simulate_device_loss (atomic)
 	taken_for_test:  int, // simulate_device_taken's rate (atomic)
+	os:              rawptr, // watch_default_output's own, for unwatch_default_output
 }
 
 Error_Info :: struct {
@@ -278,18 +279,17 @@ Player :: struct {
 	pending_next:    Source_Copy, // a set_next that waits for the tail to finish
 	has_pending:     bool,
 	paused:          bool,
-	device:          ^ma.device,
-	null_output:     bool, // miniaudio's null backend: real-time callbacks, no sound
-	null_ctx:        ^ma.context_type, // for null_output
+	null_output:     bool, // the null device: real-time callbacks, no sound
+	null:            Null_Output,
 	output:          Output,
 	hal:             Hal,
 	hal_scratch:     []f32, // for devices whose buffers don't match the ring's layout
 	watch:           ^Device_Watch, // heap, never freed
 	watching_hal:    bool, // watch_device is on for hal
-	mixer_watched:   Device_ID, // the device watch_format is on for while miniaudio plays, 0 for none
+	mixer_watched:   Device_ID, // the device watch_format is on for while the system mixer plays, 0 for none
 	taken:           [64]u8, // why the next device_open skips hal: another app changed the device
 	taken_len:       int,
-	using_hal:       bool, // the open device is hal, not miniaudio's
+	using_hal:       bool, // the open device is hal's bit-perfect one, not the system mixer or the null device
 	device_open:     bool,
 	device_running:  bool,
 	device_rate:     int,
@@ -342,8 +342,8 @@ Player :: struct {
 // the status changes, and every TICK while playing. With capture_path set,
 // every frame the callback sends to the device also goes to that file as a
 // 32-bit float WAV. window is each track's download window in bytes. With
-// null_output the callback runs on miniaudio's null device, in real time
-// but silent, for tests.
+// null_output the callback runs on the null device (null_output.odin), in
+// real time but silent, for tests.
 create :: proc(wake_ui: proc "c" (), volume: f32, capture_path := "", window := STREAM_WINDOW, null_output := false, output := Output{}) -> ^Player {
 	p, err := vmem.arena_growing_bootstrap_new(Player, "arena")
 	assert(err == nil, "audio: no memory for the player")
@@ -357,11 +357,7 @@ create :: proc(wake_ui: proc "c" (), volume: f32, capture_path := "", window := 
 	p.scratch = make([]f32, CHUNK * MAX_CHANNELS, a)
 	p.hal_scratch = make([]f32, HAL_MAX_FRAMES * MAX_CHANNELS, a)
 	p.pcm_data = make([]f32, RING_FRAMES * MAX_CHANNELS, a)
-	p.device = new(ma.device, a)
 	p.watch = new(Device_Watch, runtime.heap_allocator())
-	if !null_output {
-		watch_default_output(p.watch)
-	}
 	if capture_path != "" {
 		if f, err := os.open(capture_path, {.Write, .Create, .Trunc}, os.Permissions_Default_File); err == nil {
 			p.capture_file = f
@@ -399,9 +395,6 @@ destroy :: proc(p: ^Player) {
 	wake_post(&p.watch.wake)
 	if p.running {
 		sys.thread_join(p.thread)
-	}
-	if !p.null_output {
-		unwatch_default_output(p.watch)
 	}
 	for &sl in p.slots {
 		slot_close(&sl)
@@ -489,7 +482,7 @@ set_paused :: proc(p: ^Player, paused: bool) {
 	post(p)
 }
 
-// set_output switches between miniaudio and bit-perfect output. The
+// set_output switches between the system mixer and bit-perfect output. The
 // current track goes on from where it is, through the new output.
 set_output :: proc(p: ^Player, o: Output) {
 	sync.lock(&p.cmd_mutex)
@@ -661,6 +654,11 @@ decode_main :: proc "c" (arg: rawptr) -> rawptr {
 	context = runtime.default_context()
 	p := (^Player)(arg)
 	context.logger = p.logger
+	// The default output is watched from this thread, which is also the one
+	// that opens the device.
+	if !p.null_output {
+		watch_default_output(p.watch)
+	}
 	for {
 		if run_commands(p, .All) == .Quit {
 			break
@@ -691,8 +689,9 @@ decode_main :: proc "c" (arg: rawptr) -> rawptr {
 		}
 	}
 	device_close(p, restore = true)
-	if p.null_ctx != nil {
-		ma.context_uninit(p.null_ctx)
+	null_close(&p.null)
+	if !p.null_output {
+		unwatch_default_output(p.watch)
 	}
 	capture_close(p)
 	runtime.default_temp_allocator_destroy(&runtime.global_default_temp_allocator_data)
@@ -905,10 +904,12 @@ watch_note :: proc "contextless" (w: ^Device_Watch, default_changed, device_chan
 // the device is the other app's now, and the track plays on through the
 // system mixer until the device has to open again. Taking the rate back
 // would start a fight with the other app. If the system's default output
-// moved to another device, the device is put back and let go. miniaudio
-// follows the default output by itself. Each way the track plays on from
-// the audible position on the default output as it is now; if that can't
-// open, the track fails and the player bar says so.
+// moved to another device, the device is put back and let go. The system
+// mixer's stream follows the default output by itself where
+// MIXER_FOLLOWS_DEFAULT says so, and is closed and opened again like the
+// HAL's where it doesn't, or when it has lost its device. Each way the
+// track plays on from the audible position on the default output as it is
+// now; if that can't open, the track fails and the player bar says so.
 @(private = "file")
 check_device :: proc(p: ^Player) {
 	w := p.watch
@@ -928,14 +929,18 @@ check_device :: proc(p: ^Player) {
 			taken = hal_taken(&p.hal)
 		}
 		moved = moved && default_output_device() != p.hal.device
+	} else if p.null_output {
+		moved = false
 	} else {
-		// The rate or format of what miniaudio plays to changed, or the
-		// default output moved and miniaudio followed it: only the status
-		// changes.
-		if !lost && taken == "" && p.mixer_watched != 0 && (changed || moved) {
+		lost = lost || (changed && !hal_alive(&p.hal))
+		followed := moved && MIXER_FOLLOWS_DEFAULT
+		moved = moved && !MIXER_FOLLOWS_DEFAULT && default_output_device() != p.hal.device
+		// The rate or format of what the system mixer plays to changed, or
+		// the default output moved and the stream followed it: only the
+		// status changes.
+		if !lost && taken == "" && p.mixer_watched != 0 && (changed || followed) {
 			mixer_refresh(p)
 		}
-		moved = false
 	}
 	if !lost && taken == "" && !moved {
 		return
@@ -967,7 +972,8 @@ check_device :: proc(p: ^Player) {
 }
 
 // mixer_refresh publishes the default output's rate, format and name while
-// miniaudio plays to it, and moves the watch to it if it's another device.
+// the system mixer plays to it, and moves the watch to it if it's another
+// device.
 @(private = "file")
 mixer_refresh :: proc(p: ^Player) {
 	dev := default_output_device()
@@ -1119,12 +1125,12 @@ format_ready :: proc(p: ^Player, sl: ^Slot) -> bool {
 		p.reclock_rates = {p.device_rate, sl.rate}
 	}
 	device_close(p)
-	opened := device_open(p, sl.rate, sl.channels, sl.bits)
+	opened, why := device_open(p, sl.rate, sl.channels, sl.bits)
 	if !p.using_hal {
 		p.reclock_from = 0
 	}
 	if !opened {
-		slot_fail(p, sl, 0, "couldn't open the audio device")
+		slot_fail(p, sl, 0, why if why != "" else "couldn't open the audio device")
 		return false
 	}
 	update_device(p)
@@ -1144,16 +1150,16 @@ update_device :: proc(p: ^Player) {
 	want := !p.paused && (!current_mark(p).end || newer)
 	if want && !p.device_running {
 		ring_skip_flush(&p.pcm)
-		if p.using_hal {
+		if p.null_output {
+			p.device_running = null_start(&p.null, p)
+		} else {
 			p.device_running = hal_start(&p.hal, p)
-		} else if ma.device_start(p.device) == .SUCCESS {
-			p.device_running = true
 		}
 	} else if !want && p.device_running {
-		if p.using_hal {
-			hal_stop(&p.hal)
+		if p.null_output {
+			null_stop(&p.null)
 		} else {
-			ma.device_stop(p.device)
+			hal_stop(&p.hal)
 		}
 		p.device_running = false
 		bookkeep_stopped(p)
@@ -1802,8 +1808,12 @@ decode_chunk :: proc(p: ^Player, sl: ^Slot) {
 
 HAL_MAX_FRAMES :: 8192 // per IOProc call, when the device's buffers need rearranging
 
+// device_open opens the output for rate and channels: bit-perfect if it's
+// asked for and the device can, the system mixer otherwise, or the null
+// device. If nothing opens, why is the player bar's line, "" for the usual
+// one.
 @(private = "file")
-device_open :: proc(p: ^Player, rate, channels, bits: int) -> bool {
+device_open :: proc(p: ^Player, rate, channels, bits: int) -> (ok: bool, why: string) {
 	if p.pcm.channels != channels {
 		w := p.pcm.write
 		ring_init(&p.pcm, p.pcm_data[:RING_FRAMES * channels], RING_FRAMES, channels)
@@ -1833,29 +1843,14 @@ device_open :: proc(p: ^Player, rate, channels, bits: int) -> bool {
 		info.name_len = copy(info.name[:], device_name(p.hal.device))
 	} else {
 		info.reason_len = copy(info.reason[:], reason)
-		cfg := ma.device_config_init(.playback)
-		cfg.playback.format = .f32
-		cfg.playback.channels = u32(channels)
-		cfg.sampleRate = u32(rate)
-		cfg.dataCallback = audio_callback
-		cfg.pUserData = p
-		cfg.noPreSilencedOutputBuffer = true
-		if p.null_output && p.null_ctx == nil {
-			ctx := new(ma.context_type, vmem.arena_allocator(&p.arena))
-			backends := [1]ma.backend{.null}
-			if r := ma.context_init(&backends[0], 1, nil, ctx); r != .SUCCESS {
-				log.errorf("audio: no null backend: %v", r)
-				return false
-			}
-			p.null_ctx = ctx
-		}
-		if r := ma.device_init(p.null_ctx, &cfg, p.device); r != .SUCCESS {
-			log.errorf("audio: device_init failed: %v", r)
-			return false
-		}
 		if p.null_output {
+			null_open(&p.null, rate)
 			info.name_len = copy(info.name[:], "Null device")
 		} else {
+			if opened, refusal := mixer_open(&p.hal, p.watch, rate, channels); !opened {
+				log.errorf("audio: no output at %d Hz, %d channels: %s", rate, channels, refusal)
+				return false, refusal
+			}
 			dev := default_output_device()
 			mixer_info(dev, &info)
 			if watch_format(dev, p.watch) {
@@ -1873,12 +1868,12 @@ device_open :: proc(p: ^Player, rate, channels, bits: int) -> bool {
 	sync.unlock(&p.status_mutex)
 	update_change(p)
 	capture_begin(p, rate, channels)
-	return true
+	return true, ""
 }
 
 // hal_open readies the default output device for bit-perfect playback. On
-// failure the device is put back as it was, and miniaudio plays instead;
-// reason says why.
+// failure the device is put back as it was, and the system mixer plays
+// instead; reason says why.
 @(private = "file")
 hal_open :: proc(p: ^Player, rate, channels, bits: int) -> (ok: bool, reason: string) {
 	// The device the last track played on, until the output is restored.
@@ -1898,7 +1893,7 @@ hal_open :: proc(p: ^Player, rate, channels, bits: int) -> (ok: bool, reason: st
 	return true, ""
 }
 
-// mixer_info fills in what miniaudio plays to: the system's default output.
+// mixer_info fills in what the system mixer plays to: the default output.
 // Linux has no device rate or format to read here and keeps the track's
 // rate.
 @(private = "file")
@@ -1924,10 +1919,10 @@ device_close :: proc(p: ^Player, restore := false) {
 		p.mixer_watched = 0
 	}
 	if p.device_open {
-		if p.using_hal {
-			hal_close(&p.hal, restore)
+		if p.null_output {
+			null_stop(&p.null)
 		} else {
-			ma.device_uninit(p.device)
+			hal_close(&p.hal, restore)
 		}
 		p.device_open = false
 		p.device_running = false
@@ -1968,23 +1963,25 @@ publish :: proc "contextless" (p: ^Player, rd: u64) -> bool {
 	return changed
 }
 
-// miniaudio's callback. Bit-perfect mode on miniaudio (the null device, or
-// a rate the HAL couldn't do) leaves the volume out too.
-@(private = "file")
-audio_callback :: proc "c" (device: ^ma.device, output, input: rawptr, frame_count: u32) {
-	p := (^Player)(device.pUserData)
-	out := ([^]f32)(output)
+// mixer_render is the callback of the system mixer's stream and of the null
+// device: frame_count frames from the ring into out, interleaved floats with
+// the ring's channels, at the volume, ramped over this buffer. Bit-perfect
+// mode on them (the null device, or a rate the HAL couldn't do) leaves the
+// volume out too. It keeps the callback's rules: no locks, allocation or
+// system calls.
+@(private)
+mixer_render :: proc "contextless" (p: ^Player, out: [^]f32, frame_count: u64) {
 	ch := u64(p.pcm.channels)
 	target := transmute(f32)sync.atomic_load(&p.volume_bits)
 	if sync.atomic_load(&p.bypass) {
 		target, p.cb_gain = 1, 1
 	}
-	n := ring_read(&p.pcm, out, u64(frame_count), p.cb_gain, target)
+	n := ring_read(&p.pcm, out, frame_count, p.cb_gain, target)
 	p.cb_gain = target
-	for i in n * ch ..< u64(frame_count) * ch {
+	for i in n * ch ..< frame_count * ch {
 		out[i] = 0
 	}
-	after_render(p, out, u64(frame_count), n)
+	after_render(p, out, frame_count, n)
 }
 
 // hal_render is what the HAL's IOProc does: the ring's frames as they

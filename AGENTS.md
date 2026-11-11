@@ -9,7 +9,7 @@ TIDALfast is a native TIDAL client in Odin for macOS and Linux, with a first Win
 ./build.sh release      # optimized
 ./build.sh measure      # the measurement app, mock server and tool in build/measure/
 ./build.sh dist         # TIDALfast.app and .dmg, or the AppImage, in build/dist/
-./build.sh libs         # only the C libraries in third_party, into build/kbts, build/miniaudio and build/dr_flac
+./build.sh libs         # only the C libraries in third_party, into build/kbts and build/dr_flac
 odin test tests         # run ./build.sh once first: it builds the C libraries
 ```
 

@@ -56,7 +56,6 @@ if "%version:~0,1%"=="v" set version=%version:~1%
 if not exist build\windows mkdir build\windows
 
 call :lib kbts kb_text_shape || exit /b 1
-call :lib miniaudio miniaudio || exit /b 1
 call :lib dr_flac dr_flac || exit /b 1
 call :freetype || exit /b 1
 if "%target%"=="libs" exit /b 0

@@ -77,7 +77,7 @@ Playback :: struct {
 	set_now_playing: proc "c" (info: ^platform.Now_Playing), // the shell's
 	capture:         Small, // TIDALFAST_AUDIO_CAPTURE
 	window:          int, // TIDALFAST_AUDIO_WINDOW_KB, in bytes
-	null_output:     bool, // TIDALFAST_AUDIO_NULL: play to miniaudio's silent null device
+	null_output:     bool, // TIDALFAST_AUDIO_NULL: play to the silent null device
 
 	// The queue: a snapshot of a list, strings in arena.
 	arena:           vmem.Arena,

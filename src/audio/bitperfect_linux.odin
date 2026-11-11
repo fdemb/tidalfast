@@ -1,12 +1,18 @@
 package audio
 
-// Bit-perfect output on Linux, through a PipeWire stream. libpipewire is
-// loaded at run time, so the app starts without it, and the Output menu
-// says so when it's missing.
+// Output on Linux, through a PipeWire stream. libpipewire is loaded at run
+// time, so the app starts without it, and a track then fails with a line
+// that says it's missing. There is no other way to a sound card here.
 //
-// The stream asks for the track's rate with node.rate and forces the graph
-// to it with node.force-rate, the way bitperfect_darwin.odin sets the
-// device's nominal rate. hal_configure then waits until the graph runs at
+// With bit-perfect output off (mixer_open) the stream sends floats at the
+// track's rate with the track's channels, and PipeWire resamples them to
+// the graph's rate, mixes them down or up to the sink's channels and
+// applies the stream's volume.
+//
+// With it on (hal_configure) the stream asks for the track's rate with
+// node.rate and forces the graph to it with node.force-rate, the way
+// bitperfect_darwin.odin sets the device's nominal rate. It then waits until
+// the graph runs at
 // that rate and refuses otherwise. At the same rate PipeWire passes the
 // stream's samples through without resampling: 32-bit floats of v / 2^23,
 // which PipeWire converts to the sink's integer format exactly. The
@@ -58,6 +64,9 @@ Pw_Output :: struct {
 	loop:        rawptr, // pw_thread_loop
 	stream:      rawptr, // pw_stream
 	rate:        int,
+	channels:    int, // the stream's
+	shared:      bool, // the graph may run at another rate: floats at the volume (mixer_render)
+	state:       i32, // the stream's state as state_changed last saw it (atomic)
 	graph_rate:  u32, // the graph's rate as process last saw it, 0 before (atomic)
 	running:     bool, // between hal_start and hal_stop (atomic)
 	busy:        bool, // process is rendering (atomic)
@@ -74,8 +83,8 @@ default_output_device :: proc() -> Device_ID {
 	return PIPEWIRE_DEFAULT
 }
 
-// device_nominal_rate is 0: miniaudio converts to whatever the sound server
-// runs at, and the player reports the track's rate instead.
+// device_nominal_rate is 0: PipeWire converts to whatever the graph runs
+// at, and the player reports the track's rate instead.
 device_nominal_rate :: proc(dev: Device_ID) -> f64 {
 	return 0
 }
@@ -85,7 +94,7 @@ device_name :: proc(dev: Device_ID) -> string {
 }
 
 // watch_format does nothing: the graph's rate is checked in the stream's
-// process callback, and miniaudio's device has no rate to read.
+// process callback, and a sink has no rate to read from here.
 watch_format :: proc(dev: Device_ID, w: ^Device_Watch) -> bool {
 	return false
 }
@@ -102,6 +111,10 @@ device_physical_format :: proc(dev: Device_ID) -> (bits: int, float: bool, ok: b
 hal_alive :: proc(h: ^Hal) -> bool {
 	return h.out != nil && !sync.atomic_load(&h.out.lost)
 }
+
+// MIXER_FOLLOWS_DEFAULT says whether mixer_open's stream moves to a new
+// default output by itself.
+MIXER_FOLLOWS_DEFAULT :: true
 
 // The default output needs no watching: PipeWire moves the stream itself.
 watch_default_output :: proc(w: ^Device_Watch) -> bool {
@@ -140,15 +153,49 @@ unwatch_device :: proc(h: ^Hal, w: ^Device_Watch) {
 // matter: a float holds up to 24 bits exactly. If the graph doesn't get
 // there, ok is false and reason says why, short enough for a menu line.
 hal_configure :: proc(h: ^Hal, dev: Device_ID, rate, channels, bits: int) -> (ok: bool, reason: string) {
-	hal_close(h, false)
 	if channels < 1 || channels > 2 {
+		hal_close(h, false)
 		return false, fmt.tprintf("%d channels; PipeWire output is stereo", channels)
 	}
+	ok, reason = stream_open(h, nil, rate, 2, shared = false)
+	if ok {
+		h.device = dev
+		h.channel_map = channel_map_make(channels, {0, 1})
+	}
+	return
+}
+
+// mixer_open opens a stream for floats at rate with the track's channels,
+// whatever rate the graph runs at, and waits up to HAL_SETTLE_TIMEOUT for
+// PipeWire to link it. w hears when the stream fails or loses its sink. If
+// it can't open, ok is false and reason says why, short enough for the
+// player bar.
+mixer_open :: proc(h: ^Hal, w: ^Device_Watch, rate, channels: int) -> (ok: bool, reason: string) {
+	if channels < 1 || channels > MAX_CHANNELS {
+		hal_close(h, false)
+		return false, fmt.tprintf("no output for %d channels", channels)
+	}
+	ok, reason = stream_open(h, w, rate, channels, shared = true)
+	if ok {
+		h.device = PIPEWIRE_DEFAULT
+	}
+	return
+}
+
+// stream_open is what hal_configure and mixer_open share: a stream of
+// channels at rate, left idle. A shared one is ready once it's linked;
+// otherwise the graph must reach the rate.
+@(private = "file")
+stream_open :: proc(h: ^Hal, w: ^Device_Watch, rate, channels: int, shared: bool) -> (ok: bool, reason: string) {
+	hal_close(h, false)
 	if !pw_load() {
 		return false, "PipeWire isn't installed"
 	}
 	o := new(Pw_Output, runtime.heap_allocator())
 	o.rate = rate
+	o.channels = channels
+	o.shared = shared
+	o.watch = w
 	h.out = o
 	defer if !ok {
 		hal_close(h, false)
@@ -163,13 +210,14 @@ hal_configure :: proc(h: ^Hal, dev: Device_ID, rate, channels, bits: int) -> (ok
 		{"media.role", "Music"},
 		{"application.name", "TIDALfast"},
 		{"node.name", "tidalfast"},
+		// The rest is bit-perfect output's.
 		{"node.rate", fmt.ctprintf("1/%d", rate)},
 		{"node.force-rate", "0"},
 		// Don't restore a stream volume saved for this app.
 		{"state.restore-props", "false"},
 	}
 	dict := Spa_Dict {
-		n_items = len(items),
+		n_items = len(items) - 3 if shared else len(items),
 		items   = &items[0],
 	}
 	o.stream = pw.stream_new_simple(pw.thread_loop_get_loop(o.loop), "TIDALfast", pw.properties_new_dict(&dict), &pw_events, o)
@@ -178,7 +226,7 @@ hal_configure :: proc(h: ^Hal, dev: Device_ID, rate, channels, bits: int) -> (ok
 		return false, "PipeWire refused the stream"
 	}
 	pod: [32]u64
-	params := [1]rawptr{format_pod(&pod, rate)}
+	params := [1]rawptr{format_pod(&pod, rate, channels)}
 	if st := pw.stream_connect(o.stream, SPA_DIRECTION_OUTPUT, PW_ID_ANY, STREAM_FLAGS, &params[0], 1); st < 0 {
 		log.warnf("audio: connecting the PipeWire stream failed (%d)", st)
 		return false, "PipeWire refused the stream"
@@ -193,11 +241,11 @@ hal_configure :: proc(h: ^Hal, dev: Device_ID, rate, channels, bits: int) -> (ok
 			return false, "PipeWire refused the stream"
 		}
 		graph := int(sync.atomic_load(&o.graph_rate))
-		if graph == rate {
+		if graph == rate || (shared && sync.atomic_load(&o.state) >= STREAM_STATE_PAUSED) {
 			break
 		}
 		if time.tick_since(begin) > HAL_SETTLE_TIMEOUT {
-			if graph == 0 {
+			if graph == 0 || shared {
 				log.warn("audio: the PipeWire stream didn't start")
 				return false, "PipeWire didn't start the stream"
 			}
@@ -207,16 +255,14 @@ hal_configure :: proc(h: ^Hal, dev: Device_ID, rate, channels, bits: int) -> (ok
 		time.sleep(2 * time.Millisecond)
 	}
 	h.settle_ms = time.duration_milliseconds(time.tick_since(begin))
-	h.device = dev
 	h.format = {
 		sample_rate     = f64(rate),
 		format_id       = FORMAT_LPCM,
 		format_flags    = FLAG_FLOAT,
-		bytes_per_frame = 2 * size_of(f32),
-		channels        = 2,
+		bytes_per_frame = u32(channels) * size_of(f32),
+		channels        = u32(channels),
 		bits            = 32,
 	}
-	h.channel_map = channel_map_make(channels, {0, 1})
 	// Idle until hal_start, so an output opened while paused costs no CPU.
 	pw.thread_loop_lock(o.loop)
 	pw.stream_set_active(o.stream, false)
@@ -224,7 +270,8 @@ hal_configure :: proc(h: ^Hal, dev: Device_ID, rate, channels, bits: int) -> (ok
 	return true, ""
 }
 
-// hal_start lets process render p's ring (hal_render).
+// hal_start lets process render p's ring (hal_render, or mixer_render for
+// a shared stream).
 hal_start :: proc(h: ^Hal, p: ^Player) -> bool {
 	o := h.out
 	if o == nil {
@@ -283,9 +330,10 @@ device_change_undo :: proc(c: ^Device_Change) -> bool {
 
 // pw_process runs on PipeWire's real-time thread for each buffer the
 // stream needs. It keeps the IOProc's rules: no locks, allocation, logging
-// or system calls. Until the graph runs at the track's rate it sends
-// silence and leaves the ring alone; if the rate stays wrong while playing,
-// the output is lost and the player opens it again.
+// or system calls. A bit-perfect stream sends silence and leaves the ring
+// alone until the graph runs at the track's rate; if the rate stays wrong
+// while playing, the output is lost and the player opens it again. A shared
+// stream plays at any graph rate.
 @(private = "file")
 pw_process :: proc "c" (data: rawptr) {
 	o := (^Pw_Output)(data)
@@ -294,7 +342,7 @@ pw_process :: proc "c" (data: rawptr) {
 		return
 	}
 	d := &b.buffer.datas[0]
-	stride := u32(2 * size_of(f32))
+	stride := u32(o.channels) * size_of(f32)
 	frames := d.maxsize / stride
 	if b.requested > 0 {
 		frames = min(frames, u32(b.requested))
@@ -303,7 +351,7 @@ pw_process :: proc "c" (data: rawptr) {
 	if pw.stream_get_time_n(o.stream, &t, size_of(t)) == 0 && t.rate_denom != 0 {
 		sync.atomic_store(&o.graph_rate, t.rate_denom)
 	}
-	right := sync.atomic_load(&o.graph_rate) == u32(o.rate)
+	right := o.shared || sync.atomic_load(&o.graph_rate) == u32(o.rate)
 	if right || !sync.atomic_load(&o.running) {
 		o.wrong_since = 0
 	} else {
@@ -317,10 +365,12 @@ pw_process :: proc "c" (data: rawptr) {
 	if d.data != nil {
 		size = frames * stride
 		sync.atomic_store(&o.busy, true)
-		if right && sync.atomic_load(&o.running) {
+		if right && sync.atomic_load(&o.running) && o.shared {
+			mixer_render(o.player, ([^]f32)(d.data), u64(frames))
+		} else if right && sync.atomic_load(&o.running) {
 			list := Audio_Buffer_List {
 				count   = 1,
-				buffers = {{channels = 2, size = size, data = d.data}},
+				buffers = {{channels = u32(o.channels), size = size, data = d.data}},
 			}
 			hal_render(o.player, &list)
 		} else {
@@ -339,6 +389,7 @@ pw_process :: proc "c" (data: rawptr) {
 @(private = "file")
 pw_state_changed :: proc "c" (data: rawptr, old, state: i32, error: cstring) {
 	o := (^Pw_Output)(data)
+	sync.atomic_store(&o.state, state)
 	if state == STREAM_STATE_ERROR || (old == STREAM_STATE_STREAMING && state < STREAM_STATE_PAUSED) {
 		pw_lose(o)
 	}
@@ -361,10 +412,11 @@ pw_events := Pw_Stream_Events {
 }
 
 // format_pod writes the stream's one EnumFormat into buf as a SPA pod: raw
-// 32-bit float audio, stereo, at rate. libspa builds these with inline
-// header functions, so this is the same bytes by hand.
+// 32-bit float audio of 1 to 8 channels at rate, the channels where FLAC
+// has them. libspa builds these with inline header functions, so this is
+// the same bytes by hand.
 @(private = "file")
-format_pod :: proc(buf: ^[32]u64, rate: int) -> rawptr {
+format_pod :: proc(buf: ^[32]u64, rate, channels: int) -> rawptr {
 	w := ([^]u32)(&buf[0])[:2 * len(buf)]
 	n := 0
 	put :: proc(w: []u32, n: ^int, v: ..u32) {
@@ -382,9 +434,11 @@ format_pod :: proc(buf: ^[32]u64, rate: int) -> rawptr {
 	put(w, &n, SPA_FORMAT_MEDIA_SUBTYPE, 0, 4, SPA_TYPE_ID, SPA_MEDIA_SUBTYPE_RAW)
 	put(w, &n, SPA_FORMAT_AUDIO_FORMAT, 0, 4, SPA_TYPE_ID, SPA_AUDIO_FORMAT_F32_LE)
 	put(w, &n, SPA_FORMAT_AUDIO_RATE, 0, 4, SPA_TYPE_INT, u32(rate))
-	put(w, &n, SPA_FORMAT_AUDIO_CHANNELS, 0, 4, SPA_TYPE_INT, 2)
+	put(w, &n, SPA_FORMAT_AUDIO_CHANNELS, 0, 4, SPA_TYPE_INT, u32(channels))
 	// An array pod: its child pod's header, then the values.
-	put(w, &n, SPA_FORMAT_AUDIO_POSITION, 0, 8 + 2 * 4, SPA_TYPE_ARRAY, 4, SPA_TYPE_ID, SPA_AUDIO_CHANNEL_FL, SPA_AUDIO_CHANNEL_FR)
+	put(w, &n, SPA_FORMAT_AUDIO_POSITION, 0, u32(8 + channels * 4), SPA_TYPE_ARRAY, 4, SPA_TYPE_ID)
+	positions := CHANNEL_POSITIONS[channels - 1]
+	put(w, &n, ..positions[:channels])
 	w[0] = u32(n - 2) * 4 // the object's body, everything after its header
 	return &buf[0]
 }
@@ -558,7 +612,38 @@ SPA_MEDIA_TYPE_AUDIO :: 1
 SPA_MEDIA_SUBTYPE_RAW :: 1
 @(private = "file")
 SPA_AUDIO_FORMAT_F32_LE :: 0x11b
+
+// SPA_AUDIO_CHANNEL_*: where each channel of a FLAC stream of 1 to 8
+// channels plays.
 @(private = "file")
-SPA_AUDIO_CHANNEL_FL :: 3
+MONO :: 2
 @(private = "file")
-SPA_AUDIO_CHANNEL_FR :: 4
+FL :: 3
+@(private = "file")
+FR :: 4
+@(private = "file")
+FC :: 5
+@(private = "file")
+LFE :: 6
+@(private = "file")
+SL :: 7
+@(private = "file")
+SR :: 8
+@(private = "file")
+RC :: 11
+@(private = "file")
+RL :: 12
+@(private = "file")
+RR :: 13
+
+@(private = "file")
+CHANNEL_POSITIONS := [8][8]u32 {
+	{MONO, 0, 0, 0, 0, 0, 0, 0},
+	{FL, FR, 0, 0, 0, 0, 0, 0},
+	{FL, FR, FC, 0, 0, 0, 0, 0},
+	{FL, FR, RL, RR, 0, 0, 0, 0},
+	{FL, FR, FC, RL, RR, 0, 0, 0},
+	{FL, FR, FC, LFE, RL, RR, 0, 0},
+	{FL, FR, FC, LFE, RC, SL, SR, 0},
+	{FL, FR, FC, LFE, RL, RR, SL, SR},
+}
