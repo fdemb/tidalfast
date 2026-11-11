@@ -66,12 +66,12 @@ draw_user_row :: proc(s: ^State) {
 	ui.column("", {}, ui.fill(), ui.px(USER_ROW_H)).pad = {SIDEBAR_PAD, USER_ROW_PAD}
 	ui.set_next_radius(8)
 	sidebar_selected(open)
-	b := ui.row("##user", {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects}, ui.fill(), ui.fill())
+	b := ui.row("##user", {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects, .Instant_Hover}, ui.fill(), ui.fill())
 	ui.accessible(b, .Button, label)
 	if ui.signal(b).clicked {
 		ui.open_menu(USER_MENU, {b.rect.x, b.rect.y - 4}, up = true)
 	}
-	shown := max(b.hot_t, b.focus_t, 1 if open else 0)
+	shown := max(ui.hover_t(b), b.focus_t, 1 if open else 0)
 	// The avatar's centre is level with Home's and Search's icons.
 	ui.spacer(ui.px(ROW_PAD - 3))
 	draw_avatar(s, small_str(&d.profile.picture), name)

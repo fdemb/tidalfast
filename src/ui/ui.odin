@@ -39,6 +39,8 @@ DRAG_THRESHOLD :: 4 // points the mouse moves before a press becomes a drag
 FADE_IN :: 0.08 // seconds hot_t, active_t and focus_t take from 0 to 1
 FADE_OUT :: 0.16 // seconds they take from 1 to 0
 MAX_SETTLE_FRAMES :: 3 // extra frames in a row that a layout mismatch may ask for
+FRAME_SAMPLES :: 5 // intervals between animating frames that frame_dt is the median of
+MIN_FRAME :: 0.001 // seconds: a shorter interval is two frames back to back, not the display's
 
 Key :: distinct u64
 
@@ -96,7 +98,7 @@ Box_Flag :: enum u32 {
 	Shrink_From_End, // children that don't fit give up room from the end, not in proportion: the one crossing the edge is cut short and those after it get none
 	Center_Children, // children sit in the middle of the room along the child axis, as between two fill() spacers, for a box that's only there to centre something
 	Draw_Glass, // a lens of glass tinted by background, lit while hot and swelling while pressed, see render.push_glass
-	Instant_Hover, // hot_t jumps with no fade, for list rows and tiles: a fast mouse is on one for a few frames, and a fade would light neighbours unevenly
+	Instant_Hover, // hot_t jumps with no fade when the mouse moves on or off, for list rows and tiles: a fast mouse is on one for a few frames, and a fade would light neighbours unevenly
 }
 Box_Flags :: bit_set[Box_Flag; u32]
 
@@ -118,8 +120,7 @@ Box :: struct {
 	bar_hovered:     bool, // the mouse was over the view when the scrollbar was last built
 	bar_focused:     bool, // the focus was in the view then
 	bar_grab:        f32, // where in the thumb the mouse took it
-	hot_t:           f32,
-	hot_fade:        f32, // hot_t's linear progress, before its curve
+	hot_t:           f32, // the hover fade's linear progress, see hover_t
 	active_t:        f32,
 	focus_t:         f32,
 	open_t:          f32, // menus and tooltips fading in
@@ -250,7 +251,9 @@ State :: struct {
 	frame:          u64,
 	time:           f64,
 	dt:             f32,
-	frame_dt:       f32, // a normal frame's length, measured between animating frames
+	frame_dt:       f32, // a normal frame's length: the median of frame_samples, or 1/60 s before there are 3
+	frame_samples:  [FRAME_SAMPLES]f32, // the last intervals between animating frames
+	frame_sampled:  int, // how many there have been
 	animated_before: bool, // the frame before last ended with animating set
 	width, height:  f32,
 	renderer:       ^render.Renderer, // this frame's
@@ -459,13 +462,21 @@ begin_frame :: proc(u: ^State, events: []platform.Event, r: ^render.Renderer, t:
 		u.settle_frames = 0
 	}
 	// Nothing was easing across the gap after a frame that settled, so the
-	// next step is a normal frame long. The first interval after idle can
-	// be irregular, so only a run of animating frames measures one.
+	// next step is a normal frame long. The interval after that can be
+	// irregular, so it steps no more than a normal frame either, and only
+	// a run of animating frames measures one.
 	elapsed := f32(clamp(time - u.time, 0, 1.0 / 30))
-	if u.animating && u.animated_before && elapsed > 0 && elapsed < 1.0 / 30 {
-		u.frame_dt = elapsed
+	switch {
+	case !u.animating:
+		u.dt = u.frame_dt
+	case !u.animated_before:
+		u.dt = min(elapsed, u.frame_dt)
+	case:
+		u.dt = elapsed
+		if elapsed >= MIN_FRAME && elapsed < 1.0 / 30 {
+			frame_sample(u, elapsed)
+		}
 	}
-	u.dt = elapsed if u.animating else u.frame_dt
 	u.animated_before = u.animating
 	u.time = time
 	u.width = width
@@ -1265,12 +1276,17 @@ box_make :: proc(id: string, flags: Box_Flags = {}, width: Size = {}, height: Si
 
 	if b.key != 0 {
 		hot := u.hot == b.key || u.hot_parent == b.key
+		// Rows that scroll under a still mouse fade: hot is from the last
+		// frame's rects, so each is lit a frame late and for a frame only.
+		instant := .Instant_Hover in b.flags && u.hot_by_mouse
 		if .Focus_Is_Hot in b.flags {
-			hot = u.focus == b.key
+			// A menu fading out keeps its highlight, though the focus has
+			// gone back to where it was.
+			hot = u.focus == b.key if u.menu_open else b.hot_t == 1
+			instant = .Instant_Hover in b.flags
 		}
 		ring := u.focus == b.key && u.focus_visible && .No_Focus_Ring not_in b.flags
-		b.hot_fade = (1 if hot else 0) if .Instant_Hover in b.flags else step_fade(u, b.hot_fade, hot)
-		b.hot_t = math.smoothstep(f32(0), 1, b.hot_fade)
+		b.hot_t = (1 if hot else 0) if instant else step_fade(u, b.hot_t, hot)
 		b.active_t = step_fade(u, b.active_t, u.active[.Left] == b.key)
 		b.focus_t = step_fade(u, b.focus_t, ring)
 	}
@@ -1326,6 +1342,32 @@ ui_scale :: proc(u: ^State) -> f32 {
 view_offset :: proc(view: ^Box) -> [2]f32 {
 	s := ui_scale(ctx)
 	return {drawn_off(view, 0, s), drawn_off(view, 1, s)}
+}
+
+// hover_t is how lit b is by the hover, from 0 to 1: hot_t along a
+// smoothstep curve.
+hover_t :: proc(b: ^Box) -> f32 {
+	return math.smoothstep(f32(0), 1, b.hot_t)
+}
+
+// frame_sample takes an interval between two animating frames. frame_dt is
+// the median of the last few, so one hitch or one pair of frames back to
+// back doesn't become the step after every later idle.
+@(private)
+frame_sample :: proc(u: ^State, interval: f32) {
+	u.frame_samples[u.frame_sampled % FRAME_SAMPLES] = interval
+	u.frame_sampled += 1
+	n := min(u.frame_sampled, FRAME_SAMPLES)
+	if n < 3 {
+		return
+	}
+	sorted := u.frame_samples
+	for i in 1 ..< n {
+		for j := i; j > 0 && sorted[j] < sorted[j - 1]; j -= 1 {
+			sorted[j], sorted[j - 1] = sorted[j - 1], sorted[j]
+		}
+	}
+	u.frame_dt = sorted[n / 2]
 }
 
 // step_fade moves t toward 1 if on and toward 0 if not, at a constant speed,

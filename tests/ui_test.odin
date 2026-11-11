@@ -1160,7 +1160,7 @@ test_ui_space_goes_to_the_app :: proc(t: ^testing.T) {
 }
 
 // A hover that ends partway fades out from where it reached, at the fade's
-// normal speed, and hot_t follows smoothstep of that progress both ways.
+// normal speed, and hover_t is smoothstep of that progress.
 @(test)
 test_ui_hover_fade_reverses_from_where_it_is :: proc(t: ^testing.T) {
 	u: ui.State
@@ -1170,8 +1170,8 @@ test_ui_hover_fade_reverses_from_where_it_is :: proc(t: ^testing.T) {
 	now := 0.0
 	step := f32(dt) / ui.FADE_OUT
 	follows_curve :: proc(b: ^ui.Box) -> bool {
-		f := b.hot_fade
-		return abs(b.hot_t - f * f * (3 - 2 * f)) < 1e-5
+		f := b.hot_t
+		return abs(ui.hover_t(b) - f * f * (3 - 2 * f)) < 1e-5
 	}
 
 	sig: ui.Signal
@@ -1182,40 +1182,40 @@ test_ui_hover_fade_reverses_from_where_it_is :: proc(t: ^testing.T) {
 	now += dt
 	sig, _ = button_frame(&u, {{kind = .Mouse_Move, x = 20, y = 20}}, now)
 	for _ in 0 ..< 200 {
-		if sig.box.hot_fade >= 0.4 {
+		if sig.box.hot_t >= 0.4 {
 			break
 		}
 		now += dt
 		sig, _ = button_frame(&u, nil, now)
 	}
-	testing.expect(t, sig.box.hot_fade >= 0.4 && sig.box.hot_fade < 1, "the hover stops partway")
-	testing.expect(t, follows_curve(sig.box), "hot_t follows smoothstep on the way in")
+	testing.expect(t, sig.box.hot_t >= 0.4 && sig.box.hot_t < 1, "the hover stops partway")
+	testing.expect(t, follows_curve(sig.box), "hover_t follows smoothstep on the way in")
 
 	now += dt
 	sig, _ = button_frame(&u, {{kind = .Mouse_Move, x = 250, y = 150}}, now)
 	now += dt
 	sig, _ = button_frame(&u, nil, now)
-	start := sig.box.hot_fade
+	start := sig.box.hot_t
 	testing.expect(t, start < 1)
 
 	frames := 0
 	animating := true
 	for animating && frames < 200 {
-		before := sig.box.hot_fade
+		before := sig.box.hot_t
 		now += dt
 		sig, animating = button_frame(&u, nil, now)
 		frames += 1
-		testing.expect(t, follows_curve(sig.box), "hot_t follows smoothstep on the way out")
-		if sig.box.hot_fade > 0 {
-			testing.expect(t, abs(before - sig.box.hot_fade - step) < 1e-3, "the fade keeps a constant speed")
+		testing.expect(t, follows_curve(sig.box), "hover_t follows smoothstep on the way out")
+		if sig.box.hot_t > 0 {
+			testing.expect(t, abs(before - sig.box.hot_t - step) < 1e-3, "the fade keeps a constant speed")
 		}
 	}
 	testing.expect(t, abs(f32(frames) - start / step) <= 1, "the way back is as long as the distance")
 	testing.expect_value(t, sig.box.hot_t, f32(0))
 }
 
-// An Instant_Hover box lights and goes dark with the hover, and asks for no
-// frames to do it.
+// An Instant_Hover box lights and goes dark as the mouse moves on and off,
+// and asks for no frames to do it.
 @(test)
 test_ui_instant_hover_has_no_fade :: proc(t: ^testing.T) {
 	u: ui.State
@@ -1238,6 +1238,128 @@ test_ui_instant_hover_has_no_fade :: proc(t: ^testing.T) {
 	b, animating = frame(&u, &now, {kind = .Mouse_Move, x = 250, y = 150})
 	testing.expect_value(t, b.hot_t, f32(0))
 	testing.expect(t, !animating, "going dark takes no frames")
+}
+
+// An Instant_Hover box that comes under a still mouse fades in, as a row
+// does that scrolls past: hot is a frame behind then, so a row lit at once
+// would be lit in the wrong place.
+@(test)
+test_ui_instant_hover_fades_under_a_still_mouse :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	now := 0.0
+	frame :: proc(u: ^ui.State, now: ^f64, above: f32, events: ..platform.Event) -> (^ui.Box, bool) {
+		now^ += 1.0 / 120
+		ui.begin_frame(u, events, nil, nil, 300, 200, now^)
+		ui.spacer(ui.px(above))
+		b := ui.box_make("row", {.Clickable, .Instant_Hover}, ui.px(100), ui.px(40))
+		ui.signal(b)
+		return b, ui.end_frame()
+	}
+
+	frame(&u, &now, 100)
+	frame(&u, &now, 100, {kind = .Mouse_Move, x = 20, y = 20})
+	b, animating := frame(&u, &now, 100)
+	testing.expect_value(t, b.hot_t, f32(0))
+	testing.expect(t, !animating)
+
+	// The row moves under the mouse. The frame after has it hot.
+	frame(&u, &now, 0)
+	b, animating = frame(&u, &now, 0)
+	testing.expect(t, b.hot_t > 0 && b.hot_t < 0.5, "the row starts to fade in")
+	testing.expect(t, animating)
+	for _ in 0 ..< 200 {
+		if b, animating = frame(&u, &now, 0); !animating {
+			break
+		}
+	}
+	testing.expect_value(t, b.hot_t, f32(1))
+
+	// The mouse leaving still takes the light off at once.
+	b, animating = frame(&u, &now, 0, {kind = .Mouse_Move, x = 250, y = 150})
+	testing.expect_value(t, b.hot_t, f32(0))
+	testing.expect(t, !animating)
+}
+
+// hover_run moves the mouse onto the button, or off it, and runs frames
+// every 1/120 s until the fade settles.
+@(private = "file")
+hover_run :: proc(u: ^ui.State, now: ^f64, on: bool) -> (sig: ui.Signal) {
+	now^ += 1.0 / 120
+	pos: [2]f32 = {20, 20} if on else {250, 150}
+	animating: bool
+	sig, animating = button_frame(u, {{kind = .Mouse_Move, x = pos.x, y = pos.y}}, now^)
+	for _ in 0 ..< 200 {
+		if !animating {
+			break
+		}
+		now^ += 1.0 / 120
+		sig, animating = button_frame(u, nil, now^)
+	}
+	return
+}
+
+// After an idle gap the first two frames each step a normal frame's length,
+// however late the second one comes.
+@(test)
+test_ui_frames_after_idle_step_a_normal_frame :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	now := 0.0
+	button_frame(&u, nil, now)
+	hover_run(&u, &now, true)
+	hover_run(&u, &now, false)
+	step := f32(1.0 / 120) / ui.FADE_IN
+
+	now += 5
+	sig, _ := button_frame(&u, {{kind = .Mouse_Move, x = 20, y = 20}}, now)
+	testing.expect(t, abs(sig.box.hot_t - step) < 1e-4, "the first frame steps a normal frame")
+	now += 1.0 / 30
+	sig, _ = button_frame(&u, nil, now)
+	testing.expect(t, abs(sig.box.hot_t - 2 * step) < 1e-4, "a late second frame steps no more")
+	now += 1.0 / 120
+	sig, _ = button_frame(&u, nil, now)
+	testing.expect(t, abs(sig.box.hot_t - 3 * step) < 1e-4, "the third steps the time since the second")
+}
+
+// One odd interval between animating frames, a hitch or two frames back to
+// back, doesn't become the step after the next idle.
+@(test)
+test_ui_frame_length_ignores_one_odd_interval :: proc(t: ^testing.T) {
+	for odd in ([]f64{0.030, 0.0005}) {
+		u: ui.State
+		ui.init(&u)
+		defer ui_destroy(&u)
+		now := 0.0
+		button_frame(&u, nil, now)
+		hover_run(&u, &now, true)
+		hover_run(&u, &now, false)
+
+		// A fade in whose last interval is the odd one.
+		now += 1.0 / 120
+		sig, animating := button_frame(&u, {{kind = .Mouse_Move, x = 20, y = 20}}, now)
+		for sig.box.hot_t < 0.7 {
+			now += 1.0 / 120
+			sig, animating = button_frame(&u, nil, now)
+		}
+		testing.expect(t, animating)
+		now += odd
+		sig, animating = button_frame(&u, nil, now)
+		for _ in 0 ..< 200 {
+			if !animating {
+				break
+			}
+			now += odd
+			sig, animating = button_frame(&u, nil, now)
+		}
+		testing.expect_value(t, sig.box.hot_t, f32(1))
+
+		now += 5
+		sig, _ = button_frame(&u, {{kind = .Mouse_Move, x = 250, y = 150}}, now)
+		testing.expectf(t, abs(1 - sig.box.hot_t - f32(1.0 / 120) / ui.FADE_OUT) < 1e-4, "after a %v s interval the step is %v", odd, 1 - sig.box.hot_t)
+	}
 }
 
 // The mouse and the keys move one highlight in a menu, and an item has no
@@ -1287,6 +1409,18 @@ test_ui_menu_hover_is_focus :: proc(t: ^testing.T) {
 	f = menu_frame(&u, &now)
 	testing.expect(t, !ui.has_focus(f.a.box) && !ui.has_focus(f.b.box), "no item has the focus")
 	testing.expect(t, ui.menu_is_open("menu"), "the menu stays open")
+
+	// The highlight stays on while the menu fades out.
+	menu_frame(&u, &now, {kind = .Mouse_Move, x = ra.x + 10, y = ra.y + ra.h / 2})
+	f = menu_frame(&u, &now, {kind = .Key_Down, key = .Escape})
+	testing.expect(t, !ui.menu_is_open("menu"))
+	faded := 0
+	for f.animating && f.a.box != nil && faded < 200 {
+		testing.expect_value(t, f.a.box.hot_t, f32(1))
+		faded += 1
+		f = menu_frame(&u, &now)
+	}
+	testing.expect(t, faded > 1, "the menu takes frames to fade out")
 }
 
 // Two 40 pt buttons with tooltips at the bottom right of a 300 by 200
