@@ -262,8 +262,27 @@ typedef struct {
   void (*set_accessibility)(const Access_Node *nodes, uint32_t count); // copied
   // x, y, w, h in view points for each rect where a press moves the window; copied
   void (*set_drag_regions)(const float (*rects)[4], uint32_t count);
+  // With WINDOW_FLAG_BUTTONS: what the app's window buttons do (Window_Command).
+  void (*window_command)(uint32_t command);
+  // With WINDOW_FLAG_BUTTONS: minimise, maximise and close, x, y, w, h in view points; copied
+  void (*set_window_buttons)(const float (*rects)[4], uint32_t count);
 } Shell;
-_Static_assert(sizeof(Shell) == 64, "Shell size must match platform.odin");
+_Static_assert(sizeof(Shell) == 80, "Shell size must match platform.odin");
+
+// Frame_Input.window
+enum {
+  // The window has no titlebar of its own: the app draws minimise, maximise
+  // and close at the view's top right and reports them with set_window_buttons.
+  WINDOW_FLAG_BUTTONS = 1 << 0,
+  WINDOW_FLAG_MAXIMIZED = 1 << 1,
+};
+
+typedef enum {
+  WINDOW_COMMAND_NONE,
+  WINDOW_COMMAND_MINIMIZE,
+  WINDOW_COMMAND_TOGGLE_MAXIMIZE, // maximise, or restore a maximised window
+  WINDOW_COMMAND_CLOSE,
+} Window_Command;
 
 typedef struct {
   Event *events;
@@ -278,8 +297,10 @@ typedef struct {
   float titlebar_height; // points of the view's top under the window's buttons, 0 for none
   float titlebar_inset; // where the window's buttons end, from the left edge
   float frame_interval; // seconds between the display's refreshes, 0 when unknown
+  uint32_t window; // WINDOW_FLAG_*
+  uint32_t _pad;
 } Frame_Input;
-_Static_assert(sizeof(Frame_Input) == 64, "Frame_Input size must match platform.odin");
+_Static_assert(sizeof(Frame_Input) == 72, "Frame_Input size must match platform.odin");
 
 typedef struct {
   int32_t animating;

@@ -115,12 +115,15 @@ link :: proc(id: string, hot_color: render.Color, height: Size = {}, label := ""
 // the parent until the end of the scope. It has a scrollbar while its
 // content is taller than it, drawn as State.scrollbars says. inset_end is
 // how much of its bottom something else covers: the content can scroll up
-// clear of it, and the scrollbar and scroll_to keep above it.
+// clear of it, and the scrollbar and scroll_to keep above it. bar_top is
+// how much of its top right something else covers, such as the window's
+// buttons: the scrollbar starts below it.
 @(deferred_out = scroll_view_end)
-scroll_view :: proc(id: string, width, height: Size, flags: Box_Flags = {}, inset_end: f32 = 0) -> ^Box {
+scroll_view :: proc(id: string, width, height: Size, flags: Box_Flags = {}, inset_end: f32 = 0, bar_top: f32 = 0) -> ^Box {
 	b := box_make(id, {.View_Scroll, .Clip, .Allow_Overflow_Y} + flags, width, height)
 	b.child_axis = .Y
 	b.inset_end = inset_end
+	b.bar_top = bar_top
 	if b.key != 0 {
 		scrollbar_drag(b)
 		b.gutter = gutter_of(b)
@@ -170,10 +173,10 @@ Thumb :: struct {
 @(private)
 thumb_of :: proc(view: ^Box) -> (t: Thumb, ok: bool) {
 	content, h := view.view_bounds.y - view.inset_end, build_size(view).y - view.inset_end
-	if content <= h || h <= 0 {
+	if content <= h || h - view.bar_top <= 2 * SCROLLBAR_INSET {
 		return {}, false
 	}
-	track := h - 2 * SCROLLBAR_INSET
+	track := h - view.bar_top - 2 * SCROLLBAR_INSET
 	t.h = clamp(track * h / content, min(SCROLLBAR_MIN_THUMB, track), track)
 	t.travel = track - t.h
 	t.range = content - h
@@ -261,8 +264,8 @@ scrollbar :: proc(view: ^Box) {
 	}
 	set_next_flags({})
 	size := build_size(view)
-	bar := box_make("###scrollbar", flags, px(SCROLLBAR_TRACK), px(size.y - view.inset_end))
-	bar.fixed_pos = {size.x - SCROLLBAR_TRACK, view_offset(view).y}
+	bar := box_make("###scrollbar", flags, px(SCROLLBAR_TRACK), px(size.y - view.inset_end - view.bar_top))
+	bar.fixed_pos = {size.x - SCROLLBAR_TRACK, view_offset(view).y + view.bar_top}
 	bar.opacity = view.bar_t
 	push_parent(bar)
 	defer pop_parent()

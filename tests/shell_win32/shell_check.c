@@ -2,8 +2,8 @@
 // shell/common.c linked with a stub app, run on Windows or under Wine (see
 // run.sh). A driver thread does what a person, Windows or the app's own
 // threads would: keys, a minimized window, a redraw asked for from another
-// thread, the system menu, a clipboard another app holds, the end of the
-// session. The stub app records what each frame got, and the driver checks
+// thread, the system menu, a clipboard another app holds, the window's top
+// and its buttons, which the app draws, the end of the session. The stub app records what each frame got, and the driver checks
 // it. Each check prints PASS or FAIL; the exit code is the failures.
 //
 // It goes through the shell's real entry points (window messages and the
@@ -17,7 +17,7 @@
 #define MAX_SEEN 256
 
 static CRITICAL_SECTION g_lock;
-static Event g_seen[MAX_SEEN]; // key and text events, in order
+static Event g_seen[MAX_SEEN]; // key, text and mouse events, in order
 static int g_seen_count;
 static volatile LONG g_frames;
 static volatile LONG g_shutdowns;
@@ -42,6 +42,14 @@ enum {
 static volatile LONG g_ime_context; // whether the window had an input method context, -1 before asked
 static volatile LONG g_menu_allowed; // let SC_KEYMENU open the system menu
 static volatile LONG g_menu_open; // between WM_ENTERMENULOOP and WM_EXITMENULOOP
+static volatile LONG g_window_flags = -1; // the last frame's Frame_Input.window
+static volatile LONG g_titlebar_height; // and its titlebar_height, in points
+static Shell *g_stub_shell;
+
+// The stub app's top: a 50 point room whose empty part moves the window,
+// and the window's three buttons, 46 points wide, at its right.
+#define STUB_TOP 50.0f
+#define STUB_BUTTON 46.0f
 
 static void check(bool ok, const char *name, const char *detail) {
   fprintf(stdout, "%s %s%s%s\n", ok ? "PASS" : "FAIL", name, ok || !detail ? "" : ": ", ok || !detail ? "" : detail);
@@ -105,9 +113,20 @@ Frame_Result app_frame(Memory *mem, Shell *shell, Frame_Input *input) {
   EnterCriticalSection(&g_lock);
   for (uint32_t i = 0; i < input->event_count; i++) {
     Event e = input->events[i];
-    if ((e.kind == EVENT_KEY_DOWN || e.kind == EVENT_KEY_UP || e.kind == EVENT_TEXT) && g_seen_count < MAX_SEEN) g_seen[g_seen_count++] = e;
+    bool kept = e.kind == EVENT_KEY_DOWN || e.kind == EVENT_KEY_UP || e.kind == EVENT_TEXT || e.kind == EVENT_MOUSE_MOVE ||
+                e.kind == EVENT_MOUSE_DOWN || e.kind == EVENT_MOUSE_UP || e.kind == EVENT_MOUSE_LEAVE;
+    if (kept && g_seen_count < MAX_SEEN) g_seen[g_seen_count++] = e;
   }
   LeaveCriticalSection(&g_lock);
+  InterlockedExchange(&g_window_flags, (LONG)input->window);
+  InterlockedExchange(&g_titlebar_height, (LONG)input->titlebar_height);
+  g_stub_shell = shell;
+  float w = input->width;
+  float buttons[3][4] = {{w - 3 * STUB_BUTTON, 0, STUB_BUTTON, STUB_TOP}, {w - 2 * STUB_BUTTON, 0, STUB_BUTTON, STUB_TOP}, {w - STUB_BUTTON, 0, STUB_BUTTON, STUB_TOP}};
+  float drag[1][4] = {{0, 0, w - 3 * STUB_BUTTON, STUB_TOP}};
+  // An older shell has neither.
+  if (shell->set_window_buttons) shell->set_window_buttons((const float(*)[4])buttons, 3);
+  if (shell->set_drag_regions) shell->set_drag_regions((const float(*)[4])drag, 1);
   Frame_Result result = {0};
   LONG what = InterlockedExchange(&g_ask, ASK_NONE);
   switch (what) {
@@ -328,6 +347,120 @@ static void check_clipboard(void) {
   check(copied, "clipboard: a copy waits for another app to let go", NULL);
 }
 
+static int seen_mouse(uint32_t kind, float *x, float *y) {
+  int n = 0;
+  EnterCriticalSection(&g_lock);
+  for (int i = 0; i < g_seen_count; i++)
+    if (g_seen[i].kind == kind) {
+      n++;
+      if (x) *x = g_seen[i].x, *y = g_seen[i].y;
+    }
+  LeaveCriticalSection(&g_lock);
+  return n;
+}
+
+// A point of the client area in points, on the screen, as WM_NCHITTEST
+// and the non-client mouse messages take it.
+static LPARAM screen_point(float x, float y) {
+  POINT p = {(LONG)lroundf(x * g_scale), (LONG)lroundf(y * g_scale)};
+  ClientToScreen(g_window, &p);
+  return MAKELPARAM(p.x, p.y);
+}
+
+static LRESULT hit_at(float x, float y) { return SendMessageW(g_window, WM_NCHITTEST, 0, screen_point(x, y)); }
+
+static float client_width(void) {
+  RECT c;
+  GetClientRect(g_window, &c);
+  return (float)c.right / g_scale;
+}
+
+static void check_window_top(void) {
+  char detail[160];
+  request_redraw();
+  Sleep(100);
+  LONG flags = InterlockedCompareExchange(&g_window_flags, 0, 0);
+  check(flags >= 0 && (flags & WINDOW_FLAG_BUTTONS), "the app draws the window's buttons", NULL);
+  check(InterlockedCompareExchange(&g_titlebar_height, 0, 0) > 0, "and keeps room at the top", NULL);
+  RECT w;
+  GetWindowRect(g_window, &w);
+  POINT origin = {0, 0};
+  ClientToScreen(g_window, &origin);
+  snprintf(detail, sizeof detail, "client top %ld, window top %ld", origin.y, w.top);
+  check(origin.y == w.top, "no titlebar: the client area starts at the window's top", detail);
+
+  float width = client_width();
+  snprintf(detail, sizeof detail, "got %ld", (long)hit_at(width / 2, 1));
+  check(hit_at(width / 2, 1) == HTTOP, "the top edge resizes", detail);
+  snprintf(detail, sizeof detail, "got %ld", (long)hit_at(100, 30));
+  check(hit_at(100, 30) == HTCAPTION, "a drag region moves the window", detail);
+  snprintf(detail, sizeof detail, "got %ld", (long)hit_at(width - 1.5f * STUB_BUTTON, 30));
+  check(hit_at(width - 1.5f * STUB_BUTTON, 30) == HTMAXBUTTON, "the app's maximise button is HTMAXBUTTON, for snap layouts", detail);
+  check(hit_at(width - 0.5f * STUB_BUTTON, 30) == HTCLIENT, "close is the app's", NULL);
+  check(hit_at(100, 200) == HTCLIENT, "below the top is the app's", NULL);
+
+  // The pointer over the maximise button comes as non-client messages,
+  // which reach the app as ordinary ones. The shell's point step sends
+  // them, and keeps the pointer there whatever the real one does.
+  float mx = width - 1.5f * STUB_BUTTON, my = 30;
+  clear_seen();
+  LONG before = frames();
+  char at[32];
+  snprintf(at, sizeof at, "%.1f,%.1f", mx, my);
+  os_test_step("point", at);
+  frame_after(before, 300);
+  float x = -1, y = -1;
+  int moves = seen_mouse(EVENT_MOUSE_MOVE, &x, &y);
+  snprintf(detail, sizeof detail, "%d moves, the last at %.1f, %.1f", moves, x, y);
+  check(moves == 1 && fabsf(x - mx) < 1 && fabsf(y - my) < 1, "maximise button: the pointer reaches the app", detail);
+  clear_seen();
+  before = frames();
+  SendMessageW(g_window, WM_NCLBUTTONDOWN, HTMAXBUTTON, screen_point(mx, my));
+  // GetCapture only sees the calling thread's.
+  GUITHREADINFO gui = {.cbSize = sizeof gui};
+  GetGUIThreadInfo(GetWindowThreadProcessId(g_window, NULL), &gui);
+  check(gui.hwndCapture == g_window, "maximise button: a press takes the capture", NULL);
+  SendMessageW(g_window, WM_LBUTTONUP, 0, MAKELPARAM((int)(mx * g_scale), (int)(my * g_scale)));
+  frame_after(before, 300);
+  Sleep(30);
+  check(seen_mouse(EVENT_MOUSE_DOWN, NULL, NULL) == 1 && seen_mouse(EVENT_MOUSE_UP, NULL, NULL) == 1,
+        "maximise button: the press and release reach the app", NULL);
+  check(!IsZoomed(g_window), "and the system doesn't act on them itself", NULL);
+  clear_seen();
+  before = frames();
+  SendMessageW(g_window, WM_NCMOUSEMOVE, HTCAPTION, screen_point(100, 30));
+  frame_after(before, 300);
+  check(seen_mouse(EVENT_MOUSE_LEAVE, NULL, NULL) == 1, "off the maximise button onto a drag region, the pointer leaves the app", NULL);
+
+  // The app's buttons ask the shell, which changes the window after the
+  // frame.
+  if (!g_stub_shell->window_command) {
+    check(false, "the shell takes window commands", NULL);
+    return;
+  }
+  g_stub_shell->window_command(WINDOW_COMMAND_TOGGLE_MAXIMIZE);
+  for (int i = 0; i < 100 && !IsZoomed(g_window); i++) Sleep(10);
+  check(IsZoomed(g_window), "maximise maximises", NULL);
+  request_redraw();
+  Sleep(100);
+  check((InterlockedCompareExchange(&g_window_flags, 0, 0) & WINDOW_FLAG_MAXIMIZED) != 0, "and the app is told", NULL);
+  MONITORINFO info = {.cbSize = sizeof info};
+  GetMonitorInfoW(MonitorFromWindow(g_window, MONITOR_DEFAULTTONEAREST), &info);
+  origin = (POINT){0, 0};
+  ClientToScreen(g_window, &origin);
+  RECT c;
+  GetClientRect(g_window, &c);
+  snprintf(detail, sizeof detail, "client %ld,%ld %ldx%ld, work area %ld,%ld to %ld,%ld", origin.x, origin.y, c.right, c.bottom,
+           info.rcWork.left, info.rcWork.top, info.rcWork.right, info.rcWork.bottom);
+  check(origin.y >= info.rcWork.top && origin.x >= info.rcWork.left && origin.y + c.bottom <= info.rcWork.bottom &&
+            origin.x + c.right <= info.rcWork.right && origin.y - info.rcWork.top <= 2,
+        "maximised, the client area fills the work area and no more", detail);
+  check(hit_at(client_width() / 2, 1) != HTTOP, "maximised, the top edge doesn't resize", NULL);
+  g_stub_shell->window_command(WINDOW_COMMAND_TOGGLE_MAXIMIZE);
+  for (int i = 0; i < 100 && IsZoomed(g_window); i++) Sleep(10);
+  check(!IsZoomed(g_window), "maximise again restores", NULL);
+}
+
 static unsigned __stdcall watchdog(void *arg) {
   Sleep(30000);
   fprintf(stdout, "FAIL timed out\n");
@@ -347,6 +480,7 @@ static unsigned __stdcall driver(void *arg) {
   check_capture();
   check_clipboard();
   check_menu();
+  check_window_top();
   check_minimized();
   if (g_endsession_run) {
     // Logging off: the app shuts down before WM_ENDSESSION returns.

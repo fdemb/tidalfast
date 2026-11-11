@@ -621,7 +621,7 @@ draw_track_list :: proc(s: ^State, main_w, view_h: f32) {
 	artist := album_artist_page(s) if kind == .Album else nil
 	defer draw_list_menu(s, kind)
 
-	list := ui.scroll_view("tracks", ui.px(main_w), ui.px(view_h), inset_end = bar_inset(s))
+	list := ui.scroll_view("tracks", ui.px(main_w), ui.px(view_h), inset_end = bar_inset(s), bar_top = window_bar_top(s))
 	// One scroll view shows every list, so its offset belongs to the list
 	// that was open. A refresh keeps list_gen, and the anchor below.
 	if lib.scrolled_gen != lib.list_gen {

@@ -160,7 +160,7 @@ draw_artist :: proc(s: ^State, p: ^List_Place, main_w, view_h: f32) {
 		draw_artist_grid(s, page, grid.part, content_w, view_h)
 		return
 	}
-	view := ui.scroll_view(fmt.tprintf("artist##%d", page.id), ui.px(main_w), ui.px(view_h), inset_end = bar_inset(s))
+	view := ui.scroll_view(fmt.tprintf("artist##%d", page.id), ui.px(main_w), ui.px(view_h), inset_end = bar_inset(s), bar_top = window_bar_top(s))
 	history_scroll(s, view)
 	ui.accessible(view, .Group, small_str(&page.name))
 	nav_float(s, view.view_off.y)

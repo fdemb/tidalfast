@@ -249,10 +249,32 @@ Shell :: struct {
 	set_accessibility: proc "c" (nodes: [^]Access_Node, count: u32),
 	// Where a press moves the window, as x, y, w, h in view points: the
 	// empty parts of the titlebar the view draws under. The shell copies
-	// them. nil on Linux and Windows.
+	// them. nil on Linux.
 	set_drag_regions:  proc "c" (rects: [^][4]f32, count: u32),
+	// With Frame_Input.window's Buttons, what the app's window buttons do.
+	window_command:    proc "c" (command: Window_Command),
+	// With Frame_Input.window's Buttons, where minimise, maximise and close
+	// are, in that order, as x, y, w, h in view points. The shell copies
+	// them, and Windows' snap layouts open from the maximise button.
+	set_window_buttons: proc "c" (rects: [^][4]f32, count: u32),
 }
-#assert(size_of(Shell) == 64)
+#assert(size_of(Shell) == 80)
+
+Window_Flag :: enum u32 {
+	// The window has no titlebar of its own: the app draws minimise,
+	// maximise and close at the view's top right, and tells the shell
+	// where with set_window_buttons.
+	Buttons,
+	Maximized,
+}
+Window_Flags :: bit_set[Window_Flag; u32]
+
+Window_Command :: enum u32 {
+	None,
+	Minimize,
+	Toggle_Maximize, // maximise, or restore a maximised window
+	Close,
+}
 
 Frame_Input :: struct {
 	events:        [^]Event,
@@ -274,6 +296,8 @@ Frame_Input :: struct {
 	// Seconds between the display's refreshes, 0 when the shell doesn't
 	// know. A frame after an idle gap steps this long.
 	frame_interval:  f32,
+	window:          Window_Flags,
+	_:               u32,
 }
 
 Frame_Result :: struct {
@@ -284,5 +308,5 @@ Frame_Result :: struct {
 	wake_after: f32,
 }
 
-#assert(size_of(Frame_Input) == 64)
+#assert(size_of(Frame_Input) == 72)
 #assert(size_of(Frame_Result) == 8)
