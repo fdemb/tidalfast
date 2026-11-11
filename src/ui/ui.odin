@@ -93,7 +93,7 @@ Box_Flag :: enum u32 {
 	Window_Drag, // empty titlebar space: a press there moves the window, see drag_regions
 	Draw_Backdrop, // background over a blur of what's under the box, see render.push_backdrop
 	Click_Shield, // clickable only so presses don't reach what's under it; under the titlebar it moves the window, see cut_drag_regions
-	Focus_Is_Hot, // hot while it has the focus, for menu items: hover and the keyboard move one highlight
+	Focus_Is_Hot, // hot while it's the menu's highlight, see menu_highlight: hover and the keyboard move one highlight
 	No_Focus_Ring, // shows the focus itself, as a table does with its selected row
 	Shrink_From_End, // children that don't fit give up room from the end, not in proportion: the one crossing the edge is cut short and those after it get none
 	Center_Children, // children sit in the middle of the room along the child axis, as between two fill() spacers, for a box that's only there to centre something
@@ -323,6 +323,7 @@ State :: struct {
 	menu_focus_new: bool, // the first menu item built takes the focus
 	menu_saved:     Key, // the focus before the menu opened, restored when it closes
 	menu_saved_vis: bool,
+	menu_lit:       Key, // the item highlighted when the menu closed, lit while it fades out
 	tooltip_seen:   f64, // when a tooltip was last built
 	tooltip_owner:  Key, // the box the tooltip is showing for
 	tooltip_pos:    [2]f32, // where it showed for that box, which it stays at
@@ -546,6 +547,9 @@ prune :: proc(u: ^State) {
 	}
 	if box_lookup(u, u.menu_saved) == nil {
 		u.menu_saved = 0
+	}
+	if box_lookup(u, u.menu_lit) == nil {
+		u.menu_lit = 0
 	}
 }
 
@@ -1281,9 +1285,7 @@ box_make :: proc(id: string, flags: Box_Flags = {}, width: Size = {}, height: Si
 		// frame's rects, so each is lit a frame late and for a frame only.
 		instant := .Instant_Hover in b.flags && u.hot_by_mouse
 		if .Focus_Is_Hot in b.flags {
-			// A menu fading out keeps its highlight, though the focus has
-			// gone back to where it was.
-			hot = u.focus == b.key if u.menu_open else b.hot_t == 1
+			hot = menu_highlight(u) == b.key
 			instant = .Instant_Hover in b.flags
 		}
 		ring := u.focus == b.key && u.focus_visible && .No_Focus_Ring not_in b.flags

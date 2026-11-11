@@ -359,12 +359,14 @@ open_menu :: proc(id: string, pos: [2]f32, up := false) {
 	u.menu_pos = pos
 	u.menu_up = up
 	u.menu_focus_new = u.key_click != 0
+	u.menu_lit = 0
 	u.focus = 0
 }
 
 close_menu :: proc() {
 	u := ctx
 	if u.menu_open {
+		u.menu_lit = u.focus
 		u.focus = u.menu_saved
 		u.focus_visible = u.menu_saved_vis && u.focus != 0
 		u.menu_saved = 0
@@ -373,6 +375,14 @@ close_menu :: proc() {
 	u.menu_focus_new = false
 	// It may close after it was built this frame, so the fade starts next.
 	u.animating = true
+}
+
+// menu_highlight is the menu item drawn lit: the focus while the menu is
+// open, and while it fades out the item that had the focus when it closed,
+// though the focus has gone back to where it was.
+@(private)
+menu_highlight :: proc(u: ^State) -> Key {
+	return u.focus if u.menu_open else u.menu_lit
 }
 
 menu_is_open :: proc(id: string) -> bool {
