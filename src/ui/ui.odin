@@ -246,7 +246,9 @@ State :: struct {
 	frame:          u64,
 	time:           f64,
 	dt:             f32,
-	ease:           f32, // how far this frame's dt takes active_t, focus_t and a fading hot_t to their targets
+	frame_dt:       f32, // a normal frame's length, measured between animating frames
+	animated_before: bool, // the frame before last ended with animating set
+	ease:          f32, // how far this frame's dt takes active_t, focus_t and a fading hot_t to their targets
 	width, height:  f32,
 	renderer:       ^render.Renderer, // this frame's
 	texts:          ^text.State,
@@ -348,6 +350,7 @@ init :: proc(u: ^State) {
 	u.hits = make([]Hit, MAX_BOXES)
 	// No tooltip yet, though the time may start at 0.
 	u.tooltip_seen = -TOOLTIP_WARM
+	u.frame_dt = 1.0 / 60
 }
 
 // Sizes
@@ -452,7 +455,15 @@ begin_frame :: proc(u: ^State, events: []platform.Event, r: ^render.Renderer, t:
 	if width != u.width || height != u.height || len(events) > 0 {
 		u.settle_frames = 0
 	}
-	u.dt = f32(clamp(time - u.time, 0, 1.0 / 30))
+	// Nothing was easing across the gap after a frame that settled, so the
+	// next step is a normal frame long. The first interval after idle can
+	// be irregular, so only a run of animating frames measures one.
+	elapsed := f32(clamp(time - u.time, 0, 1.0 / 30))
+	if u.animating && u.animated_before && elapsed > 0 && elapsed < 1.0 / 30 {
+		u.frame_dt = elapsed
+	}
+	u.dt = elapsed if u.animating else u.frame_dt
+	u.animated_before = u.animating
 	u.ease = 1 - math.exp(-u.dt * 18)
 	u.time = time
 	u.width = width
