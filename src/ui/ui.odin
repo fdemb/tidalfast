@@ -246,7 +246,7 @@ State :: struct {
 	frame:          u64,
 	time:           f64,
 	dt:             f32,
-	ease:           f32, // how far this frame's dt takes hot_t, active_t and focus_t to their targets
+	ease:           f32, // how far this frame's dt takes active_t, focus_t and a fading hot_t to their targets
 	width, height:  f32,
 	renderer:       ^render.Renderer, // this frame's
 	texts:          ^text.State,
@@ -1257,7 +1257,9 @@ box_make :: proc(id: string, flags: Box_Flags = {}, width: Size = {}, height: Si
 			hot = u.focus == b.key
 		}
 		ring := u.focus == b.key && u.focus_visible && .No_Focus_Ring not_in b.flags
-		b.hot_t = approach(u, b.hot_t, 1 if hot else 0, rate, 0.002)
+		// Lit at once: a fast mouse is on a row for one to three frames, and
+		// an eased peak would differ between neighbouring rows.
+		b.hot_t = 1 if hot else approach(u, b.hot_t, 0, rate, 0.002)
 		b.active_t = approach(u, b.active_t, 1 if u.active[.Left] == b.key else 0, rate, 0.002)
 		b.focus_t = approach(u, b.focus_t, 1 if ring else 0, rate, 0.002)
 	}
