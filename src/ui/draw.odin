@@ -19,7 +19,7 @@ fade :: proc(c: render.Color, a: f32) -> render.Color {
 @(private)
 draw_box :: proc(u: ^State, b: ^Box, alpha: f32) {
 	r := u.renderer
-	a := alpha * b.opacity
+	a := alpha * drawn_opacity(b)
 	if r == nil || a <= 0 {
 		return
 	}

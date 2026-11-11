@@ -36,7 +36,7 @@ STACK_DEPTH :: 64
 TOOLTIP_DELAY :: 0.5 // seconds of hovering before a tooltip shows
 TOOLTIP_WARM :: 1 // seconds after a tooltip that the next one shows without the delay
 DRAG_THRESHOLD :: 4 // points the mouse moves before a press becomes a drag
-FADE_IN :: 0.08 // seconds hot_t, active_t and focus_t take from 0 to 1
+FADE_IN :: 0.08 // seconds hot_fade, active_t and focus_t take from 0 to 1
 FADE_OUT :: 0.16 // seconds they take from 1 to 0
 MAX_SETTLE_FRAMES :: 3 // extra frames in a row that a layout mismatch may ask for
 
@@ -91,12 +91,12 @@ Box_Flag :: enum u32 {
 	Window_Drag, // empty titlebar space: a press there moves the window, see drag_regions
 	Draw_Backdrop, // background over a blur of what's under the box, see render.push_backdrop
 	Click_Shield, // clickable only so presses don't reach what's under it; under the titlebar it moves the window, see cut_drag_regions
-	Focus_Is_Hot, // hot while it has the focus, for menu items: hover and the keyboard move one highlight
+	Focus_Is_Hot, // hot while it's the menu's highlight, see menu_highlight: hover and the keyboard move one highlight
 	No_Focus_Ring, // shows the focus itself, as a table does with its selected row
 	Shrink_From_End, // children that don't fit give up room from the end, not in proportion: the one crossing the edge is cut short and those after it get none
 	Center_Children, // children sit in the middle of the room along the child axis, as between two fill() spacers, for a box that's only there to centre something
 	Draw_Glass, // a lens of glass tinted by background, lit while hot and swelling while pressed, see render.push_glass
-	Instant_Hover, // hot_t jumps with no fade, for list rows and tiles: a fast mouse is on one for a few frames, and a fade would light neighbours unevenly
+	Instant_Hover, // hot_t jumps with no fade, for list rows and tiles: a fast mouse is on one for a few frames, and a fade would light neighbours unevenly. end_frame lights the one under the mouse in this frame's layout
 }
 Box_Flags :: bit_set[Box_Flag; u32]
 
@@ -118,7 +118,7 @@ Box :: struct {
 	bar_hovered:     bool, // the mouse was over the view when the scrollbar was last built
 	bar_focused:     bool, // the focus was in the view then
 	bar_grab:        f32, // where in the thumb the mouse took it
-	hot_t:           f32,
+	hot_t:           f32, // how lit the hover is, along a smoothstep curve: what draws it
 	hot_fade:        f32, // hot_t's linear progress, before its curve
 	active_t:        f32,
 	focus_t:         f32,
@@ -150,6 +150,7 @@ Build :: struct {
 	texture_src:               render.Rect, // texels of texture to draw; zero for all of it
 	rim:                       render.Rim, // a hairline inside the edge, see render.push_rim
 	opacity:                   f32, // multiplies the box and everything inside it
+	shown_by:                  ^Box, // drawn at least as opaque as this box's hot_t, see show_on_hover
 	run:                       ^text.Run,
 	text_size:                 [2]f32, // the label's size with padding, measured in end_frame
 	// What assistive apps see: a role puts the box in the accessibility
@@ -250,7 +251,6 @@ State :: struct {
 	frame:          u64,
 	time:           f64,
 	dt:             f32,
-	frame_dt:       f32, // a normal frame's length, measured between animating frames
 	animated_before: bool, // the frame before last ended with animating set
 	width, height:  f32,
 	renderer:       ^render.Renderer, // this frame's
@@ -319,6 +319,7 @@ State :: struct {
 	menu_focus_new: bool, // the first menu item built takes the focus
 	menu_saved:     Key, // the focus before the menu opened, restored when it closes
 	menu_saved_vis: bool,
+	menu_lit:       Key, // the item highlighted when the menu closed, lit while it fades out
 	tooltip_seen:   f64, // when a tooltip was last built
 	tooltip_owner:  Key, // the box the tooltip is showing for
 	tooltip_pos:    [2]f32, // where it showed for that box, which it stays at
@@ -353,7 +354,6 @@ init :: proc(u: ^State) {
 	u.hits = make([]Hit, MAX_BOXES)
 	// No tooltip yet, though the time may start at 0.
 	u.tooltip_seen = -TOOLTIP_WARM
-	u.frame_dt = 1.0 / 60
 }
 
 // Sizes
@@ -452,20 +452,27 @@ box_lookup :: proc(u: ^State, key: Key) -> ^Box {
 // end_frame. hardware is the buttons down right now, from Frame_Input.mouse_buttons;
 // without it the UI goes by the events alone.
 // text is the bytes Text and Marked_Text events point into.
-begin_frame :: proc(u: ^State, events: []platform.Event, r: ^render.Renderer, t: ^text.State, width, height: f32, time: f64, hardware: Maybe(platform.Mouse_Buttons) = nil, text_bytes: []u8 = nil) {
+// frame_interval is the display's, from Frame_Input.frame_interval, or 0
+// when the shell doesn't know it.
+begin_frame :: proc(u: ^State, events: []platform.Event, r: ^render.Renderer, t: ^text.State, width, height: f32, time: f64, hardware: Maybe(platform.Mouse_Buttons) = nil, text_bytes: []u8 = nil, frame_interval: f32 = 0) {
 	ctx = u
 	u.frame += 1
 	if width != u.width || height != u.height || len(events) > 0 {
 		u.settle_frames = 0
 	}
 	// Nothing was easing across the gap after a frame that settled, so the
-	// next step is a normal frame long. The first interval after idle can
-	// be irregular, so only a run of animating frames measures one.
+	// next step is one refresh of the display long. The interval after that
+	// can be irregular, as the swap chain wakes up, so it steps no more.
+	refresh := min(frame_interval, 1.0 / 30) if frame_interval > 0 else 1.0 / 60
 	elapsed := f32(clamp(time - u.time, 0, 1.0 / 30))
-	if u.animating && u.animated_before && elapsed > 0 && elapsed < 1.0 / 30 {
-		u.frame_dt = elapsed
+	switch {
+	case !u.animating:
+		u.dt = refresh
+	case !u.animated_before:
+		u.dt = min(elapsed, refresh)
+	case:
+		u.dt = elapsed
 	}
-	u.dt = elapsed if u.animating else u.frame_dt
 	u.animated_before = u.animating
 	u.time = time
 	u.width = width
@@ -534,6 +541,9 @@ prune :: proc(u: ^State) {
 	}
 	if box_lookup(u, u.menu_saved) == nil {
 		u.menu_saved = 0
+	}
+	if box_lookup(u, u.menu_lit) == nil {
+		u.menu_lit = 0
 	}
 }
 
@@ -1055,6 +1065,20 @@ end_frame :: proc() -> bool {
 		u.focus_reveal = false
 		reveal_focus(u)
 	}
+	// Hot came from the last frame's rects, so a row that scrolled under a
+	// still mouse would be lit a frame late, in the wrong place. An
+	// Instant_Hover box has no fade to keep, so it's lit by this frame's.
+	hot := hit_at(u, u.input.mouse) if u.input.mouse_inside else 0
+	if active := u.active[.Left]; active != 0 && hot != active {
+		hot = 0
+	}
+	if hot != u.hot {
+		h, _ := find_hit(u, hot)
+		relight(u, u.hot, false)
+		relight(u, u.hot_parent, false)
+		relight(u, hot, true)
+		relight(u, h.click_parent, true)
+	}
 	// The build used sizes or offsets the layout didn't keep, so what's on
 	// screen may be missing rows. One more frame builds it right. The limit
 	// stops a layout that never settles from drawing forever once nothing
@@ -1085,11 +1109,39 @@ end_frame :: proc() -> bool {
 	}
 	// Rows moved under a still mouse, or a box appeared that has no rect to
 	// test against yet: one more frame settles hot.
-	hot := hit_at(u, u.input.mouse) if u.input.mouse_inside else 0
 	if hot != u.hot && u.active[.Left] == 0 {
 		u.animating = true
 	}
 	return u.animating
+}
+
+// relight lights or darkens key's box at once, if it's an Instant_Hover
+// box built this frame.
+@(private)
+relight :: proc(u: ^State, key: Key, on: bool) {
+	b := box_lookup(u, key)
+	if b == nil || b.last_frame != u.frame || .Instant_Hover not_in b.flags || .Focus_Is_Hot in b.flags {
+		return
+	}
+	b.hot_fade = 1 if on else 0
+	b.hot_t = b.hot_fade
+}
+
+// show_on_hover draws b at least as opaque as box's hover, as the buttons
+// on a list row show while the row is hovered. It goes by box's hot_t when
+// b is drawn, so it agrees with the row once end_frame has lit the
+// Instant_Hover box under the mouse.
+show_on_hover :: proc(b, box: ^Box) {
+	b.shown_by = box
+}
+
+// drawn_opacity is the opacity b is drawn with: its own, or more with
+// show_on_hover.
+drawn_opacity :: proc(b: ^Box) -> f32 {
+	if b.shown_by != nil {
+		return max(b.opacity, b.shown_by.hot_t)
+	}
+	return b.opacity
 }
 
 // fit_floating moves the floating boxes that keep_in_window into the
@@ -1266,7 +1318,7 @@ box_make :: proc(id: string, flags: Box_Flags = {}, width: Size = {}, height: Si
 	if b.key != 0 {
 		hot := u.hot == b.key || u.hot_parent == b.key
 		if .Focus_Is_Hot in b.flags {
-			hot = u.focus == b.key
+			hot = menu_highlight(u) == b.key
 		}
 		ring := u.focus == b.key && u.focus_visible && .No_Focus_Ring not_in b.flags
 		b.hot_fade = (1 if hot else 0) if .Instant_Hover in b.flags else step_fade(u, b.hot_fade, hot)

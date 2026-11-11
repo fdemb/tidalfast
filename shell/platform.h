@@ -277,7 +277,7 @@ typedef struct {
   uint32_t mouse_buttons; // 1 << Mouse_Button for each held down now, in any app
   float titlebar_height; // points of the view's top under the window's buttons, 0 for none
   float titlebar_inset; // where the window's buttons end, from the left edge
-  uint32_t _pad;
+  float frame_interval; // seconds between the display's refreshes, 0 when unknown
 } Frame_Input;
 _Static_assert(sizeof(Frame_Input) == 64, "Frame_Input size must match platform.odin");
 

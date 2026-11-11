@@ -1214,8 +1214,8 @@ test_ui_hover_fade_reverses_from_where_it_is :: proc(t: ^testing.T) {
 	testing.expect_value(t, sig.box.hot_t, f32(0))
 }
 
-// An Instant_Hover box lights and goes dark with the hover, and asks for no
-// frames to do it.
+// An Instant_Hover box lights and goes dark as the mouse moves on and off,
+// and asks for no frames to do it.
 @(test)
 test_ui_instant_hover_has_no_fade :: proc(t: ^testing.T) {
 	u: ui.State
@@ -1238,6 +1238,143 @@ test_ui_instant_hover_has_no_fade :: proc(t: ^testing.T) {
 	b, animating = frame(&u, &now, {kind = .Mouse_Move, x = 250, y = 150})
 	testing.expect_value(t, b.hot_t, f32(0))
 	testing.expect(t, !animating, "going dark takes no frames")
+}
+
+// Ten 40 pt Instant_Hover rows in a 300 by 200 scroll view, each with a
+// mark that shows while its row is lit, as a track row's buttons do.
+@(private = "file")
+Scrolled_Rows :: struct {
+	rows:      [10]^ui.Box,
+	marks:     [10]^ui.Box,
+	animating: bool,
+}
+
+@(private = "file")
+scrolled_rows_frame :: proc(u: ^ui.State, now: ^f64, events: ..platform.Event) -> (f: Scrolled_Rows) {
+	now^ += 1.0 / 120
+	ui.begin_frame(u, events, nil, nil, 300, 200, now^)
+	list := ui.box_make("list", {.View_Scroll, .Allow_Overflow_Y, .Clip}, ui.px(300), ui.px(200))
+	list.child_axis = .Y
+	ui.push_parent(list)
+	for i in 0 ..< len(f.rows) {
+		f.rows[i] = ui.box_make(fmt.tprintf("##row%d", i), {.Clickable, .Instant_Hover}, ui.fill(), ui.px(40))
+		ui.signal(f.rows[i])
+		ui.push_parent(f.rows[i])
+		f.marks[i] = ui.box_make("", {}, ui.px(10), ui.px(10))
+		f.marks[i].opacity = 0
+		ui.show_on_hover(f.marks[i], f.rows[i])
+		ui.pop_parent()
+	}
+	ui.pop_parent()
+	f.animating = ui.end_frame()
+	return
+}
+
+// only_lit says whether row lit is the only lit one, and its mark the
+// only one showing.
+@(private = "file")
+only_lit :: proc(f: Scrolled_Rows, lit: int) -> bool {
+	for i in 0 ..< len(f.rows) {
+		want := f32(1 if i == lit else 0)
+		if f.rows[i].hot_t != want || ui.drawn_opacity(f.marks[i]) != want {
+			return false
+		}
+	}
+	return true
+}
+
+// A row that scrolls under a still mouse is lit in the frame it gets
+// there, and the lit row is the one under the mouse in that frame's
+// layout, not the one that was there before. What shows with the row,
+// though built before the layout, agrees with it.
+@(test)
+test_ui_instant_hover_follows_rows_scrolled_under_a_still_mouse :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	now := 0.0
+	scrolled_rows_frame(&u, &now)
+	scrolled_rows_frame(&u, &now, {kind = .Mouse_Move, x = 50, y = 60})
+	f := scrolled_rows_frame(&u, &now)
+	testing.expect(t, only_lit(f, 1), "row 1 is lit")
+	testing.expect(t, !f.animating)
+
+	// One row up, at once: row 2 is under the mouse now.
+	f = scrolled_rows_frame(&u, &now, {kind = .Scroll, x = 50, y = 60, dy = -40, precise = true, phase = .Began})
+	testing.expect_value(t, f.rows[2].rect.y, f32(40))
+	testing.expect(t, only_lit(f, 2), "row 2 is lit in the frame it comes under the mouse")
+
+	// The next frames agree, and nothing fades.
+	for _ in 0 ..< 10 {
+		if f = scrolled_rows_frame(&u, &now); !f.animating {
+			break
+		}
+		testing.expect(t, only_lit(f, 2), "row 2 stays lit")
+	}
+	testing.expect(t, !f.animating, "the rows settle")
+	testing.expect(t, only_lit(f, 2), "row 2 stays lit")
+
+	// To the end, 200 pt down: row 6 is at 40.
+	f = scrolled_rows_frame(&u, &now, {kind = .Scroll, x = 50, y = 60, dy = -5000, precise = true, phase = .Changed})
+	testing.expect_value(t, f.rows[6].rect.y, f32(40))
+	testing.expect(t, only_lit(f, 6), "row 6 is lit in the frame it comes under the mouse")
+}
+
+// refresh_frame is button_frame on a display whose refresh interval the
+// shell reports as refresh, 0 for unknown.
+@(private = "file")
+refresh_frame :: proc(u: ^ui.State, events: []platform.Event, time: f64, refresh: f32) -> (ui.Signal, bool) {
+	ui.begin_frame(u, events, nil, nil, 300, 200, time, nil, nil, refresh)
+	b := ui.box_make("button", {.Clickable, .Focusable}, ui.px(100), ui.px(40))
+	sig := ui.signal(b)
+	return sig, ui.end_frame()
+}
+
+// hover_run moves the mouse onto the button, or off it, and runs frames
+// every interval seconds until the fade settles.
+@(private = "file")
+hover_run :: proc(u: ^ui.State, now: ^f64, on: bool, interval: f64, refresh: f32) {
+	now^ += interval
+	pos: [2]f32 = {20, 20} if on else {250, 150}
+	_, animating := refresh_frame(u, {{kind = .Mouse_Move, x = pos.x, y = pos.y}}, now^, refresh)
+	for _ in 0 ..< 400 {
+		if !animating {
+			break
+		}
+		now^ += interval
+		_, animating = refresh_frame(u, nil, now^, refresh)
+	}
+}
+
+// After an idle gap the first two frames each step one refresh of the
+// display, as the shell reports it, or 1/60 s when it doesn't know,
+// however late the second one comes and whatever the frames before the
+// gap took. The third steps the time since the second.
+@(test)
+test_ui_frames_after_idle_step_a_normal_frame :: proc(t: ^testing.T) {
+	for refresh in ([]f32{1.0 / 144, 1.0 / 60, 0}) {
+		u: ui.State
+		ui.init(&u)
+		defer ui_destroy(&u)
+		now := 0.0
+		refresh_frame(&u, nil, now, refresh)
+		// Frames twice as far apart as the display's, and one hitch.
+		hover_run(&u, &now, true, 2 * f64(refresh if refresh > 0 else 1.0 / 60), refresh)
+		now += 0.03
+		refresh_frame(&u, nil, now, refresh)
+		hover_run(&u, &now, false, 0.0005, refresh)
+		step := (refresh if refresh > 0 else 1.0 / 60) / ui.FADE_IN
+
+		now += 5
+		sig, _ := refresh_frame(&u, {{kind = .Mouse_Move, x = 20, y = 20}}, now, refresh)
+		testing.expectf(t, abs(sig.box.hot_fade - step) < 1e-4, "refresh %v: the first frame steps one refresh, not %v", refresh, sig.box.hot_fade)
+		now += 1.0 / 30
+		sig, _ = refresh_frame(&u, nil, now, refresh)
+		testing.expectf(t, abs(sig.box.hot_fade - 2 * step) < 1e-4, "refresh %v: a late second frame steps no more", refresh)
+		now += 1.0 / 240
+		sig, _ = refresh_frame(&u, nil, now, refresh)
+		testing.expectf(t, abs(sig.box.hot_fade - 2 * step - f32(1.0 / 240) / ui.FADE_IN) < 1e-4, "refresh %v: the third steps the time since the second", refresh)
+	}
 }
 
 // The mouse and the keys move one highlight in a menu, and an item has no
@@ -1287,6 +1424,18 @@ test_ui_menu_hover_is_focus :: proc(t: ^testing.T) {
 	f = menu_frame(&u, &now)
 	testing.expect(t, !ui.has_focus(f.a.box) && !ui.has_focus(f.b.box), "no item has the focus")
 	testing.expect(t, ui.menu_is_open("menu"), "the menu stays open")
+
+	// The highlight stays on while the menu fades out.
+	menu_frame(&u, &now, {kind = .Mouse_Move, x = ra.x + 10, y = ra.y + ra.h / 2})
+	f = menu_frame(&u, &now, {kind = .Key_Down, key = .Escape})
+	testing.expect(t, !ui.menu_is_open("menu"))
+	faded := 0
+	for f.animating && f.a.box != nil && faded < 200 {
+		testing.expect_value(t, f.a.box.hot_t, f32(1))
+		faded += 1
+		f = menu_frame(&u, &now)
+	}
+	testing.expect(t, faded > 1, "the menu takes frames to fade out")
 }
 
 // Two 40 pt buttons with tooltips at the bottom right of a 300 by 200
