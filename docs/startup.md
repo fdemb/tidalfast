@@ -7,9 +7,9 @@ The M1 Air is an old, low-end machine by now: a 2020 chip, 8 GB of memory and no
 ## How to measure
 
 ```
-./build.sh measure
+./build.py measure
 ./build/measure/measure startup              # 10 cold launches each with fake data and the mock
-./build/measure/measure ab main -setup=fake  # a change against main, in one sitting
+./build/measure/measure ab <app a> <app b> -setup=fake  # two builds, in one sitting
 ```
 
 [Measuring](measuring.md) explains how the tool works. Each step of startup has a mark, the time since the kernel started the process. The marks between `app_start` and `init` split the app's own setup, and each OS has a few marks the other lacks (`ns_window`, `metal_device` and `render_shaders` on macOS, `render_device` on Linux). The table of marks is in [What the app prints](measuring.md#what-the-app-prints).
@@ -101,7 +101,7 @@ The steps for the fake data, as differences of the medians:
 
 On the mock, `first_frame` to `tracks` is another 50 ms.
 
-The numbers this section had before came from `docs/measure-baseline.json`, taken on 15 October, when the app was still a dylib that the shell loaded after `launched`. That made `main` 4.8 ms, before the app's code was loaded. The other marks were close to these: `launched` 76.9, `init` 130.2, `first_frame` 154.2. `window` came 2 ms after `init` then, where now it comes 13 ms after.
+The numbers this section had before came from a baseline taken on 15 October, when the app was still a dylib that the shell loaded after `launched`. That made `main` 4.8 ms, before the app's code was loaded. The other marks were close to these: `launched` 76.9, `init` 130.2, `first_frame` 154.2. `window` came 2 ms after `init` then, where now it comes 13 ms after.
 
 ## Comparison
 

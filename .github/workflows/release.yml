@@ -1,7 +1,7 @@
-# Builds the macOS .dmg and the Linux AppImage with ./build.sh dist. A tag
-# v1.2.3 publishes both as the GitHub release v1.2.3, or adds them to it when
-# the release was made in GitHub's UI, which pushes the tag. A manual run only
-# uploads them as workflow artifacts.
+# Builds the macOS .dmg, the Linux AppImage and the Windows .zip with
+# build.py dist. A tag v1.2.3 publishes all three as the GitHub release
+# v1.2.3, or adds them to it when the release was made in GitHub's UI, which
+# pushes the tag. A manual run only uploads them as workflow artifacts.
 name: release
 
 on:
@@ -13,7 +13,6 @@ permissions:
   contents: write
 
 env:
-  ODIN_VERSION: dev-2026-10
   TIDALFAST_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
 
 jobs:
@@ -21,13 +20,8 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v5
-      - name: Install Odin
-        run: |
-          mkdir -p "$RUNNER_TEMP/odin"
-          curl -fsSL "https://github.com/odin-lang/Odin/releases/download/$ODIN_VERSION/odin-macos-arm64-$ODIN_VERSION.tar.gz" |
-            tar xz -C "$RUNNER_TEMP/odin" --strip-components=1
-          echo "$RUNNER_TEMP/odin" >> "$GITHUB_PATH"
-      - run: ./build.sh dist
+      - uses: ./.github/actions/install-odin
+      - run: python3 build.py dist
       - uses: actions/upload-artifact@v4
         with:
           name: macos
@@ -46,14 +40,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential clang pkg-config libwayland-dev wayland-protocols libxkbcommon-dev \
             libvulkan-dev glslang-tools libfreetype-dev libfontconfig-dev libcurl4-openssl-dev
-      - name: Install Odin
-        run: |
-          mkdir -p "$RUNNER_TEMP/odin"
-          curl -fsSL "https://github.com/odin-lang/Odin/releases/download/$ODIN_VERSION/odin-linux-amd64-$ODIN_VERSION.tar.gz" |
-            tar xz -C "$RUNNER_TEMP/odin" --strip-components=1
-          echo "$RUNNER_TEMP/odin" >> "$GITHUB_PATH"
-      - name: Build stb
-        run: cd "$(odin root)/vendor/stb/src" && sh build_stb.sh
+      - uses: ./.github/actions/install-odin
       - name: Install linuxdeploy
         run: |
           mkdir -p "$RUNNER_TEMP/bin" && cd "$RUNNER_TEMP/bin"
@@ -62,16 +49,31 @@ jobs:
           chmod +x ./*.AppImage
           ln -s linuxdeploy-x86_64.AppImage linuxdeploy
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-      - run: ./build.sh dist
+      - run: python3 build.py dist
       - uses: actions/upload-artifact@v4
         with:
           name: linux
           path: build/dist/*.AppImage
           if-no-files-found: error
 
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/install-odin
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - run: python build.py dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: build/dist/*.zip
+          if-no-files-found: error
+
   release:
     if: github.ref_type == 'tag'
-    needs: [macos, linux]
+    needs: [macos, linux, windows]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4

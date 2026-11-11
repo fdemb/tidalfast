@@ -1,6 +1,6 @@
 // Bindings for the dr_flac procedures the app uses. dr_flac.h next to this
 // file is dr_flac 0.13.3 from github.com/mackron/dr_libs (commit 69d777c).
-// build.sh compiles it from dr_flac.c, without stdio and Ogg.
+// build.py compiles it from dr_flac.c, without stdio and Ogg.
 package dr_flac
 
 import "core:c"
@@ -9,7 +9,7 @@ import "core:c"
 LIB :: "../../build/windows/dr_flac/dr_flac.lib" when ODIN_OS == .Windows else "../../build/dr_flac/dr_flac.a"
 
 when !#exists(LIB) {
-	#panic(LIB + " is missing: run ./build.sh first")
+	#panic(LIB + " is missing: run ./build.py first")
 }
 
 foreign import lib { LIB }
@@ -46,6 +46,6 @@ version_check :: proc "contextless" () {
 	v: [3]u32
 	version(&v.x, &v.y, &v.z)
 	if v != VERSION {
-		panic_contextless("dr_flac version mismatch: run ./build.sh")
+		panic_contextless("dr_flac version mismatch: run ./build.py")
 	}
 }

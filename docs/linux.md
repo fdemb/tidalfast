@@ -9,9 +9,9 @@ apt install build-essential clang pkg-config libwayland-dev wayland-protocols li
 
 The text is in Noto Sans, which the app has built in (see [Text](text.md#text-font)). Other scripts and emoji come from the system's fonts through fontconfig: on Debian and Ubuntu `fonts-noto-core`, `fonts-noto-cjk` and `fonts-noto-color-emoji` cover them. The `linux-text` workflow runs the tests and captures frames with the system's Noto Sans removed.
 
-Odin's `vendor:stb` links static libraries that Odin doesn't ship built for Linux. Build them once in the Odin install by running `build_stb.sh` in `$(odin root)/vendor/stb/src`. `build.sh` builds kb_text_shape and dr_flac itself. libsecret is opened with `dlopen` when the login is first saved or read, so it's only needed at run time, and only to keep the login. libpipewire (`libpipewire-0.3.so.0`, 0.3.50 or newer) is opened the same way when the first track plays, and the app needs it and a running PipeWire for any sound: there is no PulseAudio or ALSA output. Without it the app still runs, and a track fails with "PipeWire isn't installed" in the player bar ([Playback](playback.md#output-on-linux)).
+Odin's `vendor:stb` links static libraries that Odin doesn't ship built for Linux. Build them once in the Odin install by running `build_stb.sh` in `$(odin root)/vendor/stb/src`. `build.py` builds kb_text_shape and dr_flac itself. libsecret is opened with `dlopen` when the login is first saved or read, so it's only needed at run time, and only to keep the login. libpipewire (`libpipewire-0.3.so.0`, 0.3.50 or newer) is opened the same way when the first track plays, and the app needs it and a running PipeWire for any sound: there is no PulseAudio or ALSA output. Without it the app still runs, and a track fails with "PipeWire isn't installed" in the player bar ([Playback](playback.md#output-on-linux)).
 
-`./build.sh` takes the same arguments as on macOS and writes `build/tidalfast`. It generates the Wayland protocol code into `build/wayland` and compiles the shaders in `src/render/shaders` to SPIR-V in `build/shaders`, which the app `#load`s. The shell and the protocol code are compiled to objects in `build/shell`, which Odin links into the app with the Wayland and xkbcommon libraries.
+`./build.py` takes the same arguments as on macOS and writes `build/tidalfast`. It generates the Wayland protocol code into `build/wayland` and compiles the shaders in `src/render/shaders` to SPIR-V in `build/shaders`, which the app `#load`s. The shell and the protocol code are compiled to objects in `build/shell`, which Odin links into the app with the Wayland and xkbcommon libraries.
 
 What's different from macOS:
 
@@ -38,24 +38,6 @@ The shell differs from GTK in three places. The glide ends once less than a quar
 
 Not done yet: media keys and MPRIS, the screen reader tree (AT-SPI) and client-side decorations. The Vulkan backend gives each texture its own `VkDeviceMemory`, which is fine for the few hundred textures the app makes but could use a sub-allocator.
 
-To check the Linux build without a display, run a headless Weston and point the app at it. On a desktop, keep both away from the session's own state. Give them a temp runtime folder, and give the app throwaway `HOME`, `XDG_DATA_HOME`, `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` and a D-Bus session of its own. Otherwise the app reads and writes the user's settings, caches and keyring.
-
-With a GPU, Weston needs `--renderer=gl`. Its default renderer offers the Vulkan driver no sRGB format, and the renderer fails with "the surface has no 8-bit sRGB format". Without one, Mesa's lavapipe gives a software Vulkan device and the default renderer works, as in the `linux-text` workflow.
-
-```
-t=$(mktemp -d) && mkdir -m 700 "$t/run"
-XDG_RUNTIME_DIR="$t/run" weston --backend=headless --renderer=gl --socket=wl-test --width=1600 --height=1000 &
-weston=$!
-sleep 2 # until its socket is up
-env HOME="$t" XDG_DATA_HOME="$t/data" XDG_CONFIG_HOME="$t/config" XDG_CACHE_HOME="$t/cache" \
-    XDG_RUNTIME_DIR="$t/run" WAYLAND_DISPLAY=wl-test TIDALFAST_FAKE=1 TIDALFAST_AUDIO_NULL=1 \
-    TIDALFAST_CAPTURE="$t/frame.tga" TIDALFAST_SHELL_TEST="2:size=820,600;3:capture=$t/narrow.tga;4:quit" \
-    dbus-run-session -- ./build/tidalfast
-kill $weston
-```
-
-The captures are in `$t`. Remove it with `rm -rf "$t"` once you've looked at them.
-
 One test, `keychain_round_trip`, needs a Secret Service. The login tests keep the login in memory. Run the tests in a private D-Bus session with a throwaway keyring.
 
 A temp `HOME` alone doesn't make the keyring throwaway. gnome-keyring keeps its keyrings in `$XDG_DATA_HOME/keyrings` and its control socket in `$XDG_RUNTIME_DIR/keyring`, and desktop sessions often set both. With them pointing at the user's folders, `gnome-keyring-daemon --unlock` creates a real `login.keyring` with the password `x`. Programs that look in the login keyring before the default one, such as the GitHub CLI, then stop finding their secrets. So point all of them at a temp folder. The keyring daemon exits with the D-Bus session.
@@ -63,6 +45,6 @@ A temp `HOME` alone doesn't make the keyring throwaway. gnome-keyring keeps its 
 ```
 t=$(mktemp -d) && mkdir -m 700 "$t/run"
 env HOME="$t" XDG_DATA_HOME="$t/data" XDG_CONFIG_HOME="$t/config" XDG_CACHE_HOME="$t/cache" XDG_RUNTIME_DIR="$t/run" \
-    dbus-run-session -- sh -c 'echo x | gnome-keyring-daemon --unlock --components=secrets > /dev/null; odin test tests'
+    dbus-run-session -- sh -c 'echo x | gnome-keyring-daemon --unlock --components=secrets > /dev/null; ./build.py test'
 rm -rf "$t"
 ```

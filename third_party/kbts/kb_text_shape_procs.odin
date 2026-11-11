@@ -1,6 +1,6 @@
 // Odin's vendor:kb_text_shape bindings (dev-2026-10), copied so the library
 // links from build/kbts instead of the Odin install. The C source next to
-// this file is the matching kb_text_shape 2.21; build.sh compiles it. bidi.odin
+// this file is the matching kb_text_shape 2.21; build.py compiles it. bidi.odin
 // declares the one function this project adds to kb_text_shape.c.
 package kbts
 
@@ -8,7 +8,7 @@ package kbts
 LIB_PATH :: "../../build/windows/kbts/kb_text_shape.lib" when ODIN_OS == .Windows else "../../build/kbts/kb_text_shape.a"
 
 when !#exists(LIB_PATH) {
-	#panic(LIB_PATH + " is missing: run ./build.sh first")
+	#panic(LIB_PATH + " is missing: run ./build.py first")
 }
 
 foreign import lib { LIB_PATH }

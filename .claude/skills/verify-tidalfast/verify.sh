@@ -4,7 +4,7 @@
 # (default /tmp/tidalfast-verify), so build/ and the user's running app are
 # never touched. See SKILL.md next to this file.
 #
-#   verify.sh build                      app and mock into $ROOT/bin
+#   verify.sh build                      app and mock into $ROOT/build
 #   verify.sh doctor                     read-only health check
 #   verify.sh mock-start | mock-stop     tests/mock_tidal on a free port
 #   verify.sh run <label> <fake|mock> <steps>
@@ -14,7 +14,10 @@ set -u
 
 REPO=$(cd "$(dirname "$0")/../../.." && pwd)
 ROOT=${TIDALFAST_VERIFY_DIR:-/tmp/tidalfast-verify}
-BIN=$ROOT/bin
+BUILD=$ROOT/build
+BIN=$BUILD/measure
+APP=$BIN/app/tidalfast
+MOCK=$BIN/mock_tidal
 STATE=$ROOT/run
 EVIDENCE_ROOT=$ROOT/evidence
 
@@ -29,23 +32,11 @@ newest_source() {
 }
 
 cmd_build() {
-	mkdir -p "$BIN"
 	cd "$REPO" || die "no repo at $REPO"
-	# The app links the C libraries in build/kbts and build/dr_flac.
-	./build.sh libs || die "C library build failed"
-	echo "verify: building shell"
-	clang -c shell/shell.m -o "$BIN/shell.o" -fobjc-arc -mmacosx-version-min=14.0 \
-		-Wall -Wno-unused-parameter -O2 || die "shell build failed"
-	# MOCK_API makes an optimized build honour TIDALFAST_API and
-	# TIDALFAST_PKCE_REDIRECT, as ./build.sh measure does.
-	echo "verify: building app"
-	odin build src/app -out:"$BIN/tidalfast.tmp" -vet -strict-style -o:speed -minimum-os-version:14.0 \
-		-define:TIDALFAST_MOCK_API=true \
-		-extra-linker-flags:"$BIN/shell.o -framework Cocoa -framework Metal -framework QuartzCore -framework MediaPlayer" ||
-		die "app build failed"
-	mv -f "$BIN/tidalfast.tmp" "$BIN/tidalfast"
-	echo "verify: building mock"
-	odin build tests/mock_tidal -out:"$BIN/mock_tidal" -o:speed || die "mock build failed"
+	# The measure build is optimized and honours TIDALFAST_API and
+	# TIDALFAST_PKCE_REDIRECT.
+	echo "verify: building app and mock"
+	./build.py measure --out "$BUILD" || die "build failed"
 	echo "verify: built into $BIN"
 }
 
@@ -64,16 +55,16 @@ ours() {
 
 cmd_doctor() {
 	ok=1
-	for f in tidalfast mock_tidal; do
-		[ -x "$BIN/$f" ] || { echo "FAIL $BIN/$f missing: run verify.sh build"; ok=0; }
+	for f in "$APP" "$MOCK"; do
+		[ -x "$f" ] || { echo "FAIL $f missing: run verify.sh build"; ok=0; }
 	done
-	if [ -f "$BIN/tidalfast" ]; then
-		built=$(stat -f '%m' "$BIN/tidalfast")
+	if [ -f "$APP" ]; then
+		built=$(stat -f '%m' "$APP")
 		[ "$built" -ge "$(newest_source)" ] && echo "ok   build is newer than src/ and shell/" ||
 			{ echo "FAIL src/ or shell/ changed after the last build: run verify.sh build"; ok=0; }
 	fi
-	if [ -f "$BIN/tidalfast" ]; then
-		strings "$BIN/tidalfast" | grep -q "size wants w,h" && echo "ok   shell has the size= test step" ||
+	if [ -f "$APP" ]; then
+		strings "$APP" | grep -q "size wants w,h" && echo "ok   shell has the size= test step" ||
 			{ echo "FAIL shell lacks the size= test step"; ok=0; }
 	fi
 	app=$(cat "$STATE/app.pid" 2>/dev/null)
@@ -111,9 +102,9 @@ cmd_mock_start() {
 		echo "verify: mock already at $url"
 		return
 	fi
-	[ -x "$BIN/mock_tidal" ] || die "no mock: run verify.sh build"
+	[ -x "$MOCK" ] || die "no mock: run verify.sh build"
 	rm -f "$STATE/mock.url"
-	"$BIN/mock_tidal" -port=0 -audio-dir="$STATE/mock-audio" >"$STATE/mock.log" 2>&1 &
+	"$MOCK" -port=0 -audio-dir="$STATE/mock-audio" >"$STATE/mock.log" 2>&1 &
 	pid=$!
 	echo "$pid" >"$STATE/mock.pid"
 	url=
@@ -158,7 +149,7 @@ float_window() {
 # directory.
 cmd_run() {
 	label=$1 mode=$2 steps=$3
-	[ -x "$BIN/tidalfast" ] || die "nothing built: run verify.sh build"
+	[ -x "$APP" ] || die "nothing built: run verify.sh build"
 	ours "$(cat "$STATE/app.pid" 2>/dev/null)" && die "an app from an earlier run is still up: run verify.sh cleanup"
 	mkdir -p "$STATE"
 	EVIDENCE="$EVIDENCE_ROOT/$(date +%Y%m%d-%H%M%S)-$label"
@@ -199,7 +190,7 @@ cmd_run() {
 	echo "$steps" >"$EVIDENCE/steps.txt"
 	# env -i keeps the caller's TIDALFAST_ variables out, so the real API or
 	# keychain can't leak in.
-	env -i HOME="$HOME" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" "${env_args[@]}" "$BIN/tidalfast" >"$EVIDENCE/app.log" 2>&1 &
+	env -i HOME="$HOME" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" "${env_args[@]}" "$APP" >"$EVIDENCE/app.log" 2>&1 &
 	app=$!
 	echo $app >"$STATE/app.pid"
 	echo "verify: app $app ($mode), evidence in $EVIDENCE"
@@ -260,7 +251,7 @@ cmd_cleanup() {
 		esac
 	done
 	rm -rf "$STATE"
-	[ "${1:-}" = --bin ] && rm -rf "$BIN"
+	[ "${1:-}" = --bin ] && rm -rf "$BUILD"
 	echo "verify: cleaned up; evidence kept in $EVIDENCE_ROOT"
 }
 

@@ -1,0 +1,30 @@
+# Installs the Odin release that .odin-version names and puts it on PATH. On
+# Linux it also builds vendor:stb's static libraries, which Odin doesn't
+# ship built for Linux.
+name: Install Odin
+description: Installs the Odin release in .odin-version
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        version=$(tr -d '[:space:]' < .odin-version)
+        url=https://github.com/odin-lang/Odin/releases/download/$version
+        dir=$RUNNER_TEMP/odin
+        mkdir -p "$dir"
+        case "$RUNNER_OS" in
+        macOS | Linux)
+          [ "$RUNNER_OS" = macOS ] && asset=odin-macos-arm64 || asset=odin-linux-amd64
+          curl -fsSL "$url/$asset-$version.tar.gz" | tar xz -C "$dir" --strip-components=1
+          echo "$dir" >> "$GITHUB_PATH"
+          if [ "$RUNNER_OS" = Linux ]; then
+            (cd "$("$dir/odin" root)/vendor/stb/src" && sh build_stb.sh)
+          fi
+          ;;
+        Windows)
+          curl -fsSL -o "$RUNNER_TEMP/odin.zip" "$url/odin-windows-amd64-$version.zip"
+          unzip -q "$RUNNER_TEMP/odin.zip" -d "$dir"
+          odin=$(find "$dir" -name odin.exe | head -n 1)
+          cygpath -w "$(dirname "$odin")" >> "$GITHUB_PATH"
+          ;;
+        esac

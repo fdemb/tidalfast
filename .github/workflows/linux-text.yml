@@ -12,10 +12,8 @@ on:
       - "assets/fonts/**"
       - "tests/text_test.odin"
       - ".github/workflows/linux-text.yml"
+      - ".odin-version"
   workflow_dispatch:
-
-env:
-  ODIN_VERSION: dev-2026-10
 
 jobs:
   linux:
@@ -35,15 +33,8 @@ jobs:
           sudo rm /usr/share/fonts/truetype/noto/NotoSans-*.ttf
           sudo fc-cache -f
           if fc-list | grep -E '/NotoSans-[A-Za-z]+\.ttf'; then exit 1; fi
-      - name: Install Odin
-        run: |
-          mkdir -p "$RUNNER_TEMP/odin"
-          curl -fsSL "https://github.com/odin-lang/Odin/releases/download/$ODIN_VERSION/odin-linux-amd64-$ODIN_VERSION.tar.gz" |
-            tar xz -C "$RUNNER_TEMP/odin" --strip-components=1
-          echo "$RUNNER_TEMP/odin" >> "$GITHUB_PATH"
-      - name: Build stb
-        run: cd "$(odin root)/vendor/stb/src" && sh build_stb.sh
-      - run: ./build.sh
+      - uses: ./.github/actions/install-odin
+      - run: python3 build.py
       - name: Test
         run: |
           # The inner sh expands these, in a private D-Bus session and keyring.

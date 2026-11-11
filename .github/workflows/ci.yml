@@ -1,0 +1,55 @@
+# Builds the app and the measure tools and runs the tests on macOS, Linux
+# and Windows, for every pull request and every push to main. This is where
+# shared code is checked on the systems a change wasn't made on.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            python: python3
+          - os: ubuntu-24.04
+            python: python3
+          - os: windows-latest
+            python: python
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang pkg-config libwayland-dev wayland-protocols libxkbcommon-dev \
+            libvulkan-dev glslang-tools libfreetype-dev libfontconfig-dev libcurl4-openssl-dev dbus gnome-keyring
+      - uses: ./.github/actions/install-odin
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+        with:
+          arch: x64
+      - name: Build
+        run: ${{ matrix.python }} build.py
+      - name: Build measure
+        run: ${{ matrix.python }} build.py measure
+      - name: Test
+        if: runner.os != 'Linux'
+        run: ${{ matrix.python }} build.py test
+      - name: Test
+        if: runner.os == 'Linux'
+        run: |
+          # The inner sh expands these, in a private D-Bus session and keyring.
+          # shellcheck disable=SC2016
+          dbus-run-session -- sh -c 'export HOME=$(mktemp -d); eval "$(echo x | gnome-keyring-daemon --unlock --components=secrets)"; python3 build.py test'

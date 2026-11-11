@@ -1,44 +1,27 @@
 # Windows
 
-The Windows build is a first pass. It runs the same app as macOS and Linux: a Win32 shell in C (`shell/shell_win32.c`), a Direct3D 11 renderer, FreeType text, playback through WASAPI's shared mode, bit-perfect output through its exclusive mode, and the login in the Credential Manager. It is built for x86-64 Windows 10 and 11, on Windows itself with `build.bat` or cross-compiled from macOS or Linux.
+The Windows build is a first pass. It runs the same app as macOS and Linux: a Win32 shell in C (`shell/shell_win32.c`), a Direct3D 11 renderer, FreeType text, playback through WASAPI's shared mode, bit-perfect output through its exclusive mode, and the login in the Credential Manager. It is built for x86-64 Windows 10 and 11, on Windows itself with `build.py`, and CI builds and tests it on every push.
 
 ## Building on Windows
 
-`build.bat` builds from a prompt with MSVC's `cl`, `lib`, `link` and `rc` on `PATH` (an x64 Native Tools Command Prompt), with `odin` on `PATH` too. `curl` and `tar` come with Windows. With `fxc` from the Windows SDK on `PATH` (`%WindowsSdkBinPath%%WindowsSDKVersion%x64` in that prompt), it compiles the shaders in `src/render/shaders/rect.hlsl` into `src/render/shaders/dxbc`; without it, it uses the bytecode checked in there. Run it with `fxc` after changing `rect.hlsl`, and commit the bytecode.
+`python build.py` builds from a prompt with MSVC's `cl`, `lib`, `link` and `rc` on `PATH` (an x64 Native Tools Command Prompt), with `odin` and Python 3 on `PATH` too. `curl` and `tar` come with Windows. With `fxc` from the Windows SDK on `PATH` (`%WindowsSdkBinPath%%WindowsSDKVersion%x64` in that prompt), it compiles the shaders in `src/render/shaders/rect.hlsl` into `src/render/shaders/dxbc`; without it, it uses the bytecode checked in there. Run it with `fxc` after changing `rect.hlsl`, and commit the bytecode.
 
 ```
-build.bat               debug build\windows\tidalfast.exe, with a console for the log
-build.bat release       optimized, the windows subsystem
-build.bat dist          release build in build\dist\tidalfast.exe
-build.bat measure       build\measure\: the measure app, mock_tidal.exe and measure.exe
-build.bat libs          only the C libraries
-odin test tests         after one build.bat, which builds the C libraries
-tools\check_other_os.bat  type-checks the app and the measure tool for Linux and macOS
+python build.py           debug build\windows\tidalfast.exe, with a console for the log
+python build.py release   optimized, the windows subsystem
+python build.py dist      release build in build\dist: tidalfast.exe and a .zip of it
+python build.py measure   build\measure\: the measure app, mock_tidal.exe and measure.exe
+python build.py libs      only the C libraries
+python build.py test      the C libraries, then odin test tests
 ```
 
-The C code is compiled as C11 (`/std:c11 /experimental:c11atomics`). Odin links with MSVC's `link` (`-linker:default`): Odin's own rad-link has failed here without a message or an exit code. `check_other_os.bat` puts empty stand-ins for the Unix `.a` files the C library bindings check for, and removes only the ones it made.
+The C code is compiled as C11 (`/std:c11 /experimental:c11atomics`). Odin links with MSVC's `link` (`-linker:msvc`): Odin's own rad-link, its default on Windows, has failed here without a message or an exit code. The tests pass on Windows too. Two of them skip what Windows can't do: the time zone comes from the system, not `TZ`, and a variable set to "" is deleted (`tests/os_quirks_*.odin`).
 
 Some things about Odin on Windows that the tools work around: `os.process_wait` reports `success` whatever the exit code, so check `exit_code`; `os.create` makes handles a child process doesn't inherit, so a log handed to a child is opened with `.Inheritable`; and `os.process_terminate` sends a console Ctrl-C, which reaches every process on the console, the one that started it too, so `tools/measure` closes the app's window instead (`stop_windows`).
 
-## Cross-compiling
+The C libraries are compiled with `cl` into `build/windows`, apart from the macOS and Linux ones in `build`. `third_party`'s bindings pick `build/windows/<name>/<name>.lib` on Windows. FreeType 2.13.3 comes from its release, checked against its SHA-256, and is built with only the modules the app uses (`third_party/freetype/tf_ftmodule.h`): TrueType and CFF outlines, the SFNT tables with CBDT colour bitmaps and variations, and the anti-aliasing rasterizer. Its zlib and OT-SVG options are off (`tf_ftoption.h`).
 
-`./build.sh windows` writes `build/windows/tidalfast.exe`. `./build.sh windows release` makes an optimized one with the windows subsystem, so it opens no console. The debug build keeps the console, where the log goes. It needs:
-
-- Odin, the same release as the rest of the project, plus the Windows libraries Odin ships in its Windows release: `vendor/curl/lib/libcurl.lib` and `vendor/stb/lib/*.lib`. Copy them from `odin-windows-amd64-<release>.zip` into the same folders of the Odin install that builds. Odin's libcurl for Windows talks TLS through Schannel, so it trusts the system's certificate store.
-- clang-cl and lld-link (`apt install clang lld llvm` or Homebrew's `llvm`), `llvm-lib` and `llvm-rc`, `curl`, `sha256sum` and `tar`.
-- The MSVC libraries and the Windows SDK, fetched with [xwin](https://github.com/Jake-Shadle/xwin) and named by `WINDOWS_SDK`:
-
-```
-xwin --accept-license --arch x86_64 splat --output ~/winsdk --use-winsysroot-style --preserve-ms-arch-notation --disable-symlinks
-tools/winsdk_case.sh ~/winsdk
-WINDOWS_SDK=~/winsdk ./build.sh windows
-```
-
-`tools/winsdk_case.sh` adds links for each spelling of the SDK's files that the headers, Odin and the CRT ask for (`Windows.h` and `windows.h`, `User32.lib` and `user32.lib`). A case-sensitive file system needs it; Windows and a default macOS volume don't care.
-
-The C libraries are compiled with clang-cl into `build/windows`, apart from the native ones in `build`, so one checkout builds both. `third_party`'s bindings pick `build/windows/<name>/<name>.lib` on Windows. FreeType 2.13.3 comes from its release, checked against its SHA-256, and is built with only the modules the app uses (`third_party/freetype/tf_ftmodule.h`): TrueType and CFF outlines, the SFNT tables with CBDT colour bitmaps and variations, and the anti-aliasing rasterizer. Its zlib and OT-SVG options are off (`tf_ftoption.h`).
-
-`packaging/windows` has the icon, the version resource and the manifest, which `llvm-rc` compiles into the executable. The manifest asks for per-monitor DPI awareness (v2) and UTF-8 as the process's code page.
+`packaging/windows` has the icon, the version resource and the manifest, which `rc` compiles into the executable. The manifest asks for per-monitor DPI awareness (v2) and UTF-8 as the process's code page.
 
 ## What's different
 
@@ -66,34 +49,13 @@ The C libraries are compiled with clang-cl into `build/windows`, apart from the 
 - **Quitting.** Ctrl-C in the console and SIGTERM, which `sys.quit` raises for `measure`, quit through the main loop, so the app's shutdown runs, which saves the settings. Closing the window (`WM_CLOSE`) quits the same way, minimized or not. Logging off or shutting down Windows can end the process as soon as `WM_ENDSESSION` returns, so the shell runs the app's shutdown inside it; closing a debug build's console waits for the shutdown in the console's handler. There is no SIGUSR1: the shell's `snapshot` test step asks for a memory snapshot.
 - **The log.** A debug build logs to its console. A release build has no console, so started from Explorer or the Start menu it has no stderr, and the app logs to `%LOCALAPPDATA%\tidalfast\tidalfast.log`, the shell's lines included, keeping the last launch's as `tidalfast.old.log` (`src/app/logging_windows.odin`). A release build started from a console with its stderr redirected logs there. An error the app can't start or draw after also shows in a message box when there's no console: the window or the memory blocks failing in the shell, or the renderer or the fonts failing in the app.
 - **The clipboard.** Only one window can have it open, and clipboard managers open it for a moment after each change, so the shell tries again for up to 60 ms before giving up, and logs it if it does.
-- **Measuring.** `build.bat measure`, then `build\measure\measure.exe all`, runs as on the other systems: the machine comes from the registry, and the mock's login is deleted from the Credential Manager after the runs. Run it in a console of its own (`start /wait cmd /c ...`) when something else shares the console. On a Ryzen 5 7600 with an RTX 3070 Ti, the fake data's tracks were drawn 137 ms after the process started, and the footprint at tracks was 23 MB, 32 MB at its peak; against the mock, 27 MB at tracks and 40 MB at its peak, playing. With Vulkan it was 54 MB at tracks, 70 MB at its peak.
+- **Measuring.** `python build.py measure`, then `build\measure\measure.exe all`, runs as on the other systems: the machine comes from the registry, and the mock's login is deleted from the Credential Manager after the runs. Run it in a console of its own (`start /wait cmd /c ...`) when something else shares the console. On a Ryzen 5 7600 with an RTX 3070 Ti, the fake data's tracks were drawn 137 ms after the process started, and the footprint at tracks was 23 MB, 32 MB at its peak; against the mock, 27 MB at tracks and 40 MB at its peak, playing. With Vulkan it was 54 MB at tracks, 70 MB at its peak.
+- **Test steps.** The shell test steps are the Linux ones (see `shell/common.c` and `shell_win32.c`), and `move=x,y`, `click=x,y`, `type=text`, `vkey=name` (with `ctrl+`, `alt+` and `shift+`, and the keypad's keys as `kp-home` and so on), `wheel=n`, `touchpad=dy`, `minimize`, `restore` and `endsession` go through the window procedure as Windows' own messages would. `endmenu` closes a menu `vkey=alt+space` opened.
 - **The mock.** `tests/mock_tidal` encodes its FLAC files with macOS's `afconvert`, and elsewhere with `tests/dashgen`'s verbatim encoder: lossless, but about as big as the WAV.
-
-## Running it without Windows
-
-The executable runs under Wine. On an ARM64 Linux machine, [Hangover](https://github.com/AndreRH/hangover)'s Wine runs x86-64 Windows programs through FEX, and its wined3d turns Direct3D 11 into OpenGL or Vulkan on the host's driver, Mesa's llvmpipe without a GPU. Wine draws to X11, so give it an Xvfb. A prefix of its own keeps it away from any other Wine setup:
-
-```
-export WINEPREFIX=~/.cache/wineprefix-tidalfast
-wine wineboot -u
-Xvfb :91 -screen 0 1600x1000x24 &
-DISPLAY=:91 WINEDEBUG=-all TIDALFAST_FAKE=1 TIDALFAST_AUDIO_NULL=1 \
-    APPDATA='Z:\tmp\tf\roaming' LOCALAPPDATA='Z:\tmp\tf\local' \
-    TIDALFAST_CAPTURE='Z:\tmp\tf\last.tga' \
-    TIDALFAST_SHELL_TEST='3:size=820,600;5:capture=Z:\tmp\tf\narrow.tga;6:key=ctrl+f;7:commit=Jóga;8:ime;9:ax-dump;10:quit' \
-    wine build/windows/tidalfast.exe
-```
-
-Paths the app gets are Windows paths: Wine's `Z:` drive is the Linux root. A fresh prefix has no fonts beyond Tahoma, so characters outside its Latin, Greek and Cyrillic show as boxes; copying a font with them, such as DejaVu Sans, into the prefix's `windows/Fonts` as `arial.ttf` puts it in the fallback list. The same test steps work as on Linux (see `shell/common.c` and `shell_win32.c`); `move=x,y`, `click=x,y`, `type=text`, `vkey=name` (with `ctrl+`, `alt+` and `shift+`, and the keypad's keys as `kp-home` and so on), `wheel=n`, `touchpad=dy`, `minimize`, `restore` and `endsession` go through the window procedure as Windows' own messages would, and `endmenu` closes a menu `vkey=alt+space` opened.
-
-`tests/shell_win32/run.sh` checks the shell on its own, without Odin or the Windows SDK: it builds `shell_win32.c` and `common.c` with a stub app (`tests/shell_win32/shell_check.c`) using mingw-w64's gcc, and runs it under Wine, or on Windows itself. A driver thread sends the window what a person and Windows would, keys of other layouts, Alt+Space, a minimized window, a redraw from another thread, the system menu, a lost mouse capture, a clipboard another app holds and the end of the session, and checks what the stub app's frames got. Given an older `shell_win32.c` as its argument, it shows what that one got wrong.
-
-Under emulation the frame times say nothing about real hardware: the CPU is emulated and llvmpipe draws on it. The behaviour is the real app's, though. The same shell test script gives the same input method mirror and accessibility tree as on Linux, the double-clicked fake row plays a 220 Hz tone into `TIDALFAST_AUDIO_CAPTURE`, a PKCE login against `tests/mock_tidal` goes over curl and Schannel and is restored from the Credential Manager on the next launch, `type=` and `vkey=` edit the search field through `WM_CHAR` and `WM_KEYDOWN` with surrogate pairs joined, the layout and clicks scale at 144 DPI (Wine's `LogPixels`), CJK, Arabic, Hebrew, Devanagari and Thai fall back to the fonts in the list, the window survives being minimized, restored and resized six times in two seconds, and an idle window uses no CPU, minimized or not. `./build.sh windows` from a fresh checkout fetches and builds FreeType by itself.
 
 ## Not done yet
 
-- A CI job. `odin test tests` runs on Windows itself (all 432 pass on Windows 11), but doesn't build for Windows from another system, since `odin test` takes no `-windows-sdk-root`. Two tests skip what Windows can't do: the time zone comes from the system, not `TZ`, and a variable set to "" is deleted (`tests/os_quirks_*.odin`).
-- Packaging: an installer or a zip with the executable, and code signing. `./build.sh windows dist` writes only `build/dist/tidalfast.exe`. `./build.sh windows measure` refuses; build the measure tools on Windows with `build.bat measure`.
+- Packaging: an installer, and code signing. `build.py dist` makes a .zip with only the executable in it.
 - Following a new default output while exclusive output plays; it moves at the next track.
 - The System Media Transport Controls, for media keys from anywhere and Now Playing.
 - UI Automation for screen readers. The app's accessibility tree is there; the shell keeps it only for tests.
