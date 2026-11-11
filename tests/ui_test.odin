@@ -1320,83 +1320,60 @@ test_ui_instant_hover_follows_rows_scrolled_under_a_still_mouse :: proc(t: ^test
 	testing.expect(t, only_lit(f, 6), "row 6 is lit in the frame it comes under the mouse")
 }
 
-// hover_run moves the mouse onto the button, or off it, and runs frames
-// every 1/120 s until the fade settles.
+// refresh_frame is button_frame on a display whose refresh interval the
+// shell reports as refresh, 0 for unknown.
 @(private = "file")
-hover_run :: proc(u: ^ui.State, now: ^f64, on: bool) -> (sig: ui.Signal) {
-	now^ += 1.0 / 120
+refresh_frame :: proc(u: ^ui.State, events: []platform.Event, time: f64, refresh: f32) -> (ui.Signal, bool) {
+	ui.begin_frame(u, events, nil, nil, 300, 200, time, nil, nil, refresh)
+	b := ui.box_make("button", {.Clickable, .Focusable}, ui.px(100), ui.px(40))
+	sig := ui.signal(b)
+	return sig, ui.end_frame()
+}
+
+// hover_run moves the mouse onto the button, or off it, and runs frames
+// every interval seconds until the fade settles.
+@(private = "file")
+hover_run :: proc(u: ^ui.State, now: ^f64, on: bool, interval: f64, refresh: f32) {
+	now^ += interval
 	pos: [2]f32 = {20, 20} if on else {250, 150}
-	animating: bool
-	sig, animating = button_frame(u, {{kind = .Mouse_Move, x = pos.x, y = pos.y}}, now^)
-	for _ in 0 ..< 200 {
+	_, animating := refresh_frame(u, {{kind = .Mouse_Move, x = pos.x, y = pos.y}}, now^, refresh)
+	for _ in 0 ..< 400 {
 		if !animating {
 			break
 		}
-		now^ += 1.0 / 120
-		sig, animating = button_frame(u, nil, now^)
+		now^ += interval
+		_, animating = refresh_frame(u, nil, now^, refresh)
 	}
-	return
 }
 
-// After an idle gap the first two frames each step a normal frame's length,
-// however late the second one comes.
+// After an idle gap the first two frames each step one refresh of the
+// display, as the shell reports it, or 1/60 s when it doesn't know,
+// however late the second one comes and whatever the frames before the
+// gap took. The third steps the time since the second.
 @(test)
 test_ui_frames_after_idle_step_a_normal_frame :: proc(t: ^testing.T) {
-	u: ui.State
-	ui.init(&u)
-	defer ui_destroy(&u)
-	now := 0.0
-	button_frame(&u, nil, now)
-	hover_run(&u, &now, true)
-	hover_run(&u, &now, false)
-	step := f32(1.0 / 120) / ui.FADE_IN
-
-	now += 5
-	sig, _ := button_frame(&u, {{kind = .Mouse_Move, x = 20, y = 20}}, now)
-	testing.expect(t, abs(sig.box.hot_fade - step) < 1e-4, "the first frame steps a normal frame")
-	now += 1.0 / 30
-	sig, _ = button_frame(&u, nil, now)
-	testing.expect(t, abs(sig.box.hot_fade - 2 * step) < 1e-4, "a late second frame steps no more")
-	now += 1.0 / 120
-	sig, _ = button_frame(&u, nil, now)
-	testing.expect(t, abs(sig.box.hot_fade - 3 * step) < 1e-4, "the third steps the time since the second")
-}
-
-// One odd interval between animating frames, a hitch or two frames back to
-// back, doesn't become the step after the next idle.
-@(test)
-test_ui_frame_length_ignores_one_odd_interval :: proc(t: ^testing.T) {
-	for odd in ([]f64{0.030, 0.0005}) {
+	for refresh in ([]f32{1.0 / 144, 1.0 / 60, 0}) {
 		u: ui.State
 		ui.init(&u)
 		defer ui_destroy(&u)
 		now := 0.0
-		button_frame(&u, nil, now)
-		hover_run(&u, &now, true)
-		hover_run(&u, &now, false)
-
-		// A fade in whose last interval is the odd one.
-		now += 1.0 / 120
-		sig, animating := button_frame(&u, {{kind = .Mouse_Move, x = 20, y = 20}}, now)
-		for sig.box.hot_fade < 0.7 {
-			now += 1.0 / 120
-			sig, animating = button_frame(&u, nil, now)
-		}
-		testing.expect(t, animating)
-		now += odd
-		sig, animating = button_frame(&u, nil, now)
-		for _ in 0 ..< 200 {
-			if !animating {
-				break
-			}
-			now += odd
-			sig, animating = button_frame(&u, nil, now)
-		}
-		testing.expect_value(t, sig.box.hot_fade, f32(1))
+		refresh_frame(&u, nil, now, refresh)
+		// Frames twice as far apart as the display's, and one hitch.
+		hover_run(&u, &now, true, 2 * f64(refresh if refresh > 0 else 1.0 / 60), refresh)
+		now += 0.03
+		refresh_frame(&u, nil, now, refresh)
+		hover_run(&u, &now, false, 0.0005, refresh)
+		step := (refresh if refresh > 0 else 1.0 / 60) / ui.FADE_IN
 
 		now += 5
-		sig, _ = button_frame(&u, {{kind = .Mouse_Move, x = 250, y = 150}}, now)
-		testing.expectf(t, abs(1 - sig.box.hot_fade - f32(1.0 / 120) / ui.FADE_OUT) < 1e-4, "after a %v s interval the step is %v", odd, 1 - sig.box.hot_fade)
+		sig, _ := refresh_frame(&u, {{kind = .Mouse_Move, x = 20, y = 20}}, now, refresh)
+		testing.expectf(t, abs(sig.box.hot_fade - step) < 1e-4, "refresh %v: the first frame steps one refresh, not %v", refresh, sig.box.hot_fade)
+		now += 1.0 / 30
+		sig, _ = refresh_frame(&u, nil, now, refresh)
+		testing.expectf(t, abs(sig.box.hot_fade - 2 * step) < 1e-4, "refresh %v: a late second frame steps no more", refresh)
+		now += 1.0 / 240
+		sig, _ = refresh_frame(&u, nil, now, refresh)
+		testing.expectf(t, abs(sig.box.hot_fade - 2 * step - f32(1.0 / 240) / ui.FADE_IN) < 1e-4, "refresh %v: the third steps the time since the second", refresh)
 	}
 }
 

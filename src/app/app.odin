@@ -314,7 +314,7 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input, shell: ^platfor
 	ui_begin := time.tick_now()
 	measure_frame_begin(s)
 	text.begin_frame(&s.text, r)
-	ui.begin_frame(&s.ui, events, r, &s.text, w, h, input.time, input.mouse_buttons, input.text[:input.text_length])
+	ui.begin_frame(&s.ui, events, r, &s.text, w, h, input.time, input.mouse_buttons, input.text[:input.text_length], input.frame_interval)
 	ui.set_window_key(&s.ui, bool(input.key_window))
 	ui.set_clipboard(&s.ui, shell.get_clipboard, shell.set_clipboard)
 	data_update(s, input.time)

@@ -271,7 +271,9 @@ Frame_Input :: struct {
 	// window has its own titlebar, or none, as in full screen.
 	titlebar_height: f32,
 	titlebar_inset:  f32,
-	_:               u32,
+	// Seconds between the display's refreshes, 0 when the shell doesn't
+	// know. A frame after an idle gap steps this long.
+	frame_interval:  f32,
 }
 
 Frame_Result :: struct {

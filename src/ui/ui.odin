@@ -39,8 +39,6 @@ DRAG_THRESHOLD :: 4 // points the mouse moves before a press becomes a drag
 FADE_IN :: 0.08 // seconds hot_fade, active_t and focus_t take from 0 to 1
 FADE_OUT :: 0.16 // seconds they take from 1 to 0
 MAX_SETTLE_FRAMES :: 3 // extra frames in a row that a layout mismatch may ask for
-FRAME_SAMPLES :: 5 // intervals between animating frames that frame_dt is the median of
-MIN_FRAME :: 0.001 // seconds: a shorter interval is two frames back to back, not the display's
 
 Key :: distinct u64
 
@@ -253,9 +251,6 @@ State :: struct {
 	frame:          u64,
 	time:           f64,
 	dt:             f32,
-	frame_dt:       f32, // a normal frame's length: the median of frame_samples, or 1/60 s before there are 3
-	frame_samples:  [FRAME_SAMPLES]f32, // the last intervals between animating frames
-	frame_sampled:  int, // how many there have been
 	animated_before: bool, // the frame before last ended with animating set
 	width, height:  f32,
 	renderer:       ^render.Renderer, // this frame's
@@ -359,7 +354,6 @@ init :: proc(u: ^State) {
 	u.hits = make([]Hit, MAX_BOXES)
 	// No tooltip yet, though the time may start at 0.
 	u.tooltip_seen = -TOOLTIP_WARM
-	u.frame_dt = 1.0 / 60
 }
 
 // Sizes
@@ -458,27 +452,26 @@ box_lookup :: proc(u: ^State, key: Key) -> ^Box {
 // end_frame. hardware is the buttons down right now, from Frame_Input.mouse_buttons;
 // without it the UI goes by the events alone.
 // text is the bytes Text and Marked_Text events point into.
-begin_frame :: proc(u: ^State, events: []platform.Event, r: ^render.Renderer, t: ^text.State, width, height: f32, time: f64, hardware: Maybe(platform.Mouse_Buttons) = nil, text_bytes: []u8 = nil) {
+// frame_interval is the display's, from Frame_Input.frame_interval, or 0
+// when the shell doesn't know it.
+begin_frame :: proc(u: ^State, events: []platform.Event, r: ^render.Renderer, t: ^text.State, width, height: f32, time: f64, hardware: Maybe(platform.Mouse_Buttons) = nil, text_bytes: []u8 = nil, frame_interval: f32 = 0) {
 	ctx = u
 	u.frame += 1
 	if width != u.width || height != u.height || len(events) > 0 {
 		u.settle_frames = 0
 	}
 	// Nothing was easing across the gap after a frame that settled, so the
-	// next step is a normal frame long. The interval after that can be
-	// irregular, so it steps no more than a normal frame either, and only
-	// a run of animating frames measures one.
+	// next step is one refresh of the display long. The interval after that
+	// can be irregular, as the swap chain wakes up, so it steps no more.
+	refresh := min(frame_interval, 1.0 / 30) if frame_interval > 0 else 1.0 / 60
 	elapsed := f32(clamp(time - u.time, 0, 1.0 / 30))
 	switch {
 	case !u.animating:
-		u.dt = u.frame_dt
+		u.dt = refresh
 	case !u.animated_before:
-		u.dt = min(elapsed, u.frame_dt)
+		u.dt = min(elapsed, refresh)
 	case:
 		u.dt = elapsed
-		if elapsed >= MIN_FRAME && elapsed < 1.0 / 30 {
-			frame_sample(u, elapsed)
-		}
 	}
 	u.animated_before = u.animating
 	u.time = time
@@ -1385,26 +1378,6 @@ ui_scale :: proc(u: ^State) -> f32 {
 view_offset :: proc(view: ^Box) -> [2]f32 {
 	s := ui_scale(ctx)
 	return {drawn_off(view, 0, s), drawn_off(view, 1, s)}
-}
-
-// frame_sample takes an interval between two animating frames. frame_dt is
-// the median of the last few, so one hitch or one pair of frames back to
-// back doesn't become the step after every later idle.
-@(private)
-frame_sample :: proc(u: ^State, interval: f32) {
-	u.frame_samples[u.frame_sampled % FRAME_SAMPLES] = interval
-	u.frame_sampled += 1
-	n := min(u.frame_sampled, FRAME_SAMPLES)
-	if n < 3 {
-		return
-	}
-	sorted := u.frame_samples
-	for i in 1 ..< n {
-		for j := i; j > 0 && sorted[j] < sorted[j - 1]; j -= 1 {
-			sorted[j], sorted[j - 1] = sorted[j - 1], sorted[j]
-		}
-	}
-	u.frame_dt = sorted[n / 2]
 }
 
 // step_fade moves t toward 1 if on and toward 0 if not, at a constant speed,

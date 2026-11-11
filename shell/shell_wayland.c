@@ -105,7 +105,11 @@ static bool g_key_window;
 static uint32_t g_serial; // of the last input event, for the clipboard
 static struct wl_callback *g_frame_callback;
 static double g_frame_requested;
-static double g_frame_interval = 1.0 / 60;
+// The display's refresh interval, from frame callbacks asked for in the
+// callback before, which span one refresh. 0 until one has.
+static double g_frame_interval;
+static bool g_in_frame_done; // draw_frame is running from a frame callback
+static bool g_frame_chained; // the pending callback was asked for in one
 
 static int g_redraw_fd = -1; // eventfd
 static int g_wake_fd = -1; // timerfd for wake_after
@@ -219,6 +223,7 @@ static void draw_frame(void) {
     g_frame_callback = wl_surface_frame(g_surface);
     wl_callback_add_listener(g_frame_callback, &g_frame_listener, NULL);
     g_frame_requested = now_seconds();
+    g_frame_chained = g_in_frame_done;
   }
   apply_scale();
   glide_frame(now_seconds());
@@ -233,6 +238,7 @@ static void draw_frame(void) {
       .text_length = g_text_len,
       .key_window = g_key_window,
       .mouse_buttons = g_buttons,
+      .frame_interval = (float)g_frame_interval,
   };
   Frame_Result result = app_frame(&g_memory, &g_shell, &input);
   g_event_count = 0;
@@ -247,8 +253,13 @@ static void frame_done(void *data, struct wl_callback *callback, uint32_t time) 
   g_frame_callback = NULL;
   double now = now_seconds();
   double interval = now - g_frame_requested;
-  if (interval > 0.002 && interval < 0.1) g_frame_interval = g_frame_interval * 0.9 + interval * 0.1;
-  if (g_animating || atomic_load(&g_needs_redraw)) draw_frame();
+  if (g_frame_chained && interval > 0.002 && interval < 0.1)
+    g_frame_interval = g_frame_interval > 0 ? g_frame_interval * 0.9 + interval * 0.1 : interval;
+  if (g_animating || atomic_load(&g_needs_redraw)) {
+    g_in_frame_done = true;
+    draw_frame();
+    g_in_frame_done = false;
+  }
 }
 
 // When a frame callback is pending, the deadline by which it should have
@@ -258,7 +269,7 @@ static void frame_done(void *data, struct wl_callback *callback, uint32_t time) 
 // compositor gets a frame at the new size soon after it.
 static double frame_deadline(void) {
   if (!g_frame_callback || g_configure_unanswered) return 0;
-  double deadline = g_frame_requested + 2 * g_frame_interval;
+  double deadline = g_frame_requested + 2 * (g_frame_interval > 0 ? g_frame_interval : 1.0 / 60);
   return now_seconds() < deadline ? deadline : 0;
 }
 

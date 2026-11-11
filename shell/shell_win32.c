@@ -157,6 +157,30 @@ static uint32_t buttons_down(void) {
 
 // Frames
 
+// The refresh interval of the monitor the window is on, in seconds, or 0
+// when Windows doesn't say. It's looked up again when the window goes to
+// another monitor, or after WM_DISPLAYCHANGE clears g_refresh_monitor.
+static HMONITOR g_refresh_monitor;
+static double g_refresh_interval;
+
+static double refresh_interval(void) {
+  HMONITOR monitor = MonitorFromWindow(g_window, MONITOR_DEFAULTTONEAREST);
+  if (monitor == g_refresh_monitor) return g_refresh_interval;
+  g_refresh_monitor = monitor;
+  g_refresh_interval = 0;
+  MONITORINFOEXW info;
+  memset(&info, 0, sizeof info);
+  ((MONITORINFO *)&info)->cbSize = sizeof info;
+  DEVMODEW mode;
+  memset(&mode, 0, sizeof mode);
+  mode.dmSize = sizeof mode;
+  // 0 and 1 mean the hardware's default rate, which it doesn't name.
+  if (monitor && GetMonitorInfoW(monitor, (MONITORINFO *)&info) &&
+      EnumDisplaySettingsW(info.szDevice, ENUM_CURRENT_SETTINGS, &mode) && mode.dmDisplayFrequency > 1)
+    g_refresh_interval = 1.0 / mode.dmDisplayFrequency;
+  return g_refresh_interval;
+}
+
 // A frame's work can send the window a message: the input method's
 // answer to ImmNotifyIME, or a sent message from another thread while a
 // call waits. If that message asks for a frame, it gets the next one; the
@@ -172,6 +196,7 @@ static void draw_frame(void) {
       .time = now_seconds() - g_start_time,
       .key_window = g_key_window,
       .mouse_buttons = buttons_down(),
+      .frame_interval = (float)refresh_interval(),
   };
   queue_take(&input.events, &input.event_count, &input.text, &input.text_length);
   g_in_frame = true;
@@ -596,6 +621,9 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     update_size();
     return 0;
   }
+  case WM_DISPLAYCHANGE:
+    g_refresh_monitor = NULL;
+    break;
   case WM_GETMINMAXINFO: {
     MINMAXINFO *mm = (MINMAXINFO *)lp;
     float s = hwnd ? (float)GetDpiForWindow(hwnd) / 96.0f : 1;
