@@ -6,7 +6,7 @@ import "core:os"
 import "core:slice"
 import "core:strings"
 
-// run_ab measures base (a), a git ref built with ./build.sh measure in a
+// run_ab measures base (a), a git ref built with ./build.py measure in a
 // worktree of its own, against this checkout's measure build (b). The two
 // take turns, a then b, then b then a, so a machine that gets busier or
 // hotter over the run weighs on both alike. Startup is judged on the
@@ -30,10 +30,14 @@ run_ab :: proc(cfg: ^Config, base, stamp: string) -> int {
 		return 1
 	}
 	defer run_command({"git", "-C", cfg.root, "worktree", "remove", "--force", worktree}, build_log)
+	// A ref from before build.py has build.sh and build.bat instead.
+	build_script := join(worktree, "build.py")
 	when ODIN_OS == .Windows {
-		build_command := []string{"cmd", "/c", join(worktree, "build.bat"), "measure"}
+		build_command :=
+			os.exists(build_script) ? []string{"python", build_script, "measure"} : []string{"cmd", "/c", join(worktree, "build.bat"), "measure"}
 	} else {
-		build_command := []string{"sh", join(worktree, "build.sh"), "measure"}
+		build_command :=
+			os.exists(build_script) ? []string{"python3", build_script, "measure"} : []string{"sh", join(worktree, "build.sh"), "measure"}
 	}
 	if !run_command(build_command, build_log) {
 		fmt.eprintfln("measure: building %s failed, see %s", base, build_log)
@@ -54,7 +58,7 @@ run_ab :: proc(cfg: ^Config, base, stamp: string) -> int {
 	has_mock := slice.contains(cfg.setups, "mock")
 	if has_mock {
 		if !os.exists(cfg.mock) {
-			fmt.eprintfln("measure: no mock at %s; run ./build.sh measure", cfg.mock)
+			fmt.eprintfln("measure: no mock at %s; run ./build.py measure", cfg.mock)
 			return 1
 		}
 		for &side, k in sides {

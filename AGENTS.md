@@ -5,17 +5,17 @@ TIDALfast is a native TIDAL client in Odin for macOS and Linux, with a first Win
 ## Build and test
 
 ```
-./build.sh              # debug build/tidalfast
-./build.sh release      # optimized
-./build.sh measure      # the measurement app, mock server and tool in build/measure/
-./build.sh dist         # TIDALfast.app and .dmg, or the AppImage, in build/dist/
-./build.sh libs         # only the C libraries in third_party, into build/kbts, build/miniaudio and build/dr_flac
-odin test tests         # run ./build.sh once first: it builds the C libraries
+./build.py              # debug build/tidalfast
+./build.py release      # optimized
+./build.py measure      # the measurement app, mock server and tool in build/measure/
+./build.py dist         # TIDALfast.app and .dmg, or the AppImage, in build/dist/
+./build.py libs         # only the C libraries in third_party, into build/kbts, build/miniaudio and build/dr_flac
+odin test tests         # run ./build.py once first: it builds the C libraries
 ```
 
-Keep `./build.sh` clean with `-vet -strict-style`. `odin test tests` runs without `-strict-style`.
+Keep `./build.py` clean with `-vet -strict-style`. `odin test tests` runs without `-strict-style`.
 
-Per-OS code lives in `_darwin.odin`, `_linux.odin` and `_windows.odin` files. Shared code doesn't import `core:sys/posix`; `src/sys` has threads, local time, the page size and file mappings for every OS. `odin check src/app -no-entry-point -vet -strict-style -target:darwin_arm64` (and `-target:linux_amd64`) type-checks the other OS's files without its SDK, so check both after touching shared code. For Windows, `odin check` refuses the target without an SDK, so build it: `WINDOWS_SDK=<xwin splat> ./build.sh windows` (`docs/windows.md`).
+Per-OS code lives in `_darwin.odin`, `_linux.odin` and `_windows.odin` files. Shared code doesn't import `core:sys/posix`; `src/sys` has threads, local time, the page size and file mappings for every OS. `odin check src/app -no-entry-point -vet -strict-style -target:darwin_arm64` (and `-target:linux_amd64`) type-checks the other OS's files without its SDK, so check both after touching shared code. For Windows, `odin check` refuses the target without an SDK, so build it: `WINDOWS_SDK=<xwin splat> ./build.py windows` (`docs/windows.md`).
 
 Odin dev-2026-10 crashes the compiler on any Obj-C method call (`missing procedure 'objc_lookUpClass'`). Call Obj-C through `objc_msgSend` casts as `src/render` does, call C frameworks (CoreText, CoreAudio, Security) through hand-written foreign declarations, or put Obj-C-only code in `shell.m`.
 
@@ -35,14 +35,14 @@ The window is often covered or the screen locked, and real input may not reach i
 - **Metal.** `MTL_DEBUG_LAYER=1 METAL_DEVICE_WRAPPER_TYPE=1` turns on validation.
 - **Direct3D 11.** `TIDALFAST_D3D11_DEBUG=1` makes the device with the debug layer, from Windows' optional Graphics Tools, and logs its messages through `core:log`. Without the layer installed it logs a warning and carries on. `TIDALFAST_D3D_BLT=1` makes a blt-model swap chain, which the compositor always composes and never hands to the display as an overlay plane, to tell a fault in that path from one in the frames.
 - **Linux without a display.** Run `weston --backend=headless` with its own `XDG_RUNTIME_DIR` and socket, and point the app at it with `WAYLAND_DISPLAY`. With a GPU, Weston needs `--renderer=gl`, or the Vulkan renderer finds no sRGB format and doesn't start. Without one, Mesa's lavapipe is a software Vulkan device. `size=w,h` in `TIDALFAST_SHELL_TEST` resizes the window, since nobody else will. On a desktop, run the app and the tests with throwaway `HOME`, `XDG_DATA_HOME`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `XDG_RUNTIME_DIR`, in their own `dbus-run-session`. A temp `HOME` alone isn't enough, because desktops set the XDG variables and a keyring daemon started for the tests then writes into the user's real keyrings. `docs/linux.md` has the commands.
-- **Windows without Windows.** `./build.sh windows` cross-builds `build/windows/tidalfast.exe` (`docs/windows.md`). Wine runs it, Hangover's Wine on ARM64 Linux, on an Xvfb with a Wine prefix of its own and `APPDATA` and `LOCALAPPDATA` pointed at a temp folder. Paths the app gets are Windows paths: `Z:\tmp\x.tga` for `/tmp/x.tga`. The shell test steps are the Linux ones, plus `move=x,y`, `click=x,y`, `type=text` (WM_CHAR) and `vkey=ctrl+name` (WM_KEYDOWN), `touchpad=dy` for a precision touchpad, and `endsession` for a logoff. Wine's `HKCU\Control Panel\Desktop\LogPixels` sets the DPI. Frame times under emulation mean nothing. `tests/shell_win32/run.sh` checks the shell alone, with a stub app instead of the Odin one, so it needs only mingw-w64 and Wine; run it after changing `shell_win32.c` or `common.c`.
+- **Windows without Windows.** `./build.py windows` cross-builds `build/windows/tidalfast.exe` (`docs/windows.md`). Wine runs it, Hangover's Wine on ARM64 Linux, on an Xvfb with a Wine prefix of its own and `APPDATA` and `LOCALAPPDATA` pointed at a temp folder. Paths the app gets are Windows paths: `Z:\tmp\x.tga` for `/tmp/x.tga`. The shell test steps are the Linux ones, plus `move=x,y`, `click=x,y`, `type=text` (WM_CHAR) and `vkey=ctrl+name` (WM_KEYDOWN), `touchpad=dy` for a precision touchpad, and `endsession` for a logoff. Wine's `HKCU\Control Panel\Desktop\LogPixels` sets the DPI. Frame times under emulation mean nothing. `tests/shell_win32/run.sh` checks the shell alone, with a stub app instead of the Odin one, so it needs only mingw-w64 and Wine; run it after changing `shell_win32.c` or `common.c`.
 
 ## Measuring RAM and startup
 
 Run this before and after any change that could affect memory or startup:
 
 ```
-./build.sh measure
+./build.py measure
 ./build/measure/measure all
 ./build/measure/measure compare docs/measure-baseline.json build/measure/<time>.json
 ```

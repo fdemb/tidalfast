@@ -7,7 +7,7 @@ The M1 Air is an old, low-end machine by now: a 2020 chip, 8 GB of memory and no
 ## How to measure
 
 ```
-./build.sh measure
+./build.py measure
 ./build/measure/measure startup              # 10 cold launches each with fake data and the mock
 ./build/measure/measure ab main -setup=fake  # a change against main, in one sitting
 ```

@@ -32,12 +32,12 @@ cmd_build() {
 	mkdir -p "$BIN"
 	cd "$REPO" || die "no repo at $REPO"
 	# The app links the C libraries in build/kbts and build/miniaudio.
-	./build.sh libs || die "C library build failed"
+	./build.py libs || die "C library build failed"
 	echo "verify: building shell"
 	clang -c shell/shell.m -o "$BIN/shell.o" -fobjc-arc -mmacosx-version-min=14.0 \
 		-Wall -Wno-unused-parameter -O2 || die "shell build failed"
 	# MOCK_API makes an optimized build honour TIDALFAST_API and
-	# TIDALFAST_PKCE_REDIRECT, as ./build.sh measure does.
+	# TIDALFAST_PKCE_REDIRECT, as ./build.py measure does.
 	echo "verify: building app"
 	odin build src/app -out:"$BIN/tidalfast.tmp" -vet -strict-style -o:speed -minimum-os-version:14.0 \
 		-define:TIDALFAST_MOCK_API=true \

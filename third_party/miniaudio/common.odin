@@ -1,7 +1,7 @@
 // Odin's vendor:miniaudio bindings (dev-2026-10), copied so the library
 // links from build/miniaudio instead of the Odin install, whose miniaudio.a
 // targets the macOS it was built on. miniaudio.h next to this file is the
-// matching miniaudio 0.11.24; build.sh compiles it from miniaudio.c,
+// matching miniaudio 0.11.24; build.py compiles it from miniaudio.c,
 // without its FLAC decoder: dr_flac is vendored on its own in
 // third_party/dr_flac.
 package miniaudio
@@ -18,7 +18,7 @@ when MINIAUDIO_SHARED {
 LIB :: "../../build/windows/miniaudio/miniaudio.lib" when ODIN_OS == .Windows else "../../build/miniaudio/miniaudio.a"
 
 when !#exists(LIB) {
-	#panic(LIB + " is missing: run ./build.sh first")
+	#panic(LIB + " is missing: run ./build.py first")
 }
 
 foreign import lib { LIB }
@@ -40,7 +40,7 @@ version_check :: proc "contextless" () {
 		n += copy(buf[n:], BINDINGS_VERSION_STRING)
 		n += copy(buf[n:], ", but version ")
 		n += copy(buf[n:], string(version_string()))
-		n += copy(buf[n:], " is linked: run ./build.sh")
+		n += copy(buf[n:], " is linked: run ./build.py")
 		panic_contextless(string(buf[:n]))
 	}
 }

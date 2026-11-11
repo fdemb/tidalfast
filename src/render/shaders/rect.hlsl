@@ -1,6 +1,6 @@
 // The Direct3D 11 rect pipeline and blur, a port of rect.vert, rect.frag,
 // blur.vert, blur_down.frag and blur_up.frag. Keep them doing the same.
-// build.bat compiles each entry point with fxc into shaders/dxbc, which
+// build.py on Windows compiles each entry point with fxc into shaders/dxbc, which
 // d3d11_windows.odin loads; the bytecode is checked in so a cross-build
 // needs no fxc.
 

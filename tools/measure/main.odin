@@ -2,7 +2,7 @@
 // `measure:` lines and prints what it found. See "Measuring RAM and
 // startup" in docs/measuring.md.
 //
-//     ./build.sh measure
+//     ./build.py measure
 //     ./build/measure/measure startup            fake and mock, 10 runs each
 //     ./build/measure/measure memory             fake and mock, 1 run each
 //     ./build/measure/measure all
@@ -137,7 +137,7 @@ main :: proc() {
 	}
 	cfg.mock = join(cfg.out_dir, "mock_tidal" + EXE_SUFFIX)
 	if !os.exists(cfg.app) {
-		fmt.eprintfln("measure: no app at %s; run ./build.sh measure (or ./build.sh release for -real)", cfg.app)
+		fmt.eprintfln("measure: no app at %s; run ./build.py measure (or ./build.py release for -real)", cfg.app)
 		os.exit(1)
 	}
 
@@ -167,7 +167,7 @@ main :: proc() {
 		case "fake", "real":
 		case "mock":
 			if !os.exists(cfg.mock) {
-				fmt.eprintfln("measure: no mock at %s; run ./build.sh measure", cfg.mock)
+				fmt.eprintfln("measure: no mock at %s; run ./build.py measure", cfg.mock)
 				os.exit(1)
 			}
 			if !start_side_mock(&cfg, &side) {

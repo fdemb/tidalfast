@@ -1,7 +1,7 @@
 # Measuring RAM and startup
 
 ```
-./build.sh measure
+./build.py measure
 ./build/measure/measure startup     # 10 cold launches with the fake data, then 10 against the mock
 ./build/measure/measure memory      # the memory scenario, once with each
 ./build/measure/measure all         # both
@@ -12,7 +12,7 @@
 ./build/measure/measure html         # the app's memory snapshots as a page
 ```
 
-`./build.sh measure` builds an optimized app in `build/measure/app` (its own executable), `tests/mock_tidal` and the tool. The app is the release build plus `TIDALFAST_MOCK_API`, which keeps the test screens and the text bench and lets it read `TIDALFAST_API` and `TIDALFAST_PKCE_REDIRECT`. The real release build doesn't take them, so it can't run against the mock. With either one set it shows the fake data, as every build does without a mock URL it takes (see [Building](building.md)).
+`./build.py measure` builds an optimized app in `build/measure/app` (its own executable), `tests/mock_tidal` and the tool. The app is the release build plus `TIDALFAST_MOCK_API`, which keeps the test screens and the text bench and lets it read `TIDALFAST_API` and `TIDALFAST_PKCE_REDIRECT`. The real release build doesn't take them, so it can't run against the mock. With either one set it shows the fake data, as every build does without a mock URL it takes (see [Building](building.md)).
 
 Each run is a cold launch with `TIDALFAST_MEASURE` set, `TIDALFAST_AUDIO_NULL=1` and a settings file of its own, so bit-perfect output is off and your settings stay as they are. The runs share a list cache folder in the logs folder: the mock's first run starts with an empty cache, and later runs read the sidebar and Liked Songs from it. Other `TIDALFAST_` variables in your environment are dropped. The tool prints a table per scenario and setup, writes `build/measure/<time>.json`, and keeps each run's stderr in `build/measure/logs-<time>/`. Flags: `-runs=N`, `-setup=fake` or `mock` or `fake,mock`, `-app=path`, `-timeout=seconds` and `-out=path`.
 
@@ -20,7 +20,7 @@ The setups:
 
 - `fake` runs with `TIDALFAST_FAKE=1`: no account, no network, 10,000 fake rows.
 - `mock` starts its own `mock_tidal` on a free loopback port and logs in with `TIDALFAST_PKCE_REDIRECT` under a Keychain item called `tidalfast-measure-` and a random suffix. So the first run logs in and later runs read the login from the Keychain, as you would. The tool deletes the item at the end with `security delete-generic-password`. Deleting it from the tool itself fails with -25244, because the item's access list names the app. The mock's audio goes in `build/measure/mock-audio`: the first start of a new mock binary encodes it, about 3 s, and later starts read it back.
-- `-real` runs `build/tidalfast` against your own account and your `tidalfast` Keychain item. Build it with `./build.sh release` first. It's for you to run by hand: macOS may ask for Keychain access, and the memory scenario plays a track from your longest list to the null device.
+- `-real` runs `build/tidalfast` against your own account and your `tidalfast` Keychain item. Build it with `./build.py release` first. It's for you to run by hand: macOS may ask for Keychain access, and the memory scenario plays a track from your longest list to the null device.
 
 `measure compare a.json b.json` prints every number in both files with its change. A time or size that changed by 10% and at least 1 ms or MB is marked `worse` or `better`, and an instruction count that changed by 2%. Startup times move a few percent from run to run, so compare medians from the same machine.
 
@@ -34,7 +34,7 @@ The window has to be on screen and the Mac awake: a covered window parks its dra
 
 Times measured on different days don't compare. On 17 October the commit the baseline below was recorded from, measured again, came out 50 ms (fake) and 109 ms (mock) slower to `tracks` than its own baseline. The code was the same; the machine wasn't. Load, heat and background work such as Spotlight, Photos analysis and XProtect's scans move startup by tens of percent.
 
-`measure ab <ref>` measures a change against the code it changes, in one sitting. It checks out `<ref>` in a worktree under `build/measure/ab-<time>`, builds it with its own `./build.sh measure`, and measures it (a) against this checkout's measure build (b), so run `./build.sh measure` first. The two take turns, a then b, then b then a, so whatever the machine does during the run weighs on both. Each build has its own settings, list cache, Keychain item and mock, both mocks this checkout's. A shared mock keeps one refresh token per user, so each build's login would end the other's. Flags are the same as `startup`'s. With the fake data the frames scenario runs three times each, taking turns, compared by its medians and marked as `compare` marks. With `-memory` the memory scenario also runs once each after the startup runs.
+`measure ab <ref>` measures a change against the code it changes, in one sitting. It checks out `<ref>` in a worktree under `build/measure/ab-<time>`, builds it with its own `./build.py measure`, and measures it (a) against this checkout's measure build (b), so run `./build.py measure` first. The two take turns, a then b, then b then a, so whatever the machine does during the run weighs on both. Each build has its own settings, list cache, Keychain item and mock, both mocks this checkout's. A shared mock keeps one refresh token per user, so each build's login would end the other's. Flags are the same as `startup`'s. With the fake data the frames scenario runs three times each, taking turns, compared by its medians and marked as `compare` marks. With `-memory` the memory scenario also runs once each after the startup runs.
 
 For each startup mark it prints the median of a and of b, then the median and middle half (25th to 75th percentile) of the differences between runs next to each other, in how many of those pairs b was higher, and a sign test's p-value: the chance that two builds doing the same work split the pairs at least that unevenly. Each build's first run is left out. A change is `worse` or `better` only when p is under 0.05 (with the default 9 pairs, 8 of them going the same way) and the median difference is at least 1% (and 1 ms for times). An earlier rule, the middle half of the differences on one side of zero, marked two builds with the same startup code apart: b was faster in 7 of 9 pairs, which happens by chance 18% of the time. Memory runs only with `-memory`, once per build, and is printed without marks: a build measured against itself came out 12 MB apart at the mock's `list_open`. Without the flag `ab` is about two thirds shorter. To judge memory, compare `measure memory -runs=N` of each build.
 
@@ -71,7 +71,7 @@ Malloc that the app has no pointer to, such as AppKit's, Core Text's, libcurl's 
 
 Every launch that gets to its first track rows appends a line to `launches.jsonl` next to the settings file (`~/Library/Application Support/tidalfast/` on macOS, `~/.config/tidalfast/` on Linux): the time, the commit the app was built from (with `-dirty` when the tree had changes), debug or release, the `init`, `first_frame`, `library` and `tracks` marks in ms, the UI thread's and the process's instructions, and footprint. `measure launches` sums it up per build: how many launches, and the median and middle half of `tracks`, `first_frame`, instructions and footprint. These are the launches the app really has, on your machine, with your account, cache and whatever else is running, so they show what a build is like to use, where `ab` shows what a change did.
 
-A worker appends the line, so the UI thread never waits on the disk. Past 512 KB, about 2,000 launches, the file keeps its newer half. Nothing in it leaves the machine, and it holds no account data. The fake data starts no workers, so it isn't logged; neither are runs with `TIDALFAST_MEASURE`. Runs against the mock are logged only when `TIDALFAST_LAUNCH_LOG` names a file. `TIDALFAST_LAUNCH_LOG=off` turns the log off. `./build.sh` passes the commit with `-define:TIDALFAST_COMMIT`; other builds log it as "".
+A worker appends the line, so the UI thread never waits on the disk. Past 512 KB, about 2,000 launches, the file keeps its newer half. Nothing in it leaves the machine, and it holds no account data. The fake data starts no workers, so it isn't logged; neither are runs with `TIDALFAST_MEASURE`. Runs against the mock are logged only when `TIDALFAST_LAUNCH_LOG` names a file. `TIDALFAST_LAUNCH_LOG=off` turns the log off. `./build.py` passes the commit with `-define:TIDALFAST_COMMIT`; other builds log it as "".
 
 ## What the app prints
 

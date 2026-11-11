@@ -9,9 +9,9 @@ apt install build-essential clang pkg-config libwayland-dev wayland-protocols li
 
 The text is in Noto Sans, which the app has built in (see [Text](text.md#text-font)). Other scripts and emoji come from the system's fonts through fontconfig: on Debian and Ubuntu `fonts-noto-core`, `fonts-noto-cjk` and `fonts-noto-color-emoji` cover them. The `linux-text` workflow runs the tests and captures frames with the system's Noto Sans removed.
 
-Odin's `vendor:stb` links static libraries that Odin doesn't ship built for Linux. Build them once in the Odin install by running `build_stb.sh` in `$(odin root)/vendor/stb/src`. `build.sh` builds miniaudio and dr_flac itself. libsecret is opened with `dlopen` when the login is first saved or read, so it's only needed at run time, and only to keep the login. libpipewire is opened the same way when bit-perfect output first plays ([Playback](playback.md#bit-perfect-output-on-linux)).
+Odin's `vendor:stb` links static libraries that Odin doesn't ship built for Linux. Build them once in the Odin install by running `build_stb.sh` in `$(odin root)/vendor/stb/src`. `build.py` builds miniaudio and dr_flac itself. libsecret is opened with `dlopen` when the login is first saved or read, so it's only needed at run time, and only to keep the login. libpipewire is opened the same way when bit-perfect output first plays ([Playback](playback.md#bit-perfect-output-on-linux)).
 
-`./build.sh` takes the same arguments as on macOS and writes `build/tidalfast`. It generates the Wayland protocol code into `build/wayland` and compiles the shaders in `src/render/shaders` to SPIR-V in `build/shaders`, which the app `#load`s. The shell and the protocol code are compiled to objects in `build/shell`, which Odin links into the app with the Wayland and xkbcommon libraries.
+`./build.py` takes the same arguments as on macOS and writes `build/tidalfast`. It generates the Wayland protocol code into `build/wayland` and compiles the shaders in `src/render/shaders` to SPIR-V in `build/shaders`, which the app `#load`s. The shell and the protocol code are compiled to objects in `build/shell`, which Odin links into the app with the Wayland and xkbcommon libraries.
 
 What's different from macOS:
 

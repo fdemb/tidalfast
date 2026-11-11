@@ -83,7 +83,7 @@ At 2x with white text on the app's dark background, the rendered weight sits bet
 
 ## Performance
 
-`TIDALFAST_BENCH=text` on the 10,000-row list (about 25 rows in view, four labels each, plus the specimen panel and overlay, about 1,500 glyph instances), optimized build (now `build/measure/app` from `./build.sh measure`, since release builds leave out the text screen), Apple M1, 120 Hz display link. ui is the time spent building the frame, before `end_frame`:
+`TIDALFAST_BENCH=text` on the 10,000-row list (about 25 rows in view, four labels each, plus the specimen panel and overlay, about 1,500 glyph instances), optimized build (now `build/measure/app` from `./build.py measure`, since release builds leave out the text screen), Apple M1, 120 Hz display link. ui is the time spent building the frame, before `end_frame`:
 
 | phase | what | ui avg | ui max |
 |---|---|---|---|

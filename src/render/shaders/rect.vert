@@ -1,6 +1,6 @@
 #version 450
 // The Vulkan rect pipeline, a port of SHADER_SOURCE in metal_darwin.odin.
-// build.sh compiles it to build/shaders/rect.vert.spv, which
+// build.py compiles it to build/shaders/rect.vert.spv, which
 // vulkan_linux.odin loads. Keep the two backends' shaders doing the same.
 
 struct Instance {

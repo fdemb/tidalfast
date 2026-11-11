@@ -43,7 +43,7 @@ jobs:
           echo "$RUNNER_TEMP/odin" >> "$GITHUB_PATH"
       - name: Build stb
         run: cd "$(odin root)/vendor/stb/src" && sh build_stb.sh
-      - run: ./build.sh
+      - run: python3 build.py
       - name: Test
         run: |
           # The inner sh expands these, in a private D-Bus session and keyring.

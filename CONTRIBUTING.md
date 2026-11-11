@@ -5,15 +5,15 @@ TIDALfast is written in Odin. A small shell owns the window and talks to the OS:
 ## Building and running
 
 ```
-./build.sh              # debug: build/tidalfast
-./build.sh release      # optimized
-./build.sh dist         # TIDALfast.app and a .dmg on macOS, an AppImage on Linux
+./build.py              # debug: build/tidalfast
+./build.py release      # optimized
+./build.py dist         # TIDALfast.app and a .dmg on macOS, an AppImage on Linux
 ./build/tidalfast
 ```
 
-It needs macOS 14 or later, Odin and the Xcode command line tools. Linux needs a few packages first; see [docs/linux.md](docs/linux.md). Run `./build.sh` once before `odin test tests`. `TIDALFAST_FAKE=1` runs the app on fake data without an account. The environment variables, keys and the patches to kb_text_shape are in [docs/building.md](docs/building.md).
+It needs macOS 14 or later, Odin, Python 3 and the Xcode command line tools. Linux needs a few packages first; see [docs/linux.md](docs/linux.md). Run `./build.py` once before `odin test tests`. `TIDALFAST_FAKE=1` runs the app on fake data without an account. The environment variables, keys and the patches to kb_text_shape are in [docs/building.md](docs/building.md).
 
-Keep `./build.sh` clean with `-vet -strict-style`. Per-OS code lives in `_darwin.odin` and `_linux.odin` files, so after touching shared code, type-check the other OS too:
+Keep `./build.py` clean with `-vet -strict-style`. Per-OS code lives in `_darwin.odin` and `_linux.odin` files, so after touching shared code, type-check the other OS too:
 
 ```
 odin check src/app -no-entry-point -vet -strict-style -target:linux_amd64
@@ -45,7 +45,7 @@ tests/audio_check/ compares a capture of the audio output with the source it cam
 tests/bitperfect_check/ checks a bit-perfect capture against integer source WAVs, bit for bit
 tests/dashgen/  cuts FLAC into TIDAL-style DASH (fMP4 segments and an MPD), for the mock and the tests
 examples/cli/   CLI on top of src/tidal
-packaging/      the icon, Info.plist and the Linux .desktop file for ./build.sh dist
+packaging/      the icon, Info.plist and the Linux .desktop file for ./build.py dist
 ```
 
 ## Docs

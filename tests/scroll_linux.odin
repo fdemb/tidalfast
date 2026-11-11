@@ -10,7 +10,7 @@ import "core:testing"
 SCROLL_OBJ :: "../build/shell/scroll.o"
 
 when !#exists(SCROLL_OBJ) {
-	#panic("build/shell/scroll.o is missing: run ./build.sh first")
+	#panic("build/shell/scroll.o is missing: run ./build.py first")
 }
 
 foreign import scroll_c {SCROLL_OBJ, "system:m"}

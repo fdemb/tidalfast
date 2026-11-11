@@ -1,4 +1,4 @@
-# Builds the macOS .dmg and the Linux AppImage with ./build.sh dist. A tag
+# Builds the macOS .dmg and the Linux AppImage with build.py dist. A tag
 # v1.2.3 publishes both as the GitHub release v1.2.3, or adds them to it when
 # the release was made in GitHub's UI, which pushes the tag. A manual run only
 # uploads them as workflow artifacts.
@@ -27,7 +27,7 @@ jobs:
           curl -fsSL "https://github.com/odin-lang/Odin/releases/download/$ODIN_VERSION/odin-macos-arm64-$ODIN_VERSION.tar.gz" |
             tar xz -C "$RUNNER_TEMP/odin" --strip-components=1
           echo "$RUNNER_TEMP/odin" >> "$GITHUB_PATH"
-      - run: ./build.sh dist
+      - run: python3 build.py dist
       - uses: actions/upload-artifact@v4
         with:
           name: macos
@@ -62,7 +62,7 @@ jobs:
           chmod +x ./*.AppImage
           ln -s linuxdeploy-x86_64.AppImage linuxdeploy
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-      - run: ./build.sh dist
+      - run: python3 build.py dist
       - uses: actions/upload-artifact@v4
         with:
           name: linux
