@@ -54,7 +54,7 @@ draw_box :: proc(u: ^State, b: ^Box, alpha: f32) {
 		render.push_rim(r, rect, {b.rim.lift * a, b.rim.darken * a}, b.radius)
 	}
 	if .Draw_Hot_Effects in b.flags && b.hot_t > 0 {
-		render.push_rect(r, rect, fade(b.hover_color, a * hover_t(b)), b.radius)
+		render.push_rect(r, rect, fade(b.hover_color, a * b.hot_t), b.radius)
 	}
 	if .Draw_Active_Effects in b.flags && b.active_t > 0 {
 		render.push_rect(r, rect, fade(b.active_color, a * b.active_t), b.radius)
@@ -86,12 +86,12 @@ draw_glass :: proc(u: ^State, b: ^Box, a: f32) {
 	grow := min(b.rect.w, b.rect.h) * 0.06 * b.active_t
 	rect := render.Rect{b.rect.x - grow, b.rect.y - grow, b.rect.w + 2 * grow, b.rect.h + 2 * grow}
 	tint := b.background
-	tint.a = (tint.a + 0.05 * hover_t(b) + 0.04 * b.active_t) * a
+	tint.a = (tint.a + 0.05 * b.hot_t + 0.04 * b.active_t) * a
 	render.push_glass(u.renderer, rect, b.radius + grow, {
 		tint = tint,
 		refraction = min(rect.w, rect.h) * 0.12,
 		bevel = min(rect.w, rect.h) * 0.22,
-		highlight = (0.6 + 0.4 * hover_t(b)) * a,
+		highlight = (0.6 + 0.4 * b.hot_t) * a,
 		glow = b.active_t * a,
 		glow_at = u.input.mouse,
 	})
@@ -121,7 +121,7 @@ draw_label :: proc(u: ^State, b: ^Box, a: f32) {
 	y := b.rect.y + (b.rect.h - (run.ascent + run.descent)) / 2
 	text.draw_run(u.texts, u.renderer, run, {x, y}, fade(b.text_color, a), avail)
 	if .Draw_Hot_Underline in b.flags && b.hot_t > 0 {
-		render.push_rect(u.renderer, {x, y + run.ascent + 1.5, w, 1}, fade(b.text_color, a * hover_t(b)))
+		render.push_rect(u.renderer, {x, y + run.ascent + 1.5, w, 1}, fade(b.text_color, a * b.hot_t))
 	}
 }
 

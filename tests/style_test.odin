@@ -8,7 +8,7 @@ import "core:testing"
 
 // The app styles boxes through the stacks. A style field written on a box
 // after it's built is allowed only when the value reads that box, as in
-// `b.text_color = mix(SECONDARY, TEXT, ui.hover_t(b))`, or when the write sits
+// `b.text_color = mix(SECONDARY, TEXT, b.hot_t)`, or when the write sits
 // right under an `if` that tests the box, as under `if ui.drop_hover(item)`.
 @(test)
 test_app_styles_go_through_the_stacks :: proc(t: ^testing.T) {
@@ -32,7 +32,7 @@ test_app_styles_go_through_the_stacks :: proc(t: ^testing.T) {
 			if !ok {
 				continue
 			}
-			reads_box := strings.contains(value, fmt.tprintf("%s.", box)) || strings.contains(value, fmt.tprintf("(%s)", box))
+			reads_box := strings.contains(value, fmt.tprintf("%s.", box))
 			tested_above := strings.has_prefix(above, "if ") && strings.contains(above, fmt.tprintf("(%s)", box))
 			if !reads_box && !tested_above {
 				testing.fail_now(t, fmt.tprintf("%s:%d sets %s after the box is built; use a style scope or ui.set_next_%s: %s", path, n + 1, field, field, code))

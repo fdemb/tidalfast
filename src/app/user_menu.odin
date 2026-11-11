@@ -71,7 +71,7 @@ draw_user_row :: proc(s: ^State) {
 	if ui.signal(b).clicked {
 		ui.open_menu(USER_MENU, {b.rect.x, b.rect.y - 4}, up = true)
 	}
-	shown := max(ui.hover_t(b), b.focus_t, 1 if open else 0)
+	shown := max(b.hot_t, b.focus_t, 1 if open else 0)
 	// The avatar's centre is level with Home's and Search's icons.
 	ui.spacer(ui.px(ROW_PAD - 3))
 	draw_avatar(s, small_str(&d.profile.picture), name)

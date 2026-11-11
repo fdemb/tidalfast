@@ -36,7 +36,7 @@ STACK_DEPTH :: 64
 TOOLTIP_DELAY :: 0.5 // seconds of hovering before a tooltip shows
 TOOLTIP_WARM :: 1 // seconds after a tooltip that the next one shows without the delay
 DRAG_THRESHOLD :: 4 // points the mouse moves before a press becomes a drag
-FADE_IN :: 0.08 // seconds hot_t, active_t and focus_t take from 0 to 1
+FADE_IN :: 0.08 // seconds hot_fade, active_t and focus_t take from 0 to 1
 FADE_OUT :: 0.16 // seconds they take from 1 to 0
 MAX_SETTLE_FRAMES :: 3 // extra frames in a row that a layout mismatch may ask for
 FRAME_SAMPLES :: 5 // intervals between animating frames that frame_dt is the median of
@@ -120,7 +120,8 @@ Box :: struct {
 	bar_hovered:     bool, // the mouse was over the view when the scrollbar was last built
 	bar_focused:     bool, // the focus was in the view then
 	bar_grab:        f32, // where in the thumb the mouse took it
-	hot_t:           f32, // the hover fade's linear progress, see hover_t
+	hot_t:           f32, // how lit the hover is, along a smoothstep curve: what draws it
+	hot_fade:        f32, // hot_t's linear progress, before its curve
 	active_t:        f32,
 	focus_t:         f32,
 	open_t:          f32, // menus and tooltips fading in
@@ -1286,7 +1287,8 @@ box_make :: proc(id: string, flags: Box_Flags = {}, width: Size = {}, height: Si
 			instant = .Instant_Hover in b.flags
 		}
 		ring := u.focus == b.key && u.focus_visible && .No_Focus_Ring not_in b.flags
-		b.hot_t = (1 if hot else 0) if instant else step_fade(u, b.hot_t, hot)
+		b.hot_fade = (1 if hot else 0) if instant else step_fade(u, b.hot_fade, hot)
+		b.hot_t = math.smoothstep(f32(0), 1, b.hot_fade)
 		b.active_t = step_fade(u, b.active_t, u.active[.Left] == b.key)
 		b.focus_t = step_fade(u, b.focus_t, ring)
 	}
@@ -1342,12 +1344,6 @@ ui_scale :: proc(u: ^State) -> f32 {
 view_offset :: proc(view: ^Box) -> [2]f32 {
 	s := ui_scale(ctx)
 	return {drawn_off(view, 0, s), drawn_off(view, 1, s)}
-}
-
-// hover_t is how lit b is by the hover, from 0 to 1: hot_t along a
-// smoothstep curve.
-hover_t :: proc(b: ^Box) -> f32 {
-	return math.smoothstep(f32(0), 1, b.hot_t)
 }
 
 // frame_sample takes an interval between two animating frames. frame_dt is

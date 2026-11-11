@@ -106,7 +106,7 @@ link :: proc(id: string, hot_color: render.Color, height: Size = {}, label := ""
 	if label != "" {
 		b.label = label
 	}
-	b.text_color += (hot_color - b.text_color) * hover_t(b)
+	b.text_color += (hot_color - b.text_color) * b.hot_t
 	accessible(b, .Button, b.label)
 	return signal(b)
 }
@@ -267,7 +267,7 @@ scrollbar :: proc(view: ^Box) {
 	push_parent(bar)
 	defer pop_parent()
 	set_next_flags({})
-	set_next_background({1, 1, 1, 0.22 + 0.2 * max(hover_t(bar), bar.active_t)})
+	set_next_background({1, 1, 1, 0.22 + 0.2 * max(bar.hot_t, bar.active_t)})
 	set_next_radius(SCROLLBAR_W / 2)
 	thumb := box_make("", {.Floating_X, .Floating_Y, .Draw_Background}, px(SCROLLBAR_W), px(t.h))
 	thumb.fixed_pos = {SCROLLBAR_INSET, t.y}

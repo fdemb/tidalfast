@@ -54,7 +54,7 @@ text_button :: proc(id, name: string) -> ui.Signal {
 	ui.set_next_text_align(.Center)
 	ui.set_next_radius(6)
 	b := ui.box_make(id, {.Clickable, .Focusable, .Draw_Text}, ui.text_size(16), ui.px(28))
-	b.text_color = mix(SECONDARY, TEXT, ui.hover_t(b))
+	b.text_color = mix(SECONDARY, TEXT, b.hot_t)
 	ui.accessible(b, .Button, name)
 	ui.spacer(ui.fill())
 	return ui.signal(b)
