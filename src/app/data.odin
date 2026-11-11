@@ -254,7 +254,7 @@ run_decide :: proc(env: Run_Env, allocator: runtime.Allocator) -> (run: Run) {
 }
 
 // MOCK_API lets an optimized build read TIDALFAST_API and
-// TIDALFAST_PKCE_REDIRECT. Only `./build.sh measure` sets it, for
+// TIDALFAST_PKCE_REDIRECT. Only `./build.py measure` sets it, for
 // tools/measure's runs against tests/mock_tidal; the release build never does.
 MOCK_API :: #config(TIDALFAST_MOCK_API, false)
 

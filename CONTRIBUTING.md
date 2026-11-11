@@ -5,19 +5,16 @@ TIDALfast is written in Odin. A small shell owns the window and talks to the OS:
 ## Building and running
 
 ```
-./build.sh              # debug: build/tidalfast
-./build.sh release      # optimized
-./build.sh dist         # TIDALfast.app and a .dmg on macOS, an AppImage on Linux
+./build.py              # debug: build/tidalfast
+./build.py release      # optimized
+./build.py dist         # TIDALfast.app and a .dmg on macOS, an AppImage on Linux
+./build.py test         # what the tests link, then odin test tests
 ./build/tidalfast
 ```
 
-It needs macOS 14 or later, Odin and the Xcode command line tools. Linux needs a few packages first; see [docs/linux.md](docs/linux.md). Run `./build.sh` once before `odin test tests`. `TIDALFAST_FAKE=1` runs the app on fake data without an account. The environment variables, keys and the patches to kb_text_shape are in [docs/building.md](docs/building.md).
+It needs macOS 14 or later, Odin, Python 3 and the Xcode command line tools. Linux needs a few packages first; see [docs/linux.md](docs/linux.md). `TIDALFAST_FAKE=1` runs the app on fake data without an account. The environment variables, keys and the patches to kb_text_shape are in [docs/building.md](docs/building.md).
 
-Keep `./build.sh` clean with `-vet -strict-style`. Per-OS code lives in `_darwin.odin` and `_linux.odin` files, so after touching shared code, type-check the other OS too:
-
-```
-odin check src/app -no-entry-point -vet -strict-style -target:linux_amd64
-```
+Keep `./build.py` clean with `-vet -strict-style`. Per-OS code lives in `_darwin.odin`, `_linux.odin` and `_windows.odin` files. CI builds and tests all three on every push and pull request, so a branch shows whether shared code still builds on the other systems.
 
 ## Layout
 
@@ -45,7 +42,7 @@ tests/audio_check/ compares a capture of the audio output with the source it cam
 tests/bitperfect_check/ checks a bit-perfect capture against integer source WAVs, bit for bit
 tests/dashgen/  cuts FLAC into TIDAL-style DASH (fMP4 segments and an MPD), for the mock and the tests
 examples/cli/   CLI on top of src/tidal
-packaging/      the icon, Info.plist and the Linux .desktop file for ./build.sh dist
+packaging/      the icon, Info.plist and the Linux .desktop file for ./build.py dist
 ```
 
 ## Docs
@@ -62,13 +59,13 @@ packaging/      the icon, Info.plist and the Linux .desktop file for ./build.sh 
 - [Accessibility](docs/accessibility.md)
 - [Memory](docs/memory.md)
 - [Redraw policy](docs/redraw.md)
-- [Measuring RAM and startup](docs/measuring.md): the measure tool, what the app prints and the baseline numbers
+- [Measuring RAM and startup](docs/measuring.md): the measure tool, what the app prints and where the memory went
 - [Architecture](docs/architecture.md): the layout, the main decisions and what isn't done yet
 
 ## Pull requests
 
 - Commits are conventional and lowercase, with a subject line only.
 - Prove a bug fix with a test that fails on the commit before it.
-- For a change that could move memory or startup, run `./build/measure/measure ab main` and put the result in the pull request (see [Measuring RAM and startup](docs/measuring.md)).
+- For a change that could move memory or startup, measure it against the code before it with `./build/measure/measure ab` and put the result in the pull request (see [Measuring RAM and startup](docs/measuring.md)).
 - An idle window should use no CPU. Anything that animates must stop asking for frames once it settles.
 - Code is plain Odin, procedures and structs, with comments only where they say something the code doesn't. Docs and comments are plain direct English with sentence-case headings.

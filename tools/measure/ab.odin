@@ -6,55 +6,44 @@ import "core:os"
 import "core:slice"
 import "core:strings"
 
-// run_ab measures base (a), a git ref built with ./build.sh measure in a
-// worktree of its own, against this checkout's measure build (b). The two
-// take turns, a then b, then b then a, so a machine that gets busier or
-// hotter over the run weighs on both alike. Startup is judged on the
-// differences between runs next to each other (paired_startup); with
-// -memory the memory scenario runs once each and is compared as `measure
-// compare` does; and with the fake data the frames scenario runs three
-// times each, taking turns, compared by its medians. Each build gets a mock of its own, both
-// this checkout's.
-run_ab :: proc(cfg: ^Config, base, stamp: string) -> int {
+// run_ab measures two builds, a and b, against each other. How they were
+// built is up to the caller; the mock setup needs measure builds, which take
+// TIDALFAST_API. The two take turns, a then b, then b then a, so a machine
+// that gets busier or hotter over the run weighs on both alike. Startup is
+// judged on the differences between runs next to each other
+// (paired_startup); with -memory the memory scenario runs once each and is
+// compared as `measure compare` does; and with the fake data the frames
+// scenario runs three times each, taking turns, compared by its medians.
+// Each build gets a mock of its own.
+run_ab :: proc(cfg: ^Config, apps: [2]string, stamp: string) -> int {
 	for setup in cfg.setups {
 		if setup != "fake" && setup != "mock" {
 			fmt.eprintfln("measure: ab runs fake and mock, not %s", setup)
 			return 1
 		}
 	}
-	worktree := join(cfg.out_dir, fmt.tprintf("ab-%s", stamp))
-	build_log := join(cfg.log_dir, "build-a.log")
-	fmt.printfln("building %s in %s, log in %s", base, worktree, build_log)
-	if !run_command({"git", "-C", cfg.root, "worktree", "add", "--detach", worktree, base}, build_log) {
-		fmt.eprintfln("measure: can't check out %s, see %s", base, build_log)
-		return 1
-	}
-	defer run_command({"git", "-C", cfg.root, "worktree", "remove", "--force", worktree}, build_log)
-	when ODIN_OS == .Windows {
-		build_command := []string{"cmd", "/c", join(worktree, "build.bat"), "measure"}
-	} else {
-		build_command := []string{"sh", join(worktree, "build.sh"), "measure"}
-	}
-	if !run_command(build_command, build_log) {
-		fmt.eprintfln("measure: building %s failed, see %s", base, build_log)
-		return 1
+	for app in apps {
+		if !os.exists(app) {
+			fmt.eprintfln("measure: no app at %s", app)
+			return 1
+		}
 	}
 
 	sides := [2]Side {
-		{name = "a", app = join(worktree, "build", "measure", "app", "tidalfast" + EXE_SUFFIX), log_dir = join(cfg.log_dir, "a")},
-		{name = "b", app = cfg.app, log_dir = join(cfg.log_dir, "b")},
+		{name = "a", app = apps[0], log_dir = join(cfg.log_dir, "a")},
+		{name = "b", app = apps[1], log_dir = join(cfg.log_dir, "b")},
 	}
 	results: [2]Results
 	for &side, k in sides {
 		os.make_directory_all(side.log_dir)
 		results[k] = {version = 1, time = stamp, machine = machine(), app = side.app}
 	}
-	fmt.printfln("a: %s, b: this checkout\n", base)
+	fmt.printfln("a: %s\nb: %s\nlogs in %s\n", apps[0], apps[1], cfg.log_dir)
 
 	has_mock := slice.contains(cfg.setups, "mock")
 	if has_mock {
 		if !os.exists(cfg.mock) {
-			fmt.eprintfln("measure: no mock at %s; run ./build.sh measure", cfg.mock)
+			fmt.eprintfln("measure: no mock at %s; run ./build.py measure", cfg.mock)
 			return 1
 		}
 		for &side, k in sides {
@@ -154,20 +143,4 @@ scenario_metrics :: proc(metrics: []Metric, scenario: string) -> []Metric {
 
 new_keychain_name :: proc() -> string {
 	return fmt.aprintf("tidalfast-measure-%08x", rand.uint32())
-}
-
-// run_command runs command with its output added to log_path and says
-// whether it exited with 0.
-run_command :: proc(command: []string, log_path: string) -> bool {
-	f, err := child_log(log_path, append = true)
-	if err != nil {
-		return false
-	}
-	defer os.close(f)
-	p, perr := os.process_start({command = command, stdout = f, stderr = f})
-	if perr != nil {
-		return false
-	}
-	state, werr := os.process_wait(p)
-	return werr == nil && state.exited && state.exit_code == 0
 }

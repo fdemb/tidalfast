@@ -72,7 +72,7 @@ main :: proc() {
 	os.exit(int(shell_main(i32(len(runtime.args__)), raw_data(runtime.args__))))
 }
 
-// Linked in by build.sh: shell/shell.m on macOS, shell/shell_wayland.c on
+// Linked in by build.py: shell/shell.m on macOS, shell/shell_wayland.c on
 // Linux and shell/shell_win32.c on Windows.
 foreign {
 	shell_main :: proc "c" (argc: i32, argv: [^]cstring) -> i32 ---

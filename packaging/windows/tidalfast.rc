@@ -1,4 +1,4 @@
-// The Windows executable's resources. build.sh fills in the version.
+// The Windows executable's resources. build.py fills in the version.
 // No headers: llvm-rc doesn't find the SDK's, so the few constants are
 // numbers. 24 is RT_MANIFEST, 4 VOS_NT_WINDOWS32 and 1 VFT_APP.
 
