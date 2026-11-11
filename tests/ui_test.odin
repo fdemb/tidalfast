@@ -1159,6 +1159,87 @@ test_ui_space_goes_to_the_app :: proc(t: ^testing.T) {
 	testing.expect(t, !f.space)
 }
 
+// A hover that ends partway fades out from where it reached, at the fade's
+// normal speed, and hot_t follows smoothstep of that progress both ways.
+@(test)
+test_ui_hover_fade_reverses_from_where_it_is :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	dt := 1.0 / 120
+	now := 0.0
+	step := f32(dt) / ui.FADE_OUT
+	follows_curve :: proc(b: ^ui.Box) -> bool {
+		f := b.hot_fade
+		return abs(b.hot_t - f * f * (3 - 2 * f)) < 1e-5
+	}
+
+	sig: ui.Signal
+	for _ in 0 ..< 3 {
+		now += dt
+		sig, _ = button_frame(&u, nil, now)
+	}
+	now += dt
+	sig, _ = button_frame(&u, {{kind = .Mouse_Move, x = 20, y = 20}}, now)
+	for _ in 0 ..< 200 {
+		if sig.box.hot_fade >= 0.4 {
+			break
+		}
+		now += dt
+		sig, _ = button_frame(&u, nil, now)
+	}
+	testing.expect(t, sig.box.hot_fade >= 0.4 && sig.box.hot_fade < 1, "the hover stops partway")
+	testing.expect(t, follows_curve(sig.box), "hot_t follows smoothstep on the way in")
+
+	now += dt
+	sig, _ = button_frame(&u, {{kind = .Mouse_Move, x = 250, y = 150}}, now)
+	now += dt
+	sig, _ = button_frame(&u, nil, now)
+	start := sig.box.hot_fade
+	testing.expect(t, start < 1)
+
+	frames := 0
+	animating := true
+	for animating && frames < 200 {
+		before := sig.box.hot_fade
+		now += dt
+		sig, animating = button_frame(&u, nil, now)
+		frames += 1
+		testing.expect(t, follows_curve(sig.box), "hot_t follows smoothstep on the way out")
+		if sig.box.hot_fade > 0 {
+			testing.expect(t, abs(before - sig.box.hot_fade - step) < 1e-3, "the fade keeps a constant speed")
+		}
+	}
+	testing.expect(t, abs(f32(frames) - start / step) <= 1, "the way back is as long as the distance")
+	testing.expect_value(t, sig.box.hot_t, f32(0))
+}
+
+// An Instant_Hover box lights and goes dark with the hover, and asks for no
+// frames to do it.
+@(test)
+test_ui_instant_hover_has_no_fade :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	now := 0.0
+	frame :: proc(u: ^ui.State, now: ^f64, events: ..platform.Event) -> (^ui.Box, bool) {
+		now^ += 1.0 / 120
+		ui.begin_frame(u, events, nil, nil, 300, 200, now^)
+		b := ui.box_make("row", {.Clickable, .Instant_Hover}, ui.px(100), ui.px(40))
+		ui.signal(b)
+		return b, ui.end_frame()
+	}
+
+	frame(&u, &now)
+	frame(&u, &now)
+	b, animating := frame(&u, &now, {kind = .Mouse_Move, x = 20, y = 20})
+	testing.expect_value(t, b.hot_t, f32(1))
+	testing.expect(t, !animating, "lighting up takes no frames")
+	b, animating = frame(&u, &now, {kind = .Mouse_Move, x = 250, y = 150})
+	testing.expect_value(t, b.hot_t, f32(0))
+	testing.expect(t, !animating, "going dark takes no frames")
+}
+
 // The mouse and the keys move one highlight in a menu, and an item has no
 // focus ring.
 @(test)

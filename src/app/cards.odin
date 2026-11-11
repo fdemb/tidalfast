@@ -144,7 +144,7 @@ card_cover :: proc(source: Source) -> cover.Kind {
 card :: proc(s: ^State, i: int, f: Found, kind: cover.Kind, filled: bool) -> ui.Signal {
 	ui.set_next_radius(8)
 	row_highlight(LIST_ROWS, false)
-	b := ui.column(fmt.tprintf("##card%d", i), {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects}, ui.px(CARD_W), ui.px(CARD_H))
+	b := ui.column(fmt.tprintf("##card%d", i), {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects, .Instant_Hover}, ui.px(CARD_W), ui.px(CARD_H))
 	ui.accessible(b, .Button, f.name if f.subtitle == "" else fmt.tprintf("%s, %s", f.name, f.subtitle))
 	if !filled {
 		return ui.signal(b)

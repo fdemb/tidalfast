@@ -751,7 +751,7 @@ draw_found_list :: proc(s: ^State, w, h: f32) {
 			f := found_at(s, tab, i)
 			ui.set_next_radius(6)
 			row_highlight(LIST_ROWS, false)
-			row := ui.row(fmt.tprintf("##found%d", i), {.Clickable, .Draw_Background, .Draw_Hot_Effects}, ui.fill(), ui.px(TRACK_ROW_H))
+			row := ui.row(fmt.tprintf("##found%d", i), {.Clickable, .Draw_Background, .Draw_Hot_Effects, .Instant_Hover}, ui.fill(), ui.px(TRACK_ROW_H))
 			ui.accessible(row, .Row, fmt.tprintf("%s, %s", f.name, f.subtitle))
 			if ui.signal(row).clicked {
 				open_found(s, tab, f)
