@@ -39,17 +39,14 @@ The window is often covered or the screen locked, and real input may not reach i
 
 ## Measuring RAM and startup
 
-Run this before and after any change that could affect memory or startup:
+When a change could move startup, memory or frame time, measure it against the code before it with `measure ab`. It runs two builds in one sitting, taking turns, and marks a change only when the paired runs agree:
 
 ```
-./build.py measure
-./build/measure/measure all
-./build/measure/measure compare docs/measure-baseline.json build/measure/<time>.json
+./build.py measure                            # build/measure/: the app, the mock and the tool
+./build/measure/measure ab <app a> <app b>    # add -memory for one memory run of each
 ```
 
-To judge a change, `./build/measure/measure ab main` measures this checkout against main in one sitting, the two builds taking turns, and marks a change only when the paired runs agree. Its `ui_instructions` rows are the steadiest. A stored baseline from another day differs by tens of milliseconds on time alone. `measure launches` reads the app's own log of real launches.
-
-`measure all` does 10 cold launches and a memory scenario (idle, a large list open, scrolled with covers, playing, idle again), with fake data and against its own mock. It prints medians and writes JSON. `compare` marks changes of 10% and at least 1 ms or MB. Footprint is what Activity Monitor shows, and on Apple silicon it includes GPU memory, so don't add the `ram` and `gpu` numbers together. The first launch after a build is slow because macOS checks the new binary's signature; the tool reports it separately. Update `docs/measure-baseline.json` and the numbers in `docs/measuring.md` when a change moves them on purpose. `-real` uses the user's account and is only for the user to run.
+How you get the two builds is up to you. With the mock setup both have to be measure builds, so build one, copy `build/measure/app/tidalfast` aside, and build the other. Judge on `ui_instructions` first: it moves least from run to run. Numbers from another day don't compare, since load and heat alone move times by tens of milliseconds. To judge memory, run `measure memory -runs=N` on each build. Footprint is what Activity Monitor shows, and on Apple silicon it includes GPU memory, so don't add the `ram` and `gpu` numbers together. `measure launches` reads the app's own log of real launches. `-real` uses the user's account and is only for the user to run. `docs/measuring.md` has the rest.
 
 ## Idle CPU
 

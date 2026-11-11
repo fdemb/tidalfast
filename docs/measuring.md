@@ -6,8 +6,8 @@
 ./build/measure/measure memory      # the memory scenario, once with each
 ./build/measure/measure all         # both
 ./build/measure/measure frames      # frame rate and frame times, scrolling the fake data, 3 runs
-./build/measure/measure compare docs/measure-baseline.json build/measure/20261015-114141.json
-./build/measure/measure ab main      # this checkout against main, the two taking turns
+./build/measure/measure compare a.json b.json
+./build/measure/measure ab /tmp/a build/measure/app/tidalfast   # two builds, taking turns
 ./build/measure/measure launches     # your own launches, from the app's launch log
 ./build/measure/measure html         # the app's memory snapshots as a page
 ```
@@ -32,13 +32,21 @@ The window has to be on screen and the Mac awake: a covered window parks its dra
 
 ## Comparing two builds
 
-Times measured on different days don't compare. On 17 October the commit the baseline below was recorded from, measured again, came out 50 ms (fake) and 109 ms (mock) slower to `tracks` than its own baseline. The code was the same; the machine wasn't. Load, heat and background work such as Spotlight, Photos analysis and XProtect's scans move startup by tens of percent.
+Times measured on different days don't compare. On 17 October a commit measured again came out 50 ms (fake) and 109 ms (mock) slower to `tracks` than two days before. The code was the same; the machine wasn't. Load, heat and background work such as Spotlight, Photos analysis and XProtect's scans move startup by tens of percent.
 
-`measure ab <ref>` measures a change against the code it changes, in one sitting. It checks out `<ref>` in a worktree under `build/measure/ab-<time>`, builds it with its own `./build.py measure`, and measures it (a) against this checkout's measure build (b), so run `./build.py measure` first. The two take turns, a then b, then b then a, so whatever the machine does during the run weighs on both. Each build has its own settings, list cache, Keychain item and mock, both mocks this checkout's. A shared mock keeps one refresh token per user, so each build's login would end the other's. Flags are the same as `startup`'s. With the fake data the frames scenario runs three times each, taking turns, compared by its medians and marked as `compare` marks. With `-memory` the memory scenario also runs once each after the startup runs.
+`measure ab <app a> <app b>` measures two builds against each other in one sitting. How they are built is up to you. With the mock setup both have to be measure builds, since only those take `TIDALFAST_API`. For a change against the code before it, build the measure app on each side and keep a copy of the first:
+
+```
+git stash && ./build.py measure && cp build/measure/app/tidalfast /tmp/a && git stash pop
+./build.py measure
+./build/measure/measure ab /tmp/a build/measure/app/tidalfast
+```
+
+The two take turns, a then b, then b then a, so whatever the machine does during the run weighs on both. Each build has its own settings, list cache, Keychain item and mock, both started from `build/measure/mock_tidal`. A shared mock keeps one refresh token per user, so each build's login would end the other's. Flags are the same as `startup`'s, apart from `-app`. With the fake data the frames scenario runs three times each, taking turns, compared by its medians and marked as `compare` marks. With `-memory` the memory scenario also runs once each after the startup runs.
 
 For each startup mark it prints the median of a and of b, then the median and middle half (25th to 75th percentile) of the differences between runs next to each other, in how many of those pairs b was higher, and a sign test's p-value: the chance that two builds doing the same work split the pairs at least that unevenly. Each build's first run is left out. A change is `worse` or `better` only when p is under 0.05 (with the default 9 pairs, 8 of them going the same way) and the median difference is at least 1% (and 1 ms for times). An earlier rule, the middle half of the differences on one side of zero, marked two builds with the same startup code apart: b was faster in 7 of 9 pairs, which happens by chance 18% of the time. Memory runs only with `-memory`, once per build, and is printed without marks: a build measured against itself came out 12 MB apart at the mock's `list_open`. Without the flag `ab` is about two thirds shorter. To judge memory, compare `measure memory -runs=N` of each build.
 
-Measured against itself on 17 October (`measure ab HEAD`), the tool marked nothing. The UI thread's instructions differed by 0.1 to 0.3% at every mark, lower for b in 7 of 9 pairs, a small offset between two copies of one build; times differed by up to 3.7% in their medians with no pattern in the pairs. It writes `<out>-a.json` and `<out>-b.json`, and removes the worktree when it's done.
+Two builds of the same commit, measured against each other on 17 October, got no marks. The UI thread's instructions differed by 0.1 to 0.3% at every mark, lower for b in 7 of 9 pairs, a small offset between two copies of one build; times differed by up to 3.7% in their medians with no pattern in the pairs. It writes `<out>-a.json` and `<out>-b.json`.
 
 Judge a change on `ui_instructions` first: it moves least from run to run (see The numbers). Times are what a person waits for, but they need the change to be several percent before the middle half clears zero.
 
@@ -133,41 +141,9 @@ With `TIDALFAST_MEASURE` unset, measuring costs two additions per drawn row and 
 
 The frame-time overlay (backtick) shows footprint and gpu under the frame times.
 
-## Baseline
+## Where the memory went
 
-`docs/measure-baseline.json`, from `./build/measure/measure all -runs=10` on a MacBook Air (M1, 8 GB, MacBookAir10,1), macOS 27.0.1, 1100x700 window at 2x. MB is 2^20 bytes.
-
-Startup, in ms since the process started. Run 1 is on its own. The other 9 runs give the median and range.
-
-| mark | fake run 1 | fake median (min to max) | mock run 1 | mock median (min to max) |
-|---|---|---|---|---|
-| main | 7.5 | 4.8 (4.8 to 4.9) | 7.4 | 4.8 (4.7 to 7.1) |
-| launched | 79.6 | 76.9 (76.1 to 77.9) | 87.9 | 77.7 (76.7 to 87.7) |
-| init | 397.9 | 130.2 (127.9 to 134.5) | 137.5 | 126.8 (121.9 to 138.1) |
-| window | 401.2 | 132.1 (129.7 to 137.1) | 139.3 | 128.7 (123.7 to 139.9) |
-| first_frame | 433.0 | 154.2 (152.0 to 158.9) | 159.5 | 150.4 (144.9 to 161.4) |
-| library | 433.0 | 154.3 (152.0 to 159.0) | 178.9 | 158.7 (153.2 to 169.7) |
-| tracks | 440.1 | 162.6 (160.4 to 167.4) | 412.1 | 182.4 (177.9 to 194.5) |
-
-At `tracks` the footprint is 50 MB with the fake data and 70 MB with the mock, gpu 27 and 29 MB.
-
-The fake run 1 came straight after a build, so it includes macOS checking the new binary's signature. The app was then a shell that opened a dylib after `launched`, which took 365 ms instead of 118 in this run. It is one executable now, so the check comes before `main`: 1.1 s in a run 1 on 2026-11-01. Later launches skip it. The mock's run 1 also logs in, and starts with an empty list cache. The later mock runs read the sidebar, Liked Songs and its covers from the cache (see [The list cache](tidal-data.md#the-list-cache)), so their `tracks` came at 182 ms. Before the cache it was 417 ms, about what run 1 still takes: on the mock most of it was waiting for covers.
-
-Memory, MB. `-runs` applies to startup; the memory scenario ran once with each setup, and earlier runs of the same build with two or three runs each were within 1 MB of these:
-
-| stage | fake footprint | resident | gpu | mock footprint | resident | gpu | mock covers |
-|---|---|---|---|---|---|---|---|
-| startup_idle | 67.6 | 107.6 | 27.3 | 66.6 | 111.9 | 28.9 | 22 |
-| list_open | 76.8 | 107.6 | 39.5 | 69.5 | 114.1 | 30.2 | 37 |
-| scrolled | 85.1 | 116.4 | 40.5 | 75.9 | 121.6 | 35.0 | 257 (7.4 MB of pages) |
-| playing | 88.0 | 120.0 | 40.5 | 90.0 | 131.9 | 35.5 | 195 |
-| idle_after | 83.5 | 118.6 | 40.5 | 84.1 | 129.8 | 35.5 | 195 |
-
-The peak footprint was 88 MB with the fake data and 96 MB with the mock, both while playing. Fallback fonts: 601 MB mapped, 23 MB of it resident.
-
-The fake data's gpu is 12 MB higher than in the baseline before this one from `list_open` on, one drawable's worth: the layer held three at those samples. The fake data doesn't use the list cache, and the build before the cache, measured the same day, showed the same, so it isn't the cache. Against that build, one memory run each and before covers went to disk, the mock's footprint was within 0.4 MB up to `scrolled` and 2 MB higher at `playing` and `idle_after`. About 0.6 MB of that is Liked Songs, kept in memory while the long playlist is open; the rest wasn't tracked down.
-
-Before the memory work (the previous baseline, same machine) the footprint was 104 MB at `startup_idle` with the fake data and 114 MB with the mock, 174 MB on the mock after scrolling and 185 MB after playing, with a 198 MB peak, and `tracks` came at 312 and 581 ms. What took it down, in the order it went in, measured each time against the build before:
+On a MacBook Air (M1, 8 GB) in October, before the memory work, the footprint was 104 MB at `startup_idle` with the fake data and 114 MB with the mock, 174 MB on the mock after scrolling and 185 MB after playing, with a 198 MB peak, and `tracks` came at 312 and 581 ms. What took it down, in the order it went in, measured each time against the build before:
 
 - Covers in shared pages of exact-size covers, without mips, within 8 MB: the mock's scrolled footprint went from 174 to 119 MB, gpu from 103 to 51 MB. See Covers.
 - Opening the dylib in place in release builds: `tracks` 320 to 187 ms with the fake data, 589 to 437 ms on the mock, all of it between `launched` and `dylib`.

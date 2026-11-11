@@ -62,13 +62,13 @@ packaging/      the icon, Info.plist and the Linux .desktop file for ./build.py 
 - [Accessibility](docs/accessibility.md)
 - [Memory](docs/memory.md)
 - [Redraw policy](docs/redraw.md)
-- [Measuring RAM and startup](docs/measuring.md): the measure tool, what the app prints and the baseline numbers
+- [Measuring RAM and startup](docs/measuring.md): the measure tool, what the app prints and where the memory went
 - [Architecture](docs/architecture.md): the layout, the main decisions and what isn't done yet
 
 ## Pull requests
 
 - Commits are conventional and lowercase, with a subject line only.
 - Prove a bug fix with a test that fails on the commit before it.
-- For a change that could move memory or startup, run `./build/measure/measure ab main` and put the result in the pull request (see [Measuring RAM and startup](docs/measuring.md)).
+- For a change that could move memory or startup, measure it against the code before it with `./build/measure/measure ab` and put the result in the pull request (see [Measuring RAM and startup](docs/measuring.md)).
 - An idle window should use no CPU. Anything that animates must stop asking for frames once it settles.
 - Code is plain Odin, procedures and structs, with comments only where they say something the code doesn't. Docs and comments are plain direct English with sentence-case headings.

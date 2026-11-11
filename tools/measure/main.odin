@@ -8,8 +8,8 @@
 //     ./build/measure/measure all
 //     ./build/measure/measure frames             fake, 3 runs
 //     ./build/measure/measure compare a.json b.json
-//     ./build/measure/measure ab main            this checkout against main, taking turns
-//     ./build/measure/measure ab main -memory    the same, with a memory run of each
+//     ./build/measure/measure ab <app a> <app b>          two builds, taking turns
+//     ./build/measure/measure ab <app a> <app b> -memory  the same, with a memory run of each
 //     ./build/measure/measure launches           the app's own log of real launches
 //     ./build/measure/measure html               the app's memory snapshots as a page
 //
@@ -80,13 +80,14 @@ main :: proc() {
 		os.exit(show_launches(args[1] if len(args) == 2 else launch_log_default()))
 	}
 	scenario := args[0]
-	base := ""
-	if scenario == "ab" {
-		if len(args) < 2 || strings.has_prefix(args[1], "-") {
+	ab := scenario == "ab"
+	ab_apps: [2]string
+	if ab {
+		if len(args) < 3 || strings.has_prefix(args[1], "-") || strings.has_prefix(args[2], "-") {
 			usage()
 		}
-		base = args[1]
-		args = args[1:]
+		ab_apps = {args[1], args[2]}
+		args = args[2:]
 	} else if scenario != "startup" && scenario != "memory" && scenario != "all" && scenario != "frames" {
 		usage()
 	}
@@ -106,6 +107,9 @@ main :: proc() {
 		case "-setup":
 			setups_flag = value
 		case "-app":
+			if ab {
+				usage()
+			}
 			cfg.app = value
 		case "-timeout":
 			secs, _ := strconv.parse_int(value)
@@ -115,7 +119,7 @@ main :: proc() {
 		case "-real":
 			cfg.real = true
 		case "-memory":
-			if base == "" {
+			if !ab {
 				usage()
 			}
 			cfg.memory = true
@@ -124,7 +128,7 @@ main :: proc() {
 		}
 	}
 	if cfg.real {
-		if base != "" {
+		if ab {
 			usage()
 		}
 		setups_flag = "real"
@@ -136,7 +140,7 @@ main :: proc() {
 		cfg.app = join(cfg.root, "build", "tidalfast" + EXE_SUFFIX) if cfg.real else join(cfg.out_dir, "app", "tidalfast" + EXE_SUFFIX)
 	}
 	cfg.mock = join(cfg.out_dir, "mock_tidal" + EXE_SUFFIX)
-	if !os.exists(cfg.app) {
+	if !ab && !os.exists(cfg.app) {
 		fmt.eprintfln("measure: no app at %s; run ./build.py measure (or ./build.py release for -real)", cfg.app)
 		os.exit(1)
 	}
@@ -147,8 +151,8 @@ main :: proc() {
 	}
 	cfg.log_dir = join(cfg.out_dir, fmt.tprintf("logs-%s", stamp))
 	os.make_directory_all(cfg.log_dir)
-	if base != "" {
-		os.exit(run_ab(&cfg, base, stamp))
+	if ab {
+		os.exit(run_ab(&cfg, ab_apps, stamp))
 	}
 	side := Side{app = cfg.app, log_dir = cfg.log_dir}
 
@@ -230,7 +234,7 @@ main :: proc() {
 
 usage :: proc() {
 	fmt.eprintln(`usage: measure startup|memory|all|frames [-runs=N] [-setup=fake,mock] [-app=path] [-timeout=s] [-out=path] [-real]
-       measure ab <git ref> [-runs=N] [-setup=fake,mock] [-timeout=s] [-out=path] [-memory]
+       measure ab <app a> <app b> [-runs=N] [-setup=fake,mock] [-timeout=s] [-out=path] [-memory]
        measure compare a.json b.json
        measure launches [launches.jsonl]
        measure html [snapshots folder] [page.html]`)
@@ -417,10 +421,8 @@ start_mock :: proc(cfg: ^Config, log_dir: string) -> (p: os.Process, url: string
 // child_log creates the file at path, empty, for a child process's output.
 // Windows passes a child only handles marked inheritable, which os.create's
 // aren't.
-child_log :: proc(path: string, append := false) -> (^os.File, os.Error) {
-	flags := os.File_Flags{.Write, .Create, .Inheritable}
-	flags += {.Append} if append else {.Trunc}
-	return os.open(path, flags)
+child_log :: proc(path: string) -> (^os.File, os.Error) {
+	return os.open(path, {.Write, .Create, .Trunc, .Inheritable})
 }
 
 join :: proc(elems: ..string) -> string {
