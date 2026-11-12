@@ -252,6 +252,7 @@ start :: proc(s: ^State, shell: ^platform.Shell) {
 	library_init(&s.library)
 	measure_init_part(s, .Library)
 	data_start(s, shell)
+	send_decorations(s, shell)
 	measure_init_part(s, .Data)
 	if s.data.fake {
 		s.rows = make_rows()
@@ -303,8 +304,7 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input, shell: ^platfor
 	}
 	w, h := input.width, input.height
 	s.titlebar_h = input.titlebar_height
-	s.window.shown = .Buttons in input.window
-	s.window.maximized = .Maximized in input.window
+	window_frame(s, input, shell)
 	r := &s.renderer
 	render.begin_frame(r, w, h, input.scale, CLEAR_COLOR)
 	if r.device_resets != s.gpu_resets {

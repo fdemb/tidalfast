@@ -403,15 +403,15 @@ history_button :: proc(id, name: string, enabled: bool) -> ui.Signal {
 	return ui.signal(b)
 }
 
-// sidebar_top is the room above Home. On macOS it's as tall as the main
-// view's room for Back and Forward, which holds the window's buttons, and
-// moves the window. Elsewhere Home is as far from the top as the rows are
-// from the sides.
+// sidebar_top is the room above Home. On macOS, and on Linux with the
+// window's buttons on the left, it's as tall as the main view's room for
+// Back and Forward, which holds the buttons, and moves the window.
+// Elsewhere Home is as far from the top as the rows are from the sides.
 sidebar_top :: proc(s: ^State) -> f32 {
 	when ODIN_OS == .Darwin {
 		return nav_h(s) + NAV_TOP
 	} else {
-		return SIDEBAR_PAD
+		return nav_h(s) + NAV_TOP if window_buttons_left(s) else SIDEBAR_PAD
 	}
 }
 
