@@ -47,7 +47,7 @@ jobs:
         run: ${{ matrix.python }} build.py measure
       - name: Test
         if: runner.os != 'Linux'
-        run: ${{ matrix.python }} build.py test -- '-define:ODIN_TEST_THREADS=1' '-define:ODIN_TEST_LOG_STATE_CHANGES=true' '-define:ODIN_TEST_FANCY=false'
+        run: ${{ matrix.python }} build.py test -- '-define:ODIN_TEST_LOG_STATE_CHANGES=true' '-define:ODIN_TEST_FANCY=false'
       - name: Test
         if: runner.os == 'Linux'
         run: |
