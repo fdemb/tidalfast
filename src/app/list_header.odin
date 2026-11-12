@@ -421,7 +421,8 @@ draw_pinned_header :: proc(s: ^State, list: ^ui.Box, h: List_Header, cols: Track
 			ui.label(view_title(s), ui.fill(), ui.fill())
 			ui.spacer(ui.px(12))
 			list_play_button(s, "pinned_play", COMPACT_PLAY)
-			ui.spacer(ui.px(LIST_PAD + 8))
+			// Clear of the window's buttons, at the top with Back and Forward.
+			ui.spacer(ui.px(LIST_PAD + 8 + (window_buttons_w(s) if h.nav > 0 else 0)))
 		}
 	}
 	if c.pinned {

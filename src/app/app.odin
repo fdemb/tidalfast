@@ -59,6 +59,7 @@ State :: struct {
 	toast:            Toast,
 	drag_sent:    u64, // hash of the drag regions the shell has
 	titlebar_h:   f32, // this frame's Frame_Input.titlebar_height
+	window:       Window_Buttons,
 	bench:        Bench,
 	measure:      Measure,
 	dev:          Dev,
@@ -302,6 +303,8 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input, shell: ^platfor
 	}
 	w, h := input.width, input.height
 	s.titlebar_h = input.titlebar_height
+	s.window.shown = .Buttons in input.window
+	s.window.maximized = .Maximized in input.window
 	r := &s.renderer
 	render.begin_frame(r, w, h, input.scale, CLEAR_COLOR)
 	if r.device_resets != s.gpu_resets {
@@ -310,6 +313,10 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input, shell: ^platfor
 		text.forget_glyphs(&s.text, r)
 		covers_forget(s)
 		dev_start(s)
+		if s.window.texture != 0 {
+			render.texture_destroy(r, s.window.texture)
+			s.window.texture = 0
+		}
 	}
 	ui_begin := time.tick_now()
 	measure_frame_begin(s)
@@ -336,10 +343,13 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input, shell: ^platfor
 			draw_library(s, w, h)
 		}
 	}
+	build_window_buttons(s, shell, w)
 	animating := ui.end_frame()
 	shell_update(s, shell)
+	send_window_buttons(s, shell)
 	covers_schedule(s)
 	dev_draw_over(s, input.time, w, h)
+	draw_window_buttons(s, bool(input.key_window))
 
 	if s.show_overlay {
 		draw_frame_overlay(s, w)

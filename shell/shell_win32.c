@@ -28,6 +28,16 @@
 // overlay (System Media Transport Controls), drag and drop and touchpad
 // momentum (Windows sends precision touchpad scrolls as fine wheel deltas,
 // which arrive as precise scrolls without phases).
+//
+// The window has no titlebar of its own. The view goes up to the window's
+// top, and the app draws minimise, maximise and close at its top right
+// (WINDOW_FLAG_BUTTONS). The sides and the bottom keep the system's frame,
+// so they resize the window and it keeps its shadow, and WM_NCHITTEST
+// makes the rest of a titlebar: the top edge resizes, the app's drag
+// regions move the window, and the app's maximise button is HTMAXBUTTON,
+// so Windows 11 opens its snap layouts from it. The pointer's messages
+// over that button come in as the non-client ones, and go to the app as
+// ordinary mouse events.
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -71,6 +81,19 @@ static bool g_minimized; // frames only when asked, no animation, unless TIDALFA
 static bool g_capture;
 static bool g_in_frame; // inside app_frame, which a window message can re-enter
 static bool g_shut_down; // app_shutdown has run
+
+// What the app says about the top of the view, in view points: where a
+// press moves the window, and its minimise, maximise and close buttons.
+#define MAX_DRAG_REGIONS 64
+static float g_drag_regions[MAX_DRAG_REGIONS][4];
+static uint32_t g_drag_region_count;
+static float g_window_buttons[3][4];
+static uint32_t g_window_button_count;
+static bool g_on_max_button; // the app was last told the pointer is over the maximise button
+static bool g_tracking_nc_leave;
+// A test step moved the pointer, so it's where the step put it, wherever
+// the real one is.
+static bool g_test_pointer;
 
 // Set by request_redraw. Auto-reset, so a wait it ends consumes it: a
 // request that comes while a frame is starting leaves it set at most until
@@ -181,6 +204,30 @@ static double refresh_interval(void) {
   return g_refresh_interval;
 }
 
+// The frame's thickness on each side at the window's DPI, in pixels: the
+// part of it that resizes the window, which on Windows 10 and 11 is
+// invisible apart from a line at its inner edge.
+static int frame_x(UINT dpi) { return GetSystemMetricsForDpi(SM_CXSIZEFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi); }
+static int frame_y(UINT dpi) { return GetSystemMetricsForDpi(SM_CYSIZEFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi); }
+
+// What a system titlebar would take at the top, in points. The app keeps
+// at least this much room there, and the empty parts of it move the
+// window.
+static float titlebar_height(void) {
+  UINT dpi = GetDpiForWindow(g_window);
+  if (!dpi) dpi = 96;
+  return (float)(GetSystemMetricsForDpi(SM_CYCAPTION, dpi) + frame_y(dpi)) * 96.0f / (float)dpi;
+}
+
+// The window's rect for a client area w by h pixels: the system's frame
+// on the sides and the bottom, and none at the top (WM_NCCALCSIZE).
+static RECT window_rect_for(LONG w, LONG h, UINT dpi) {
+  RECT r = {0, 0, w, h};
+  AdjustWindowRectExForDpi(&r, WS_OVERLAPPEDWINDOW, FALSE, 0, dpi);
+  r.top = 0;
+  return r;
+}
+
 // A frame's work can send the window a message: the input method's
 // answer to ImmNotifyIME, or a sent message from another thread while a
 // call waits. If that message asks for a frame, it gets the next one; the
@@ -197,6 +244,8 @@ static void draw_frame(void) {
       .key_window = g_key_window,
       .mouse_buttons = buttons_down(),
       .frame_interval = (float)refresh_interval(),
+      .titlebar_height = titlebar_height(),
+      .window = WINDOW_FLAG_BUTTONS | (IsZoomed(g_window) ? WINDOW_FLAG_MAXIMIZED : 0),
   };
   queue_take(&input.events, &input.event_count, &input.text, &input.text_length);
   g_in_frame = true;
@@ -587,6 +636,100 @@ static void modal_tick(void) {
   if (atomic_load(&g_needs_redraw) || animating()) draw_frame();
 }
 
+// The top of the window
+
+static void set_drag_regions(const float (*rects)[4], uint32_t count) {
+  if (count > MAX_DRAG_REGIONS) count = MAX_DRAG_REGIONS;
+  memcpy(g_drag_regions, rects, count * sizeof rects[0]);
+  g_drag_region_count = count;
+}
+
+static void set_window_buttons(const float (*rects)[4], uint32_t count) {
+  if (count > 3) count = 3;
+  memcpy(g_window_buttons, rects, count * sizeof rects[0]);
+  g_window_button_count = count;
+}
+
+// Posted, so the window changes after the frame that asked, as it would
+// after a press on the system's own buttons.
+static void window_command(uint32_t command) {
+  switch (command) {
+  case WINDOW_COMMAND_MINIMIZE: PostMessageW(g_window, WM_SYSCOMMAND, SC_MINIMIZE, 0); break;
+  case WINDOW_COMMAND_TOGGLE_MAXIMIZE: PostMessageW(g_window, WM_SYSCOMMAND, IsZoomed(g_window) ? SC_RESTORE : SC_MAXIMIZE, 0); break;
+  case WINDOW_COMMAND_CLOSE: PostMessageW(g_window, WM_SYSCOMMAND, SC_CLOSE, 0); break;
+  }
+}
+
+static bool in_rect(const float r[4], float x, float y) { return x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3]; }
+
+// What a point on the screen is: the system's answer for the frame on the
+// sides and the bottom, then the top edge, which resizes unless the
+// window is maximised, then the app's maximise button and its drag
+// regions. The rest is the app's.
+static LRESULT hit_test(HWND hwnd, LPARAM lp) {
+  LRESULT hit = DefWindowProcW(hwnd, WM_NCHITTEST, 0, lp);
+  if (hit != HTCLIENT) return hit;
+  POINT p = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+  ScreenToClient(hwnd, &p);
+  UINT dpi = GetDpiForWindow(hwnd);
+  if (!IsZoomed(hwnd) && p.y < frame_y(dpi)) {
+    RECT c;
+    GetClientRect(hwnd, &c);
+    if (p.x < frame_x(dpi)) return HTTOPLEFT;
+    if (p.x >= c.right - frame_x(dpi)) return HTTOPRIGHT;
+    return HTTOP;
+  }
+  float x = (float)p.x / g_scale, y = (float)p.y / g_scale;
+  if (g_window_button_count == 3 && in_rect(g_window_buttons[1], x, y)) return HTMAXBUTTON;
+  for (uint32_t i = 0; i < g_drag_region_count; i++)
+    if (in_rect(g_drag_regions[i], x, y)) return HTCAPTION;
+  return HTCLIENT;
+}
+
+// What the pointer is on, HTNOWHERE off the window.
+static LRESULT pointer_hit(HWND hwnd) {
+  POINT p;
+  if (g_test_pointer) {
+    p = (POINT){(LONG)(g_mouse_x * g_scale), (LONG)(g_mouse_y * g_scale)};
+    ClientToScreen(hwnd, &p);
+  } else if (!GetCursorPos(&p) || WindowFromPoint(p) != hwnd) {
+    return HTNOWHERE;
+  }
+  return SendMessageW(hwnd, WM_NCHITTEST, 0, MAKELPARAM(p.x, p.y));
+}
+
+// Whether the pointer is on the window where the app gets it: in the
+// client area, or over the maximise button.
+static bool pointer_on_app(HWND hwnd) {
+  LRESULT hit = pointer_hit(hwnd);
+  return hit == HTCLIENT || hit == HTMAXBUTTON;
+}
+
+static void pointer_left(void) {
+  push_event((Event){.kind = EVENT_MOUSE_LEAVE, .modifiers = g_modifiers, .time = now_seconds(), .x = g_mouse_x, .y = g_mouse_y});
+}
+
+// A maximised window reaches past the monitor's edges by its frame, so
+// the client area gives the top back too. An auto-hide taskbar shows when
+// the pointer reaches its edge of the monitor, which a window covering the
+// whole monitor would stop, so the window leaves that edge free.
+static void fit_maximized(HWND hwnd, RECT *r) {
+  r->top += frame_y(GetDpiForWindow(hwnd));
+  APPBARDATA bar = {.cbSize = sizeof bar};
+  if (!(SHAppBarMessage(ABM_GETSTATE, &bar) & ABS_AUTOHIDE)) return;
+  MONITORINFO info = {.cbSize = sizeof info};
+  if (!GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &info)) return;
+  static const UINT edges[] = {ABE_BOTTOM, ABE_TOP, ABE_LEFT, ABE_RIGHT};
+  for (int i = 0; i < 4; i++) {
+    APPBARDATA edge = {.cbSize = sizeof edge, .uEdge = edges[i], .rc = info.rcMonitor};
+    if (!SHAppBarMessage(ABM_GETAUTOHIDEBAREX, &edge)) continue;
+    if (edges[i] == ABE_BOTTOM) r->bottom -= 2;
+    if (edges[i] == ABE_TOP) r->top += 2;
+    if (edges[i] == ABE_LEFT) r->left += 2;
+    if (edges[i] == ABE_RIGHT) r->right -= 2;
+  }
+}
+
 static bool is_modifier(WPARAM vk) {
   return vk == VK_SHIFT || vk == VK_CONTROL || vk == VK_MENU || vk == VK_LWIN || vk == VK_RWIN || vk == VK_CAPITAL;
 }
@@ -595,6 +738,57 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   switch (msg) {
   case WM_CLOSE:
     atomic_store(&g_quit, true);
+    return 0;
+  case WM_NCCALCSIZE: {
+    // The system's frame on the sides and the bottom, none at the top.
+    // The window's first one, as it's made, has a bare rect.
+    RECT *r = wp ? &((NCCALCSIZE_PARAMS *)lp)->rgrc[0] : (RECT *)lp;
+    LONG top = r->top;
+    DefWindowProcW(hwnd, msg, wp, lp);
+    r->top = top;
+    if (IsZoomed(hwnd)) fit_maximized(hwnd, r);
+    return 0;
+  }
+  case WM_NCHITTEST:
+    return hit_test(hwnd, lp);
+  case WM_NCMOUSEMOVE:
+    if (wp == HTMAXBUTTON) {
+      POINT p = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+      ScreenToClient(hwnd, &p);
+      mouse_at(MAKELPARAM(p.x, p.y));
+      g_on_max_button = true;
+      if (!g_tracking_nc_leave) {
+        TRACKMOUSEEVENT tme = {.cbSize = sizeof tme, .dwFlags = TME_LEAVE | TME_NONCLIENT, .hwndTrack = hwnd};
+        g_tracking_nc_leave = TrackMouseEvent(&tme);
+      }
+      push_event((Event){.kind = EVENT_MOUSE_MOVE, .modifiers = g_modifiers, .time = now_seconds(), .x = g_mouse_x, .y = g_mouse_y});
+    } else if (g_on_max_button) {
+      g_on_max_button = false;
+      pointer_left();
+    }
+    break; // the system still sees it, for the snap layouts
+  case WM_NCMOUSELEAVE:
+    g_tracking_nc_leave = false;
+    if (g_on_max_button && pointer_hit(hwnd) != HTMAXBUTTON) {
+      g_on_max_button = false;
+      // Into the client area, whose WM_MOUSEMOVE says where.
+      if (!pointer_on_app(hwnd)) pointer_left();
+    }
+    return 0;
+  case WM_NCLBUTTONDOWN:
+  case WM_NCLBUTTONDBLCLK:
+  case WM_NCLBUTTONUP:
+  case WM_NCRBUTTONDOWN:
+  case WM_NCRBUTTONUP:
+    // The system would draw a button of its own over the app's. A left
+    // press takes the capture, so its release comes as WM_LBUTTONUP.
+    if (wp != HTMAXBUTTON) break;
+    if (msg == WM_NCLBUTTONDOWN || msg == WM_NCLBUTTONDBLCLK || msg == WM_NCLBUTTONUP) {
+      POINT p = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+      ScreenToClient(hwnd, &p);
+      mouse_at(MAKELPARAM(p.x, p.y));
+      mouse_button(MOUSE_BUTTON_LEFT, msg != WM_NCLBUTTONUP);
+    }
     return 0;
   case WM_QUERYENDSESSION:
     return TRUE;
@@ -626,9 +820,8 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     break;
   case WM_GETMINMAXINFO: {
     MINMAXINFO *mm = (MINMAXINFO *)lp;
-    float s = hwnd ? (float)GetDpiForWindow(hwnd) / 96.0f : 1;
-    RECT r = {0, 0, (LONG)(MIN_WIDTH * s), (LONG)(MIN_HEIGHT * s)};
-    AdjustWindowRectExForDpi(&r, WS_OVERLAPPEDWINDOW, FALSE, 0, hwnd ? GetDpiForWindow(hwnd) : 96);
+    UINT dpi = hwnd ? GetDpiForWindow(hwnd) : 96;
+    RECT r = window_rect_for((LONG)(MIN_WIDTH * dpi / 96), (LONG)(MIN_HEIGHT * dpi / 96), dpi);
     mm->ptMinTrackSize.x = r.right - r.left;
     mm->ptMinTrackSize.y = r.bottom - r.top;
     return 0;
@@ -685,7 +878,8 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     return 0;
   case WM_MOUSELEAVE:
     g_tracking_leave = false;
-    push_event((Event){.kind = EVENT_MOUSE_LEAVE, .modifiers = g_modifiers, .time = now_seconds(), .x = g_mouse_x, .y = g_mouse_y});
+    // Onto the maximise button, whose WM_NCMOUSEMOVE says where.
+    if (!pointer_on_app(hwnd)) pointer_left();
     return 0;
   case WM_LBUTTONDOWN:
   case WM_LBUTTONUP:
@@ -788,6 +982,10 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 //   size=w,h            make the window's client area w by h points
 //   move=x,y            the pointer moves to x, y in points
 //   click=x,y           a left click at x, y in points
+//   hit=x,y             print what WM_NCHITTEST says x, y in points is: 1 the app's, 2 a drag region, 9 maximise, 12 the top edge
+//   point=x,y           the pointer moves to x, y in points as Windows moves it: by what the hit test says is there
+//   press=x,y           point=x,y, then a left click as Windows sends it there, on the app's or on its maximise button
+//   window              print whether the window is maximised and where its client area is on the screen
 //   type=text           each UTF-16 unit of text as a WM_CHAR, surrogate pairs as two
 //   vkey=ctrl+name      WM_KEYDOWN and WM_KEYUP for a virtual key, with modifiers (ctrl, alt, shift) held:
 //                       escape, return, enter (the keypad's), backspace, tab, space, delete, home, end,
@@ -874,17 +1072,49 @@ bool os_test_step(const char *command, char *arg) {
       return true;
     }
     UINT dpi = GetDpiForWindow(g_window);
-    RECT r = {0, 0, (LONG)lroundf(w * dpi / 96.0f), (LONG)lroundf(h * dpi / 96.0f)};
-    AdjustWindowRectExForDpi(&r, (DWORD)GetWindowLongW(g_window, GWL_STYLE), FALSE, (DWORD)GetWindowLongW(g_window, GWL_EXSTYLE), dpi);
+    RECT r = window_rect_for(lroundf(w * dpi / 96.0f), lroundf(h * dpi / 96.0f), dpi);
     SetWindowPos(g_window, NULL, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
     request_redraw();
   } else if (!strcmp(command, "move")) {
+    g_test_pointer = true;
     SendMessageW(g_window, WM_MOUSEMOVE, 0, test_point(arg));
   } else if (!strcmp(command, "click")) {
+    g_test_pointer = true;
     LPARAM at = test_point(arg);
     SendMessageW(g_window, WM_MOUSEMOVE, 0, at);
     SendMessageW(g_window, WM_LBUTTONDOWN, MK_LBUTTON, at);
     SendMessageW(g_window, WM_LBUTTONUP, 0, at);
+  } else if (!strcmp(command, "hit")) {
+    LPARAM at = test_point(arg);
+    POINT p = {GET_X_LPARAM(at), GET_Y_LPARAM(at)};
+    ClientToScreen(g_window, &p);
+    fprintf(stderr, "shell: test: hit %s is %ld\n", arg, (long)SendMessageW(g_window, WM_NCHITTEST, 0, MAKELPARAM(p.x, p.y)));
+  } else if (!strcmp(command, "point") || !strcmp(command, "press")) {
+    LPARAM at = test_point(arg);
+    POINT p = {GET_X_LPARAM(at), GET_Y_LPARAM(at)};
+    ClientToScreen(g_window, &p);
+    LPARAM screen = MAKELPARAM(p.x, p.y);
+    LRESULT hit = SendMessageW(g_window, WM_NCHITTEST, 0, screen);
+    bool press = !strcmp(command, "press");
+    g_test_pointer = true;
+    if (hit == HTCLIENT) {
+      SendMessageW(g_window, WM_MOUSEMOVE, 0, at);
+      if (press) SendMessageW(g_window, WM_LBUTTONDOWN, MK_LBUTTON, at), SendMessageW(g_window, WM_LBUTTONUP, 0, at);
+    } else if (hit == HTMAXBUTTON) {
+      SendMessageW(g_window, WM_NCMOUSEMOVE, HTMAXBUTTON, screen);
+      // The press takes the capture, so the release comes to the client.
+      if (press) SendMessageW(g_window, WM_NCLBUTTONDOWN, HTMAXBUTTON, screen), SendMessageW(g_window, WM_LBUTTONUP, 0, at);
+    } else {
+      fprintf(stderr, "shell: test: %s %s is hit %ld, not the app's\n", command, arg, (long)hit);
+    }
+  } else if (!strcmp(command, "window")) {
+    RECT c, w;
+    GetClientRect(g_window, &c);
+    GetWindowRect(g_window, &w);
+    POINT origin = {0, 0};
+    ClientToScreen(g_window, &origin);
+    fprintf(stderr, "shell: test: window maximized %d, client %ldx%ld at %ld,%ld, window top %ld\n", IsZoomed(g_window) ? 1 : 0, c.right, c.bottom,
+            origin.x, origin.y, w.top);
   } else if (!strcmp(command, "type")) {
     int n = MultiByteToWideChar(CP_UTF8, 0, arg, -1, NULL, 0);
     wchar_t *w = malloc((size_t)n * sizeof(wchar_t));
@@ -1033,8 +1263,7 @@ static bool open_window(void) {
   typedef HRESULT(WINAPI * Get_Dpi)(HMONITOR, int, UINT *, UINT *);
   Get_Dpi get_dpi = shcore ? (Get_Dpi)(void *)GetProcAddress(shcore, "GetDpiForMonitor") : NULL;
   if (get_dpi && get_dpi(monitor, 0, &dpi_x, &dpi_y) == S_OK) dpi = dpi_x;
-  RECT r = {0, 0, (LONG)(DEFAULT_WIDTH * dpi / 96), (LONG)(DEFAULT_HEIGHT * dpi / 96)};
-  AdjustWindowRectExForDpi(&r, WS_OVERLAPPEDWINDOW, FALSE, 0, dpi);
+  RECT r = window_rect_for((LONG)(DEFAULT_WIDTH * dpi / 96), (LONG)(DEFAULT_HEIGHT * dpi / 96), dpi);
   g_window = CreateWindowExW(0, L"TIDALfast", L"TIDALfast", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left,
                              r.bottom - r.top, NULL, NULL, instance, NULL);
   if (!g_window) {
@@ -1042,8 +1271,9 @@ static bool open_window(void) {
     fatal(message);
     return false;
   }
-  // A dark title bar, to go with the app. Windows 10 before 20H1 has no
-  // such attribute and ignores it.
+  // Dark, to go with the app: the system menu and, on Windows 10, the
+  // frame's line. Windows 10 before 20H1 has no such attribute and
+  // ignores it.
   BOOL dark = TRUE;
   DwmSetWindowAttribute(g_window, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof dark);
   g_surface_info = (Win32_Surface){.instance = instance, .window = g_window};
@@ -1132,6 +1362,9 @@ int shell_main(int argc, char **argv) {
       .set_clipboard = set_clipboard,
       .get_clipboard = get_clipboard,
       .set_accessibility = getenv("TIDALFAST_SHELL_TEST") ? set_accessibility : NULL,
+      .set_drag_regions = set_drag_regions,
+      .window_command = window_command,
+      .set_window_buttons = set_window_buttons,
   };
 
   measure_mark("app_start");

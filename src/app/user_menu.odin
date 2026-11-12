@@ -99,6 +99,7 @@ draw_user_row :: proc(s: ^State) {
 			}
 		}
 	}
+	draw_settings_menu(s)
 }
 
 // draw_avatar is the user's picture in a circle. Until it has come, or

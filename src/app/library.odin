@@ -61,7 +61,7 @@ OUTLINE :: render.Color{0x2c / 255.0, 0x2c / 255.0, 0x2c / 255.0, 1}
 TEXT :: render.Color{0xf3 / 255.0, 0xf3 / 255.0, 0xf3 / 255.0, 1}
 SECONDARY :: render.Color{0xad / 255.0, 0xad / 255.0, 0xad / 255.0, 1}
 NAV_TEXT :: render.Color{0xd6 / 255.0, 0xd6 / 255.0, 0xd6 / 255.0, 1} // the sidebar's Home and Search when not lit
-QUIET :: render.Color{0x8f / 255.0, 0x8f / 255.0, 0x8f / 255.0, 1} // the sidebar's subtitles and settings button
+QUIET :: render.Color{0x8f / 255.0, 0x8f / 255.0, 0x8f / 255.0, 1} // the sidebar's subtitles
 DIM :: render.Color{0x74 / 255.0, 0x74 / 255.0, 0x74 / 255.0, 1}
 ACCENT :: render.Color{0, 1, 1, 1}
 PLAYBACK_ERROR :: render.Color{0xf0 / 255.0, 0x8a / 255.0, 0x6c / 255.0, 1}
@@ -85,10 +85,10 @@ PLAYLIST_COVER :: 36
 HEADER_H :: 34
 NAV_ROW_H :: 32 // Home and Search
 NAV_GAP :: 2 // between Home and Search
-NAV_TOP :: 4 // between the top row and Home
+NAV_TOP :: 4 // on macOS, between the room for the window's buttons and Home
 HEADING_GAP :: 16 // between Search and the Your Library heading
 HEADING_H :: 28
-SIDEBAR_HEAD_H :: NAV_TOP + 2 * NAV_ROW_H + NAV_GAP + HEADING_GAP + HEADING_H // under the top row, above the playlists
+SIDEBAR_HEAD_H :: 2 * NAV_ROW_H + NAV_GAP + HEADING_GAP + HEADING_H // under sidebar_top, above the playlists
 SIDEBAR_LIST_TOP :: 4 // between the heading and the first playlist
 SIDEBAR_PAD :: 8 // between the sidebar's edges and its rows
 ROW_PAD :: 10 // between a sidebar row's edge and its icon
@@ -403,29 +403,27 @@ history_button :: proc(id, name: string, enabled: bool) -> ui.Signal {
 	return ui.signal(b)
 }
 
-// draw_sidebar is the sidebar, h tall: the top row with the settings
-// button, Home, Search, the Your Library heading, the playlists under
-// them and the user row at the bottom, above the player bar.
+// sidebar_top is the room above Home. On macOS it's as tall as the main
+// view's room for Back and Forward, which holds the window's buttons, and
+// moves the window. Elsewhere Home is as far from the top as the rows are
+// from the sides.
+sidebar_top :: proc(s: ^State) -> f32 {
+	when ODIN_OS == .Darwin {
+		return nav_h(s) + NAV_TOP
+	} else {
+		return SIDEBAR_PAD
+	}
+}
+
+// draw_sidebar is the sidebar, h tall: Home, Search, the Your Library
+// heading, the playlists under them and the user row at the bottom, above
+// the player bar.
 draw_sidebar :: proc(s: ^State, h: f32) {
 	lib := &s.library
 	ui.set_next_background(PANEL)
 	ui.column("sidebar", {.Draw_Background, .Clip}, ui.px(lib.sidebar_w), ui.fill())
-	// As tall as the main view's room for Back and Forward, so the settings
-	// button is level with them. Under the window's buttons it moves the
-	// window.
-	top := nav_h(s)
-	{
-		ui.row("", {.Window_Drag} if s.titlebar_h > 0 else {}, ui.fill(), ui.px(top))
-		ui.spacer(ui.fill())
-		{
-			ui.column("", {}, ui.children_sum(), ui.fill())
-			ui.spacer(ui.fill())
-			draw_settings_button(s)
-			ui.spacer(ui.fill())
-		}
-		ui.spacer(ui.px(SIDEBAR_PAD))
-	}
-	ui.spacer(ui.px(NAV_TOP))
+	top := sidebar_top(s)
+	ui.box_make("", {.Window_Drag} if s.titlebar_h > 0 else {}, ui.fill(), ui.px(top))
 	draw_home_entry(s)
 	ui.spacer(ui.px(NAV_GAP))
 	draw_search_entry(s)
@@ -623,7 +621,7 @@ draw_track_list :: proc(s: ^State, main_w, view_h: f32) {
 	artist := album_artist_page(s) if kind == .Album else nil
 	defer draw_list_menu(s, kind)
 
-	list := ui.scroll_view("tracks", ui.px(main_w), ui.px(view_h), inset_end = bar_inset(s))
+	list := ui.scroll_view("tracks", ui.px(main_w), ui.px(view_h), inset_end = bar_inset(s), bar_top = window_bar_top(s))
 	// One scroll view shows every list, so its offset belongs to the list
 	// that was open. A refresh keeps list_gen, and the anchor below.
 	if lib.scrolled_gen != lib.list_gen {

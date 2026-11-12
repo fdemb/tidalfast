@@ -179,12 +179,12 @@ draw_search_page :: proc(s: ^State, main_w, view_h: f32) {
 // draw_search_bar is the search page's field, a pill like Back and Forward
 // and as tall, right of them in the main view's room at the top, which is
 // main_w wide. Like them it's built after the view, over the bar the
-// results pin there. So Return asks for its search once the frame is done
+// results pin there. It stops short of the window's buttons. So Return asks for its search once the frame is done
 // (Search_Now), and the debounce runs before the view (search_tick).
 draw_search_bar :: proc(s: ^State, main_w: f32) {
 	sr := &s.search
 	x := f32(NAV_PAD + NAV_W + NAV_PAD)
-	w := clamp(main_w - x - NAV_PAD, 0, SEARCH_BAR_MAX)
+	w := clamp(main_w - x - NAV_PAD - window_buttons_w(s), 0, SEARCH_BAR_MAX)
 	bar := ui.row("search_bar", {.Floating_X, .Floating_Y}, ui.px(w), ui.px(NAV_BUTTON_H))
 	bar.fixed_pos = {x, (nav_h(s) - NAV_BUTTON_H) / 2}
 	ui.text_style(.Regular, 14, TEXT)
@@ -734,7 +734,7 @@ draw_found_list :: proc(s: ^State, w, h: f32) {
 	tab := sr.tab
 	head := search_list_header(nav_reserve(s))
 	top := head.hero + head.actions
-	list := ui.scroll_view("found", ui.px(w), ui.px(h), inset_end = bar_inset(s))
+	list := ui.scroll_view("found", ui.px(w), ui.px(h), inset_end = bar_inset(s), bar_top = window_bar_top(s))
 	history_scroll(s, list)
 	if list.view_off.y < top {
 		draw_search_hero(s, head, list.view_off.y)

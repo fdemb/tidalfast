@@ -138,6 +138,7 @@ Build :: struct {
 	gutter:                    f32, // points at the right that children's widths leave out
 	pad:                       [2]f32, // points before and after the children on each axis, inside the box
 	inset_end:                 f32, // a scroll view's bottom under something drawn over it, see scroll_view
+	bar_top:                   f32, // a scroll view's top right under something drawn over it, which its scrollbar stays below
 	keep_in_window:            bool, // a floating box moved inside the window once its size is known, see fit_floating
 	flip_y:                    f32, // with keep_in_window, where its bottom goes when it doesn't fit below
 	above:                     bool, // with keep_in_window, its bottom goes at flip_y even when it fits below
