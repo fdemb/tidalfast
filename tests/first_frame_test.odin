@@ -5,9 +5,11 @@ import "core:mem"
 import vmem "core:mem/virtual"
 import "core:strings"
 import "core:testing"
+import "core:time"
 
 import app "../src/app"
 import "../src/render"
+import "../src/text"
 import "../src/ui"
 
 // A page's first frame is laid out as the frame after it, with nothing in
@@ -29,6 +31,7 @@ first_frames_match_the_next :: proc(t: ^testing.T) {
 	for size in ([][2]f32{{820, 600}, {1100, 760}, {1600, 900}}) {
 		s := library_state(true)
 		defer library_state_free(s)
+		load_fallbacks(&fonts, s.rows)
 		// Past the first second, which a new view's floating scrollbar
 		// takes as having just scrolled.
 		f := Frame{fonts = &fonts, size = size, now = 100}
@@ -76,6 +79,35 @@ first_frames_match_the_next :: proc(t: ^testing.T) {
 		library_frame(t, s, &f, key(.Left, {ui.PRIMARY}))
 		library_frame(t, s, &f)
 		expect_next_frame_same(t, s, &f, at, "back to Home")
+	}
+}
+
+// load_fallbacks shapes every character of the fake rows in each text font
+// and waits for the fallback faces they ask for. One that arrives between
+// the two frames compared reshapes a label, which says nothing about
+// layout, and with every core busy the loader can take that long.
+@(private = "file")
+load_fallbacks :: proc(fonts: ^Fonts, rows: []app.Row) {
+	seen := make(map[rune]bool, context.temp_allocator)
+	b := strings.builder_make(context.temp_allocator)
+	for row in rows {
+		for str in ([3]string{row.title, row.artist, row.album}) {
+			for r in str {
+				if r >= 0x80 && !seen[r] {
+					seen[r] = true
+					strings.write_rune(&b, r)
+				}
+			}
+		}
+	}
+	all := strings.to_string(b)
+	for font in ([]text.Font{.Regular, .Medium, .Semibold, .Bold}) {
+		run := text.shape(fonts.state, font, 13, all)
+		for i := 0; (run.pending || text.loading(fonts.state)) && i < 5000; i += 1 {
+			time.sleep(time.Millisecond)
+			text.begin_frame(fonts.state, &fonts.r)
+			run = text.shape(fonts.state, font, 13, all)
+		}
 	}
 }
 
