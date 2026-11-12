@@ -34,7 +34,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential clang pkg-config libwayland-dev wayland-protocols libxkbcommon-dev \
-            libvulkan-dev glslang-tools libfreetype-dev libfontconfig-dev libcurl4-openssl-dev dbus gnome-keyring
+            libvulkan-dev glslang-tools libfreetype-dev libfontconfig-dev libcurl4-openssl-dev dbus gnome-keyring \
+            fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji
       - uses: ./.github/actions/install-odin
       - uses: ilammy/msvc-dev-cmd@v1
         if: runner.os == 'Windows'
