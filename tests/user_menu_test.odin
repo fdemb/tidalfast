@@ -60,8 +60,8 @@ user_row_shows_the_name_on_hover :: proc(t: ^testing.T) {
 	testing.expect_value(t, name_opacity(s, "Ada Lovelace"), 0)
 }
 
-// The menu opens above the row, Settings opens the settings menu there,
-// and Log out signs out.
+// The menu opens above the row, Settings shows the settings page, and Log
+// out signs out.
 @(test)
 user_menu_opens_settings_and_logs_out :: proc(t: ^testing.T) {
 	arena: vmem.Arena
@@ -83,11 +83,11 @@ user_menu_opens_settings_and_logs_out :: proc(t: ^testing.T) {
 	testing.expectf(t, bottom <= row.y, "the menu ends at %v, above the row at %v", bottom, row.y)
 	library_frame(t, s, &f, {kind = .Access_Press, target = settings.id})
 	library_frame(t, s, &f)
-	testing.expect(t, ui.menu_is_open(app.SETTINGS_MENU), "Settings opens the settings menu")
-	library_frame(t, s, &f, key(.Escape))
+	testing.expect(t, app.settings_showing(s), "Settings shows the settings page")
 	for _ in 0 ..< 30 {
 		library_frame(t, s, &f)
 	}
+	testing.expect(t, !ui.menu_is_open(app.USER_MENU), "the menu closes")
 
 	open_user_menu(t, s, &f)
 	library_frame(t, s, &f, {kind = .Access_Press, target = menu_item(s, "Log out").id})

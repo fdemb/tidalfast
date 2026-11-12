@@ -1,6 +1,6 @@
 // The user row at the bottom of the sidebar: the signed-in user's picture,
-// and on hover a button with their name that opens a menu with Settings and
-// Log out. The name and picture come from TIDAL once per login.
+// and on hover a button with their name that opens a menu with Settings,
+// which shows the settings page, and Log out. The name and picture come from TIDAL once per login.
 package app
 
 import "core:fmt"
@@ -90,7 +90,7 @@ draw_user_row :: proc(s: ^State) {
 	if ui.menu(USER_MENU, b.rect.w) {
 		ui.text_style(.Regular, 13, TEXT)
 		if ui.menu_item("Settings###user_settings").clicked {
-			ui.open_menu(SETTINGS_MENU, {b.rect.x, b.rect.y - 4}, up = true)
+			pending_set(s, Settings_Place{})
 		}
 		if d.account == .Signed_In {
 			ui.menu_separator()
@@ -99,7 +99,6 @@ draw_user_row :: proc(s: ^State) {
 			}
 		}
 	}
-	draw_settings_menu(s)
 }
 
 // draw_avatar is the user's picture in a circle. Until it has come, or
