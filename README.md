@@ -43,7 +43,7 @@ On an M1 MacBook Air it shows your library about 180 ms after launch. It takes a
 
 ## Download
 
-Get the `.dmg` (macOS 14 or later, Apple silicon) or the AppImage (Linux on Wayland, x86_64) from [Releases](https://github.com/fdemb/tidalfast/releases). You need a TIDAL subscription.
+Get the `.dmg` (macOS 14 or later, Apple silicon) or the AppImage (Linux on Wayland with PipeWire, x86_64) from [Releases](https://github.com/fdemb/tidalfast/releases). You need a TIDAL subscription.
 
 The macOS app isn't notarized yet, so Gatekeeper blocks it the first time. Allow it in System Settings > Privacy & Security, or run:
 

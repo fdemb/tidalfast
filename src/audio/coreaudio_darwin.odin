@@ -1,14 +1,16 @@
 #+private
 package audio
 
-// The CoreAudio HAL calls bitperfect_darwin.odin makes. They are plain C
-// functions in CoreAudio.framework, declared by hand, so Odin calls them
-// without the Obj-C runtime. Private to the package: the player goes
-// through the procedures bitperfect_linux.odin also has.
+// The CoreAudio HAL and AudioUnit calls bitperfect_darwin.odin makes. They
+// are plain C functions in CoreAudio.framework and AudioToolbox.framework,
+// declared by hand, so Odin calls them without the Obj-C runtime. Private
+// to the package: the player goes through the procedures
+// bitperfect_linux.odin also has.
 
 import CF "core:sys/darwin/CoreFoundation"
 
 foreign import CoreAudio "system:CoreAudio.framework"
+foreign import AudioToolbox "system:AudioToolbox.framework"
 
 Audio_Object_ID :: u32
 OS_Status :: i32
@@ -56,6 +58,45 @@ foreign CoreAudio {
 	AudioDeviceStop :: proc(device: Audio_Object_ID, id: rawptr) -> OS_Status ---
 	AudioObjectAddPropertyListener :: proc(id: Audio_Object_ID, addr: ^Property_Address, listener: Listener_Proc, client: rawptr) -> OS_Status ---
 	AudioObjectRemovePropertyListener :: proc(id: Audio_Object_ID, addr: ^Property_Address, listener: Listener_Proc, client: rawptr) -> OS_Status ---
+}
+
+// AudioComponentDescription
+Component_Description :: struct {
+	type:         u32,
+	sub_type:     u32,
+	manufacturer: u32,
+	flags:        u32,
+	flags_mask:   u32,
+}
+
+Render_Proc :: #type proc "c" (client: rawptr, flags: ^u32, stamp: rawptr, bus: u32, frames: u32, data: ^Audio_Buffer_List) -> OS_Status
+
+// AURenderCallbackStruct
+Render_Callback :: struct {
+	render: Render_Proc,
+	client: rawptr,
+}
+
+// The default output unit: it plays to the system's default output, follows
+// it to another device and converts to the device's rate.
+COMPONENT_OUTPUT := fourcc("auou")
+COMPONENT_DEFAULT_OUTPUT := fourcc("def ")
+COMPONENT_APPLE := fourcc("appl")
+
+UNIT_PROP_STREAM_FORMAT :: 8
+UNIT_PROP_RENDER_CALLBACK :: 23
+UNIT_SCOPE_INPUT :: 1
+
+@(default_calling_convention = "c")
+foreign AudioToolbox {
+	AudioComponentFindNext :: proc(after: rawptr, desc: ^Component_Description) -> rawptr ---
+	AudioComponentInstanceNew :: proc(component: rawptr, unit: ^rawptr) -> OS_Status ---
+	AudioComponentInstanceDispose :: proc(unit: rawptr) -> OS_Status ---
+	AudioUnitSetProperty :: proc(unit: rawptr, property, scope, element: u32, data: rawptr, size: u32) -> OS_Status ---
+	AudioUnitInitialize :: proc(unit: rawptr) -> OS_Status ---
+	AudioUnitUninitialize :: proc(unit: rawptr) -> OS_Status ---
+	AudioOutputUnitStart :: proc(unit: rawptr) -> OS_Status ---
+	AudioOutputUnitStop :: proc(unit: rawptr) -> OS_Status ---
 }
 
 get :: proc(id: Audio_Object_ID, selector, scope: u32, out: ^$T) -> bool {

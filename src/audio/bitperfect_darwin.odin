@@ -1,15 +1,18 @@
 package audio
 
-// Bit-perfect output on macOS, through the CoreAudio HAL. miniaudio plays
-// through an AudioUnit that converts to whatever rate the device runs at;
-// this talks to the device itself instead: it sets the device's nominal
-// sample rate to the track's, picks a physical format with the track's bit
-// depth, and renders into an AudioDeviceIOProc. The CoreAudio calls
-// themselves are in coreaudio_darwin.odin.
+// Output on macOS, through CoreAudio. With bit-perfect output off
+// (mixer_open) the player renders into the default output AudioUnit, which
+// converts to whatever rate the device runs at, mixes with the other apps
+// and follows the default output to another device. Bit-perfect output
+// (hal_configure) talks to the device itself instead, through the HAL: it
+// sets the device's nominal sample rate to the track's, picks a physical
+// format with the track's bit depth, and renders into an
+// AudioDeviceIOProc. The CoreAudio calls themselves are in
+// coreaudio_darwin.odin.
 //
-// bitperfect_linux.odin declares the same procedures and the Hal fields
-// the player reads, for PipeWire, so the player never sees either OS's
-// types.
+// bitperfect_linux.odin and bitperfect_windows.odin declare the same
+// procedures and the Hal fields the player reads, for PipeWire and WASAPI,
+// so the player never sees any OS's types.
 //
 // What the device was set to before (rate and physical format) is kept in
 // Hal and put back by hal_close with restore set: when bit-perfect is
@@ -27,8 +30,12 @@ BIT_PERFECT :: true
 // MIXER_NAME is what converts and mixes the apps' sound on this OS.
 MIXER_NAME :: "CoreAudio"
 
-// Hal is one open HAL output: the device, its IOProc and what to put back.
+// Hal is one open output: the default output unit, or a HAL device, its
+// IOProc and what to put back.
 Hal :: struct {
+	unit:           rawptr, // the default output AudioUnit, nil unless mixer_open opened it
+	unit_channels:  int, // what the unit is fed: stereo for a mono track
+	unit_running:   bool,
 	device:         Device_ID,
 	stream:         Audio_Object_ID,
 	io_proc:        rawptr,
@@ -63,8 +70,11 @@ device_nominal_rate :: proc(dev: Device_ID) -> f64 {
 }
 
 // hal_alive is false once h's device has gone, as when a USB DAC is
-// unplugged.
+// unplugged. The default output unit moves to another device instead.
 hal_alive :: proc(h: ^Hal) -> bool {
+	if h.unit != nil {
+		return true
+	}
 	alive: u32
 	return get(h.device, PROP_ALIVE, SCOPE_GLOBAL, &alive) && alive != 0
 }
@@ -72,6 +82,10 @@ hal_alive :: proc(h: ^Hal) -> bool {
 device_name :: proc(dev: Device_ID) -> string {
 	return string_property(dev, PROP_NAME) or_else "?"
 }
+
+// MIXER_FOLLOWS_DEFAULT says whether mixer_open's stream moves to a new
+// default output by itself.
+MIXER_FOLLOWS_DEFAULT :: true
 
 // watch_default_output tells w whenever the system's default output
 // changes. CoreAudio may still run the listener after it's removed, which
@@ -167,6 +181,7 @@ hal_configure :: proc(h: ^Hal, dev: Device_ID, rate, channels, bits: int) -> (ok
 	if dev == 0 {
 		return false, "no output device"
 	}
+	unit_close(h)
 	if h.device != dev {
 		h^ = {}
 		h.device = dev
@@ -234,9 +249,111 @@ hal_configure :: proc(h: ^Hal, dev: Device_ID, rate, channels, bits: int) -> (ok
 	return true, ""
 }
 
-// hal_start creates the IOProc on first use and starts the device. The
-// IOProc renders p's ring (hal_render).
+// mixer_open readies the default output unit for floats at rate with the
+// track's channels. The unit converts them to the device's rate and format.
+// A mono track is fed to it as stereo, the same on both sides. w isn't
+// needed: the unit never loses its device. If it can't open, ok is false
+// and reason says why, short enough for the player bar.
+mixer_open :: proc(h: ^Hal, w: ^Device_Watch, rate, channels: int) -> (ok: bool, reason: string) {
+	unit_close(h)
+	desc := Component_Description {
+		type         = COMPONENT_OUTPUT,
+		sub_type     = COMPONENT_DEFAULT_OUTPUT,
+		manufacturer = COMPONENT_APPLE,
+	}
+	component := AudioComponentFindNext(nil, &desc)
+	if component == nil {
+		return false, "no output device"
+	}
+	if st := AudioComponentInstanceNew(component, &h.unit); st != 0 || h.unit == nil {
+		log.errorf("audio: AudioComponentInstanceNew failed (%d)", st)
+		h.unit = nil
+		return false, ""
+	}
+	defer if !ok {
+		unit_close(h)
+	}
+	h.unit_channels = max(channels, 2)
+	f := Stream_Description {
+		sample_rate       = f64(rate),
+		format_id         = FORMAT_LPCM,
+		format_flags      = FLAG_FLOAT | FLAG_PACKED,
+		bytes_per_packet  = u32(h.unit_channels) * size_of(f32),
+		frames_per_packet = 1,
+		bytes_per_frame   = u32(h.unit_channels) * size_of(f32),
+		channels          = u32(h.unit_channels),
+		bits              = 32,
+	}
+	if st := AudioUnitSetProperty(h.unit, UNIT_PROP_STREAM_FORMAT, UNIT_SCOPE_INPUT, 0, &f, size_of(f)); st != 0 {
+		log.errorf("audio: the output unit refused %s (%d)", format_name(f), st)
+		return false, ""
+	}
+	if st := AudioUnitInitialize(h.unit); st != 0 {
+		log.errorf("audio: AudioUnitInitialize failed (%d)", st)
+		return false, "no output device"
+	}
+	return true, ""
+}
+
+// unit_close stops and disposes of the default output unit.
+@(private = "file")
+unit_close :: proc(h: ^Hal) {
+	if h.unit == nil {
+		return
+	}
+	if h.unit_running {
+		AudioOutputUnitStop(h.unit)
+		h.unit_running = false
+	}
+	AudioUnitUninitialize(h.unit)
+	AudioComponentInstanceDispose(h.unit)
+	h.unit = nil
+}
+
+// unit_render is the default output unit's callback: the ring's frames at
+// the volume (mixer_render), into the unit's one interleaved buffer. A mono
+// track's frames are then spread over both channels, from the last frame
+// back so nothing is overwritten before it's read.
+@(private = "file")
+unit_render :: proc "c" (client: rawptr, flags: ^u32, stamp: rawptr, bus: u32, frames: u32, data: ^Audio_Buffer_List) -> OS_Status {
+	p := (^Player)(client)
+	if data == nil || data.count == 0 || data.buffers[0].data == nil {
+		return 0
+	}
+	b := &data.buffers[0]
+	out := ([^]f32)(b.data)
+	device_channels := u64(p.hal.unit_channels)
+	n := min(u64(frames), u64(b.size) / (device_channels * size_of(f32)))
+	mixer_render(p, out, n)
+	if p.pcm.channels == 1 && device_channels == 2 {
+		for i := int(n) - 1; i >= 0; i -= 1 {
+			v := out[i]
+			out[2 * i], out[2 * i + 1] = v, v
+		}
+	}
+	return 0
+}
+
+// hal_start starts the default output unit if mixer_open opened it. For
+// the HAL it creates the IOProc on first use and starts the device. The
+// callback renders p's ring (mixer_render or hal_render).
 hal_start :: proc(h: ^Hal, p: ^Player) -> bool {
+	if h.unit != nil {
+		if h.unit_running {
+			return true
+		}
+		callback := Render_Callback{unit_render, p}
+		if st := AudioUnitSetProperty(h.unit, UNIT_PROP_RENDER_CALLBACK, UNIT_SCOPE_INPUT, 0, &callback, size_of(callback)); st != 0 {
+			log.errorf("audio: the output unit refused its callback (%d)", st)
+			return false
+		}
+		if st := AudioOutputUnitStart(h.unit); st != 0 {
+			log.errorf("audio: AudioOutputUnitStart failed (%d)", st)
+			return false
+		}
+		h.unit_running = true
+		return true
+	}
 	if h.io_proc == nil {
 		if st := AudioDeviceCreateIOProcID(h.device, hal_io_proc, p, &h.io_proc); st != 0 {
 			log.errorf("audio: AudioDeviceCreateIOProcID failed (%d)", st)
@@ -260,18 +377,24 @@ hal_io_proc :: proc "c" (device: Audio_Object_ID, now: rawptr, input: ^Audio_Buf
 	return 0
 }
 
-// hal_stop stops the IOProc. When it returns the IOProc no longer runs.
+// hal_stop stops the output unit or the IOProc. When it returns the
+// callback no longer runs.
 hal_stop :: proc(h: ^Hal) {
+	if h.unit_running {
+		AudioOutputUnitStop(h.unit)
+		h.unit_running = false
+	}
 	if h.running {
 		AudioDeviceStop(h.device, h.io_proc)
 		h.running = false
 	}
 }
 
-// hal_close stops and destroys the IOProc. With restore, the device gets
-// back its rate and physical format.
+// hal_close stops and destroys the output unit and the IOProc. With
+// restore, the device gets back its rate and physical format.
 hal_close :: proc(h: ^Hal, restore: bool) {
 	hal_stop(h)
+	unit_close(h)
 	if h.io_proc != nil {
 		AudioDeviceDestroyIOProcID(h.device, h.io_proc)
 		h.io_proc = nil

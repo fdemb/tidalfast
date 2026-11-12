@@ -53,7 +53,7 @@ BUNDLE_ID = "com.tidalfast.app"
 # The C libraries live in third_party next to their Odin bindings, which
 # link build/<name>/<lib>.a, or build/windows/<name>/<lib>.lib on Windows.
 # kb_text_shape.c adds one export, tidalfast_bidi_class.
-C_LIBS = [("kbts", "kb_text_shape"), ("miniaudio", "miniaudio"), ("dr_flac", "dr_flac")]
+C_LIBS = [("kbts", "kb_text_shape"), ("dr_flac", "dr_flac")]
 
 WAYLAND_PROTOCOLS = [
 	"stable/xdg-shell/xdg-shell.xml",

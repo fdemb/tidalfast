@@ -53,7 +53,7 @@ media :: proc(s: ^app.State, cmd: platform.Media_Command, position: f32 = 0) {
 
 // The shell turns each MPRemoteCommandCenter command into an Event_Media.
 // This sends those events through the app's frame update, with the fake
-// queue's tones playing on miniaudio's silent null device, and checks what
+// queue's tones playing on the silent null device, and checks what
 // each one does to the queue, the player and Now Playing.
 @(test)
 media_commands :: proc(t: ^testing.T) {

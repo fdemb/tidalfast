@@ -1,22 +1,29 @@
 package audio
 
-// Bit-perfect output on Windows, through WASAPI exclusive mode. The stream
-// opens the default output at the track's rate in a signed integer format
-// at least as deep as the track, and the audio engine stays out of the way:
-// no mixing, no resampling, no system volume. The decoder's floats are its
-// integers over 2^31, so float_to_pcm turns them back into those integers
-// exactly.
+// Output on Windows, through WASAPI: one event-driven stream on the default
+// output, filled by a render thread.
+//
+// Bit-perfect output is exclusive mode (hal_configure). The stream opens at
+// the track's rate in a signed integer format at least as deep as the
+// track, and the audio engine stays out of the way: no mixing, no
+// resampling, no system volume. The decoder's floats are its integers over
+// 2^31, so float_to_pcm turns them back into those integers exactly.
 //
 // While it plays, no other app can use the device; Windows lets the user
 // forbid that in the device's Advanced properties, and then this refuses
-// and miniaudio plays through the shared mode as when bit-perfect output
-// is off. The device's own settings are never changed, so there is no
+// and the player opens the shared mode as when bit-perfect output is off.
+// The device's own settings are never changed, so there is no
 // Device_Change: the device is the shared mixer's again once the stream
 // closes.
 //
-// With bit-perfect output off, miniaudio plays in shared mode, and the
-// output menu shows the engine's mix rate and the device's format from the
-// endpoint's properties.
+// With bit-perfect output off the stream is shared mode (mixer_open):
+// floats at the track's rate, which the engine converts to its mix format
+// and mixes with the other apps. The output menu shows the engine's mix
+// rate and the device's format from the endpoint's properties.
+//
+// A stream stays on the device it opened. The default output is watched
+// (watch_default_output), and when it moves the player closes the stream
+// and opens it again on the new one.
 //
 // The interfaces are declared here as far as the app uses them: Odin's
 // core:sys/windows has COM's basics but not the audio ones.
@@ -52,10 +59,11 @@ Wasapi_Output :: struct {
 	event:    win.HANDLE, // the engine wants a buffer
 	quit:     win.HANDLE,
 	thread:   win.HANDLE,
+	shared:   bool, // shared mode: floats, at the volume (mixer_render)
 	frames:   u32, // per buffer
-	bytes:    int, // per sample in the device's format
-	channels: int, // the device's
-	scratch:  []f32, // frames * channels, the buffer as floats
+	bytes:    int, // per sample in the stream's format
+	channels: int, // the stream's
+	scratch:  []f32, // frames * channels, an exclusive buffer as floats
 	running:  bool, // between hal_start and hal_stop (atomic)
 	busy:     bool, // the thread is filling a buffer (atomic)
 	lost:     bool, // the device went away or stopped asking (atomic)
@@ -162,13 +170,105 @@ hal_alive :: proc(h: ^Hal) -> bool {
 	return h.out != nil && !sync.atomic_load(&h.out.lost)
 }
 
-// An exclusive stream stays on its device; a new default output takes over
-// from the next track.
+// MIXER_FOLLOWS_DEFAULT says whether mixer_open's stream moves to a new
+// default output by itself. A WASAPI stream stays on its device.
+MIXER_FOLLOWS_DEFAULT :: false
+
+// watch_default_output tells w whenever the default output changes, from a
+// thread of Windows' own. Windows may still be in the callback when
+// unwatch_default_output returns, so what it's given is never freed, and
+// touches nothing but w.
 watch_default_output :: proc(w: ^Device_Watch) -> bool {
-	return false
+	com_init()
+	e := device_enumerator()
+	if e == nil {
+		log.warn("audio: no device enumerator, so a new default output isn't followed")
+		return false
+	}
+	n := new(Default_Watch, runtime.heap_allocator())
+	n.vtbl = &default_watch_vtbl
+	n.watch = w
+	n.enumerator = e
+	if hr := e.vtbl.RegisterEndpointNotificationCallback(e, n); hr < 0 {
+		log.warnf("audio: can't watch the default output (0x%8x), so a new one isn't followed", u32(hr))
+		e.vtbl.Release(e)
+		free(n, runtime.heap_allocator())
+		return false
+	}
+	w.os = n
+	return true
 }
 
-unwatch_default_output :: proc(w: ^Device_Watch) {}
+unwatch_default_output :: proc(w: ^Device_Watch) {
+	n := (^Default_Watch)(w.os)
+	if n == nil {
+		return
+	}
+	n.enumerator.vtbl.UnregisterEndpointNotificationCallback(n.enumerator, n)
+	n.enumerator.vtbl.Release(n.enumerator)
+	n.enumerator = nil
+	w.os = nil
+}
+
+// Default_Watch is the IMMNotificationClient the device enumerator calls: a
+// COM object by layout, its vtable first. It's never freed, so it counts no
+// references.
+@(private = "file")
+Default_Watch :: struct {
+	vtbl:       ^Notification_Vtbl,
+	watch:      ^Device_Watch,
+	enumerator: ^IMMDeviceEnumerator,
+}
+
+@(private = "file")
+Notification_Vtbl :: struct {
+	QueryInterface:         proc "system" (this: ^Default_Watch, iid: ^win.GUID, out: ^rawptr) -> i32,
+	AddRef:                 proc "system" (this: ^Default_Watch) -> u32,
+	Release:                proc "system" (this: ^Default_Watch) -> u32,
+	OnDeviceStateChanged:   proc "system" (this: ^Default_Watch, id: [^]u16, state: u32) -> i32,
+	OnDeviceAdded:          proc "system" (this: ^Default_Watch, id: [^]u16) -> i32,
+	OnDeviceRemoved:        proc "system" (this: ^Default_Watch, id: [^]u16) -> i32,
+	OnDefaultDeviceChanged: proc "system" (this: ^Default_Watch, flow, role: u32, id: [^]u16) -> i32,
+	OnPropertyValueChanged: proc "system" (this: ^Default_Watch, id: [^]u16, key: Property_Key) -> i32,
+}
+
+@(private = "file")
+default_watch_vtbl := Notification_Vtbl {
+	QueryInterface = proc "system" (this: ^Default_Watch, iid: ^win.GUID, out: ^rawptr) -> i32 {
+		if iid^ != IID_IUnknown && iid^ != IID_IMMNotificationClient {
+			out^ = nil
+			return E_NOINTERFACE
+		}
+		out^ = this
+		return 0
+	},
+	AddRef = proc "system" (this: ^Default_Watch) -> u32 {
+		return 1
+	},
+	Release = proc "system" (this: ^Default_Watch) -> u32 {
+		return 1
+	},
+	OnDeviceStateChanged = proc "system" (this: ^Default_Watch, id: [^]u16, state: u32) -> i32 {
+		return 0
+	},
+	OnDeviceAdded = proc "system" (this: ^Default_Watch, id: [^]u16) -> i32 {
+		return 0
+	},
+	OnDeviceRemoved = proc "system" (this: ^Default_Watch, id: [^]u16) -> i32 {
+		return 0
+	},
+	// Windows calls this once per role; the stream is on the multimedia
+	// role's device.
+	OnDefaultDeviceChanged = proc "system" (this: ^Default_Watch, flow, role: u32, id: [^]u16) -> i32 {
+		if flow == E_RENDER && role == E_MULTIMEDIA {
+			watch_note(this.watch, default_changed = true, device_changed = false)
+		}
+		return 0
+	},
+	OnPropertyValueChanged = proc "system" (this: ^Default_Watch, id: [^]u16, key: Property_Key) -> i32 {
+		return 0
+	},
+}
 
 // watch_device tells w when hal_alive turns false.
 watch_device :: proc(h: ^Hal, w: ^Device_Watch) -> bool {
@@ -183,7 +283,7 @@ watch_device :: proc(h: ^Hal, w: ^Device_Watch) -> bool {
 }
 
 // hal_taken is always "": no other app can take a device held in exclusive
-// mode.
+// mode, and a shared stream has no rate of the device's to lose.
 hal_taken :: proc(h: ^Hal) -> string {
 	return ""
 }
@@ -254,18 +354,8 @@ hal_configure :: proc(h: ^Hal, dev: Device_ID, rate, channels, bits: int) -> (ok
 	if client.vtbl.GetBufferSize(client, &o.frames) < 0 || o.frames == 0 {
 		return false, "Windows refused the device"
 	}
-	o.event = win.CreateEventW(nil, false, false, nil)
-	o.quit = win.CreateEventW(nil, true, false, nil)
-	if o.event == nil || o.quit == nil || client.vtbl.SetEventHandle(client, o.event) < 0 {
-		return false, "Windows refused the device"
-	}
-	iid := IID_IAudioRenderClient
-	if client.vtbl.GetService(client, &iid, (^rawptr)(&o.render)) < 0 || o.render == nil {
-		return false, "Windows refused the device"
-	}
 	o.scratch = make([]f32, int(o.frames) * o.channels, runtime.heap_allocator())
-	o.thread = win.CreateThread(nil, 0, render_main, o, 0, nil)
-	if o.thread == nil {
+	if !stream_ready(o) {
 		return false, "Windows refused the device"
 	}
 
@@ -283,17 +373,103 @@ hal_configure :: proc(h: ^Hal, dev: Device_ID, rate, channels, bits: int) -> (ok
 	return true, ""
 }
 
-// hal_start fills the first buffer and starts the stream; the render
-// thread fills the rest (hal_render).
+// mixer_open opens the default output in shared mode for floats at rate
+// with the track's channels. The engine converts them to its mix format
+// (AUTOCONVERTPCM) and mixes. w hears when the stream loses its device. If
+// it can't open, ok is false and reason says why, short enough for the
+// player bar.
+mixer_open :: proc(h: ^Hal, w: ^Device_Watch, rate, channels: int) -> (ok: bool, reason: string) {
+	hal_close(h, false)
+	if channels < 1 || channels > len(CHANNEL_MASKS) {
+		return false, fmt.tprintf("no output for %d channels", channels)
+	}
+	com_init()
+	d := default_endpoint()
+	if d == nil {
+		return false, "no output device"
+	}
+	defer d.vtbl.Release(d)
+	client := activate(d)
+	if client == nil {
+		return false, "Windows refused the output device"
+	}
+	o := new(Wasapi_Output, runtime.heap_allocator())
+	o.client = client
+	o.shared = true
+	o.channels = channels
+	o.bytes = size_of(f32)
+	o.watch = w
+	h.out = o
+	defer if !ok {
+		hal_close(h, false)
+	}
+	block := u16(channels) * size_of(f32)
+	wf := Wave_Format_Extensible {
+		format_tag        = WAVE_FORMAT_EXTENSIBLE,
+		channels          = u16(channels),
+		samples_per_sec   = u32(rate),
+		avg_bytes_per_sec = u32(rate) * u32(block),
+		block_align       = block,
+		bits_per_sample   = 32,
+		size              = size_of(Wave_Format_Extensible) - size_of(Wave_Format),
+		valid_bits        = 32,
+		channel_mask      = CHANNEL_MASKS[channels - 1],
+		sub_format        = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT,
+	}
+	// A buffer length of 0 is the engine's own.
+	flags: u32 = AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY
+	if hr := client.vtbl.Initialize(client, AUDCLNT_SHAREMODE_SHARED, flags, 0, 0, &wf, nil); hr < 0 {
+		log.warnf("audio: shared mode at %d Hz, %d channels refused (0x%8x)", rate, channels, u32(hr))
+		return false, "Windows refused the output device"
+	}
+	if client.vtbl.GetBufferSize(client, &o.frames) < 0 || o.frames == 0 || !stream_ready(o) {
+		return false, "Windows refused the output device"
+	}
+	h.device = endpoint_id(d)
+	h.format = {
+		sample_rate     = f64(rate),
+		format_id       = FORMAT_LPCM,
+		format_flags    = FLAG_FLOAT,
+		bytes_per_frame = u32(block),
+		channels        = u32(channels),
+		bits            = 32,
+	}
+	return true, ""
+}
+
+// stream_ready gives an initialized stream its events, its render client
+// and its render thread.
+@(private = "file")
+stream_ready :: proc(o: ^Wasapi_Output) -> bool {
+	o.event = win.CreateEventW(nil, false, false, nil)
+	o.quit = win.CreateEventW(nil, true, false, nil)
+	if o.event == nil || o.quit == nil || o.client.vtbl.SetEventHandle(o.client, o.event) < 0 {
+		return false
+	}
+	iid := IID_IAudioRenderClient
+	if o.client.vtbl.GetService(o.client, &iid, (^rawptr)(&o.render)) < 0 || o.render == nil {
+		return false
+	}
+	o.thread = win.CreateThread(nil, 0, render_main, o, 0, nil)
+	return o.thread != nil
+}
+
+// hal_start starts the stream, an exclusive one with its first buffer
+// filled; the render thread fills the rest (hal_render, or mixer_render in
+// shared mode).
 hal_start :: proc(h: ^Hal, p: ^Player) -> bool {
 	o := h.out
 	if o == nil {
 		return false
 	}
 	o.player = p
-	// The first buffer goes in before running is set, so the render thread,
-	// which fills only while running, can't fill it at the same time.
-	fill(o, prefill = true)
+	// An exclusive stream needs its first buffer before it starts. It goes in
+	// before running is set, so the render thread, which fills only while
+	// running, can't fill it at the same time. A shared stream starts empty
+	// and asks a period later, when the ring has the track's first frames.
+	if !o.shared {
+		fill(o, prefill = true)
+	}
 	sync.atomic_store(&o.running, true)
 	if o.client.vtbl.Start(o.client) < 0 {
 		sync.atomic_store(&o.running, false)
@@ -321,8 +497,9 @@ hal_stop :: proc(h: ^Hal) {
 	win.ResetEvent(o.event)
 }
 
-// hal_close ends the stream, which gives the device back to the shared
-// mixer. restore doesn't matter: nothing on the device was changed.
+// hal_close ends the stream, which gives an exclusive stream's device back
+// to the shared mixer. restore doesn't matter: nothing on the device was
+// changed.
 hal_close :: proc(h: ^Hal, restore: bool) {
 	if o := h.out; o != nil {
 		hal_stop(h)
@@ -390,10 +567,11 @@ render_main :: proc "system" (arg: rawptr) -> u32 {
 }
 
 // fill hands the engine one buffer: the ring's frames while playing or for
-// hal_start's prefill, silence otherwise. The render thread fills only
-// while running. busy covers the whole of it, GetBuffer to ReleaseBuffer,
-// so hal_stop doesn't reset the stream while a buffer is out. No locks,
-// allocation or logging, as in an IOProc.
+// hal_start's prefill, silence otherwise. An exclusive buffer is always
+// whole; a shared one is what the engine has room for. The render thread
+// fills only while running. busy covers the whole of it, GetBuffer to
+// ReleaseBuffer, so hal_stop doesn't reset the stream while a buffer is
+// out. No locks, allocation or logging, as in an IOProc.
 @(private = "file")
 fill :: proc "contextless" (o: ^Wasapi_Output, prefill: bool) {
 	sync.atomic_store(&o.busy, true)
@@ -402,8 +580,20 @@ fill :: proc "contextless" (o: ^Wasapi_Output, prefill: bool) {
 	if !playing {
 		return
 	}
+	frames := o.frames
+	if o.shared {
+		padding: u32
+		if o.client.vtbl.GetCurrentPadding(o.client, &padding) < 0 {
+			lose(o)
+			return
+		}
+		frames -= min(padding, frames)
+		if frames == 0 {
+			return
+		}
+	}
 	data: [^]u8
-	if hr := o.render.vtbl.GetBuffer(o.render, o.frames, &data); hr < 0 {
+	if hr := o.render.vtbl.GetBuffer(o.render, frames, &data); hr < 0 {
 		// A buffer that's already full needs nothing; a wake that came late
 		// across a stop and start can ask for one.
 		if hr != AUDCLNT_E_BUFFER_TOO_LARGE {
@@ -412,7 +602,9 @@ fill :: proc "contextless" (o: ^Wasapi_Output, prefill: bool) {
 		return
 	}
 	flags: u32
-	if o.player != nil {
+	if o.player != nil && o.shared {
+		mixer_render(o.player, ([^]f32)(data), u64(frames))
+	} else if o.player != nil {
 		list := Audio_Buffer_List {
 			count   = 1,
 			buffers = {{channels = u32(o.channels), size = o.frames * u32(o.channels) * size_of(f32), data = raw_data(o.scratch)}},
@@ -422,7 +614,7 @@ fill :: proc "contextless" (o: ^Wasapi_Output, prefill: bool) {
 	} else {
 		flags = AUDCLNT_BUFFERFLAGS_SILENT
 	}
-	if o.render.vtbl.ReleaseBuffer(o.render, o.frames, flags) < 0 {
+	if o.render.vtbl.ReleaseBuffer(o.render, frames, flags) < 0 {
 		lose(o)
 	}
 }
@@ -504,12 +696,21 @@ com_init :: proc() {
 }
 
 @(private = "file")
-default_endpoint :: proc() -> ^IMMDevice {
-	com_init()
+device_enumerator :: proc() -> ^IMMDeviceEnumerator {
 	clsid := CLSID_MMDeviceEnumerator
 	iid := IID_IMMDeviceEnumerator
 	e: ^IMMDeviceEnumerator
-	if win.CoCreateInstance(&clsid, nil, win.CLSCTX_ALL, &iid, (^rawptr)(&e)) < 0 || e == nil {
+	if win.CoCreateInstance(&clsid, nil, win.CLSCTX_ALL, &iid, (^rawptr)(&e)) < 0 {
+		return nil
+	}
+	return e
+}
+
+@(private = "file")
+default_endpoint :: proc() -> ^IMMDevice {
+	com_init()
+	e := device_enumerator()
+	if e == nil {
 		return nil
 	}
 	defer e.vtbl.Release(e)
@@ -610,9 +811,12 @@ Property_Key :: struct {
 @(private = "file")
 IMMDeviceEnumerator :: struct {
 	vtbl: ^struct {
-		using _:                 Unknown_Vtbl(IMMDeviceEnumerator),
-		EnumAudioEndpoints:      rawptr,
-		GetDefaultAudioEndpoint: proc "system" (this: ^IMMDeviceEnumerator, flow, role: u32, dev: ^^IMMDevice) -> i32,
+		using _:                                Unknown_Vtbl(IMMDeviceEnumerator),
+		EnumAudioEndpoints:                     rawptr,
+		GetDefaultAudioEndpoint:                proc "system" (this: ^IMMDeviceEnumerator, flow, role: u32, dev: ^^IMMDevice) -> i32,
+		GetDevice:                              rawptr,
+		RegisterEndpointNotificationCallback:   proc "system" (this: ^IMMDeviceEnumerator, client: ^Default_Watch) -> i32,
+		UnregisterEndpointNotificationCallback: proc "system" (this: ^IMMDeviceEnumerator, client: ^Default_Watch) -> i32,
 	},
 }
 
@@ -643,7 +847,7 @@ IAudioClient :: struct {
 		Initialize:        proc "system" (this: ^IAudioClient, mode, flags: u32, buffer, period: i64, format: ^Wave_Format_Extensible, session: ^win.GUID) -> i32,
 		GetBufferSize:     proc "system" (this: ^IAudioClient, frames: ^u32) -> i32,
 		GetStreamLatency:  rawptr,
-		GetCurrentPadding: rawptr,
+		GetCurrentPadding: proc "system" (this: ^IAudioClient, frames: ^u32) -> i32,
 		IsFormatSupported: proc "system" (this: ^IAudioClient, mode: u32, format: ^Wave_Format_Extensible, closest: ^^Wave_Format_Extensible) -> i32,
 		GetMixFormat:      proc "system" (this: ^IAudioClient, format: ^^Wave_Format_Extensible) -> i32,
 		GetDevicePeriod:   proc "system" (this: ^IAudioClient, default_period, min_period: ^i64) -> i32,
@@ -692,6 +896,10 @@ CLSID_MMDeviceEnumerator := win.GUID{0xBCDE0395, 0xE52F, 0x467C, {0x8E, 0x3D, 0x
 @(private = "file")
 IID_IMMDeviceEnumerator := win.GUID{0xA95664D2, 0x9614, 0x4F35, {0xA7, 0x46, 0xDE, 0x8D, 0xB6, 0x36, 0x17, 0xE6}}
 @(private = "file")
+IID_IUnknown := win.GUID{0x00000000, 0x0000, 0x0000, {0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
+@(private = "file")
+IID_IMMNotificationClient := win.GUID{0x7991EEC9, 0x7E89, 0x4D85, {0x83, 0x90, 0x6C, 0x70, 0x3C, 0xEC, 0x60, 0xC0}}
+@(private = "file")
 IID_IAudioClient := win.GUID{0x1CB9AD4C, 0xDBFA, 0x4C32, {0xB1, 0x78, 0xC2, 0xF5, 0x68, 0xA7, 0x03, 0xB2}}
 @(private = "file")
 IID_IAudioRenderClient := win.GUID{0xF294ACFC, 0x3146, 0x4483, {0xA7, 0xBF, 0xAD, 0xDC, 0xA7, 0xC2, 0x60, 0xE2}}
@@ -722,10 +930,23 @@ WAVE_FORMAT_EXTENSIBLE :: 0xFFFE
 SPEAKER_FRONT_LEFT :: 0x1
 @(private = "file")
 SPEAKER_FRONT_RIGHT :: 0x2
+// The speakers of a FLAC stream of 1 to 8 channels, in FLAC's order, which
+// is also WAVE's.
+@(private = "file")
+CHANNEL_MASKS := [8]u32{0x4, 0x3, 0x7, 0x33, 0x37, 0x3F, 0x70F, 0x63F}
+
+@(private = "file")
+E_NOINTERFACE :: i32(-2147467262)
+@(private = "file")
+AUDCLNT_SHAREMODE_SHARED :: 0
 @(private = "file")
 AUDCLNT_SHAREMODE_EXCLUSIVE :: 1
 @(private = "file")
 AUDCLNT_STREAMFLAGS_EVENTCALLBACK :: 0x0004_0000
+@(private = "file")
+AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY :: 0x0800_0000
+@(private = "file")
+AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM :: 0x8000_0000
 @(private = "file")
 AUDCLNT_BUFFERFLAGS_SILENT :: 0x2
 
