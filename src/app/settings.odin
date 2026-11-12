@@ -25,6 +25,7 @@ import "core:log"
 import "core:mem"
 import "core:os"
 import "core:path/filepath"
+import "core:strings"
 import "core:sync"
 
 import "../audio"
@@ -50,10 +51,57 @@ VOLUME_DEFAULT :: 0.7
 
 // Title_Bar is whose title bar the window has on Linux, where the
 // compositor can draw one (Frame_Input.window's Decorations). Where it
-// can't, as on GNOME, the app draws its own whatever this says.
+// can't, as on GNOME, the app draws its own whatever this says. Either
+// way the compositor has the last word, as sway does keeping its own on a
+// tiled window.
 Title_Bar :: enum u8 {
+	Automatic, // the app's own, but the compositor's on a tiling one (tiling_desktop)
 	System, // the compositor's, or none on a tiling one that draws none
 	Own, // the app's buttons in the room at the top of the view
+}
+
+// title_bar_name is what the settings menu calls each choice.
+title_bar_name :: proc(t: Title_Bar) -> string {
+	switch t {
+	case .Automatic:
+		return "Automatic"
+	case .System:
+		return "System"
+	case .Own:
+		return "TIDALfast"
+	}
+	return ""
+}
+
+// title_bar_own says whether the window asks for its own title bar, the
+// desktop being XDG_CURRENT_DESKTOP.
+title_bar_own :: proc(t: Title_Bar, desktop: string) -> bool {
+	switch t {
+	case .Automatic:
+		return !tiling_desktop(desktop)
+	case .System:
+		return false
+	case .Own:
+		return true
+	}
+	return false
+}
+
+// tiling_desktop says whether XDG_CURRENT_DESKTOP, a list split by
+// colons, names a tiling compositor. Their users set them up without
+// title bars, or with the compositor's, and a window's own buttons would
+// be in the way.
+tiling_desktop :: proc(desktop: string) -> bool {
+	TILING :: [?]string{"sway", "hyprland", "niri", "river", "dwl", "qtile", "jay", "miracle-wm", "mango", "i3", "swayfx"}
+	rest := desktop
+	for name in strings.split_iterator(&rest, ":") {
+		for t in TILING {
+			if strings.equal_fold(strings.trim_space(name), t) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Player_Bar is how the player bar sits on the views, where the renderer
@@ -293,7 +341,7 @@ draw_settings_menu :: proc(s: ^State) {
 			ui.text_style(.Regular, 13, TEXT)
 			for mode in Title_Bar {
 				on := s.settings.title_bar == mode
-				name := "System" if mode == .System else "TIDALfast"
+				name := title_bar_name(mode)
 				item := ui.menu_item(fmt.tprintf("%s %s###title_bar_%v", "✓" if on else "   ", name, mode))
 				ui.accessible(item.box, .Menu_Item, name, selected = on)
 				if item.clicked {

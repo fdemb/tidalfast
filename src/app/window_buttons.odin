@@ -9,8 +9,9 @@ package app
 // faint light behind minimise and maximise under the mouse and red behind
 // close.
 //
-// On Linux the shell asks for them where the compositor leaves the title
-// bar to the window, as GNOME's does, and they look like GNOME's: round,
+// On Linux the shell asks for them unless the compositor draws the title
+// bar, as a tiling one does or the settings ask (Title_Bar), and they look
+// like GNOME's: round,
 // in the room for Back and Forward and centred level with them, on the
 // sides and in the order GNOME's button-layout setting gives (Button_Layout),
 // which the portal reports. GNOME's default is close alone; Ubuntu's has
@@ -183,6 +184,7 @@ Window_Buttons :: struct {
 	no_minimize: bool,
 	no_maximize: bool,
 	decorations: bool, // the compositor can draw the title bar, so the settings offer the choice
+	desktop:     string, // XDG_CURRENT_DESKTOP, for title_bar_own
 	style:       Window_Style,
 	placed:      [len(Window_Button)]Placed_Window_Button, // this frame's, left to right
 	placed_n:    int,
@@ -338,7 +340,7 @@ send_window_buttons :: proc(s: ^State, shell: ^platform.Shell) {
 
 // send_decorations tells the shell whose title bar the settings want.
 send_decorations :: proc(s: ^State, shell: ^platform.Shell) {
-	own := s.settings.title_bar == .Own
+	own := title_bar_own(s.settings.title_bar, s.window.desktop)
 	if shell.set_decorations != nil && s.window.own_sent != own {
 		shell.set_decorations(b32(own))
 		s.window.own_sent = own

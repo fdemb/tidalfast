@@ -1190,11 +1190,11 @@ static const struct xdg_toplevel_listener g_toplevel_listener = {
 
 // The window's title bar
 //
-// The compositor draws it where it can (xdg-decoration: KDE, wlroots
-// compositors such as sway, Hyprland and niri, COSMIC), unless the app's
-// settings ask for the app's own, and a tiling compositor draws none or a
-// border. GNOME's mutter and Weston leave every window's to the window, so
-// there, or when the compositor answers client-side, the app draws the
+// The app asks for its own (set_decorations), unless it's on a tiling
+// compositor or its settings ask for the compositor's, and the compositor
+// answers through xdg-decoration. GNOME's mutter and Weston don't have it
+// and leave every window's to the window. Where the title bar is the
+// app's (g_csd), the app draws the
 // window's buttons in the room at the top of its view, which moves the
 // window like a title bar (set_drag_regions): a press there moves it, a
 // double-click maximises or restores it and a right click opens the window

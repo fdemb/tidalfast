@@ -290,7 +290,34 @@ settings_keep_the_title_bar :: proc(t: ^testing.T) {
 	testing.expect_value(t, l, app.button_layout_parse("close:minimize"))
 	st, ok = app.settings_decode_json(transmute([]u8)string(`{"volume": 0.5}`))
 	testing.expect(t, ok)
-	testing.expect_value(t, st.title_bar, app.Title_Bar.System)
+	testing.expect_value(t, st.title_bar, app.Title_Bar.Automatic)
 	_, has = st.button_layout.?
 	testing.expect(t, !has, "no layout until the portal gives one")
+}
+
+// Automatic is the app's own title bar, but the compositor's on a tiling
+// one; the other two are what they say wherever the app runs.
+@(test)
+title_bar_follows_the_setting_and_the_desktop :: proc(t: ^testing.T) {
+	Case :: struct {
+		desktop: string,
+		tiling:  bool,
+	}
+	cases := []Case {
+		{"GNOME", false},
+		{"ubuntu:GNOME", false},
+		{"KDE", false},
+		{"COSMIC", false},
+		{"", false},
+		{"sway", true},
+		{"Hyprland", true},
+		{"niri", true},
+		{"wlroots:river", true},
+		{"swayfx", true},
+	}
+	for c in cases {
+		testing.expectf(t, app.title_bar_own(.Automatic, c.desktop) == !c.tiling, "Automatic on %q", c.desktop)
+		testing.expectf(t, !app.title_bar_own(.System, c.desktop), "System on %q", c.desktop)
+		testing.expectf(t, app.title_bar_own(.Own, c.desktop), "TIDALfast on %q", c.desktop)
+	}
 }

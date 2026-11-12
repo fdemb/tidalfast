@@ -252,6 +252,7 @@ start :: proc(s: ^State, shell: ^platform.Shell) {
 	library_init(&s.library)
 	measure_init_part(s, .Library)
 	data_start(s, shell)
+	s.window.desktop = os.get_env("XDG_CURRENT_DESKTOP", context.allocator)
 	send_decorations(s, shell)
 	measure_init_part(s, .Data)
 	if s.data.fake {
