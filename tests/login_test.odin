@@ -1106,6 +1106,7 @@ full_hold_list_never_drops_a_waiting_job :: proc(t: ^testing.T) {
 	for _ in 0 ..< app.HELD_JOBS {
 		app.push_job(d, {payload = app.Cover_Job{}}, app.PRIORITY_COVER)
 	}
+	hold_on_assert(t)
 	testing.expect_assert(t, "the hold list is full of jobs that wait behind a flag")
 	sign_in(s)
 	testing.fail_now(t, "a full hold list of waiting jobs pushed one out")
