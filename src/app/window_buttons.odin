@@ -14,8 +14,9 @@ package app
 // like GNOME's: round,
 // in the room for Back and Forward and centred level with them, on the
 // sides and in the order GNOME's button-layout setting gives (Button_Layout),
-// which the portal reports. GNOME's default is close alone; Ubuntu's has
-// all three. Buttons on the left go in the sidebar's top, which keeps room
+// which the portal reports, on GNOME and the desktops that keep that
+// setting (gnome_desktop), and all three on the right elsewhere. GNOME's
+// default is close alone; Ubuntu's has all three. Buttons on the left go in the sidebar's top, which keeps room
 // for them as it does on macOS. The layout is read once a launch, off the
 // UI thread, and kept in the settings, so the next launch starts with it.
 //
@@ -184,7 +185,7 @@ Window_Buttons :: struct {
 	no_minimize: bool,
 	no_maximize: bool,
 	decorations: bool, // the compositor can draw the title bar, so the settings offer the choice
-	desktop:     string, // XDG_CURRENT_DESKTOP, for title_bar_own
+	desktop:     string, // XDG_CURRENT_DESKTOP, for title_bar_own and gnome_desktop
 	style:       Window_Style,
 	placed:      [len(Window_Button)]Placed_Window_Button, // this frame's, left to right
 	placed_n:    int,
@@ -231,7 +232,7 @@ window_layout :: proc(s: ^State) -> Button_Layout {
 		return {}
 	}
 	l := BUTTON_LAYOUT_DEFAULT
-	if wb.style == .Round {
+	if wb.style == .Round && gnome_desktop(wb.desktop) {
 		l = s.settings.button_layout.? or_else BUTTON_LAYOUT_DEFAULT
 	}
 	drop: bit_set[Window_Button]

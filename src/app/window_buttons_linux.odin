@@ -10,9 +10,13 @@ import "../sys"
 
 // window_layout_poll reads GNOME's button layout once a launch, on a
 // thread of its own, the first frame the window has the app's buttons,
-// and keeps it in the settings when it came back different.
+// and keeps it in the settings when it came back different. Only GNOME's
+// desktops use it (gnome_desktop).
 window_layout_poll :: proc(s: ^State, shell: ^platform.Shell) {
 	rd := &s.window.read
+	if !gnome_desktop(s.window.desktop) {
+		return
+	}
 	if s.window.shown && !rd.started && !rd.taken {
 		rd.wake = shell.request_redraw
 		rd.started = sys.thread_start(&rd.thread, read_layout, rd)

@@ -1193,8 +1193,10 @@ static const struct xdg_toplevel_listener g_toplevel_listener = {
 // The app asks for its own (set_decorations), unless it's on a tiling
 // compositor or its settings ask for the compositor's, and the compositor
 // answers through xdg-decoration. GNOME's mutter and Weston don't have it
-// and leave every window's to the window. Where the title bar is the
-// app's (g_csd), the app draws the
+// and leave every window's to the window. Hyprland answers server-side
+// whatever the window asks and draws no title bar, so a window that asked
+// for its own draws it whatever the answer. Where the title bar is the
+// app's (own_buttons), the app draws the
 // window's buttons in the room at the top of its view, which moves the
 // window like a title bar (set_drag_regions): a press there moves it, a
 // double-click maximises or restores it and a right click opens the window
@@ -1206,7 +1208,7 @@ static const struct xdg_toplevel_listener g_toplevel_listener = {
 
 static struct zxdg_toplevel_decoration_v1 *g_decoration;
 static bool g_own_titlebar; // the app's settings ask for its own title bar
-static bool g_csd; // the app draws the title bar: the compositor has no decorations, or left them to the app
+static bool g_csd; // the compositor has no decorations, or left them to the app
 
 static void decoration_configure(void *data, struct zxdg_toplevel_decoration_v1 *d, uint32_t mode) {
   g_csd = mode == ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE;
@@ -1235,13 +1237,14 @@ static void set_decorations(uint32_t own) {
   if (!own == !g_own_titlebar) return;
   g_own_titlebar = own;
   if (g_shown) request_decorations();
+  request_redraw();
 }
 
 static bool has_state(uint32_t state) { return g_states & (1u << state); }
 
 // The app draws the window's buttons: the title bar is its own and the
 // window isn't full screen, where GNOME's apps show none either.
-static bool own_buttons(void) { return g_csd && !has_state(XDG_TOPLEVEL_STATE_FULLSCREEN); }
+static bool own_buttons(void) { return (g_csd || g_own_titlebar) && !has_state(XDG_TOPLEVEL_STATE_FULLSCREEN); }
 
 static uint32_t window_flags(void) {
   uint32_t flags = g_decoration_manager ? WINDOW_FLAG_DECORATIONS : 0;

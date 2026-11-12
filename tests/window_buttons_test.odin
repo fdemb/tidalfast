@@ -238,6 +238,7 @@ round_window_buttons_follow_the_layout :: proc(t: ^testing.T) {
 	s.window.shown = true
 	s.window.style = .Round
 	s.titlebar_h = 46
+	s.window.desktop = "ubuntu:GNOME"
 	s.settings.button_layout = app.button_layout_parse("appmenu:close")
 	buttons_frame(t, s, &f, &shell)
 	buttons_frame(t, s, &f, &shell)
@@ -277,6 +278,21 @@ round_window_buttons_follow_the_layout :: proc(t: ^testing.T) {
 	testing.expect(t, !has_minimize, "no Minimize the window manager can't do")
 	close, _ = access_node(s, "Close")
 	testing.expect_value(t, close.frame[0], app.ROUND_EDGE)
+	s.window.no_minimize = false
+
+	// Outside GNOME its layout is GNOME's default, which nobody chose, so
+	// all three go on the right.
+	s.window.desktop = "Hyprland"
+	s.settings.button_layout = app.button_layout_parse("appmenu:close")
+	buttons_frame(t, s, &f, &shell)
+	buttons_frame(t, s, &f, &shell)
+	minimize, has_minimize = access_node(s, "Minimize")
+	maximize, _ = access_node(s, "Maximize")
+	close, _ = access_node(s, "Close")
+	testing.expect(t, has_minimize, "all three outside GNOME")
+	testing.expect_value(t, close.frame[0], 1000 - app.ROUND_EDGE - app.ROUND_CELL)
+	testing.expect_value(t, maximize.frame[0], close.frame[0] - app.ROUND_CELL)
+	testing.expect_value(t, minimize.frame[0], maximize.frame[0] - app.ROUND_CELL)
 }
 
 // The settings file keeps the title bar choice and the last layout read.

@@ -92,11 +92,22 @@ title_bar_own :: proc(t: Title_Bar, desktop: string) -> bool {
 // title bars, or with the compositor's, and a window's own buttons would
 // be in the way.
 tiling_desktop :: proc(desktop: string) -> bool {
-	TILING :: [?]string{"sway", "hyprland", "niri", "river", "dwl", "qtile", "jay", "miracle-wm", "mango", "i3", "swayfx"}
+	return desktop_is_one_of(desktop, {"sway", "hyprland", "niri", "river", "dwl", "qtile", "jay", "miracle-wm", "mango", "i3", "swayfx"})
+}
+
+// gnome_desktop says whether XDG_CURRENT_DESKTOP names GNOME or a desktop
+// that keeps GNOME's button-layout setting. Elsewhere that setting is
+// GNOME's default, close alone, which nobody chose.
+gnome_desktop :: proc(desktop: string) -> bool {
+	return desktop_is_one_of(desktop, {"gnome", "unity", "pantheon"})
+}
+
+@(private = "file")
+desktop_is_one_of :: proc(desktop: string, names: []string) -> bool {
 	rest := desktop
 	for name in strings.split_iterator(&rest, ":") {
-		for t in TILING {
-			if strings.equal_fold(strings.trim_space(name), t) {
+		for n in names {
+			if strings.equal_fold(strings.trim_space(name), n) {
 				return true
 			}
 		}
