@@ -709,9 +709,6 @@ stream_errors_log_no_server_text :: proc(t: ^testing.T) {
 		tidal.session_destroy(s)
 		mock_stop(&m)
 		strings.builder_destroy(&log)
-		if c.name == "codec" {
-			delete(c.answer.body) // dash_answer's
-		}
 	}
 	testing.expect_value(t, tidal.codec_name("mp4a.40.2"), "MP4A")
 	testing.expect_value(t, tidal.codec_name("flac"), "FLAC")
