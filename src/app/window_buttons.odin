@@ -1,20 +1,37 @@
 package app
 
 // The window's minimise, maximise and close buttons, which the app draws
-// where the shell asks it to (Frame_Input.window's Buttons), as Windows
-// does: at the view's top right, over everything, as tall as a system
-// titlebar (titlebar_h). They look like Windows 11's own: 46 points wide, thin
-// glyphs, a faint light behind minimise and maximise under the mouse and
-// red behind close. The glyphs are drawn on whole pixels from a coverage
-// texture made for the display's scale, so their lines stay one pixel
-// sharp at any scale, as the system's are.
+// where the shell asks it to (Frame_Input.window's Buttons), over
+// everything.
+//
+// On Windows they look like Windows 11's own, at the view's top right, as
+// tall as a system titlebar (titlebar_h): 46 points wide, thin glyphs, a
+// faint light behind minimise and maximise under the mouse and red behind
+// close.
+//
+// On Linux the shell asks for them unless the compositor draws the title
+// bar, as a tiling one does or the settings ask (Title_Bar), and they look
+// like GNOME's: round,
+// in the room for Back and Forward and centred level with them, on the
+// sides and in the order GNOME's button-layout setting gives (Button_Layout),
+// which the portal reports, on GNOME and the desktops that keep that
+// setting (gnome_desktop), and all three on the right elsewhere. GNOME's
+// default is close alone; Ubuntu's has all three. Buttons on the left go in the sidebar's top, which keeps room
+// for them as it does on macOS. The layout is read once a launch, off the
+// UI thread, and kept in the settings, so the next launch starts with it.
+//
+// The glyphs are drawn on whole pixels from a coverage texture made for
+// the display's scale, so their lines stay sharp at any scale, as the
+// system's are.
 
 import "core:hash"
 import "core:math"
 import "core:mem"
+import "core:strings"
 
 import "../platform"
 import "../render"
+import "../sys"
 import "../ui"
 
 WINDOW_BUTTON_W :: 46
@@ -32,6 +49,123 @@ WINDOW_CLOSE_PRESSED :: render.Color{0xc4 / 255.0, 0x2b / 255.0, 0x1c / 255.0, 0
 WINDOW_GLYPH_PRESSED :: 0.8
 WINDOW_GLYPH_INACTIVE :: 0.4
 
+// GNOME's round buttons: a circle with a small glyph, in a cell that
+// takes the clicks around it, the cells side by side.
+ROUND_BUTTON :: 24
+ROUND_CELL :: 32
+ROUND_EDGE :: 6 // between the window's edge and the outer cell
+ROUND_GLYPH :: 8
+ROUND_HOT :: SURFACE_ACTIVE
+ROUND_PRESSED :: render.Color{0x40 / 255.0, 0x40 / 255.0, 0x40 / 255.0, 1}
+
+Window_Style :: enum u8 {
+	Windows,
+	Round, // GNOME's
+}
+
+Window_Button :: enum u8 {
+	Minimize,
+	Maximize,
+	Close,
+}
+
+// Button_Layout is which buttons go on each side of the title bar, and in
+// what order from the left. The slots past left_n and right_n stay zero,
+// so two layouts compare with ==.
+Button_Layout :: struct {
+	left, right:     [len(Window_Button)]Window_Button,
+	left_n, right_n: int,
+}
+
+// Where GNOME's setting can't be read: all three on the right, as on
+// Windows, KDE and Ubuntu.
+BUTTON_LAYOUT_DEFAULT :: Button_Layout {
+	right   = {.Minimize, .Maximize, .Close},
+	right_n = 3,
+}
+
+// button_layout_parse reads GNOME's button-layout, such as
+// "appmenu:minimize,maximize,close": the left side's buttons, a colon,
+// the right side's. Names it doesn't draw (appmenu, icon, spacer) and a
+// button named twice are left out. Without a colon all go on the left, as
+// in GTK.
+button_layout_parse :: proc(s: string) -> (l: Button_Layout) {
+	seen: bit_set[Window_Button]
+	left, right := s, ""
+	if i := strings.index_byte(s, ':'); i >= 0 {
+		left, right = s[:i], s[i + 1:]
+	}
+	for side, i in ([2]string{left, right}) {
+		rest := side
+		for name in strings.split_iterator(&rest, ",") {
+			b: Window_Button
+			switch strings.trim_space(name) {
+			case "minimize":
+				b = .Minimize
+			case "maximize":
+				b = .Maximize
+			case "close":
+				b = .Close
+			case:
+				continue
+			}
+			if b in seen {
+				continue
+			}
+			seen += {b}
+			if i == 0 {
+				l.left[l.left_n] = b
+				l.left_n += 1
+			} else {
+				l.right[l.right_n] = b
+				l.right_n += 1
+			}
+		}
+	}
+	return l
+}
+
+// button_layout_string writes l as GNOME does, for the settings file.
+button_layout_string :: proc(l: Button_Layout, allocator := context.temp_allocator) -> string {
+	names := [Window_Button]string {
+		.Minimize = "minimize",
+		.Maximize = "maximize",
+		.Close    = "close",
+	}
+	b := strings.builder_make(allocator)
+	for i in 0 ..< l.left_n {
+		if i > 0 {
+			strings.write_byte(&b, ',')
+		}
+		strings.write_string(&b, names[l.left[i]])
+	}
+	strings.write_byte(&b, ':')
+	for i in 0 ..< l.right_n {
+		if i > 0 {
+			strings.write_byte(&b, ',')
+		}
+		strings.write_string(&b, names[l.right[i]])
+	}
+	return strings.to_string(b)
+}
+
+@(private = "file")
+button_layout_without :: proc(l: Button_Layout, drop: bit_set[Window_Button]) -> (out: Button_Layout) {
+	for i in 0 ..< l.left_n {
+		if l.left[i] not_in drop {
+			out.left[out.left_n] = l.left[i]
+			out.left_n += 1
+		}
+	}
+	for i in 0 ..< l.right_n {
+		if l.right[i] not_in drop {
+			out.right[out.right_n] = l.right[i]
+			out.right_n += 1
+		}
+	}
+	return out
+}
+
 Window_Glyph :: enum {
 	Minimize,
 	Maximize,
@@ -39,20 +173,94 @@ Window_Glyph :: enum {
 	Close,
 }
 
+Placed_Window_Button :: struct {
+	button: Window_Button,
+	box:    ^ui.Box,
+	rect:   [4]f32, // in view points
+}
+
 Window_Buttons :: struct {
-	shown:     bool, // this frame's Frame_Input.window has Buttons
-	maximized: bool,
-	boxes:     [3]^ui.Box, // this frame's minimise, maximise and close
-	rects:     [3][4]f32, // where they are, in view points
-	sent:      u64, // hash of the rects the shell has
-	texture:   render.Texture, // the glyphs side by side, each with a pixel of room around it
-	glyph_px:  int, // the texture's glyph size and line width in pixels
-	stroke_px: int,
+	shown:       bool, // this frame's Frame_Input.window has Buttons
+	maximized:   bool,
+	no_minimize: bool,
+	no_maximize: bool,
+	decorations: bool, // the compositor can draw the title bar, so the settings offer the choice
+	desktop:     string, // XDG_CURRENT_DESKTOP, for title_bar_own and gnome_desktop
+	style:       Window_Style,
+	placed:      [len(Window_Button)]Placed_Window_Button, // this frame's, left to right
+	placed_n:    int,
+	sent:        u64, // hash of the rects the shell has
+	own_sent:    Maybe(bool), // the title bar last asked of the shell
+	read:        Layout_Read,
+	texture:     render.Texture, // the glyphs side by side, each with a pixel of room around it
+	glyph_px:    int, // the texture's glyph size and line width in pixels
+	stroke_px:   int,
+	glyph_style: Window_Style,
+}
+
+// Layout_Read is the thread that reads GNOME's button layout.
+Layout_Read :: struct {
+	thread:   sys.Thread,
+	started:  bool,
+	taken:    bool,
+	done:     b32, // atomic, set by the thread when it's finished
+	ok:       bool,
+	text:     [128]u8,
+	text_len: int,
+	wake:     proc "c" (),
+}
+
+// window_frame takes the window's state from the frame's input.
+window_frame :: proc(s: ^State, input: ^platform.Frame_Input, shell: ^platform.Shell) {
+	wb := &s.window
+	wb.shown = .Buttons in input.window
+	wb.maximized = .Maximized in input.window
+	wb.no_minimize = .No_Minimize in input.window
+	wb.no_maximize = .No_Maximize in input.window
+	wb.decorations = .Decorations in input.window
+	wb.style = .Round when ODIN_OS == .Linux else .Windows
+	when ODIN_OS == .Linux {
+		window_layout_poll(s, shell)
+	}
+}
+
+// window_layout is this frame's buttons on each side, less those the
+// window manager can't do.
+window_layout :: proc(s: ^State) -> Button_Layout {
+	wb := &s.window
+	if !wb.shown {
+		return {}
+	}
+	l := BUTTON_LAYOUT_DEFAULT
+	if wb.style == .Round && gnome_desktop(wb.desktop) {
+		l = s.settings.button_layout.? or_else BUTTON_LAYOUT_DEFAULT
+	}
+	drop: bit_set[Window_Button]
+	if wb.no_minimize {
+		drop += {.Minimize}
+	}
+	if wb.no_maximize {
+		drop += {.Maximize}
+	}
+	return button_layout_without(l, drop)
 }
 
 // window_buttons_w is how much of the view's top right the buttons take.
 window_buttons_w :: proc(s: ^State) -> f32 {
-	return 3 * WINDOW_BUTTON_W if s.window.shown else 0
+	if !s.window.shown {
+		return 0
+	}
+	if s.window.style == .Windows {
+		return 3 * WINDOW_BUTTON_W
+	}
+	n := window_layout(s).right_n
+	return ROUND_EDGE + f32(n) * ROUND_CELL if n > 0 else 0
+}
+
+// window_buttons_left says whether buttons go at the top left, in the
+// sidebar.
+window_buttons_left :: proc(s: ^State) -> bool {
+	return s.window.shown && s.window.style == .Round && window_layout(s).left_n > 0
 }
 
 // window_bar_top is how far down a main view's scrollbar starts: below the
@@ -66,36 +274,77 @@ window_bar_top :: proc(s: ^State) -> f32 {
 // there. A button acts on the release over it, as the system's do.
 build_window_buttons :: proc(s: ^State, shell: ^platform.Shell, w: f32) {
 	wb := &s.window
+	wb.placed_n = 0
 	if !wb.shown {
 		return
 	}
-	ids := [3]string{"###window_minimize", "###window_maximize", "###window_close"}
-	commands := [3]platform.Window_Command{.Minimize, .Toggle_Maximize, .Close}
-	names := [3]string{"Minimize", "Restore" if wb.maximized else "Maximize", "Close"}
-	h := s.titlebar_h
-	for i in 0 ..< 3 {
-		x := w - f32(3 - i) * WINDOW_BUTTON_W
-		b := ui.box_make(ids[i], {.Floating_X, .Floating_Y, .Clickable, .Click_On_Release}, ui.px(WINDOW_BUTTON_W), ui.px(h))
-		b.fixed_pos = {x, 0}
-		ui.accessible(b, .Button, names[i])
-		if ui.signal(b).clicked && shell.window_command != nil {
-			shell.window_command(commands[i])
+	if wb.style == .Windows {
+		for b, i in ([3]Window_Button{.Minimize, .Maximize, .Close}) {
+			place_window_button(s, shell, b, {w - f32(3 - i) * WINDOW_BUTTON_W, 0, WINDOW_BUTTON_W, s.titlebar_h})
 		}
-		wb.boxes[i] = b
-		wb.rects[i] = {x, 0, WINDOW_BUTTON_W, h}
+		return
+	}
+	l := window_layout(s)
+	y := nav_h(s) / 2 - ROUND_CELL / 2
+	for i in 0 ..< l.left_n {
+		place_window_button(s, shell, l.left[i], {ROUND_EDGE + f32(i) * ROUND_CELL, y, ROUND_CELL, ROUND_CELL})
+	}
+	for i in 0 ..< l.right_n {
+		place_window_button(s, shell, l.right[i], {w - ROUND_EDGE - f32(l.right_n - i) * ROUND_CELL, y, ROUND_CELL, ROUND_CELL})
 	}
 }
 
+@(private = "file")
+place_window_button :: proc(s: ^State, shell: ^platform.Shell, button: Window_Button, rect: [4]f32) {
+	wb := &s.window
+	ids := [Window_Button]string {
+		.Minimize = "###window_minimize",
+		.Maximize = "###window_maximize",
+		.Close    = "###window_close",
+	}
+	commands := [Window_Button]platform.Window_Command {
+		.Minimize = .Minimize,
+		.Maximize = .Toggle_Maximize,
+		.Close    = .Close,
+	}
+	names := [Window_Button]string {
+		.Minimize = "Minimize",
+		.Maximize = "Restore" if wb.maximized else "Maximize",
+		.Close    = "Close",
+	}
+	b := ui.box_make(ids[button], {.Floating_X, .Floating_Y, .Clickable, .Click_On_Release}, ui.px(rect[2]), ui.px(rect[3]))
+	b.fixed_pos = {rect[0], rect[1]}
+	ui.accessible(b, .Button, names[button])
+	if ui.signal(b).clicked && shell.window_command != nil {
+		shell.window_command(commands[button])
+	}
+	wb.placed[wb.placed_n] = {button, b, rect}
+	wb.placed_n += 1
+}
+
 // send_window_buttons tells the shell where the buttons are when that
-// changed.
+// changed, for Windows' snap layouts.
 send_window_buttons :: proc(s: ^State, shell: ^platform.Shell) {
 	wb := &s.window
-	if !wb.shown || shell.set_window_buttons == nil {
+	if !wb.shown || wb.style != .Windows || shell.set_window_buttons == nil || wb.placed_n != 3 {
 		return
 	}
-	if h := hash.fnv64a(mem.slice_to_bytes(wb.rects[:])); h != wb.sent {
-		shell.set_window_buttons(raw_data(wb.rects[:]), 3)
+	rects: [3][4]f32
+	for p in wb.placed[:wb.placed_n] {
+		rects[p.button] = p.rect
+	}
+	if h := hash.fnv64a(mem.slice_to_bytes(rects[:])); h != wb.sent {
+		shell.set_window_buttons(raw_data(rects[:]), 3)
 		wb.sent = h
+	}
+}
+
+// send_decorations tells the shell whose title bar the settings want.
+send_decorations :: proc(s: ^State, shell: ^platform.Shell) {
+	own := title_bar_own(s.settings.title_bar, s.window.desktop)
+	if shell.set_decorations != nil && s.window.own_sent != own {
+		shell.set_decorations(b32(own))
+		s.window.own_sent = own
 	}
 }
 
@@ -104,37 +353,56 @@ send_window_buttons :: proc(s: ^State, shell: ^platform.Shell) {
 // system's do, unless the mouse is on them.
 draw_window_buttons :: proc(s: ^State, key: bool) {
 	wb := &s.window
-	if !wb.shown {
+	if !wb.shown || wb.placed_n == 0 {
 		return
 	}
 	r := &s.renderer
 	window_glyphs(s)
 	scale := r.scale
-	right := math.round(r.width * scale)
-	bw := math.round(WINDOW_BUTTON_W * scale)
-	bh := math.round(s.titlebar_h * scale)
 	g := f32(wb.glyph_px)
 	cell := g + 2
-	glyphs := [3]Window_Glyph{.Minimize, .Restore if wb.maximized else .Maximize, .Close}
-	for i in 0 ..< 3 {
-		b := wb.boxes[i]
-		x0 := right - f32(3 - i) * bw
-		hot, pressed := b.hot_t, b.active_t
-		close := i == 2
-		bg := mix(WINDOW_CLOSE_HOT if close else WINDOW_BUTTON_HOT, WINDOW_CLOSE_PRESSED if close else WINDOW_BUTTON_PRESSED, pressed)
-		bg.a *= max(hot, pressed)
-		if bg.a > 0 {
-			render.push_rect(r, {x0 / scale, 0, bw / scale, bh / scale}, bg)
+	for p in wb.placed[:wb.placed_n] {
+		glyph: Window_Glyph
+		switch p.button {
+		case .Minimize:
+			glyph = .Minimize
+		case .Maximize:
+			glyph = .Restore if wb.maximized else .Maximize
+		case .Close:
+			glyph = .Close
 		}
-		grey: f32 = 1 if key else WINDOW_GLYPH_INACTIVE
-		grey = grey + (1 - grey) * max(hot, pressed)
-		if !close {
-			grey = grey + (WINDOW_GLYPH_PRESSED - grey) * pressed
+		hot, pressed := p.box.hot_t, p.box.active_t
+		src := render.Rect{f32(glyph) * cell, 0, cell, cell}
+		if wb.style == .Windows {
+			right := math.round(r.width * scale)
+			bw := math.round(WINDOW_BUTTON_W * scale)
+			bh := math.round(s.titlebar_h * scale)
+			x0 := right - f32(3 - int(p.button)) * bw
+			close := p.button == .Close
+			bg := mix(WINDOW_CLOSE_HOT if close else WINDOW_BUTTON_HOT, WINDOW_CLOSE_PRESSED if close else WINDOW_BUTTON_PRESSED, pressed)
+			bg.a *= max(hot, pressed)
+			if bg.a > 0 {
+				render.push_rect(r, {x0 / scale, 0, bw / scale, bh / scale}, bg)
+			}
+			grey: f32 = 1 if key else WINDOW_GLYPH_INACTIVE
+			grey = grey + (1 - grey) * max(hot, pressed)
+			if !close {
+				grey = grey + (WINDOW_GLYPH_PRESSED - grey) * pressed
+			}
+			gx := x0 + math.floor((bw - g) / 2)
+			gy := math.floor((bh - g) / 2)
+			render.push_sprite(r, {gx - 1, gy - 1, gx + g + 1, gy + g + 1}, wb.texture, src, {grey, grey, grey, 1})
+			continue
 		}
-		gx := x0 + math.floor((bw - g) / 2)
-		gy := math.floor((bh - g) / 2)
-		src := render.Rect{f32(glyphs[i]) * cell, 0, cell, cell}
-		render.push_sprite(r, {gx - 1, gy - 1, gx + g + 1, gy + g + 1}, wb.texture, src, {grey, grey, grey, 1})
+		cx := p.rect[0] + p.rect[2] / 2
+		cy := p.rect[1] + p.rect[3] / 2
+		circle := render.Rect{cx - ROUND_BUTTON / 2, cy - ROUND_BUTTON / 2, ROUND_BUTTON, ROUND_BUTTON}
+		render.push_rect(r, circle, mix(mix(SURFACE, ROUND_HOT, hot), ROUND_PRESSED, pressed), ROUND_BUTTON / 2)
+		render.push_rect(r, circle, OUTLINE, ROUND_BUTTON / 2, 1)
+		glyph_c := mix(TEXT if key else DIM, TEXT, max(hot, pressed))
+		gx := math.round(cx * scale - g / 2)
+		gy := math.round(cy * scale - g / 2)
+		render.push_sprite(r, {gx - 1, gy - 1, gx + g + 1, gy + g + 1}, wb.texture, src, glyph_c)
 	}
 }
 
@@ -146,7 +414,11 @@ window_glyphs :: proc(s: ^State) {
 	r := &s.renderer
 	g := max(int(math.round(WINDOW_GLYPH * r.scale)), 6)
 	stroke := max(int(math.round(r.scale - 0.25)), 1)
-	if wb.texture != 0 && g == wb.glyph_px && stroke == wb.stroke_px {
+	if wb.style == .Round {
+		g = max(int(math.round(ROUND_GLYPH * r.scale)), 6)
+		stroke = max(int(math.round(r.scale * 1.25)), 1)
+	}
+	if wb.texture != 0 && g == wb.glyph_px && stroke == wb.stroke_px && wb.style == wb.glyph_style {
 		return
 	}
 	if wb.texture != 0 {
@@ -155,17 +427,17 @@ window_glyphs :: proc(s: ^State) {
 	cell := g + 2
 	tw, th := cell * len(Window_Glyph), cell
 	pixels := make([]u8, tw * th, context.temp_allocator)
-	window_glyph_pixels(pixels, tw, g, stroke)
+	window_glyph_pixels(pixels, tw, g, stroke, wb.style)
 	wb.texture = render.texture_create(r, tw, th, .R8)
 	render.texture_update(r, wb.texture, pixels, 0, 0, tw, th)
-	wb.glyph_px, wb.stroke_px = g, stroke
+	wb.glyph_px, wb.stroke_px, wb.glyph_style = g, stroke, wb.style
 }
 
 // window_glyph_pixels fills pixels, tw wide, with the glyphs as coverage,
 // each g pixels square in a cell with a pixel of room around it, its lines
-// stroke pixels wide. Each pixel's coverage is the share of 8 by 8 samples
-// inside the glyph.
-window_glyph_pixels :: proc(pixels: []u8, tw, g, stroke: int) {
+// stroke pixels wide, in style's shapes. Each pixel's coverage is the share
+// of 8 by 8 samples inside the glyph.
+window_glyph_pixels :: proc(pixels: []u8, tw, g, stroke: int, style: Window_Style) {
 	N :: 8
 	cell := g + 2
 	for glyph in Window_Glyph {
@@ -176,7 +448,7 @@ window_glyph_pixels :: proc(pixels: []u8, tw, g, stroke: int) {
 					for sx in 0 ..< N {
 						x := f32(px - 1) + (f32(sx) + 0.5) / N
 						y := f32(py - 1) + (f32(sy) + 0.5) / N
-						if window_glyph_has(glyph, f32(g), f32(stroke), x, y) {
+						if window_glyph_has(glyph, f32(g), f32(stroke), style, x, y) {
 							inside += 1
 						}
 					}
@@ -189,15 +461,16 @@ window_glyph_pixels :: proc(pixels: []u8, tw, g, stroke: int) {
 
 // window_glyph_has says whether the point x, y, in pixels from the glyph's
 // top left, is inside the glyph, g pixels square with lines stroke wide.
+// GNOME's minimise is a line along the bottom, Windows' across the middle.
 @(private = "file")
-window_glyph_has :: proc(glyph: Window_Glyph, g, stroke, x, y: f32) -> bool {
+window_glyph_has :: proc(glyph: Window_Glyph, g, stroke: f32, style: Window_Style, x, y: f32) -> bool {
 	if x < 0 || y < 0 || x >= g || y >= g {
 		return false
 	}
 	radius := max(g * 0.15, 1)
 	switch glyph {
 	case .Minimize:
-		top := math.floor((g - stroke) / 2)
+		top := math.floor((g - stroke) / 2) if style == .Windows else g - stroke
 		return y >= top && y < top + stroke
 	case .Maximize:
 		return outline_has({0, 0, g, g}, radius, stroke, x, y)

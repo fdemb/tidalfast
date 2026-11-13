@@ -81,6 +81,7 @@ static struct wl_data_device_manager *g_data_manager;
 static struct wl_data_device *g_data_device;
 static struct xdg_wm_base *g_wm_base;
 static struct zxdg_decoration_manager_v1 *g_decoration_manager;
+static struct wl_subcompositor *g_subcompositor;
 static struct wp_viewporter *g_viewporter;
 static struct wp_fractional_scale_manager_v1 *g_fractional_manager;
 static struct zwp_text_input_manager_v3 *g_text_input_manager;
@@ -102,6 +103,8 @@ static float g_scale = 1;
 static int32_t g_buffer_scale = 1; // without fractional scaling
 static uint32_t g_fraction = 0; // the fractional scale, in 120ths; 0 without it
 static bool g_key_window;
+static uint32_t g_states; // 1 << xdg_toplevel_state for each the last configure had
+static uint32_t g_wm_caps = ~0u; // 1 << xdg_toplevel_wm_capabilities for each the window manager has
 static uint32_t g_serial; // of the last input event, for the clipboard
 static struct wl_callback *g_frame_callback;
 static double g_frame_requested;
@@ -204,6 +207,10 @@ static void glide_frame(double now);
 static void frame_done(void *data, struct wl_callback *callback, uint32_t time);
 static const struct wl_callback_listener g_frame_listener = {.done = frame_done};
 
+static void update_border(void);
+static uint32_t window_flags(void);
+#define TITLEBAR_HEIGHT 46 // a GNOME header bar's, for the room the app keeps at the top when it draws the window's buttons
+
 static void apply_scale(void) {
   if (g_fraction && g_viewport) {
     g_scale = g_fraction / 120.0f;
@@ -239,7 +246,10 @@ static void draw_frame(void) {
       .key_window = g_key_window,
       .mouse_buttons = g_buttons,
       .frame_interval = (float)g_frame_interval,
+      .window = window_flags(),
   };
+  if (input.window & WINDOW_FLAG_BUTTONS) input.titlebar_height = TITLEBAR_HEIGHT;
+  update_border();
   Frame_Result result = app_frame(&g_memory, &g_shell, &input);
   g_event_count = 0;
   g_text_len = 0;
@@ -679,30 +689,58 @@ static uint32_t g_repeat_key; // evdev code + 8, 0 for none
 
 // Pointer
 
+// The surface the pointer is on: the window's, or one of the border's
+// around it. NULL off the window.
+static struct wl_surface *g_pointer_surface;
+static uint32_t g_enter_serial; // of the pointer's last enter, for set_cursor
+static uint32_t g_swallowed; // 1 << Mouse_Button for presses the window took, whose releases go nowhere
+static uint32_t g_resize_edge; // xdg_toplevel_resize_edge under the pointer on the border, 0 for none
+static void border_pointer(struct wl_surface *s, double x, double y);
+static void border_press(uint32_t serial);
+static bool title_press(uint32_t button, uint32_t serial);
+
+// The cursor by its name in the theme, or by the older X name.
+static void set_cursor(const char *name, const char *x_name) {
+  if (!g_cursor_theme || !g_pointer) return;
+  struct wl_cursor *cursor = wl_cursor_theme_get_cursor(g_cursor_theme, name);
+  if (!cursor) cursor = wl_cursor_theme_get_cursor(g_cursor_theme, x_name);
+  if (!cursor || cursor->image_count == 0) return;
+  struct wl_cursor_image *image = cursor->images[0];
+  struct wl_buffer *buffer = wl_cursor_image_get_buffer(image);
+  wl_pointer_set_cursor(g_pointer, g_enter_serial, g_cursor_surface, (int32_t)image->hotspot_x, (int32_t)image->hotspot_y);
+  wl_surface_attach(g_cursor_surface, buffer, 0, 0);
+  wl_surface_damage(g_cursor_surface, 0, 0, (int32_t)image->width, (int32_t)image->height);
+  wl_surface_commit(g_cursor_surface);
+}
+
 static void pointer_enter(void *data, struct wl_pointer *p, uint32_t serial, struct wl_surface *s, wl_fixed_t x, wl_fixed_t y) {
+  g_enter_serial = serial;
+  g_pointer_surface = s;
+  if (s != g_surface) {
+    g_resize_edge = 0; // a new enter needs its own cursor
+    border_pointer(s, wl_fixed_to_double(x), wl_fixed_to_double(y));
+    return;
+  }
   g_mouse_x = wl_fixed_to_double(x);
   g_mouse_y = wl_fixed_to_double(y);
-  if (g_cursor_theme) {
-    struct wl_cursor *cursor = wl_cursor_theme_get_cursor(g_cursor_theme, "default");
-    if (!cursor) cursor = wl_cursor_theme_get_cursor(g_cursor_theme, "left_ptr");
-    if (cursor && cursor->image_count > 0) {
-      struct wl_cursor_image *image = cursor->images[0];
-      struct wl_buffer *buffer = wl_cursor_image_get_buffer(image);
-      wl_pointer_set_cursor(p, serial, g_cursor_surface, (int32_t)image->hotspot_x, (int32_t)image->hotspot_y);
-      wl_surface_attach(g_cursor_surface, buffer, 0, 0);
-      wl_surface_damage(g_cursor_surface, 0, 0, (int32_t)image->width, (int32_t)image->height);
-      wl_surface_commit(g_cursor_surface);
-    }
-  }
+  set_cursor("default", "left_ptr");
   push_event((Event){.kind = EVENT_MOUSE_MOVE, .modifiers = g_modifiers, .time = now_seconds(), .x = (float)g_mouse_x, .y = (float)g_mouse_y});
 }
 
 static void pointer_leave(void *data, struct wl_pointer *p, uint32_t serial, struct wl_surface *s) {
+  bool border = g_pointer_surface && g_pointer_surface != g_surface;
+  g_pointer_surface = NULL;
+  if (border) return;
   g_buttons = 0;
+  g_swallowed = 0;
   push_event((Event){.kind = EVENT_MOUSE_LEAVE, .modifiers = g_modifiers, .time = now_seconds(), .x = (float)g_mouse_x, .y = (float)g_mouse_y});
 }
 
 static void pointer_motion(void *data, struct wl_pointer *p, uint32_t time, wl_fixed_t x, wl_fixed_t y) {
+  if (g_pointer_surface && g_pointer_surface != g_surface) {
+    border_pointer(g_pointer_surface, wl_fixed_to_double(x), wl_fixed_to_double(y));
+    return;
+  }
   g_mouse_x = wl_fixed_to_double(x);
   g_mouse_y = wl_fixed_to_double(y);
   push_event((Event){.kind = EVENT_MOUSE_MOVE, .modifiers = g_modifiers, .time = now_seconds(), .x = (float)g_mouse_x, .y = (float)g_mouse_y});
@@ -718,6 +756,11 @@ static struct {
 
 static void pointer_button(void *data, struct wl_pointer *p, uint32_t serial, uint32_t time, uint32_t code, uint32_t state) {
   g_serial = serial;
+  bool down = state == WL_POINTER_BUTTON_STATE_PRESSED;
+  if (g_pointer_surface && g_pointer_surface != g_surface) {
+    if (down && code == EVDEV_BTN_LEFT) border_press(serial);
+    return;
+  }
   uint32_t button;
   if (code == EVDEV_BTN_LEFT) button = MOUSE_BUTTON_LEFT;
   else if (code == EVDEV_BTN_RIGHT) button = MOUSE_BUTTON_RIGHT;
@@ -726,7 +769,6 @@ static void pointer_button(void *data, struct wl_pointer *p, uint32_t serial, ui
   else if (code == EVDEV_BTN_EXTRA || code == EVDEV_BTN_FORWARD) button = MOUSE_BUTTON_FORWARD;
   else return;
   double now = now_seconds();
-  bool down = state == WL_POINTER_BUTTON_STATE_PRESSED;
   if (down) {
     bool again = g_click.button == button && now - g_click.time < 0.5 && fabs(g_mouse_x - g_click.x) < 4 && fabs(g_mouse_y - g_click.y) < 4;
     g_click.count = again ? g_click.count + 1 : 1;
@@ -734,8 +776,18 @@ static void pointer_button(void *data, struct wl_pointer *p, uint32_t serial, ui
     g_click.button = button;
     g_click.x = g_mouse_x;
     g_click.y = g_mouse_y;
+    // A press on the title bar's empty room is the window's, and so is
+    // its release.
+    if (title_press(button, serial)) {
+      g_swallowed |= 1u << button;
+      return;
+    }
     g_buttons |= 1u << button;
   } else {
+    if (g_swallowed & (1u << button)) {
+      g_swallowed &= ~(1u << button);
+      return;
+    }
     g_buttons &= ~(1u << button);
   }
   push_event((Event){
@@ -833,6 +885,12 @@ static void pointer_axis_value120(void *data, struct wl_pointer *p, uint32_t axi
 static void pointer_axis_relative_direction(void *data, struct wl_pointer *p, uint32_t axis, uint32_t direction) {}
 
 static void pointer_frame(void *data, struct wl_pointer *p) {
+  if (g_pointer_surface && g_pointer_surface != g_surface) {
+    bool keep = g_axis.fingers;
+    g_axis = (__typeof__(g_axis)){0};
+    g_axis.fingers = keep;
+    return;
+  }
   bool fingers = g_axis.has_source ? g_axis.source == WL_POINTER_AXIS_SOURCE_FINGER || g_axis.source == WL_POINTER_AXIS_SOURCE_CONTINUOUS
                                    : g_axis.fingers;
   double now = now_seconds();
@@ -1086,6 +1144,8 @@ static void wm_ping(void *data, struct xdg_wm_base *base, uint32_t serial) { xdg
 static const struct xdg_wm_base_listener g_wm_listener = {.ping = wm_ping};
 
 static float g_pending_width, g_pending_height;
+static uint32_t g_pending_states;
+static void update_border(void);
 
 static void xdg_surface_configure(void *data, struct xdg_surface *s, uint32_t serial) {
   xdg_surface_ack_configure(s, serial);
@@ -1095,6 +1155,7 @@ static void xdg_surface_configure(void *data, struct xdg_surface *s, uint32_t se
     g_width = g_pending_width;
     g_height = g_pending_height;
   }
+  g_states = g_pending_states;
   push_event((Event){.kind = EVENT_RESIZE, .x = g_width, .y = g_height});
   g_configure_unanswered = true;
 }
@@ -1104,11 +1165,21 @@ static const struct xdg_surface_listener g_xdg_surface_listener = {.configure = 
 static void toplevel_configure(void *data, struct xdg_toplevel *t, int32_t width, int32_t height, struct wl_array *states) {
   g_pending_width = width > 0 ? (float)width : g_width;
   g_pending_height = height > 0 ? (float)height : g_height;
+  g_pending_states = 0;
+  uint32_t *state;
+  wl_array_for_each(state, states) if (*state < 32) g_pending_states |= 1u << *state;
 }
 
 static void toplevel_close(void *data, struct xdg_toplevel *t) { g_quit = true; }
 static void toplevel_bounds(void *data, struct xdg_toplevel *t, int32_t width, int32_t height) {}
-static void toplevel_capabilities(void *data, struct xdg_toplevel *t, struct wl_array *caps) {}
+
+// What the window manager can do with the window, which comes before a
+// configure. A compositor before xdg-shell 5 doesn't say, and can do all.
+static void toplevel_capabilities(void *data, struct xdg_toplevel *t, struct wl_array *caps) {
+  g_wm_caps = 0;
+  uint32_t *cap;
+  wl_array_for_each(cap, caps) if (*cap < 32) g_wm_caps |= 1u << *cap;
+}
 
 static const struct xdg_toplevel_listener g_toplevel_listener = {
     .configure = toplevel_configure,
@@ -1116,6 +1187,314 @@ static const struct xdg_toplevel_listener g_toplevel_listener = {
     .configure_bounds = toplevel_bounds,
     .wm_capabilities = toplevel_capabilities,
 };
+
+// The window's title bar
+//
+// The app asks for its own (set_decorations), unless it's on a tiling
+// compositor or its settings ask for the compositor's, and the compositor
+// answers through xdg-decoration. GNOME's mutter and Weston don't have it
+// and leave every window's to the window. Hyprland answers server-side
+// whatever the window asks and draws no title bar, so a window that asked
+// for its own draws it whatever the answer. Where the title bar is the
+// app's (own_buttons), the app draws the
+// window's buttons in the room at the top of its view, which moves the
+// window like a title bar (set_drag_regions): a press there moves it, a
+// double-click maximises or restores it and a right click opens the window
+// manager's menu for it. Around the window, unless it's maximised or
+// tiled on that side, a border of subsurfaces resizes it and holds its
+// shadow and outline, which GNOME leaves to the window too. The window's
+// geometry is the window without the border, so snapping and maximising
+// line up its edges, not the shadow's.
+
+static struct zxdg_toplevel_decoration_v1 *g_decoration;
+static bool g_own_titlebar; // the app's settings ask for its own title bar
+static bool g_csd; // the compositor has no decorations, or left them to the app
+
+static void decoration_configure(void *data, struct zxdg_toplevel_decoration_v1 *d, uint32_t mode) {
+  g_csd = mode == ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE;
+}
+
+static const struct zxdg_toplevel_decoration_v1_listener g_decoration_listener = {.configure = decoration_configure};
+
+// Asks for the mode the settings want. The compositor answers with a
+// configure, which the next frame draws.
+static void request_decorations(void) {
+  if (!g_decoration_manager) {
+    g_csd = true;
+    return;
+  }
+  if (!g_decoration) {
+    g_decoration = zxdg_decoration_manager_v1_get_toplevel_decoration(g_decoration_manager, g_toplevel);
+    zxdg_toplevel_decoration_v1_add_listener(g_decoration, &g_decoration_listener, NULL);
+  }
+  zxdg_toplevel_decoration_v1_set_mode(g_decoration, g_own_titlebar ? ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE
+                                                                    : ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+}
+
+static bool g_shown; // the window's first commit is done, so a change of mode goes out at once
+
+static void set_decorations(uint32_t own) {
+  if (!own == !g_own_titlebar) return;
+  g_own_titlebar = own;
+  if (g_shown) request_decorations();
+  request_redraw();
+}
+
+static bool has_state(uint32_t state) { return g_states & (1u << state); }
+
+// The app draws the window's buttons: the title bar is its own and the
+// window isn't full screen, where GNOME's apps show none either.
+static bool own_buttons(void) { return (g_csd || g_own_titlebar) && !has_state(XDG_TOPLEVEL_STATE_FULLSCREEN); }
+
+static uint32_t window_flags(void) {
+  uint32_t flags = g_decoration_manager ? WINDOW_FLAG_DECORATIONS : 0;
+  if (!own_buttons()) return flags;
+  flags |= WINDOW_FLAG_BUTTONS;
+  if (has_state(XDG_TOPLEVEL_STATE_MAXIMIZED)) flags |= WINDOW_FLAG_MAXIMIZED;
+  if (!(g_wm_caps & (1u << XDG_TOPLEVEL_WM_CAPABILITIES_MINIMIZE))) flags |= WINDOW_FLAG_NO_MINIMIZE;
+  if (!(g_wm_caps & (1u << XDG_TOPLEVEL_WM_CAPABILITIES_MAXIMIZE))) flags |= WINDOW_FLAG_NO_MAXIMIZE;
+  return flags;
+}
+
+static void toggle_maximized(void) {
+  if (has_state(XDG_TOPLEVEL_STATE_MAXIMIZED)) xdg_toplevel_unset_maximized(g_toplevel);
+  else xdg_toplevel_set_maximized(g_toplevel);
+}
+
+static void window_command(uint32_t command) {
+  switch (command) {
+  case WINDOW_COMMAND_MINIMIZE: xdg_toplevel_set_minimized(g_toplevel); break;
+  case WINDOW_COMMAND_TOGGLE_MAXIMIZE: toggle_maximized(); break;
+  case WINDOW_COMMAND_CLOSE: g_quit = true; break;
+  }
+}
+
+#define MAX_DRAG_REGIONS 64
+static float g_drag_regions[MAX_DRAG_REGIONS][4];
+static uint32_t g_drag_region_count;
+static const char *g_title_action = "none"; // what the last press on the title bar did, for the window test step
+
+static void set_drag_regions(const float (*rects)[4], uint32_t count) {
+  if (count > MAX_DRAG_REGIONS) count = MAX_DRAG_REGIONS;
+  memcpy(g_drag_regions, rects, count * sizeof rects[0]);
+  g_drag_region_count = count;
+}
+
+static bool in_drag_region(double x, double y) {
+  for (uint32_t i = 0; i < g_drag_region_count; i++) {
+    const float *r = g_drag_regions[i];
+    if (x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3]) return true;
+  }
+  return false;
+}
+
+// A press in the title bar's empty room, with the click count already
+// counted: the left button moves the window, or every second click
+// toggles maximised, as GNOME's default double-click does, and the right
+// opens the window manager's menu. Other buttons go to the app.
+static bool title_press(uint32_t button, uint32_t serial) {
+  if (!own_buttons() || !g_toplevel || !in_drag_region(g_mouse_x, g_mouse_y)) return false;
+  if (button == MOUSE_BUTTON_LEFT) {
+    if (g_click.count % 2 == 0) {
+      if (g_wm_caps & (1u << XDG_TOPLEVEL_WM_CAPABILITIES_MAXIMIZE)) toggle_maximized();
+      g_title_action = "maximize";
+    } else {
+      if (g_seat) xdg_toplevel_move(g_toplevel, g_seat, serial);
+      g_title_action = "move";
+    }
+    return true;
+  }
+  if (button == MOUSE_BUTTON_RIGHT) {
+    if (g_seat && (g_wm_caps & (1u << XDG_TOPLEVEL_WM_CAPABILITIES_WINDOW_MENU)))
+      xdg_toplevel_show_window_menu(g_toplevel, g_seat, serial, (int32_t)g_mouse_x, (int32_t)g_mouse_y);
+    g_title_action = "menu";
+    return true;
+  }
+  return false;
+}
+
+// The border, in points outside the window on each side that isn't tiled
+// or maximised. Along an edge, BORDER_CORNER points from a corner resize
+// both ways, as GTK's do.
+#define BORDER 16
+#define BORDER_CORNER 24
+enum { SIDE_TOP, SIDE_BOTTOM, SIDE_LEFT, SIDE_RIGHT, SIDES };
+
+static struct {
+  struct wl_surface *surface;
+  struct wl_subsurface *subsurface;
+  struct wp_viewport *viewport;
+  int32_t x, y, w, h; // points from the window's top left; w or h 0 when hidden
+} g_border[SIDES];
+static int32_t g_margin[SIDES]; // the border's width on each side, 0 for none
+static struct {
+  float width, height, scale;
+  int32_t margin[SIDES];
+  bool active, viewport;
+} g_border_drawn;
+
+static void buffer_release(void *data, struct wl_buffer *buffer) { wl_buffer_destroy(buffer); }
+static const struct wl_buffer_listener g_buffer_listener = {.release = buffer_release};
+
+// How dark the border is at d points outside the window: an outline a
+// pixel wide and a shadow that fades out by BORDER, darker on the active
+// window. dy moves the shadow down a little, as a light from above would.
+static float border_alpha(float d, float dy_d, float scale, bool active) {
+  float line = d * scale < 1 ? 0.45f : 0;
+  float t = 1 - dy_d / BORDER;
+  float shadow = t > 0 ? (active ? 0.42f : 0.24f) * t * t : 0;
+  return line + shadow * (1 - line);
+}
+
+// A buffer for the side's strip, pw by ph pixels over its w by h points,
+// with the outline and shadow as premultiplied black. NULL when shared
+// memory fails.
+static struct wl_buffer *border_buffer(int side, int32_t pw, int32_t ph, bool active) {
+  int32_t stride = pw * 4;
+  size_t size = (size_t)stride * (size_t)ph;
+  int fd = memfd_create("tidalfast-border", MFD_CLOEXEC);
+  if (fd < 0) return NULL;
+  if (ftruncate(fd, (off_t)size) < 0) {
+    close(fd);
+    return NULL;
+  }
+  uint32_t *pixels = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  if (pixels == MAP_FAILED) {
+    close(fd);
+    return NULL;
+  }
+  float sx = (float)g_border[side].w / (float)pw, sy = (float)g_border[side].h / (float)ph;
+  float scale = (float)pw / (float)g_border[side].w;
+  for (int32_t py = 0; py < ph; py++) {
+    float y = (float)g_border[side].y + ((float)py + 0.5f) * sy;
+    for (int32_t px = 0; px < pw; px++) {
+      float x = (float)g_border[side].x + ((float)px + 0.5f) * sx;
+      float dx = fmaxf(fmaxf(-x, x - g_width), 0);
+      float dy = fmaxf(fmaxf(-y, y - g_height), 0);
+      // The shadow's distance, from the window moved down 2 points.
+      float sdy = fmaxf(fmaxf(-(y - 2), (y - 2) - g_height), 0);
+      float a = border_alpha(sqrtf(dx * dx + dy * dy), sqrtf(dx * dx + sdy * sdy), scale, active);
+      pixels[py * pw + px] = (uint32_t)(a * 255 + 0.5f) << 24;
+    }
+  }
+  munmap(pixels, size);
+  struct wl_shm_pool *pool = wl_shm_create_pool(g_shm, fd, (int32_t)size);
+  struct wl_buffer *buffer = wl_shm_pool_create_buffer(pool, 0, pw, ph, stride, WL_SHM_FORMAT_ARGB8888);
+  wl_shm_pool_destroy(pool);
+  close(fd);
+  wl_buffer_add_listener(buffer, &g_buffer_listener, NULL);
+  return buffer;
+}
+
+// Puts the border where this frame's size and states want it, before the
+// frame's present commits the window's surface, which applies the
+// subsurfaces' state with its own.
+static void update_border(void) {
+  if (!g_xdg_surface) return;
+  bool on = own_buttons() && !has_state(XDG_TOPLEVEL_STATE_MAXIMIZED) && g_subcompositor && g_shm;
+  static const uint32_t tiled[SIDES] = {XDG_TOPLEVEL_STATE_TILED_TOP, XDG_TOPLEVEL_STATE_TILED_BOTTOM, XDG_TOPLEVEL_STATE_TILED_LEFT,
+                                        XDG_TOPLEVEL_STATE_TILED_RIGHT};
+  for (int i = 0; i < SIDES; i++) g_margin[i] = on && !has_state(tiled[i]) ? BORDER : 0;
+  bool viewport = g_fraction && g_viewport;
+  bool active = has_state(XDG_TOPLEVEL_STATE_ACTIVATED);
+  if (g_border_drawn.width == g_width && g_border_drawn.height == g_height && g_border_drawn.scale == g_scale &&
+      !memcmp(g_border_drawn.margin, g_margin, sizeof g_margin) && g_border_drawn.active == active && g_border_drawn.viewport == viewport)
+    return;
+  g_border_drawn.width = g_width;
+  g_border_drawn.height = g_height;
+  g_border_drawn.scale = g_scale;
+  memcpy(g_border_drawn.margin, g_margin, sizeof g_margin);
+  g_border_drawn.active = active;
+  g_border_drawn.viewport = viewport;
+
+  int32_t w = (int32_t)g_width, h = (int32_t)g_height;
+  xdg_surface_set_window_geometry(g_xdg_surface, 0, 0, w, h);
+  int32_t mt = g_margin[SIDE_TOP], mb = g_margin[SIDE_BOTTOM], ml = g_margin[SIDE_LEFT], mr = g_margin[SIDE_RIGHT];
+  int32_t rects[SIDES][4] = {
+      {-ml, -mt, w + ml + mr, mt},
+      {-ml, h, w + ml + mr, mb},
+      {-ml, 0, ml, h},
+      {w, 0, mr, h},
+  };
+  for (int i = 0; i < SIDES; i++) {
+    __typeof__(g_border[0]) *b = &g_border[i];
+    int32_t *r = rects[i];
+    bool shown = r[2] > 0 && r[3] > 0;
+    if (!shown && !b->surface) continue;
+    if (!b->surface) {
+      b->surface = wl_compositor_create_surface(g_compositor);
+      b->subsurface = wl_subcompositor_get_subsurface(g_subcompositor, b->surface, g_surface);
+      wl_subsurface_place_below(b->subsurface, g_surface);
+      if (g_viewporter) b->viewport = wp_viewporter_get_viewport(g_viewporter, b->surface);
+    }
+    b->x = r[0];
+    b->y = r[1];
+    b->w = shown ? r[2] : 0;
+    b->h = shown ? r[3] : 0;
+    struct wl_buffer *buffer = NULL;
+    if (shown) {
+      int32_t pw, ph;
+      if (viewport) {
+        pw = (int32_t)ceilf((float)r[2] * g_scale);
+        ph = (int32_t)ceilf((float)r[3] * g_scale);
+        wp_viewport_set_destination(b->viewport, r[2], r[3]);
+        wl_surface_set_buffer_scale(b->surface, 1);
+      } else {
+        pw = r[2] * g_buffer_scale;
+        ph = r[3] * g_buffer_scale;
+        if (b->viewport) wp_viewport_set_destination(b->viewport, -1, -1);
+        wl_surface_set_buffer_scale(b->surface, g_buffer_scale);
+      }
+      buffer = border_buffer(i, pw, ph, active);
+      if (!buffer) b->w = b->h = 0;
+    }
+    wl_subsurface_set_position(b->subsurface, r[0], r[1]);
+    wl_surface_attach(b->surface, buffer, 0, 0);
+    if (buffer) wl_surface_damage_buffer(b->surface, 0, 0, INT32_MAX, INT32_MAX);
+    wl_surface_commit(b->surface);
+  }
+}
+
+// The resize edge at x, y in points from the window's top left, on the
+// border: the sides it's past, and the sides whose corners it's near.
+static uint32_t resize_edge_at(double x, double y) {
+  bool top = y < 0, bottom = y >= g_height, left = x < 0, right = x >= g_width;
+  if (top || bottom) {
+    if (x < BORDER_CORNER && g_margin[SIDE_LEFT]) left = true;
+    else if (x >= g_width - BORDER_CORNER && g_margin[SIDE_RIGHT]) right = true;
+  }
+  if (left || right) {
+    if (y < BORDER_CORNER && g_margin[SIDE_TOP]) top = true;
+    else if (y >= g_height - BORDER_CORNER && g_margin[SIDE_BOTTOM]) bottom = true;
+  }
+  return (top ? XDG_TOPLEVEL_RESIZE_EDGE_TOP : 0) | (bottom ? XDG_TOPLEVEL_RESIZE_EDGE_BOTTOM : 0) |
+         (left ? XDG_TOPLEVEL_RESIZE_EDGE_LEFT : 0) | (right ? XDG_TOPLEVEL_RESIZE_EDGE_RIGHT : 0);
+}
+
+static void border_pointer(struct wl_surface *s, double x, double y) {
+  for (int i = 0; i < SIDES; i++) {
+    if (g_border[i].surface != s) continue;
+    uint32_t edge = resize_edge_at(g_border[i].x + x, g_border[i].y + y);
+    if (edge == g_resize_edge && g_resize_edge) return;
+    g_resize_edge = edge;
+    switch (edge) {
+    case XDG_TOPLEVEL_RESIZE_EDGE_TOP: set_cursor("n-resize", "top_side"); break;
+    case XDG_TOPLEVEL_RESIZE_EDGE_BOTTOM: set_cursor("s-resize", "bottom_side"); break;
+    case XDG_TOPLEVEL_RESIZE_EDGE_LEFT: set_cursor("w-resize", "left_side"); break;
+    case XDG_TOPLEVEL_RESIZE_EDGE_RIGHT: set_cursor("e-resize", "right_side"); break;
+    case XDG_TOPLEVEL_RESIZE_EDGE_TOP_LEFT: set_cursor("nw-resize", "top_left_corner"); break;
+    case XDG_TOPLEVEL_RESIZE_EDGE_TOP_RIGHT: set_cursor("ne-resize", "top_right_corner"); break;
+    case XDG_TOPLEVEL_RESIZE_EDGE_BOTTOM_LEFT: set_cursor("sw-resize", "bottom_left_corner"); break;
+    case XDG_TOPLEVEL_RESIZE_EDGE_BOTTOM_RIGHT: set_cursor("se-resize", "bottom_right_corner"); break;
+    default: set_cursor("default", "left_ptr"); break;
+    }
+    return;
+  }
+}
+
+static void border_press(uint32_t serial) {
+  if (g_resize_edge && g_seat && g_toplevel) xdg_toplevel_resize(g_toplevel, g_seat, serial, g_resize_edge);
+}
 
 static void surface_enter(void *data, struct wl_surface *s, struct wl_output *o) {}
 static void surface_leave(void *data, struct wl_surface *s, struct wl_output *o) {}
@@ -1152,6 +1531,8 @@ static void registry_global(void *data, struct wl_registry *r, uint32_t name, co
   if (!strcmp(interface, wl_compositor_interface.name)) {
     g_compositor_version = MIN(version, 6);
     g_compositor = wl_registry_bind(r, name, &wl_compositor_interface, g_compositor_version);
+  } else if (!strcmp(interface, wl_subcompositor_interface.name)) {
+    g_subcompositor = wl_registry_bind(r, name, &wl_subcompositor_interface, 1);
   } else if (!strcmp(interface, wl_shm_interface.name)) {
     g_shm = wl_registry_bind(r, name, &wl_shm_interface, 1);
   } else if (!strcmp(interface, wl_seat_interface.name) && !g_seat) {
@@ -1190,6 +1571,11 @@ static const struct wl_registry_listener g_registry_listener = {.global = regist
 //   lift                the fingers leave the touchpad
 //   hold                two fingers rest on the touchpad, which stops the momentum
 //   scrolled            print the scroll the app was sent: points from touchpads, lines from wheels
+//   move=x,y            the pointer to x, y in the window, in points
+//   click=x,y           a left click there, through the same path as the compositor's
+//   rclick=x,y          a right click there
+//   edge=x,y            print the resize edge at x, y from the window's top left, on its border
+//   window              print the window's title bar, states, border and what the last press on the title bar did
 
 // Event times for the steps, in ms like the compositor's.
 static uint32_t test_ms(void) { return (uint32_t)(now_seconds() * 1000); }
@@ -1222,6 +1608,28 @@ bool os_test_step(const char *command, char *arg) {
     pointer_frame(NULL, NULL);
   } else if (!strcmp(command, "hold")) {
     hold_begin(NULL, NULL, 0, test_ms(), NULL, 2);
+  } else if (!strcmp(command, "move") || !strcmp(command, "click") || !strcmp(command, "rclick")) {
+    char *comma = strchr(arg, ',');
+    if (!comma) {
+      fprintf(stderr, "shell: test: %s wants x,y\n", command);
+      return true;
+    }
+    g_pointer_surface = g_surface;
+    pointer_motion(NULL, NULL, test_ms(), wl_fixed_from_double(atof(arg)), wl_fixed_from_double(atof(comma + 1)));
+    if (strcmp(command, "move")) {
+      uint32_t code = !strcmp(command, "click") ? EVDEV_BTN_LEFT : EVDEV_BTN_RIGHT;
+      pointer_button(NULL, NULL, 0, test_ms(), code, WL_POINTER_BUTTON_STATE_PRESSED);
+      pointer_button(NULL, NULL, 0, test_ms(), code, WL_POINTER_BUTTON_STATE_RELEASED);
+    }
+  } else if (!strcmp(command, "edge")) {
+    char *comma = strchr(arg, ',');
+    fprintf(stderr, "shell: test: edge %u\n", comma ? resize_edge_at(atof(arg), atof(comma + 1)) : 0);
+  } else if (!strcmp(command, "window")) {
+    fprintf(stderr, "shell: test: window %s, flags %u, maximized %d, tiled %d%d%d%d, border %d %d %d %d, title %s\n",
+            g_csd ? "client-side" : "server-side", window_flags(), has_state(XDG_TOPLEVEL_STATE_MAXIMIZED),
+            has_state(XDG_TOPLEVEL_STATE_TILED_TOP), has_state(XDG_TOPLEVEL_STATE_TILED_BOTTOM), has_state(XDG_TOPLEVEL_STATE_TILED_LEFT),
+            has_state(XDG_TOPLEVEL_STATE_TILED_RIGHT), g_margin[SIDE_TOP], g_margin[SIDE_BOTTOM], g_margin[SIDE_LEFT], g_margin[SIDE_RIGHT],
+            g_title_action);
   } else if (!strcmp(command, "scrolled")) {
     fprintf(stderr, "shell: test: scrolled %.1f points, %.1f lines\n", g_test_scrolled_points, g_test_scrolled_lines);
   } else {
@@ -1293,13 +1701,8 @@ static bool connect_wayland(void) {
   xdg_toplevel_set_title(g_toplevel, "TIDALfast");
   xdg_toplevel_set_app_id(g_toplevel, "tidalfast");
   xdg_toplevel_set_min_size(g_toplevel, 480, 360);
-  // The compositor's title bar where it has one (KDE, wlroots); GNOME's
-  // mutter draws none, and the window is moved with Super-drag there.
-  if (g_decoration_manager) {
-    struct zxdg_toplevel_decoration_v1 *d = zxdg_decoration_manager_v1_get_toplevel_decoration(g_decoration_manager, g_toplevel);
-    zxdg_toplevel_decoration_v1_set_mode(d, ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
-  }
-  wl_surface_commit(g_surface);
+  // The first commit waits for app_init, which says whose title bar the
+  // settings want (set_decorations).
   g_surface_info = (Wayland_Surface){.display = g_display, .surface = g_surface};
   return true;
 }
@@ -1415,11 +1818,17 @@ int shell_main(int argc, char **argv) {
       .set_clipboard = set_clipboard,
       .get_clipboard = get_clipboard,
       .set_accessibility = getenv("TIDALFAST_SHELL_TEST") ? set_accessibility : NULL,
+      .set_drag_regions = set_drag_regions,
+      .window_command = window_command,
+      .set_decorations = set_decorations,
   };
 
   measure_mark("app_start");
   app_init(&g_memory, &g_shell);
   g_app_started = true;
+  request_decorations();
+  wl_surface_commit(g_surface);
+  g_shown = true;
   while (!g_configured && wl_display_dispatch(g_display) >= 0) {
   }
   draw_frame();
