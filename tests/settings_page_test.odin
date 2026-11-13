@@ -59,6 +59,38 @@ settings_page_changes_settings :: proc(t: ^testing.T) {
 	testing.expect(t, !app.settings_showing(s), "Back leaves the page")
 }
 
+// The title bar's row shows only where the compositor offers decorations,
+// and its choices change the setting.
+@(test)
+settings_page_has_the_title_bar :: proc(t: ^testing.T) {
+	arena: vmem.Arena
+	_ = vmem.arena_init_growing(&arena)
+	defer vmem.arena_destroy(&arena)
+	context.allocator = vmem.arena_allocator(&arena)
+	s := library_state(true)
+	defer library_state_free(s)
+	f: Frame
+	library_frame(t, s, &f)
+	library_frame(t, s, &f)
+	open_settings(t, s, &f, "Fake data")
+	_, shown := settings_button(s, "System title bar")
+	testing.expect(t, !shown, "no title bar row without decorations")
+
+	s.window.decorations = true
+	library_frame(t, s, &f)
+	automatic, _ := settings_button(s, "Automatic title bar")
+	testing.expect(t, .Selected in automatic.flags, "Automatic is the default")
+	own, ok := settings_button(s, "TIDALfast title bar")
+	if !testing.expect(t, ok, "the TIDALfast choice") {
+		return
+	}
+	library_frame(t, s, &f, {kind = .Access_Press, target = own.id})
+	library_frame(t, s, &f)
+	testing.expect_value(t, s.settings.title_bar, app.Title_Bar.Own)
+	own, _ = settings_button(s, "TIDALfast title bar")
+	testing.expect(t, .Selected in own.flags, "TIDALfast shows as chosen")
+}
+
 // Signed in, the page has the account's card, whose button logs out.
 @(test)
 settings_page_logs_out :: proc(t: ^testing.T) {

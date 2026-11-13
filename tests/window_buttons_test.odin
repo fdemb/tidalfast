@@ -162,3 +162,178 @@ window_buttons_keep_the_top_clear :: proc(t: ^testing.T) {
 	testing.expectf(t, with <= 760 - 3 * app.WINDOW_BUTTON_W, "the field ends at %v, under the buttons", with)
 	testing.expect_value(t, without - with, 3 * app.WINDOW_BUTTON_W)
 }
+
+// GNOME's button-layout: the left side, a colon, the right side, in order.
+// Names the app doesn't draw and repeats are left out, and without a colon
+// every button goes on the left, as in GTK.
+@(test)
+button_layout_reads_gnomes_setting :: proc(t: ^testing.T) {
+	Case :: struct {
+		layout:      string,
+		left, right: []app.Window_Button,
+	}
+	cases := []Case {
+		{"appmenu:close", {}, {.Close}},
+		{":minimize,maximize,close", {}, {.Minimize, .Maximize, .Close}},
+		{"close,minimize,maximize:", {.Close, .Minimize, .Maximize}, {}},
+		{"close:maximize", {.Close}, {.Maximize}},
+		{"icon,close , spacer:appmenu, minimize", {.Close}, {.Minimize}},
+		{"close,close:close,maximize", {.Close}, {.Maximize}},
+		{"close,minimize", {.Close, .Minimize}, {}},
+		{"appmenu:", {}, {}},
+		{"", {}, {}},
+	}
+	for c in cases {
+		l := app.button_layout_parse(c.layout)
+		testing.expectf(t, slice_equal(l.left[:l.left_n], c.left) && slice_equal(l.right[:l.right_n], c.right), "%q gives %v and %v", c.layout, l.left[:l.left_n], l.right[:l.right_n])
+		testing.expectf(t, app.button_layout_parse(app.button_layout_string(l)) == l, "%q goes through the settings file", c.layout)
+	}
+}
+
+@(private = "file")
+slice_equal :: proc(a, b: []app.Window_Button) -> bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for x, i in a {
+		if x != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// Tests run on several threads, so this one records its own commands.
+@(private = "file")
+round_commands: [dynamic]platform.Window_Command
+
+@(private = "file")
+record_round_command :: proc "c" (command: platform.Window_Command) {
+	context = {}
+	append(&round_commands, command)
+}
+
+// GNOME's round buttons go where the layout says: on the right in the
+// room for Back and Forward, centred level with them, and on the left in
+// the sidebar's top, which keeps room for them and moves Home down. A
+// button the window manager can't do is left out.
+@(test)
+round_window_buttons_follow_the_layout :: proc(t: ^testing.T) {
+	arena: vmem.Arena
+	_ = vmem.arena_init_growing(&arena)
+	defer vmem.arena_destroy(&arena)
+	context.allocator = vmem.arena_allocator(&arena)
+	round_commands = make([dynamic]platform.Window_Command)
+	defer delete(round_commands)
+	s := library_state(false)
+	defer library_state_free(s)
+	shell := platform.Shell {
+		window_command = record_round_command,
+	}
+	f: Frame
+	buttons_frame(t, s, &f, &shell)
+	buttons_frame(t, s, &f, &shell)
+	home_before, _ := access_node(s, "Home")
+
+	s.window.shown = true
+	s.window.style = .Round
+	s.titlebar_h = 46
+	s.window.desktop = "ubuntu:GNOME"
+	s.settings.button_layout = app.button_layout_parse("appmenu:close")
+	buttons_frame(t, s, &f, &shell)
+	buttons_frame(t, s, &f, &shell)
+	close, has_close := access_node(s, "Close")
+	_, has_minimize := access_node(s, "Minimize")
+	testing.expect(t, has_close && !has_minimize, "close alone with GNOME's default")
+	nav_mid := app.nav_h(s) / 2
+	want := [4]f32{1000 - app.ROUND_EDGE - app.ROUND_CELL, nav_mid - app.ROUND_CELL / 2, app.ROUND_CELL, app.ROUND_CELL}
+	testing.expect_value(t, close.frame, want)
+	testing.expect_value(t, app.window_buttons_w(s), app.ROUND_EDGE + app.ROUND_CELL)
+	home, _ := access_node(s, "Home")
+	testing.expect_value(t, home.frame[1], home_before.frame[1])
+
+	buttons_frame(t, s, &f, &shell, press(s, "Close"))
+	testing.expect_value(t, len(round_commands), 1)
+	if len(round_commands) == 1 {
+		testing.expect_value(t, round_commands[0], platform.Window_Command.Close)
+	}
+
+	s.settings.button_layout = app.button_layout_parse("close,minimize:maximize")
+	buttons_frame(t, s, &f, &shell)
+	buttons_frame(t, s, &f, &shell)
+	close, _ = access_node(s, "Close")
+	minimize, _ := access_node(s, "Minimize")
+	maximize, _ := access_node(s, "Maximize")
+	testing.expect_value(t, close.frame[0], app.ROUND_EDGE)
+	testing.expect_value(t, minimize.frame[0], app.ROUND_EDGE + app.ROUND_CELL)
+	testing.expect_value(t, maximize.frame[0], 1000 - app.ROUND_EDGE - app.ROUND_CELL)
+	home, _ = access_node(s, "Home")
+	testing.expectf(t, home.frame[1] >= app.nav_h(s), "Home at %v is below the buttons", home.frame[1])
+
+	// A window manager that can't minimise.
+	s.window.no_minimize = true
+	buttons_frame(t, s, &f, &shell)
+	buttons_frame(t, s, &f, &shell)
+	_, has_minimize = access_node(s, "Minimize")
+	testing.expect(t, !has_minimize, "no Minimize the window manager can't do")
+	close, _ = access_node(s, "Close")
+	testing.expect_value(t, close.frame[0], app.ROUND_EDGE)
+	s.window.no_minimize = false
+
+	// Outside GNOME its layout is GNOME's default, which nobody chose, so
+	// all three go on the right.
+	s.window.desktop = "Hyprland"
+	s.settings.button_layout = app.button_layout_parse("appmenu:close")
+	buttons_frame(t, s, &f, &shell)
+	buttons_frame(t, s, &f, &shell)
+	minimize, has_minimize = access_node(s, "Minimize")
+	maximize, _ = access_node(s, "Maximize")
+	close, _ = access_node(s, "Close")
+	testing.expect(t, has_minimize, "all three outside GNOME")
+	testing.expect_value(t, close.frame[0], 1000 - app.ROUND_EDGE - app.ROUND_CELL)
+	testing.expect_value(t, maximize.frame[0], close.frame[0] - app.ROUND_CELL)
+	testing.expect_value(t, minimize.frame[0], maximize.frame[0] - app.ROUND_CELL)
+}
+
+// The settings file keeps the title bar choice and the last layout read.
+@(test)
+settings_keep_the_title_bar :: proc(t: ^testing.T) {
+	st, ok := app.settings_decode_json(transmute([]u8)string(`{"title_bar": "Own", "button_layout": "close:minimize"}`))
+	testing.expect(t, ok)
+	testing.expect_value(t, st.title_bar, app.Title_Bar.Own)
+	l, has := st.button_layout.?
+	testing.expect(t, has)
+	testing.expect_value(t, l, app.button_layout_parse("close:minimize"))
+	st, ok = app.settings_decode_json(transmute([]u8)string(`{"volume": 0.5}`))
+	testing.expect(t, ok)
+	testing.expect_value(t, st.title_bar, app.Title_Bar.Automatic)
+	_, has = st.button_layout.?
+	testing.expect(t, !has, "no layout until the portal gives one")
+}
+
+// Automatic is the app's own title bar, but the compositor's on a tiling
+// one; the other two are what they say wherever the app runs.
+@(test)
+title_bar_follows_the_setting_and_the_desktop :: proc(t: ^testing.T) {
+	Case :: struct {
+		desktop: string,
+		tiling:  bool,
+	}
+	cases := []Case {
+		{"GNOME", false},
+		{"ubuntu:GNOME", false},
+		{"KDE", false},
+		{"COSMIC", false},
+		{"", false},
+		{"sway", true},
+		{"Hyprland", true},
+		{"niri", true},
+		{"wlroots:river", true},
+		{"swayfx", true},
+	}
+	for c in cases {
+		testing.expectf(t, app.title_bar_own(.Automatic, c.desktop) == !c.tiling, "Automatic on %q", c.desktop)
+		testing.expectf(t, !app.title_bar_own(.System, c.desktop), "System on %q", c.desktop)
+		testing.expectf(t, app.title_bar_own(.Own, c.desktop), "TIDALfast on %q", c.desktop)
+	}
+}

@@ -74,6 +74,18 @@ draw_settings :: proc(s: ^State, main_w, view_h: f32) {
 				}
 			}
 		}
+		if s.window.decorations {
+			settings_separator()
+			settings_row("Title bar", "The desktop's or TIDALfast's own")
+			settings_choices("title_bar")
+			for mode in Title_Bar {
+				name := title_bar_name(mode)
+				if settings_choice(name, fmt.tprintf("%s title bar", name), s.settings.title_bar == mode) {
+					s.settings.title_bar = mode
+					settings_queue(d, settings_to_save(s))
+				}
+			}
+		}
 	}
 
 	when audio.BIT_PERFECT {

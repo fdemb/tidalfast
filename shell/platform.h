@@ -266,15 +266,26 @@ typedef struct {
   void (*window_command)(uint32_t command);
   // With WINDOW_FLAG_BUTTONS: minimise, maximise and close, x, y, w, h in view points; copied
   void (*set_window_buttons)(const float (*rects)[4], uint32_t count);
+  // Linux, with WINDOW_FLAG_DECORATIONS: 1 asks the compositor to leave the
+  // title bar to the app, 0 for its own. NULL elsewhere.
+  void (*set_decorations)(uint32_t own);
 } Shell;
-_Static_assert(sizeof(Shell) == 80, "Shell size must match platform.odin");
+_Static_assert(sizeof(Shell) == 88, "Shell size must match platform.odin");
 
 // Frame_Input.window
 enum {
   // The window has no titlebar of its own: the app draws minimise, maximise
-  // and close at the view's top right and reports them with set_window_buttons.
+  // and close, at the view's top right on Windows and where the desktop's
+  // button layout puts them on Linux, and reports them with set_window_buttons.
   WINDOW_FLAG_BUTTONS = 1 << 0,
   WINDOW_FLAG_MAXIMIZED = 1 << 1,
+  // The window manager can't minimise or maximise the window, so the app
+  // leaves those buttons out.
+  WINDOW_FLAG_NO_MINIMIZE = 1 << 2,
+  WINDOW_FLAG_NO_MAXIMIZE = 1 << 3,
+  // The compositor can draw the window's title bar, so set_decorations has
+  // a choice to make (Linux).
+  WINDOW_FLAG_DECORATIONS = 1 << 4,
 };
 
 typedef enum {

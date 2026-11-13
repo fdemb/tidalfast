@@ -249,7 +249,7 @@ Shell :: struct {
 	set_accessibility: proc "c" (nodes: [^]Access_Node, count: u32),
 	// Where a press moves the window, as x, y, w, h in view points: the
 	// empty parts of the titlebar the view draws under. The shell copies
-	// them. nil on Linux.
+	// them.
 	set_drag_regions:  proc "c" (rects: [^][4]f32, count: u32),
 	// With Frame_Input.window's Buttons, what the app's window buttons do.
 	window_command:    proc "c" (command: Window_Command),
@@ -257,15 +257,27 @@ Shell :: struct {
 	// are, in that order, as x, y, w, h in view points. The shell copies
 	// them, and Windows' snap layouts open from the maximise button.
 	set_window_buttons: proc "c" (rects: [^][4]f32, count: u32),
+	// Linux, with Frame_Input.window's Decorations: true asks the
+	// compositor to leave the title bar to the app, false for its own. nil
+	// elsewhere.
+	set_decorations:   proc "c" (own: b32),
 }
-#assert(size_of(Shell) == 80)
+#assert(size_of(Shell) == 88)
 
 Window_Flag :: enum u32 {
 	// The window has no titlebar of its own: the app draws minimise,
-	// maximise and close at the view's top right, and tells the shell
-	// where with set_window_buttons.
+	// maximise and close, at the view's top right on Windows and where the
+	// desktop's button layout puts them on Linux, and tells the shell where
+	// with set_window_buttons.
 	Buttons,
 	Maximized,
+	// The window manager can't minimise or maximise the window, so the app
+	// leaves those buttons out.
+	No_Minimize,
+	No_Maximize,
+	// The compositor can draw the window's title bar, so set_decorations
+	// has a choice to make (Linux).
+	Decorations,
 }
 Window_Flags :: bit_set[Window_Flag; u32]
 

@@ -1004,4 +1004,5 @@ shell_update :: proc(s: ^State, shell: ^platform.Shell) {
 		shell.set_drag_regions(cast([^][4]f32)raw_data(rects), u32(len(rects)))
 		s.drag_sent = dh
 	}
+	send_decorations(s, shell)
 }
