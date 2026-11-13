@@ -20,7 +20,14 @@ package audio
 // link while the graph still runs at the old rate, and it never plays a
 // frame until the rates match.
 //
-// What this can't see: a sink whose hardware can't run at the graph's rate
+// Before forcing a rate it asks the registry what the default sink is
+// (pw_default_sink), and refuses unless it's a sound card's own node. A
+// filter chain processes every sample, so it can't be bit-perfect anyway,
+// and it may offer rates the card behind it can't run: Asahi's speaker
+// DSP offers 88.2 kHz, the speakers ran at 96 kHz instead, and their
+// protection daemon read nonsense and locked them.
+//
+// What this can't see: a card that can't run at the graph's rate
 // resamples inside PipeWire, and a software volume on the sink scales the
 // samples. Other streams, such as notifications, are resampled to the
 // graph's rate and mixed in while they play, as on macOS.
@@ -156,6 +163,20 @@ hal_configure :: proc(h: ^Hal, dev: Device_ID, rate, channels, bits: int) -> (ok
 	if channels < 1 || channels > 2 {
 		hal_close(h, false)
 		return false, fmt.tprintf("%d channels; PipeWire output is stereo", channels)
+	}
+	if !pw_load() {
+		hal_close(h, false)
+		return false, "PipeWire isn't installed"
+	}
+	// Nothing may force the graph's rate before this says the sink can take it.
+	sink, queried := pw_default_sink()
+	if !queried {
+		hal_close(h, false)
+		return false, "PipeWire didn't say what the output is"
+	}
+	if allowed, refusal := sink_allows_bit_perfect(sink); !allowed {
+		hal_close(h, false)
+		return false, refusal
 	}
 	ok, reason = stream_open(h, nil, rate, 2, shared = false)
 	if ok {
@@ -443,6 +464,341 @@ format_pod :: proc(buf: ^[32]u64, rate, channels: int) -> rawptr {
 	return &buf[0]
 }
 
+// Pw_Sink is what PipeWire's registry says about the default sink.
+Pw_Sink :: struct {
+	found:      bool, // a sink has the default sink's name
+	has_device: bool, // it's a device's node, not a filter or a virtual sink
+	device_api: string, // the device's, such as "alsa" or "bluez5"
+}
+
+// sink_allows_bit_perfect says whether forcing the graph to a track's rate
+// sends its samples to a sound card unchanged. Only a node of an ALSA
+// device does: a filter chain processes the samples and may offer rates
+// its card can't run, and Bluetooth encodes them again.
+sink_allows_bit_perfect :: proc(s: Pw_Sink) -> (ok: bool, reason: string) {
+	switch {
+	case !s.found:
+		return false, "PipeWire has no default output"
+	case !s.has_device:
+		return false, "the output is a filter or virtual sink, not a sound card"
+	case s.device_api == "bluez5":
+		return false, "Bluetooth output isn't bit-perfect"
+	case s.device_api != "alsa":
+		return false, "the output isn't a sound card"
+	}
+	return true, ""
+}
+
+// default_sink_name reads the node name out of the default metadata's
+// value for default.audio.sink, a JSON object such as {"name":"x"}. Node
+// names have no quotes or escapes in them. "" if there's none.
+default_sink_name :: proc "contextless" (value: string) -> string {
+	key := `"name"`
+	for i := 0; i + len(key) <= len(value); i += 1 {
+		if value[i:i + len(key)] != key {
+			continue
+		}
+		j := i + len(key)
+		for j < len(value) && (value[j] == ' ' || value[j] == '\t') {
+			j += 1
+		}
+		if j >= len(value) || value[j] != ':' {
+			return ""
+		}
+		j += 1
+		for j < len(value) && (value[j] == ' ' || value[j] == '\t') {
+			j += 1
+		}
+		if j >= len(value) || value[j] != '"' {
+			return ""
+		}
+		j += 1
+		for k := j; k < len(value); k += 1 {
+			if value[k] == '"' {
+				return value[j:k]
+			}
+		}
+		return ""
+	}
+	return ""
+}
+
+@(private = "file")
+QUERY_TIMEOUT :: time.Second
+
+@(private = "file")
+QUERY_MAX :: 64
+
+// Pw_Query is what the registry and metadata callbacks fill in, on the
+// query's loop thread. Fixed arrays, so the callbacks don't allocate.
+@(private = "file")
+Pw_Query :: struct {
+	core_hook:     Spa_Hook,
+	registry_hook: Spa_Hook,
+	metadata_hook: Spa_Hook,
+	done:          i32, // the last sync answered (atomic)
+	metadata_id:   u32, // the "default" metadata, PW_ID_ANY until seen
+	sink:          [256]u8,
+	sink_len:      int,
+	sinks:         [QUERY_MAX]Query_Sink,
+	n_sinks:       int,
+	devices:       [QUERY_MAX]Query_Device,
+	n_devices:     int,
+}
+
+@(private = "file")
+Query_Sink :: struct {
+	name:      [256]u8,
+	name_len:  int,
+	device_id: u32, // PW_ID_ANY without a device
+}
+
+@(private = "file")
+Query_Device :: struct {
+	id:      u32,
+	api:     [32]u8,
+	api_len: int,
+}
+
+// pw_default_sink asks PipeWire's registry for the default sink and its
+// device, reading only. queried is false if PipeWire didn't answer in time.
+pw_default_sink :: proc() -> (sink: Pw_Sink, queried: bool) {
+	if !pw_load() {
+		return
+	}
+	q := new(Pw_Query, runtime.heap_allocator())
+	defer free(q, runtime.heap_allocator())
+	q.metadata_id = PW_ID_ANY
+	q.done = -1
+	loop := pw.thread_loop_new("tidalfast-pipewire-query", nil)
+	if loop == nil {
+		return
+	}
+	defer pw.thread_loop_destroy(loop)
+	ctx := pw.context_new(pw.thread_loop_get_loop(loop), nil, 0)
+	if ctx == nil {
+		return
+	}
+	defer pw.context_destroy(ctx)
+	if pw.thread_loop_start(loop) < 0 {
+		return
+	}
+	defer pw.thread_loop_stop(loop)
+
+	pw.thread_loop_lock(loop)
+	core := pw.context_connect(ctx, nil, 0)
+	if core == nil {
+		pw.thread_loop_unlock(loop)
+		return
+	}
+	registry, metadata: rawptr
+	defer {
+		pw.thread_loop_lock(loop)
+		hook_remove(&q.metadata_hook)
+		hook_remove(&q.registry_hook)
+		hook_remove(&q.core_hook)
+		if metadata != nil {
+			pw.proxy_destroy(metadata)
+		}
+		if registry != nil {
+			pw.proxy_destroy(registry)
+		}
+		pw.core_disconnect(core)
+		pw.thread_loop_unlock(loop)
+	}
+	cm, cd := methods(core, Pw_Core_Methods)
+	cm.add_listener(cd, &q.core_hook, &query_core_events, q)
+	registry = cm.get_registry(cd, PW_VERSION_REGISTRY, 0)
+	if registry == nil {
+		pw.thread_loop_unlock(loop)
+		return
+	}
+	rm, rd := methods(registry, Pw_Registry_Methods)
+	rm.add_listener(rd, &q.registry_hook, &query_registry_events, q)
+	seq := cm.sync(cd, PW_ID_CORE, 0)
+	pw.thread_loop_unlock(loop)
+	if !query_wait(q, seq) {
+		return
+	}
+
+	// The registry has listed every global; now the default sink's name.
+	pw.thread_loop_lock(loop)
+	if q.metadata_id != PW_ID_ANY {
+		metadata = rm.bind(rd, q.metadata_id, "PipeWire:Interface:Metadata", PW_VERSION_METADATA, 0)
+	}
+	if metadata == nil {
+		pw.thread_loop_unlock(loop)
+		return {}, true
+	}
+	mm, md := methods(metadata, Pw_Metadata_Methods)
+	mm.add_listener(md, &q.metadata_hook, &query_metadata_events, q)
+	seq = cm.sync(cd, PW_ID_CORE, 0)
+	pw.thread_loop_unlock(loop)
+	if !query_wait(q, seq) {
+		return
+	}
+
+	name := string(q.sink[:q.sink_len])
+	for &s in q.sinks[:q.n_sinks] {
+		if name == "" || string(s.name[:s.name_len]) != name {
+			continue
+		}
+		sink.found = true
+		if s.device_id == PW_ID_ANY {
+			break
+		}
+		sink.has_device = true
+		for &d in q.devices[:q.n_devices] {
+			if d.id == s.device_id {
+				sink.device_api = device_api_name(string(d.api[:d.api_len]))
+			}
+		}
+		break
+	}
+	return sink, true
+}
+
+// device_api_name gives an API name that outlives the query.
+@(private = "file")
+device_api_name :: proc(api: string) -> string {
+	switch api {
+	case "alsa":
+		return "alsa"
+	case "bluez5":
+		return "bluez5"
+	case "":
+		return ""
+	}
+	return "other"
+}
+
+@(private = "file")
+query_wait :: proc(q: ^Pw_Query, seq: i32) -> bool {
+	if seq < 0 {
+		return false
+	}
+	begin := time.tick_now()
+	for sync.atomic_load(&q.done) != seq {
+		if time.tick_since(begin) > QUERY_TIMEOUT {
+			log.warn("audio: PipeWire's registry didn't answer")
+			return false
+		}
+		time.sleep(time.Millisecond)
+	}
+	return true
+}
+
+@(private = "file")
+methods :: proc(object: rawptr, $T: typeid) -> (^T, rawptr) {
+	i := (^Spa_Interface)(object)
+	return (^T)(i.cb.funcs), i.cb.data
+}
+
+// hook_remove is spa_hook_remove, an inline function in spa/utils/hook.h.
+@(private = "file")
+hook_remove :: proc(h: ^Spa_Hook) {
+	if h.link.prev != nil {
+		h.link.prev.next = h.link.next
+		h.link.next.prev = h.link.prev
+		h.link = {}
+	}
+	if h.removed != nil {
+		h.removed(h)
+	}
+}
+
+@(private = "file")
+dict_get :: proc "contextless" (d: ^Spa_Dict, key: string) -> string {
+	if d == nil {
+		return ""
+	}
+	for i in 0 ..< d.n_items {
+		item := d.items[i]
+		if item.key != nil && string(item.key) == key {
+			return string(item.value) if item.value != nil else ""
+		}
+	}
+	return ""
+}
+
+@(private = "file")
+parse_id :: proc "contextless" (s: string) -> (id: u32, ok: bool) {
+	if s == "" || len(s) > 9 {
+		return
+	}
+	for c in transmute([]u8)s {
+		if c < '0' || c > '9' {
+			return
+		}
+		id = id * 10 + u32(c - '0')
+	}
+	return id, true
+}
+
+@(private = "file")
+query_done :: proc "c" (data: rawptr, id: u32, seq: i32) {
+	if id == PW_ID_CORE {
+		sync.atomic_store(&(^Pw_Query)(data).done, seq)
+	}
+}
+
+@(private = "file")
+query_global :: proc "c" (data: rawptr, id, permissions: u32, type: cstring, version: u32, props: ^Spa_Dict) {
+	q := (^Pw_Query)(data)
+	switch string(type) {
+	case "PipeWire:Interface:Metadata":
+		if dict_get(props, "metadata.name") == "default" {
+			q.metadata_id = id
+		}
+	case "PipeWire:Interface:Node":
+		if dict_get(props, "media.class") != "Audio/Sink" || q.n_sinks == QUERY_MAX {
+			return
+		}
+		s := &q.sinks[q.n_sinks]
+		s.name_len = copy(s.name[:], dict_get(props, "node.name"))
+		s.device_id = PW_ID_ANY
+		if dev, ok := parse_id(dict_get(props, "device.id")); ok {
+			s.device_id = dev
+		}
+		q.n_sinks += 1
+	case "PipeWire:Interface:Device":
+		if q.n_devices == QUERY_MAX {
+			return
+		}
+		d := &q.devices[q.n_devices]
+		d.id = id
+		d.api_len = copy(d.api[:], dict_get(props, "device.api"))
+		q.n_devices += 1
+	}
+}
+
+@(private = "file")
+query_property :: proc "c" (data: rawptr, subject: u32, key, type, value: cstring) -> i32 {
+	q := (^Pw_Query)(data)
+	if subject == PW_ID_CORE && key != nil && string(key) == "default.audio.sink" {
+		q.sink_len = 0
+		if value != nil {
+			q.sink_len = copy(q.sink[:], default_sink_name(string(value)))
+		}
+	}
+	return 0
+}
+
+@(private = "file")
+query_core_events := Pw_Core_Events {
+	done = query_done,
+}
+
+@(private = "file")
+query_registry_events := Pw_Registry_Events {
+	global = query_global,
+}
+
+@(private = "file")
+query_metadata_events := Pw_Metadata_Events {
+	property = query_property,
+}
+
 // libpipewire, as far as the app uses it. Each field is pw_<name>.
 @(private = "file")
 Pw_Api :: struct {
@@ -462,6 +818,11 @@ Pw_Api :: struct {
 	stream_dequeue_buffer: proc "c" (stream: rawptr) -> ^Pw_Buffer,
 	stream_queue_buffer:   proc "c" (stream: rawptr, buffer: ^Pw_Buffer) -> i32,
 	stream_get_time_n:     proc "c" (stream: rawptr, time: ^Pw_Time, size: uint) -> i32,
+	context_new:           proc "c" (loop: rawptr, props: rawptr, user_data_size: uint) -> rawptr,
+	context_connect:       proc "c" (ctx: rawptr, props: rawptr, user_data_size: uint) -> rawptr,
+	context_destroy:       proc "c" (ctx: rawptr),
+	core_disconnect:       proc "c" (core: rawptr) -> i32,
+	proxy_destroy:         proc "c" (proxy: rawptr),
 }
 
 @(private = "file")
@@ -566,6 +927,99 @@ Pw_Stream_Events :: struct {
 	command:       rawptr,
 	trigger_done:  rawptr,
 }
+
+@(private = "file")
+Spa_List :: struct {
+	next: ^Spa_List,
+	prev: ^Spa_List,
+}
+
+@(private = "file")
+Spa_Callbacks :: struct {
+	funcs: rawptr,
+	data:  rawptr,
+}
+
+@(private = "file")
+Spa_Interface :: struct {
+	type:    cstring,
+	version: u32,
+	cb:      Spa_Callbacks,
+}
+
+@(private = "file")
+Spa_Hook :: struct {
+	link:    Spa_List,
+	cb:      Spa_Callbacks,
+	removed: proc "c" (hook: ^Spa_Hook),
+	priv:    rawptr,
+}
+
+// A pw_core, pw_registry or pw_metadata proxy starts with its spa_interface,
+// whose funcs are these methods. pipewire/core.h and extensions/metadata.h
+// call them through inline functions.
+@(private = "file")
+Pw_Core_Methods :: struct {
+	version:       u32,
+	add_listener:  proc "c" (object: rawptr, listener: ^Spa_Hook, events: rawptr, data: rawptr) -> i32,
+	hello:         rawptr,
+	sync:          proc "c" (object: rawptr, id: u32, seq: i32) -> i32,
+	pong:          rawptr,
+	error:         rawptr,
+	get_registry:  proc "c" (object: rawptr, version: u32, user_data_size: uint) -> rawptr,
+	create_object: rawptr,
+	destroy:       rawptr,
+}
+
+@(private = "file")
+Pw_Registry_Methods :: struct {
+	version:      u32,
+	add_listener: proc "c" (object: rawptr, listener: ^Spa_Hook, events: rawptr, data: rawptr) -> i32,
+	bind:         proc "c" (object: rawptr, id: u32, type: cstring, version: u32, user_data_size: uint) -> rawptr,
+	destroy:      rawptr,
+}
+
+@(private = "file")
+Pw_Metadata_Methods :: struct {
+	version:      u32,
+	add_listener: proc "c" (object: rawptr, listener: ^Spa_Hook, events: rawptr, data: rawptr) -> i32,
+	set_property: rawptr,
+	clear:        rawptr,
+}
+
+// Version 0 of each: no events after these.
+@(private = "file")
+Pw_Core_Events :: struct {
+	version:    u32,
+	info:       rawptr,
+	done:       proc "c" (data: rawptr, id: u32, seq: i32),
+	ping:       rawptr,
+	error:      rawptr,
+	remove_id:  rawptr,
+	bound_id:   rawptr,
+	add_mem:    rawptr,
+	remove_mem: rawptr,
+}
+
+@(private = "file")
+Pw_Registry_Events :: struct {
+	version:       u32,
+	global:        proc "c" (data: rawptr, id, permissions: u32, type: cstring, version: u32, props: ^Spa_Dict),
+	global_remove: rawptr,
+}
+
+@(private = "file")
+Pw_Metadata_Events :: struct {
+	version:  u32,
+	property: proc "c" (data: rawptr, subject: u32, key, type, value: cstring) -> i32,
+}
+
+@(private = "file")
+PW_ID_CORE :: 0
+@(private = "file")
+PW_VERSION_REGISTRY :: 3
+@(private = "file")
+PW_VERSION_METADATA :: 3
 
 @(private = "file")
 STREAM_STATE_ERROR :: -1
