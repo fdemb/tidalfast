@@ -20,7 +20,7 @@ Input :: struct {
 }
 
 // Wheel scrolls without precise deltas count in lines.
-SCROLL_LINE :: 16
+SCROLL_LINE :: 32
 
 input_begin_frame :: proc(input: ^Input) {
 	input.pressed = {}

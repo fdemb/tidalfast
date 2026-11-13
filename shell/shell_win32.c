@@ -430,7 +430,8 @@ static void mouse_at(LPARAM lp) {
 // A wheel notch is WHEEL_DELTA (120). A mouse wheel sends whole notches,
 // which scroll the user's lines per notch, three by default. A precision
 // touchpad, and a free-spinning wheel, send fractions of a notch, which go
-// to the app as precise points, a notch being the same lines of 16 points.
+// to the app as precise points, 16 to a line: half a wheel line, so a
+// touchpad moves the page at a pace a finger can follow.
 // Up and left are positive, as the app takes them; Windows' horizontal
 // wheel is positive to the right.
 static double g_test_scrolled_points, g_test_scrolled_lines;
