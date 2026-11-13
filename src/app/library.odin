@@ -340,7 +340,7 @@ draw_history_buttons :: proc(s: ^State) {
 
 // nav_reserve is the room for Back and Forward that the view under them
 // keeps at the top of its scroll view, so that it scrolls under them: all
-// of it on Home, the artist page, a track list and the search results. The
+// of it on Home, Settings, the artist page, a track list and the search results. The
 // empty search page and an artist's grid keep their headers still, and a
 // view under the login notice is clear of them, so the main view keeps the
 // room above those instead.
@@ -348,7 +348,7 @@ nav_reserve :: proc(s: ^State) -> f32 {
 	if login_notice_shown(s) {
 		return 0
 	}
-	if home_showing(s) {
+	if home_showing(s) || settings_showing(s) {
 		return nav_h(s)
 	}
 	if p := artist_place(s); p != nil {
@@ -503,7 +503,7 @@ draw_playlist_row :: proc(s: ^State, i: int) {
 
 // playlist_showing says whether the main view shows sidebar entry i.
 playlist_showing :: proc(s: ^State, i: int) -> bool {
-	return s.library.playlist == i && !s.search.browsing && !home_showing(s) && !search_page_showing(s)
+	return s.library.playlist == i && !s.search.browsing && !home_showing(s) && !settings_showing(s) && !search_page_showing(s)
 }
 
 // draw_level_bars is four short bars in the accent, standing for sound. They
@@ -587,6 +587,10 @@ draw_main_view :: proc(s: ^State, main_w, h: f32) {
 draw_view :: proc(s: ^State, w, h: f32) {
 	if home_showing(s) {
 		draw_home(s, w, h)
+		return
+	}
+	if settings_showing(s) {
+		draw_settings(s, w, h)
 		return
 	}
 	if p := artist_place(s); p != nil {
@@ -1455,6 +1459,7 @@ Pending :: union {
 	Play_Playlist,
 	List_Place,
 	Home_Place,
+	Settings_Place,
 	Search_Place, // the search page, with the field focused
 	Search_Now,
 	Close_Search,
@@ -1505,6 +1510,7 @@ Place :: union {
 	List_Place,
 	Search_Place,
 	Home_Place,
+	Settings_Place,
 }
 
 // Playlist_Place is a sidebar entry. A TIDAL playlist goes by id once it's
@@ -1595,6 +1601,9 @@ apply_pending :: proc(s: ^State) -> bool {
 	case Home_Place:
 		history_visit(s, p)
 		place_go(s, p)
+	case Settings_Place:
+		history_visit(s, p)
+		place_go(s, p)
 	case Search_Place:
 		search_open(s)
 	case Search_Now:
@@ -1656,6 +1665,7 @@ place_go :: proc(s: ^State, place: Place) {
 		open_list(s, &p)
 	case Home_Place:
 		home_visit(s)
+	case Settings_Place:
 	case Search_Place:
 		ui.field_set_text(&s.search.field, "")
 	}
@@ -1737,6 +1747,9 @@ same_place :: proc(a, b: Place) -> bool {
 		return ok && x == y
 	case Home_Place:
 		_, ok := b.(Home_Place)
+		return ok
+	case Settings_Place:
+		_, ok := b.(Settings_Place)
 		return ok
 	}
 	return false

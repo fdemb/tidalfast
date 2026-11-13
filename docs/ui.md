@@ -131,6 +131,16 @@ Then come the shelves from TIDAL's home feed (see [TIDAL data](tidal-data.md#the
 
 Home is a place in the history (`Home_Place`), so Back and Forward go through it. What the main view shows is worked out from the history's current place (`home_showing`), and the open list stays as it was underneath, so going back from Home to a playlist or an artist page fetches nothing. While Home shows, no sidebar playlist is lit. With `TIDALFAST_FAKE=1` the shelves are made from the fake rows' albums and artists and the fake playlists, with gradient covers.
 
+### The settings page
+
+Settings in the user menu, at the bottom of the sidebar, shows the settings page (`src/app/settings_page.odin`), a place in the history like Home, so Back leaves it. It is laid out after [Hex](https://github.com/anomalyco/hex)'s settings in the app's own greys and accent: a column at most 720 pt wide, centred, with a card per group under the group's name. A card is a panel with a hairline border and 10 pt corners. Each of its rows is 60 pt tall, with the setting's name and a line about it on the left and its control on the right, and a hairline between rows.
+
+- Appearance has the scrollbars' mode and, where the renderer has backdrops, the player bar's (see [Scrollbars](playback.md#scrollbars)). A setting with a few choices shows them side by side in one control, with the chosen one raised.
+- Playback has bit-perfect output, which the output menu also has (see [Output settings](playback.md#output-settings)), as a switch. The knob slides across in the accent (`ui.slide`, which keeps the position in the box's `open_t`) and asks for no frames once it's there. A switch built for the first time starts where it belongs, so the page's first frame shows it settled.
+- Account, when signed in, has the user's name and Log out.
+
+Assistive apps get each choice as a button named for what it chooses, such as "Docked scrollbars", selected when chosen, and the switch as a button with the value On or Off.
+
 ## Performance
 
 `TIDALFAST_BENCH=1`, release build, Apple M1, 1100×700 window, overlay on. About 10 rows and 1,000 to 1,800 instances in view. ui is everything before `render.end_frame`:
