@@ -61,6 +61,14 @@ first_frames_match_the_next :: proc(t: ^testing.T) {
 		expect_next_frame_same(t, s, &f, at, "Home")
 		settle_frames(t, s, &f)
 
+		// Not through the user menu, which fades out over the page's
+		// first frames.
+		app.pending_set(s, app.Settings_Place{})
+		app.pending_apply(s)
+		library_frame(t, s, &f)
+		expect_next_frame_same(t, s, &f, at, "the settings page")
+		settle_frames(t, s, &f)
+
 		library_frame(t, s, &f, key(.F, {ui.PRIMARY}))
 		library_frame(t, s, &f)
 		expect_next_frame_same(t, s, &f, at, "the empty search page")

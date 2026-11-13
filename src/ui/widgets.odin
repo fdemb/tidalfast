@@ -325,6 +325,19 @@ scroll_to :: proc(view: ^Box, y0, y1: f32) {
 	ctx.animating = true
 }
 
+// slide eases keyed box b's open_t toward 1 while on and toward 0 while
+// not, and returns it, for a switch's knob. A box on its first frame starts
+// where it's going.
+slide :: proc(b: ^Box, on: bool) -> f32 {
+	u := ctx
+	target: f32 = 1 if on else 0
+	if b.first_frame == u.frame {
+		b.open_t = target
+	}
+	b.open_t = approach(u, b.open_t, target, 1 - math.exp(-u.dt * 24), 0.01)
+	return b.open_t
+}
+
 // floating makes the floating layer the parent until the end of the scope.
 // It is laid out and drawn after the main tree, ignores every clip in it
 // and comes first for input. Its boxes need Floating_X and Floating_Y and

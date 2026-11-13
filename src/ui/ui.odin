@@ -122,7 +122,7 @@ Box :: struct {
 	hot_fade:        f32, // hot_t's linear progress, before its curve
 	active_t:        f32,
 	focus_t:         f32,
-	open_t:          f32, // menus and tooltips fading in
+	open_t:          f32, // menus and tooltips fading in, a switch sliding (slide)
 
 	using build:     Build,
 }

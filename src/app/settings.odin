@@ -16,7 +16,7 @@ package app
 //
 // The player bar has a button for the output settings that opens a menu.
 // In bit-perfect mode the button shows what the device plays, such as
-// 24/96. The sidebar has one for the rest.
+// 24/96. The settings page has them all (settings_page.odin).
 
 import "core:crypto"
 import "core:encoding/json"
@@ -29,7 +29,6 @@ import "core:strings"
 import "core:sync"
 
 import "../audio"
-import "../render"
 import "../sys"
 import "../ui"
 
@@ -60,7 +59,7 @@ Title_Bar :: enum u8 {
 	Own, // the app's buttons in the room at the top of the view
 }
 
-// title_bar_name is what the settings menu calls each choice.
+// title_bar_name is what the settings page calls each choice.
 title_bar_name :: proc(t: Title_Bar) -> string {
 	switch t {
 	case .Automatic:
@@ -307,61 +306,6 @@ settings_to_save :: proc(s: ^State) -> Settings {
 
 output_of :: proc(st: Settings) -> audio.Output {
 	return {bit_perfect = audio.BIT_PERFECT && st.bit_perfect}
-}
-
-SETTINGS_MENU :: "settings_menu"
-
-// draw_settings_menu is the settings menu, which the user menu's Settings
-// opens.
-draw_settings_menu :: proc(s: ^State) {
-	if ui.menu(SETTINGS_MENU) {
-		ui.text_style(.Regular, 11, DIM)
-		ui.set_next_text_pad(14)
-		heading := ui.label("Scrollbars", ui.fill(), ui.px(24))
-		ui.text_style(.Regular, 13, TEXT)
-		for mode in ui.Scrollbars {
-			on := s.settings.scrollbars == mode
-			name := fmt.tprint(mode)
-			item := ui.menu_item(fmt.tprintf("%s %s###scrollbars_%s", "✓" if on else "   ", name, name))
-			ui.accessible(item.box, .Menu_Item, name, selected = on)
-			if item.clicked {
-				s.settings.scrollbars = mode
-				settings_queue(&s.data, settings_to_save(s))
-			}
-		}
-		if render.BACKDROPS {
-			ui.text_style(.Regular, 11, DIM)
-			ui.set_next_text_pad(14)
-			heading = ui.label("Player bar", ui.fill(), ui.px(24))
-			ui.text_style(.Regular, 13, TEXT)
-			for mode in Player_Bar {
-				on := s.settings.bar == mode
-				name := fmt.tprint(mode)
-				item := ui.menu_item(fmt.tprintf("%s %s###bar_%s", "✓" if on else "   ", name, name))
-				ui.accessible(item.box, .Menu_Item, name, selected = on)
-				if item.clicked {
-					s.settings.bar = mode
-					settings_queue(&s.data, settings_to_save(s))
-				}
-			}
-		}
-		if s.window.decorations {
-			ui.text_style(.Regular, 11, DIM)
-			ui.set_next_text_pad(14)
-			heading = ui.label("Title bar", ui.fill(), ui.px(24))
-			ui.text_style(.Regular, 13, TEXT)
-			for mode in Title_Bar {
-				on := s.settings.title_bar == mode
-				name := title_bar_name(mode)
-				item := ui.menu_item(fmt.tprintf("%s %s###title_bar_%v", "✓" if on else "   ", name, mode))
-				ui.accessible(item.box, .Menu_Item, name, selected = on)
-				if item.clicked {
-					s.settings.title_bar = mode
-					settings_queue(&s.data, settings_to_save(s))
-				}
-			}
-		}
-	}
 }
 
 // save_settings_result shows why the settings didn't save, if they didn't.
