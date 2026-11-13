@@ -170,7 +170,7 @@ draw_list_hero :: proc(s: ^State, h: List_Header, kind: List_Kind, art: Hero_Art
 		ui.set_next_radius(art.side / 2 if art.kind == .Artist else 4)
 		frame := ui.box_make("", {.Draw_Shadow}, ui.px(art.side), ui.px(art.side))
 		ui.parent(frame)
-		cover_art(s, art.kind, art.id, art.seed, art.side, ui.fill(), frame.radius)
+		cover_art(s, art.kind, art.id, art.seed, art.side, ui.fill(), frame.radius, HERO_COVER_MAX)
 	}
 	ui.spacer(ui.px(24))
 	ui.column("", {}, ui.fill(), ui.fill())

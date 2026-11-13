@@ -17,8 +17,10 @@ COVER_RIM :: render.Rim{lift = 0.025, darken = 0.025} // the 1 pt rim around a c
 
 // cover_art draws a cover size points square, centred in a cell of width
 // cell_w. Without an image id it draws the fake data's gradient for seed.
-// A radius of half the size draws it round, as artist pictures are.
-cover_art :: proc(s: ^State, kind: cover.Kind, id: string, seed: u32, size: f32, cell_w: ui.Size, radius: f32 = 4) {
+// A radius of half the size draws it round, as artist pictures are. A cover
+// whose size follows the window's passes its largest as texture_size and is
+// drawn scaled down from that, so a resize asks for nothing new.
+cover_art :: proc(s: ^State, kind: cover.Kind, id: string, seed: u32, size: f32, cell_w: ui.Size, radius: f32 = 4, texture_size: f32 = 0) {
 	ui.column("", {.Center_Children}, cell_w, ui.fill())
 	ui.radius(radius)
 	hue := f32(seed % 997) / 997
@@ -29,7 +31,7 @@ cover_art :: proc(s: ^State, kind: cover.Kind, id: string, seed: u32, size: f32,
 		b.gradient = hsv(hue + 0.08, 0.7, 0.35)
 		return
 	}
-	e := cover_want(s, kind, id, size, PRIORITY_COVER)
+	e := cover_want(s, kind, id, max(size, texture_size), PRIORITY_COVER)
 	measure_count_cover(s, e != nil && e.state == .Ready)
 	if e != nil && e.state == .Ready {
 		ui.parent(b)

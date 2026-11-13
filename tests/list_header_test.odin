@@ -8,6 +8,7 @@ import "core:mem"
 import "core:testing"
 
 import app "../src/app"
+import "../src/cover"
 import "../src/platform"
 import "../src/ui"
 
@@ -390,4 +391,66 @@ scrollbar_under_the_titlebar :: proc(t: ^testing.T) {
 	testing.expect(t, bar.rect.y < 10, "the scrollbar reaches up under the titlebar")
 	testing.expect(t, !in_drag(s, bar.rect.x + bar.rect.w / 2, 10), "a press on the scrollbar doesn't move the window")
 	testing.expect(t, in_drag(s, view.rect.x + view.rect.w / 2, 10), "the rest of the strip does")
+}
+
+// The hero's cover follows the window's width and its texture doesn't: it
+// is asked for once, at its largest, and drawn scaled down from that. A
+// size per width would show the placeholder at each one a resize passes.
+@(test)
+hero_cover_keeps_its_texture_through_a_resize :: proc(t: ^testing.T) {
+	arena: mem.Dynamic_Arena
+	mem.dynamic_arena_init(&arena)
+	defer mem.dynamic_arena_destroy(&arena)
+	context.allocator = mem.dynamic_arena_allocator(&arena)
+	s := library_state(false)
+	defer library_state_free(s)
+	s.renderer.scale = 2
+	rows := make([]app.Row, 3, context.temp_allocator)
+	for &r, i in rows {
+		r = {title = "A song", artist = "An artist", album = "An album", duration = "3:00", id = i64(100 + i), seconds = 180}
+	}
+	app.view_open(&s.data, .Playlist, "uuid", "A playlist", "img", len(rows))
+	app.view_add_rows(&s.data.view, 0, len(rows), rows, len(rows))
+
+	textured :: proc(b: ^ui.Box) -> ^ui.Box {
+		if b.texture != 0 {
+			return b
+		}
+		for c := b.first; c != nil; c = c.next {
+			if got := textured(c); got != nil {
+				return got
+			}
+		}
+		return nil
+	}
+
+	covers := &s.data.covers
+	px := 2 * app.HERO_COVER_MAX
+	f := Frame {
+		size = {900, 700},
+	}
+	library_frame(t, s, &f)
+	e := cover.lookup(covers, cover.key_of("img", px))
+	testing.expect(t, e != nil, "the hero asks for its largest size in a narrow window")
+	if e == nil {
+		return
+	}
+	_, page := cover.place(covers, e.key, s.frame_count, f.now)
+	page.texture = 7
+	f.now += 1 // faded in
+
+	sides := [3]f32{app.HERO_COVER_MIN, 190, app.HERO_COVER_MAX}
+	for w, i in ([3]f32{900, 1205, 1700}) {
+		f.size.x = w
+		s.frame_count += 1
+		library_frame(t, s, &f)
+		testing.expect_value(t, covers.used, 1) // no other size asked for
+		b := textured(s.ui.root)
+		testing.expectf(t, b != nil, "the cover shows at a width of %v", w)
+		if b != nil {
+			testing.expect_value(t, b.rect.w, sides[i])
+			testing.expect_value(t, b.texture_src.w, f32(px))
+			testing.expect_value(t, b.opacity, 1)
+		}
+	}
 }
