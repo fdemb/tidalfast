@@ -111,6 +111,7 @@ Box :: struct {
 	view_bounds:     [2]f32, // size of the children from the last layout
 	view_off:        [2]f32, // scroll offset drawn
 	view_off_target: [2]f32, // where view_off is easing to
+	stretch:         Stretch, // a trackpad pulling the content past its end, drawn on top of view_off
 	built_size:      [2]f32, // the size a scroll view's children were built for, see build_size
 	bar_t:           f32, // a scroll view's scrollbar fading in
 	bar_seen:        f32, // view_off.y when the scrollbar was last built
@@ -285,6 +286,7 @@ State :: struct {
 	scroll_key:     [2]Key, // this frame's scroll goes to these boxes
 	scroll:         [2]f32, // points, this frame
 	scroll_precise: [2]f32, // the part of scroll from trackpads, applied without easing
+	gesture:        Gesture, // the trackpad gesture, for stretch_view
 	focus:          Key,
 	focus_visible:  bool, // the focus came from the keyboard, so draw a ring
 	focus_reveal:   bool, // the keyboard moved the focus: scroll it into view
@@ -603,6 +605,7 @@ process_events :: proc(u: ^State, events: []platform.Event, text_bytes: []u8) {
 	u.scroll = {}
 	u.scroll_precise = {}
 	u.scroll_key = {}
+	u.gesture = {in_momentum = u.gesture.in_momentum, vel = u.gesture.vel, vel_time = u.gesture.vel_time}
 	u.drop = u.drop_next
 	u.drop_next = false
 	u.drag_unclaimed = false
@@ -668,6 +671,7 @@ process_events :: proc(u: ^State, events: []platform.Event, text_bytes: []u8) {
 			}
 			u.scroll_key = u.scroll_latch
 			d := scroll_delta(e)
+			gesture_event(&u.gesture, e, d)
 			u.scroll += d
 			if e.precise {
 				u.scroll_precise += d
@@ -1405,26 +1409,36 @@ approach :: proc(u: ^State, v, target, rate, eps: f32) -> f32 {
 
 // scroll_box applies this frame's scroll to a scroll view. Trackpad deltas
 // move the view straight away, momentum included, since the shell supplies
-// the inertia: macOS's own, or the Linux shell's. Wheel lines move the target and the view eases
-// after it. Both stay within the content from the last layout.
+// the inertia: macOS's own, or the Linux shell's. Wheel lines move the
+// target and the view eases after it. Both stay within the content from the
+// last layout, and a trackpad's scroll past it stretches the view.
 @(private)
 scroll_box :: proc(u: ^State, b: ^Box) {
+	delta: [2]f32
 	for axis in 0 ..< 2 {
 		if u.scroll_key[axis] == b.key {
 			b.view_off_target[axis] -= u.scroll[axis]
 			b.view_off[axis] -= u.scroll_precise[axis]
+			delta[axis] = -u.scroll_precise[axis]
 		}
 	}
 	size := build_size(b)
 	limit := [2]f32{max(b.view_bounds.x - size.x, 0), max(b.view_bounds.y - size.y, 0)}
 	rate := 1 - math.exp(-u.dt * 20)
+	unused: [2]f32
 	for axis in 0 ..< 2 {
 		overflow := Box_Flag.Allow_Overflow_X if axis == 0 else .Allow_Overflow_Y
 		if overflow not_in b.flags {
 			b.view_off_target[axis] = 0
 		}
 		b.view_off_target[axis] = clamp(b.view_off_target[axis], 0, limit[axis])
+		if delta[axis] != 0 {
+			unused[axis] = b.view_off[axis] - clamp(b.view_off[axis], 0, limit[axis])
+		}
 		b.view_off[axis] = clamp(b.view_off[axis], 0, limit[axis])
+	}
+	stretch_view(u, b, unused, limit)
+	for axis in 0 ..< 2 {
 		b.view_off[axis] = approach(u, b.view_off[axis], b.view_off_target[axis], rate, 0.25)
 	}
 }

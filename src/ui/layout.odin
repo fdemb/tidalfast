@@ -42,7 +42,8 @@ layout :: proc(root: ^Box, texts: ^text.State = nil, scale: f32 = 0) {
 	place(root, scale)
 }
 
-// drawn_off is b's scroll offset on axis rounded to whole pixels at scale.
+// drawn_off is b's scroll offset on axis plus its stretch, rounded to
+// whole pixels at scale.
 // Text baselines and rect edges round to pixels separately, so content
 // moved by a fraction of a pixel shifts its text against its rects by a
 // pixel at some offsets, and rows a fractional number of pixels apart do
@@ -50,10 +51,11 @@ layout :: proc(root: ^Box, texts: ^text.State = nil, scale: f32 = 0) {
 // same way at every offset.
 @(private)
 drawn_off :: proc(b: ^Box, axis: int, scale: f32) -> f32 {
+	off := b.view_off[axis] + b.stretch.amount[axis]
 	if scale <= 0 {
-		return b.view_off[axis]
+		return off
 	}
-	return math.round(b.view_off[axis] * scale) / scale
+	return math.round(off * scale) / scale
 }
 
 @(private)

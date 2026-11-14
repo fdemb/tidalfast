@@ -453,6 +453,152 @@ test_ui_scroll :: proc(t: ^testing.T) {
 	testing.expect_value(t, list.view_off.y, list.view_off_target.y)
 }
 
+// A trackpad pulls a view past its ends against a spring, and the view
+// goes back once the fingers lift. A wheel doesn't.
+@(test)
+test_ui_stretch :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer {
+		delete(u.boxes)
+		delete(u.table)
+		delete(u.hits)
+		free_all(context.temp_allocator)
+	}
+	list_frame :: proc(u: ^ui.State, time: f64, events: ..platform.Event) -> (list: ^ui.Box, row: ^ui.Box, animating: bool) {
+		ui.begin_frame(u, events, nil, nil, 300, 200, time)
+		list = ui.box_make("list", {.View_Scroll, .Allow_Overflow_Y, .Clip}, ui.px(300), ui.px(200))
+		list.child_axis = .Y
+		ui.push_parent(list)
+		row = ui.box_make("row", {}, ui.fill(), ui.px(1000))
+		ui.pop_parent()
+		animating = ui.end_frame()
+		return
+	}
+	settle :: proc(u: ^ui.State, now: ^f64) -> (list: ^ui.Box, row: ^ui.Box, animating: bool) {
+		for _ in 0 ..< 300 {
+			now^ += 1.0 / 120
+			list, row, animating = list_frame(u, now^)
+			if !animating {
+				break
+			}
+		}
+		return
+	}
+	scroll :: proc(dy: f32, time: f64, phase: platform.Scroll_Phase = .Changed, momentum: platform.Scroll_Phase = .None) -> platform.Event {
+		return {kind = .Scroll, x = 50, y = 50, dy = dy, time = time, precise = true, phase = phase, momentum_phase = momentum}
+	}
+	now := 0.0
+	list_frame(&u, now)
+	now += 0.01
+	list_frame(&u, now)
+
+	// 200 points past the top stretch it by a twentieth of that, and the
+	// row moves down with it while the offset stays at 0.
+	now += 0.01
+	list, row, _ := list_frame(&u, now, scroll(0, now, .Began))
+	now += 0.01
+	list, row, _ = list_frame(&u, now, scroll(200, now))
+	testing.expect_value(t, list.view_off.y, f32(0))
+	testing.expect_value(t, list.stretch.amount.y, f32(-10))
+	now += 0.01
+	list, row, _ = list_frame(&u, now)
+	testing.expect_value(t, row.rect.y, f32(10))
+
+	// Scrolling back takes the stretch in one to one before the view moves.
+	now += 0.01
+	list, row, _ = list_frame(&u, now, scroll(-4, now))
+	testing.expect_value(t, list.stretch.amount.y, f32(-6))
+	testing.expect_value(t, list.view_off.y, f32(0))
+	now += 0.01
+	list, row, _ = list_frame(&u, now, scroll(-26, now))
+	testing.expect_value(t, list.stretch.amount.y, f32(0))
+	testing.expect_value(t, list.view_off.y, f32(20))
+
+	// Held there, it asks for no frames. Lifted, it goes back and stops.
+	now += 0.01
+	list, row, _ = list_frame(&u, now, scroll(220, now))
+	testing.expect_value(t, list.stretch.amount.y, f32(-10))
+	now += 0.01
+	_, _, animating := list_frame(&u, now)
+	testing.expect(t, !animating)
+	now += 0.01
+	list, row, animating = list_frame(&u, now, scroll(0, now, .Ended))
+	testing.expect(t, animating)
+	list, row, animating = settle(&u, &now)
+	testing.expect(t, !animating)
+	testing.expect_value(t, list.stretch, ui.Stretch{})
+	testing.expect_value(t, row.rect.y, f32(0))
+
+	// The momentum after a lift keeps pushing at the top long after the
+	// bounce. It doesn't stretch the view again once the bounce is over.
+	now += 0.01
+	list_frame(&u, now, scroll(0, now, .Began))
+	now += 0.01
+	list_frame(&u, now, scroll(200, now))
+	now += 0.01
+	list_frame(&u, now, scroll(0, now, .Ended))
+	now += 0.01
+	list_frame(&u, now, scroll(20, now, .None, .Began))
+	for _ in 0 ..< 120 {
+		now += 1.0 / 120
+		list, row, _ = list_frame(&u, now, scroll(60, now, .None, .Changed))
+	}
+	testing.expect_value(t, list.stretch.amount.y, f32(0))
+	now += 1.0 / 120
+	list, row, animating = list_frame(&u, now, scroll(0, now, .None, .Ended))
+	testing.expect(t, !animating)
+	testing.expect_value(t, list.stretch, ui.Stretch{})
+
+	// A stray move under 10 points doesn't stretch it.
+	now += 0.01
+	list_frame(&u, now, scroll(0, now, .Began))
+	now += 0.01
+	list, row, _ = list_frame(&u, now, scroll(6, now))
+	testing.expect_value(t, list.stretch.amount.y, f32(0))
+	now += 0.01
+	list_frame(&u, now, scroll(0, now, .Ended))
+
+	// A wheel past the top doesn't stretch it.
+	now += 0.01
+	list, row, _ = list_frame(&u, now, {kind = .Scroll, x = 50, y = 50, dy = 20})
+	testing.expect_value(t, list.stretch.amount.y, f32(0))
+	settle(&u, &now)
+
+	// Momentum that runs into the end carries the stretch on past where it
+	// hit, then brings it back.
+	now += 0.01
+	list_frame(&u, now, scroll(0, now, .Began))
+	now += 0.01
+	list_frame(&u, now, scroll(-780, now))
+	now += 0.01
+	list_frame(&u, now, scroll(0, now, .Ended))
+	now += 0.01
+	list_frame(&u, now, scroll(-10, now, .None, .Began))
+	for _ in 0 ..< 2 {
+		now += 1.0 / 120
+		list_frame(&u, now, scroll(-25, now, .None, .Changed))
+	}
+	now += 1.0 / 120
+	list, row, _ = list_frame(&u, now, scroll(-25, now, .None, .Changed))
+	testing.expect_value(t, list.view_off.y, f32(800))
+	hit := list.stretch.amount.y
+	testing.expect(t, hit > 0)
+	peak := hit
+	for _ in 0 ..< 300 {
+		now += 1.0 / 120
+		list, row, animating = list_frame(&u, now, scroll(-5, now, .None, .Changed))
+		peak = max(peak, list.stretch.amount.y)
+		if !animating {
+			break
+		}
+	}
+	testing.expect(t, peak > hit)
+	testing.expect(t, !animating)
+	testing.expect_value(t, list.stretch.amount.y, f32(0))
+	testing.expect_value(t, list.view_off.y, f32(800))
+}
+
 // At a fractional scale a scroll moves content by whole pixels, so text,
 // which lands on a whole pixel row, keeps its place against the rects
 // around it. Moved by a fraction of a pixel it jumped a pixel against
@@ -1315,7 +1461,7 @@ test_ui_instant_hover_follows_rows_scrolled_under_a_still_mouse :: proc(t: ^test
 	testing.expect(t, only_lit(f, 2), "row 2 stays lit")
 
 	// To the end, 200 pt down: row 6 is at 40.
-	f = scrolled_rows_frame(&u, &now, {kind = .Scroll, x = 50, y = 60, dy = -5000, precise = true, phase = .Changed})
+	f = scrolled_rows_frame(&u, &now, {kind = .Scroll, x = 50, y = 60, dy = -160, precise = true, phase = .Changed})
 	testing.expect_value(t, f.rows[6].rect.y, f32(40))
 	testing.expect(t, only_lit(f, 6), "row 6 is lit in the frame it comes under the mouse")
 }
