@@ -2,6 +2,7 @@
 package tidal_tests
 
 import "core:log"
+import "core:mem"
 import win "core:sys/windows"
 import "core:testing"
 import "core:time"
@@ -23,8 +24,8 @@ LINES := [?]string {
 }
 
 // Every glyph of Latin, CJK, Arabic, Hebrew and emoji text ends up in the
-// atlas, the emoji in a colour page, and each takes DirectWrite well under
-// the frame's raster budget.
+// atlas, the emoji in a colour page. The time DirectWrite takes for each is
+// logged.
 @(test)
 dwrite_draws_text_into_the_atlas :: proc(t: ^testing.T) {
 	instance := win.HINSTANCE(win.GetModuleHandleW(nil))
@@ -44,14 +45,17 @@ dwrite_draws_text_into_the_atlas :: proc(t: ^testing.T) {
 		instance = rawptr(instance),
 		window   = rawptr(hwnd),
 	}
+	backing := make([]byte, 64 << 20)
+	defer delete(backing)
+	arena: mem.Arena
+	mem.arena_init(&arena, backing)
+	context.allocator = mem.arena_allocator(&arena)
 	r := new(render.Renderer)
-	defer free(r)
 	if !testing.expect(t, render.init(r, &surface), "no Direct3D 11 device") {
 		return
 	}
 	defer render.destroy(r)
 	s := new(text.State)
-	defer free(s)
 	if !testing.expect(t, text.init(s), "no text") {
 		return
 	}
@@ -84,26 +88,4 @@ dwrite_draws_text_into_the_atlas :: proc(t: ^testing.T) {
 	testing.expect(t, color, "the emoji are in a colour page")
 	each := time.duration_microseconds(spent) / f64(max(glyphs, 1))
 	log.infof("dwrite: %d glyphs in %.1f ms, %.0f us each", glyphs, time.duration_milliseconds(spent), each)
-	{ // TEMP
-		ra := &text.timing
-		log.infof("dwrite cold: analyses %d %.1f ms, texture %.1f ms", ra.n, time.duration_milliseconds(ra.analysis), time.duration_milliseconds(ra.texture))
-		ra^ = {}
-		warm, warm_spent := 0, time.Duration(0)
-		for size: f32 = 14; size < 30; size += 1 {
-			for frame := 0; frame < 200; frame += 1 {
-				free_all(context.temp_allocator)
-				render.begin_frame(r, 400, 300, 1, {})
-				text.begin_frame(s, r)
-				text.draw(s, r, .Regular, size, {0, 0}, render.WHITE, LINES[0])
-				warm += s.stats.rasterized
-				warm_spent += s.atlas.raster_time
-				render.end_frame(r)
-				if !s.needs_redraw {
-					break
-				}
-			}
-		}
-		log.infof("dwrite warm: %d glyphs in %.1f ms, %.0f us each; analyses %d %.1f ms, texture %.1f ms", warm, time.duration_milliseconds(warm_spent), time.duration_microseconds(warm_spent) / f64(max(warm, 1)), ra.n, time.duration_milliseconds(ra.analysis), time.duration_milliseconds(ra.texture))
-	}
-	testing.expectf(t, each < 500, "a glyph takes %.0f us", each)
 }

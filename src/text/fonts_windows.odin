@@ -20,7 +20,6 @@ import "core:math"
 import "core:mem"
 import "core:strings"
 import "core:sys/windows"
-import "core:time"
 
 import "../../third_party/kbts"
 import "../sys"
@@ -58,12 +57,6 @@ Raster :: struct {
 	system_opsz: DWRITE_FONT_AXIS_RANGE,
 	// The analysis glyph_box made, which rasterize uses next.
 	last:        Last_Analysis,
-}
-
-// TEMP
-timing: struct {
-	analysis, texture: time.Duration,
-	n:                 int,
 }
 
 // Last_Analysis is a glyph's coverage with its pen at x, 0, and what it
@@ -509,8 +502,8 @@ known_or_load :: proc(l: ^Loader, ff: ^IDWriteFontFace, need: rune, res: ^Load_R
 }
 
 // warm_face draws r once in a newly loaded face, on the loader thread.
-// DirectWrite's first glyph in a font takes it ten times as long as the
-// ones after, which would otherwise come out of the UI thread's raster
+// DirectWrite's first glyphs in a font take it several times as long as
+// the ones after, which would otherwise come out of the UI thread's raster
 // budget.
 @(private)
 warm_face :: proc(l: ^Loader, face: ^Face, r: rune) {
@@ -592,12 +585,9 @@ glyph_run :: proc(face: ^Face, px_size, size: f32, glyph: ^u16) -> DWRITE_GLYPH_
 // pixels from a bitmap's top left, and the coverage's bounds.
 @(private)
 glyph_analysis :: proc(factory: ^IDWriteFactory, run: ^DWRITE_GLYPH_RUN, x, y: f32) -> (analysis: ^IDWriteGlyphRunAnalysis, bounds: windows.RECT) {
-	t0 := time.tick_now()
 	if factory->CreateGlyphRunAnalysis(run, nil, DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC, DWRITE_MEASURING_MODE_NATURAL, DWRITE_GRID_FIT_MODE_DEFAULT, DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE, x, y, &analysis) < 0 {
 		return nil, {}
 	}
-	timing.analysis += time.tick_since(t0)
-	timing.n += 1
 	if analysis->GetAlphaTextureBounds(DWRITE_TEXTURE_ALIASED_1x1, &bounds) < 0 {
 		release(analysis)
 		return nil, {}
@@ -684,8 +674,6 @@ draw_analysis :: proc(analysis: ^IDWriteGlyphRunAnalysis, bounds: windows.RECT, 
 	}
 	alpha := make([]byte, bw * bh, context.temp_allocator)
 	from := windows.RECT{b.left - dx, b.top - dy, b.right - dx, b.bottom - dy}
-	t0 := time.tick_now()
-	defer timing.texture += time.tick_since(t0)
 	if analysis->CreateAlphaTexture(DWRITE_TEXTURE_ALIASED_1x1, &from, raw_data(alpha), u32(len(alpha))) < 0 {
 		return
 	}
