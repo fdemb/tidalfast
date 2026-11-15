@@ -1275,10 +1275,10 @@ WGHT :: u32('w') | u32('g') << 8 | u32('h') << 16 | u32('t') << 24
 
 // push_face pushes face onto kb_text_shape's font stack, set to its
 // instance at size points. kb_text_shape keeps a shape config, about 25 KB,
-// for each instance and script it shapes until the context is reset, so
-// with optical_size every point size of the face costs one. Keep sizes to
-// a few fixed values: the context running out of memory resets it and
-// shapes the run again (kb_shape).
+// for each font and script it shapes until the context is reset. A font
+// with feature variations needs one per instance too, so with
+// optical_size one per point size: keep sizes to a few fixed values for
+// those, or the context runs out of memory and kb_shape resets it.
 @(private)
 push_face :: proc(ctx: ^kbts.shape_context, face: ^Face, size: f32) {
 	axes := face.axes

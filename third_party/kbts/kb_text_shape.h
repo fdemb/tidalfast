@@ -27018,6 +27018,24 @@ KBTS_EXPORT int kbts_ShapeGetShapeCodepoint2(kbts_shape_context *Context, int Co
   return Result;
 }
 
+// TIDALfast: a shape config reads the variation vector only to pick feature variations, so a font
+// without any shares its configs between instances.
+static int kbts__FontHasFeatureVariations(kbts_font *Font)
+{
+  kbts_blob_table_id TableIds[] = {KBTS_BLOB_TABLE_ID_GSUB, KBTS_BLOB_TABLE_ID_GPOS};
+  KBTS__FOR(TableIndex, 0, KBTS__ARRAY_LENGTH(TableIds))
+  {
+    kbts__gsub_gpos *GsubGpos = kbts__BlobTableDataType(Font->Blob, TableIds[TableIndex], kbts__gsub_gpos);
+    if(GsubGpos &&
+       (kbts__ReadU16Unaligned(&GsubGpos->Minor) == 1) &&
+       kbts__ReadU32Unaligned(&GsubGpos->FeatureVariationsOffset))
+    {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 static kbts__interned_context_font_info *kbts__InternContextFontInfo(kbts_shape_context *Context, kbts__context_font_info *FontInfo)
 {
   kbts__interned_context_font_info *Result = &Context->DummyFontInfo;
@@ -27067,7 +27085,9 @@ static kbts__interned_context_font_info *kbts__InternContextFontInfo(kbts_shape_
         kbts__MurmurBegin(&Murmur, 0x97978573);
         kbts__MurmurAbsorb(&Murmur, (kbts_u32)(kbts_un)FontInfo->Font);
         kbts__MurmurAbsorb(&Murmur, (kbts_u32)((kbts_un)FontInfo->Font >> 32));
-        if(VariationVector)
+        // TIDALfast: New->Hash only keys shape configs, so leave the variations out of it when
+        // the configs don't depend on them. Every point size of a font with opsz made one before.
+        if(VariationVector && kbts__FontHasFeatureVariations(FontInfo->Font))
         {
           for(int AxisIndex = 0;
               AxisIndex < AxisCount;
