@@ -1,5 +1,5 @@
-// The parts of the shell shared by shell_wayland.c and shell_win32.c. See
-// common.h.
+// The parts of the shell shared by shell_cocoa.m, shell_wayland.c and
+// shell_win32.c. See common.h.
 
 #define _CRT_SECURE_NO_WARNINGS
 #define _CRT_NONSTDC_NO_DEPRECATE
@@ -17,12 +17,17 @@
 atomic_bool g_needs_redraw;
 atomic_bool g_quit;
 double g_start_time;
-Event *g_events;
-uint32_t g_event_count;
-static uint32_t g_event_capacity;
-uint8_t *g_text;
-uint32_t g_text_len;
-static uint32_t g_text_cap;
+bool g_now_playing_log;
+
+void common_init(void) {
+  g_start_time = now_seconds();
+  g_now_playing_log = getenv("TIDALFAST_NOW_PLAYING_LOG") != NULL;
+}
+
+static Event *g_events;
+static uint32_t g_event_count, g_event_capacity;
+static uint8_t *g_text;
+static uint32_t g_text_len, g_text_cap;
 
 // push_text copies text for an event into the frame's text buffer.
 void push_text(Event *e, const char *text, size_t n) {
@@ -61,7 +66,8 @@ static bool coalesce(Event *last, Event e) {
 }
 
 // The queue grows rather than drop an event or draw early: a lost mouse up
-// or key up leaves it stuck down.
+// or key up leaves it stuck down. It only gets long if the main loop goes a
+// long time without drawing.
 void push_event(Event e) {
   if (g_event_count == 0 || !coalesce(&g_events[g_event_count - 1], e)) {
     if (g_event_count == g_event_capacity) {
@@ -101,12 +107,13 @@ void queue_take(Event **events, uint32_t *count, const uint8_t **text, uint32_t 
 
 // Now Playing
 //
-// Not shown anywhere yet: MPRIS over D-Bus on Linux, the System Media
-// Transport Controls on Windows. TIDALFAST_NOW_PLAYING_LOG=1 prints what
-// the app sets, and TIDALFAST_REMOTE_TEST="3:pause,5:play,7:seek=42,9:next"
-// sends media commands as the media keys do.
-
-bool g_now_playing_log;
+// macOS shows it in Control Center (shell_cocoa.m). Linux and Windows
+// don't show it anywhere yet, MPRIS over D-Bus and the System Media
+// Transport Controls to come, and print_now_playing only logs what the app
+// sets.
+// TIDALFAST_NOW_PLAYING_LOG=1 prints it, and
+// TIDALFAST_REMOTE_TEST="3:pause,5:play,7:seek=42,9:next" sends media
+// commands as the media keys do.
 
 void remote_command(uint32_t command, double position) {
   push_event((Event){.kind = EVENT_MEDIA, .media = (uint8_t)command, .dx = (float)position, .time = now_seconds()});
@@ -114,7 +121,7 @@ void remote_command(uint32_t command, double position) {
   request_redraw();
 }
 
-void set_now_playing(const Now_Playing *np) {
+void print_now_playing(const Now_Playing *np) {
   if (!g_now_playing_log) return;
   if (!np || !np->title) {
     fprintf(stderr, "shell: now playing: state 0, title \"\"\n");
@@ -138,7 +145,8 @@ static int g_remote_count, g_remote_next;
 // Text input
 //
 // See Text_Mirror in common.h. text-input-v3 and the shell's IME code on
-// Windows both work in the mirror's UTF-8 bytes.
+// Windows work in the mirror's UTF-8 bytes. AppKit counts in UTF-16 units,
+// which shell_cocoa.m converts, rounding down to a whole codepoint.
 
 Text_Mirror g_ti = {.marked_start = -1, .marked_end = -1};
 
@@ -369,22 +377,16 @@ bool mirror_set(const Text_Input *ti) {
 
 // Accessibility
 //
-// Not exposed to assistive apps yet: AT-SPI over D-Bus on Linux, UI
-// Automation on Windows. The shell keeps a copy of the tree for the test
-// driver, and offers set_accessibility only when it runs.
+// macOS hands the tree to assistive apps (shell_cocoa.m). Linux and
+// Windows don't expose it yet, AT-SPI over D-Bus and UI Automation to come,
+// and keep the copy for the test driver, offering set_accessibility only
+// when it runs.
 
-typedef struct {
-  uint64_t id;
-  int32_t parent;
-  uint32_t role, flags;
-  float frame[4];
-  char *label, *value; // malloc'd, or NULL
-} Shell_Node;
+Shell_Node *g_nodes;
+uint32_t g_node_count;
+static uint32_t g_node_cap;
 
-static Shell_Node *g_nodes;
-static uint32_t g_node_count, g_node_cap;
-
-void set_accessibility(const Access_Node *nodes, uint32_t count) {
+void access_store(const Access_Node *nodes, uint32_t count) {
   for (uint32_t i = 0; i < g_node_count; i++) {
     free(g_nodes[i].label);
     free(g_nodes[i].value);
@@ -413,20 +415,22 @@ static const char *access_role_name(uint32_t role) {
   return role < sizeof names / sizeof names[0] ? names[role] : "?";
 }
 
-static bool access_pressable(uint32_t role) {
+bool access_pressable(uint32_t role) {
   return role == ACCESS_BUTTON || role == ACCESS_ROW || role == ACCESS_MENU_ITEM;
 }
 
 // TIDALFAST_SHELL_TEST runs steps against the shell's own entry points, for
 // checking text input and accessibility without a person at the keyboard:
 // "2:key=ctrl+f;3:mark=にほんご;4:commit=日本語;6:ax-dump;7:ax-press=Next".
-// Steps are seconds after launch and a command, separated by semicolons.
-// Commands joined with | run together, with no frame between them. The
-// same steps as on macOS (see shell.m), with ranges in UTF-16 units there
-// too; ax-dump prints the tree as the app sent it, and ax-press sends the
-// app the press an assistive app would.
+// Steps are seconds after the window is up and a command, separated by
+// semicolons. Commands joined with | run together, with no frame between
+// them. Ranges are in UTF-16 units on every OS. Here, ax-dump prints the
+// tree as the app sent it, and ax-press sends the app the press an
+// assistive app would; macOS takes those and the input method's steps
+// itself, to go through AppKit (os_test_step in shell_cocoa.m).
 //
-//   key=ctrl+shift+z    a key down and up (letters, digits, escape, return, tab, left...)
+//   key=ctrl+shift+z    a key down and up, with cmd or super, ctrl, opt or alt, and shift
+//                       (letters, digits, escape, return, tab, left...)
 //   mark=text           a composition, with the caret at the end of text
 //   commit=text         text from an input method
 //   mark-range=l,n,text a composition replacing UTF-16 units [l, l+n)
@@ -440,8 +444,8 @@ static bool access_pressable(uint32_t role) {
 //   capture=path        copy the last TIDALFAST_CAPTURE frame to path
 //   quit
 //
-// Each OS's shell adds its own (os_test_step): size=w,h and the scrolls on
-// Linux and Windows, which shell_wayland.c and shell_win32.c list.
+// Each OS's shell adds its own (os_test_step), such as size=w,h, which
+// shell_cocoa.m, shell_wayland.c and shell_win32.c list.
 
 typedef struct {
   double at;
@@ -450,6 +454,7 @@ typedef struct {
 
 static Test_Step *g_test_steps;
 static int g_test_count, g_test_next;
+static double g_test_start; // now_seconds at setup_shell_test, which step times count from
 
 static uint32_t key_named(const char *name) {
   static const struct {
@@ -588,7 +593,9 @@ static bool copy_file(const char *from, const char *to) {
 
 static void test_step(const char *command, char *arg) {
   int64_t lo, hi;
-  if (!strcmp(command, "key")) {
+  if (os_test_step(command, arg)) {
+    // The OS's own, or its own way of a shared one.
+  } else if (!strcmp(command, "key")) {
     test_key(arg);
   } else if (!strcmp(command, "mark")) {
     text_set_marked(arg, (uint32_t)strlen(arg), (uint32_t)strlen(arg), -1, -1);
@@ -620,7 +627,7 @@ static void test_step(const char *command, char *arg) {
   } else if (!strcmp(command, "quit")) {
     atomic_store(&g_quit, true);
     request_redraw();
-  } else if (!os_test_step(command, arg)) {
+  } else {
     fprintf(stderr, "shell: test: unknown step %s\n", command);
   }
 }
@@ -635,13 +642,13 @@ static void arm_test_timer(void) {
   if (g_test_next < g_test_count) next = g_test_steps[g_test_next].at;
   if (g_remote_next < g_remote_count && g_remote_steps[g_remote_next].at < next) next = g_remote_steps[g_remote_next].at;
   if (next < 1e30) {
-    double after = next - (now_seconds() - g_start_time);
+    double after = next - (now_seconds() - g_test_start);
     os_arm_test_timer(after > 0 ? after : 1e-6);
   }
 }
 
 void run_due_steps(void) {
-  double now = now_seconds() - g_start_time;
+  double now = now_seconds() - g_test_start;
   while (g_test_next < g_test_count && g_test_steps[g_test_next].at <= now) {
     Test_Step *s = &g_test_steps[g_test_next++];
     fprintf(stderr, "shell: test step %g:%s\n", s->at, s->text);
@@ -665,6 +672,7 @@ void run_due_steps(void) {
 }
 
 void setup_shell_test(void) {
+  g_test_start = now_seconds();
   const char *script = getenv("TIDALFAST_SHELL_TEST");
   if (script) {
     char *copy = strdup(script), *save;
@@ -678,7 +686,6 @@ void setup_shell_test(void) {
     free(copy);
     qsort(g_test_steps, (size_t)g_test_count, sizeof(Test_Step), compare_steps);
   }
-  g_now_playing_log = getenv("TIDALFAST_NOW_PLAYING_LOG") != NULL;
   const char *remote = getenv("TIDALFAST_REMOTE_TEST");
   if (remote) {
     static const struct {

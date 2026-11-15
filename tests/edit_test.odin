@@ -236,7 +236,7 @@ test_edit_limit_and_sanitize :: proc(t: ^testing.T) {
 }
 
 // The field and the shell's mirror clean text the same way byte for byte.
-// The outputs are what shell.m's field_sanitize printed for the same inputs
+// The outputs are what the shell's field_sanitize printed for the same inputs
 // (TIDALFAST_SHELL_TEST clean=...).
 @(test)
 test_edit_sanitize_table :: proc(t: ^testing.T) {
