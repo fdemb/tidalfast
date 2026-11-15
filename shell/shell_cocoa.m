@@ -1,41 +1,49 @@
-// The platform side of the executable. Owns NSApplication, the window and
-// the CAMetalLayer, collects input into an event array, and drives the app
-// through the entry points in platform.h. src/app's main calls shell_main.
-// It redraws only when something asks for it:
-// input, resize or request_redraw from any thread. While the app
-// reports it is animating and the window is visible, the display link adds a
-// frame every vsync, and other redraws wait for the next tick. A frame can
-// also ask to be woken after a delay, which a one-shot timer does.
+// The platform side of the macOS executable. Owns NSApplication, the window
+// and its CAMetalLayer, collects input into the event queue (common.c), and
+// drives the app through the entry points in platform.h, as
+// shell_wayland.c and shell_win32.c do on Linux and Windows. src/app's main
+// calls shell_main. The renderer draws to the CAMetalLayer it gets.
+//
+// It redraws only when something asks for it: input, a resize or
+// request_redraw from any thread. The run loop draws once per pass, just
+// before it sleeps, for everything that came. While the app reports it is
+// animating and the window is visible, the display link adds a frame every
+// vsync, and other redraws wait for the next tick. A frame can also ask to
+// be woken after a delay, which a one-shot timer does.
 //
 // The view is an NSTextInputClient, so input methods work in the app's text
 // fields, and it hands assistive apps an accessibility tree the app builds
-// from its boxes.
+// from its boxes. MPRemoteCommandCenter brings the media keys and
+// MPNowPlayingInfoCenter shows what plays.
+//
+// The window keeps the system's titlebar buttons, and the view goes up
+// under them: the app keeps room for them (Frame_Input.titlebar_height and
+// titlebar_inset), and the empty parts of the top move the window
+// (set_drag_regions).
 
 #import <Carbon/Carbon.h> // kVK_* only
 #import <Cocoa/Cocoa.h>
 #import <MediaPlayer/MediaPlayer.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
-#include <copyfile.h>
-#include <stdatomic.h>
 #include <sys/mman.h>
 #include <sys/sysctl.h>
 #include <sys/time.h>
 
-#include "platform.h"
+#include "common.h"
 
 #define PERSISTENT_SIZE (256ull << 20)
 #define FRAME_SIZE (64ull << 20)
+#define DEFAULT_WIDTH 1100
+#define DEFAULT_HEIGHT 700
+#define MIN_WIDTH 480
+#define MIN_HEIGHT 360
 
 static bool g_app_started; // app_init has run, so frames can be drawn
-
 static Memory g_memory;
 static Shell g_shell;
-static Event *g_events;
-static uint32_t g_event_count;
-static uint32_t g_event_capacity;
-static atomic_bool g_needs_redraw;
 static bool g_animating;
+static bool g_in_frame; // inside app_frame
 static bool g_parked; // the window can't be seen and its drawables are a pixel, see update_parking
 static bool g_never_park; // TIDALFAST_CAPTURE is set
 static double g_last_tick; // CACurrentMediaTime of the last display link frame
@@ -43,11 +51,8 @@ static double g_tick_interval = 1.0 / 60;
 static CFRunLoopTimerRef g_tick_fallback;
 static CFRunLoopTimerRef g_wake_timer; // fires when a frame asked for wake_after
 static bool g_wake_armed; // g_wake_timer is set to fire, see draw_frame
-static uint8_t *g_text; // bytes text events point into, reset with the events
-static uint32_t g_text_len;
-static uint32_t g_text_cap;
+static CFRunLoopTimerRef g_test_timer; // the next test step
 static CFRunLoopRef g_main_run_loop;
-static double g_start_time;
 
 static NSWindow *g_window;
 static NSView *g_view;
@@ -83,7 +88,10 @@ static void measure_init(void) {
   g_process_start_us = (int64_t)start.tv_sec * 1000000 + start.tv_usec;
 }
 
-static void request_redraw(void) {
+// NSEvent timestamps count from the same start.
+double now_seconds(void) { return CACurrentMediaTime(); }
+
+void request_redraw(void) {
   atomic_store(&g_needs_redraw, true);
   CFRunLoopWakeUp(g_main_run_loop);
 }
@@ -99,8 +107,10 @@ static uint32_t held_mouse_buttons(void) {
   return held;
 }
 
+// A frame that asks for another from inside app_frame, as a resize can,
+// gets the next one; the app is never re-entered.
 static void draw_frame(void) {
-  if (!g_app_started) return;
+  if (!g_app_started || g_in_frame) return;
   atomic_store(&g_needs_redraw, false);
 
   NSSize size = g_view.bounds.size;
@@ -114,27 +124,24 @@ static void draw_frame(void) {
   }
   NSButton *zoom = [g_window standardWindowButton:NSWindowZoomButton];
   Frame_Input input = {
-      .events = g_events,
-      .event_count = g_event_count,
       .width = size.width,
       .height = size.height,
       .scale = g_window.backingScaleFactor,
-      .time = CACurrentMediaTime() - g_start_time,
-      .text = g_text,
-      .text_length = g_text_len,
+      .time = now_seconds() - g_start_time,
       .key_window = g_window.isKeyWindow,
       .mouse_buttons = held_mouse_buttons(),
       .titlebar_height = titlebar > 0 ? titlebar : 0,
       .titlebar_inset = titlebar > 0 && zoom ? NSMaxX(zoom.frame) : 0,
       .frame_interval = g_tick_interval,
   };
+  queue_take(&input.events, &input.event_count, &input.text, &input.text_length);
   Frame_Result result;
+  g_in_frame = true;
   @autoreleasepool {
     result = app_frame(&g_memory, &g_shell, &input);
-    access_frame_done();
   }
-  g_event_count = 0;
-  g_text_len = 0;
+  g_in_frame = false;
+  access_frame_done();
   g_animating = result.animating;
   update_display_link();
   // Moving a timer in the common modes costs about 13,000 instructions even
@@ -151,56 +158,6 @@ static void draw_frame(void) {
 static void wake_timer_fired(CFRunLoopTimerRef timer, void *info) {
   g_wake_armed = false;
   request_redraw();
-}
-
-// push_text copies text for an event into the frame's text buffer.
-static void push_text(Event *e, const char *text, size_t n) {
-  if (g_text_len + n > g_text_cap) {
-    while (g_text_len + n > g_text_cap) g_text_cap = g_text_cap ? g_text_cap * 2 : 1024;
-    g_text = realloc(g_text, g_text_cap);
-  }
-  memcpy(g_text + g_text_len, text, n);
-  e->text_offset = g_text_len;
-  e->text_length = (uint32_t)n;
-  g_text_len += (uint32_t)n;
-}
-
-static bool continuous_phase(uint32_t phase) {
-  return phase == SCROLL_PHASE_NONE || phase == SCROLL_PHASE_CHANGED;
-}
-
-// Folds e into the last queued event when nothing between them matters: a
-// move or resize replaces the one before it, and a scroll adds to a scroll in
-// the same phase. Phase changes such as began and ended keep their own event.
-static bool coalesce(Event *last, Event e) {
-  if (last->kind != e.kind) return false;
-  if (e.kind == EVENT_MOUSE_MOVE || e.kind == EVENT_RESIZE) {
-    *last = e;
-    return true;
-  }
-  if (e.kind == EVENT_SCROLL && last->phase == e.phase && last->momentum_phase == e.momentum_phase &&
-      continuous_phase(e.phase) && continuous_phase(e.momentum_phase) && last->precise == e.precise &&
-      last->modifiers == e.modifiers) {
-    e.dx += last->dx;
-    e.dy += last->dy;
-    *last = e;
-    return true;
-  }
-  return false;
-}
-
-// The queue grows rather than drop an event or draw early: a lost mouse up
-// or key up leaves it stuck down. It only gets long if the run loop goes a
-// long time without sleeping.
-static void push_event(Event e) {
-  if (g_event_count == 0 || !coalesce(&g_events[g_event_count - 1], e)) {
-    if (g_event_count == g_event_capacity) {
-      g_event_capacity = g_event_capacity ? g_event_capacity * 2 : 256;
-      g_events = realloc(g_events, g_event_capacity * sizeof(Event));
-    }
-    g_events[g_event_count++] = e;
-  }
-  atomic_store(&g_needs_redraw, true);
 }
 
 // When the next display link frame is due, the deadline by which it should
@@ -239,19 +196,11 @@ static void tick_fallback_fired(CFRunLoopTimerRef timer, void *info) {}
 // becomes an EVENT_MEDIA in the app's next frame.
 //
 // TIDALFAST_NOW_PLAYING_LOG=1 prints nowPlayingInfo as macOS holds it after
-// every update. TIDALFAST_REMOTE_TEST="3:pause,5:play,7:seek=42,9:next"
-// sends commands through the same path as the real handlers, each that
-// many seconds after launch, for testing without a keyboard.
+// every update. TIDALFAST_REMOTE_TEST (common.c) sends commands through
+// remote_command, as the handlers here do.
 
 static MPMediaItemArtwork *g_artwork;
 static uint64_t g_artwork_key;
-static bool g_now_playing_log;
-
-static void remote_command(uint32_t command, double position) {
-  push_event((Event){.kind = EVENT_MEDIA, .media = (uint8_t)command, .dx = (float)position, .time = CACurrentMediaTime()});
-  if (g_now_playing_log) fprintf(stderr, "shell: remote command %u (%.3f)\n", command, position);
-  request_redraw();
-}
 
 static MPMediaItemArtwork *make_artwork(const Now_Playing *np) {
   size_t w = np->artwork_width, h = np->artwork_height;
@@ -315,7 +264,6 @@ static void set_now_playing(const Now_Playing *np) {
 }
 
 static void setup_remote_commands(void) {
-  g_now_playing_log = getenv("TIDALFAST_NOW_PLAYING_LOG") != NULL;
   MPRemoteCommandCenter *center = MPRemoteCommandCenter.sharedCommandCenter;
   struct {
     MPRemoteCommand *command;
@@ -340,293 +288,67 @@ static void setup_remote_commands(void) {
     remote_command(MEDIA_SEEK, ((MPChangePlaybackPositionCommandEvent *)event).positionTime);
     return MPRemoteCommandHandlerStatusSuccess;
   }];
-
-  const char *script = getenv("TIDALFAST_REMOTE_TEST");
-  if (!script) return;
-  NSDictionary *names = @{
-    @"play" : @(MEDIA_PLAY),
-    @"pause" : @(MEDIA_PAUSE),
-    @"toggle" : @(MEDIA_TOGGLE),
-    @"next" : @(MEDIA_NEXT),
-    @"previous" : @(MEDIA_PREVIOUS),
-    @"seek" : @(MEDIA_SEEK),
-  };
-  for (NSString *step in [@(script) componentsSeparatedByString:@","]) {
-    NSArray *at = [step componentsSeparatedByString:@":"];
-    if (at.count != 2) continue;
-    NSArray *arg = [at[1] componentsSeparatedByString:@"="];
-    NSNumber *kind = names[arg[0]];
-    if (!kind) continue;
-    uint32_t command = kind.unsignedIntValue;
-    double value = arg.count > 1 ? [arg[1] doubleValue] : 0;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)([at[0] doubleValue] * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-                     fprintf(stderr, "shell: remote test sends %s\n", [step UTF8String]);
-                     remote_command(command, value);
-                   });
-  }
 }
 
 // Text input
 //
 // The app tells the shell about the focused text field after each frame
-// (set_text_input): its text, selection, marked text and where the caret
-// is. Input methods ask NSTextInputClient questions synchronously, often
-// right after setMarkedText and before the app has had a frame, so the
-// shell keeps a mirror of the field and applies each edit it sends on to
-// the app to the mirror as well. The app's next state replaces the mirror.
-// The app counts in UTF-8 bytes and AppKit in UTF-16 units; the mirror
-// converts, rounding down to a whole codepoint. Both sides take the input
-// method's edits by rules that need no segmentation, so they agree: the
-// text is cleaned the same way byte for byte (field_sanitize and the app's
-// sanitize), a replacement range is clamped to the text and rounded down to
-// codepoints, and an edit that doesn't fit the limit is refused whole.
+// (set_text_input), and the shell keeps a mirror of it (Text_Mirror in
+// common.h), since input methods ask NSTextInputClient questions
+// synchronously, often right after setMarkedText and before the app has had
+// a frame. The view's NSTextInputClient methods hand the input method's
+// edits to common.c's text_insert, text_set_marked and text_unmark, which
+// send them to the app and apply them to the mirror. AppKit counts in
+// UTF-16 units and the mirror in UTF-8 bytes; the view converts, rounding
+// down to a whole codepoint.
 
-static struct {
-  bool active;
-  uint8_t *bytes;
-  uint32_t length, capacity;
-  uint32_t limit; // the field's, in bytes; 0 for none
-  uint32_t sel_start, sel_end;
-  int32_t marked_start, marked_end; // -1 without marked text
-  NSRect caret; // view points
-} g_ti = {.marked_start = -1, .marked_end = -1};
 static bool g_ime_handled; // the input method took the key being handled
-
-static uint32_t utf8_width(uint8_t c) { return c < 0xc0 ? 1 : c < 0xe0 ? 2 : c < 0xf0 ? 3 : 4; }
-
-static NSUInteger utf16_of_byte(const uint8_t *s, uint32_t len, uint32_t byte) {
-  NSUInteger n = 0;
-  for (uint32_t i = 0; i < byte && i < len;) {
-    uint32_t w = utf8_width(s[i]);
-    n += w == 4 ? 2 : 1;
-    i += w;
-  }
-  return n;
-}
-
-// byte_of_utf16 never lands between a surrogate pair's halves.
-static uint32_t byte_of_utf16(const uint8_t *s, uint32_t len, NSUInteger u16) {
-  NSUInteger n = 0;
-  uint32_t i = 0;
-  while (i < len) {
-    uint32_t w = utf8_width(s[i]);
-    NSUInteger units = w == 4 ? 2 : 1;
-    if (n + units > u16) break;
-    n += units;
-    i += w;
-  }
-  return i < len ? i : len;
-}
-
-static void mirror_replace(uint32_t lo, uint32_t hi, const char *text, uint32_t n) {
-  uint32_t length = g_ti.length - (hi - lo) + n;
-  if (length > g_ti.capacity) {
-    g_ti.capacity = length * 2 + 64;
-    g_ti.bytes = realloc(g_ti.bytes, g_ti.capacity);
-  }
-  memmove(g_ti.bytes + lo + n, g_ti.bytes + hi, g_ti.length - hi);
-  memcpy(g_ti.bytes + lo, text, n);
-  g_ti.length = length;
-}
-
-// The range an edit replaces: the one the input method gave, else the
-// marked text, else the selection.
-static void edit_range(NSRange given, Event *e, uint32_t *lo, uint32_t *hi) {
-  if (given.location != NSNotFound) {
-    *lo = byte_of_utf16(g_ti.bytes, g_ti.length, given.location);
-    *hi = byte_of_utf16(g_ti.bytes, g_ti.length, given.location + given.length);
-    if (*hi < *lo) *hi = *lo;
-    e->replace = 1;
-    e->replace_start = (int32_t)*lo;
-    e->replace_end = (int32_t)*hi;
-  } else if (g_ti.marked_start >= 0) {
-    *lo = (uint32_t)g_ti.marked_start;
-    *hi = (uint32_t)g_ti.marked_end;
-  } else {
-    *lo = g_ti.sel_start;
-    *hi = g_ti.sel_end;
-  }
-}
 
 static NSString *plain_string(id string) {
   return [string isKindOfClass:NSAttributedString.class] ? [(NSAttributedString *)string string] : (NSString *)string;
 }
 
-// utf8_decode reads one codepoint as Odin's utf8.decode_rune does: an
-// invalid or cut short sequence is U+FFFD one byte long.
-static uint32_t utf8_decode(const uint8_t *s, uint32_t n, uint32_t *cp) {
-  uint8_t c = s[0];
-  uint32_t w = 0, min = 0x80, max = 0xbf;
-  if (c < 0x80) {
-    *cp = c;
-    return 1;
-  } else if (c >= 0xc2 && c <= 0xdf) {
-    w = 2;
-  } else if (c >= 0xe0 && c <= 0xef) {
-    w = 3;
-    if (c == 0xe0) min = 0xa0;
-    if (c == 0xed) max = 0x9f;
-  } else if (c >= 0xf0 && c <= 0xf4) {
-    w = 4;
-    if (c == 0xf0) min = 0x90;
-    if (c == 0xf4) max = 0x8f;
+static uint32_t utf16_index(NSUInteger i) { return i > UINT32_MAX ? UINT32_MAX : (uint32_t)i; }
+
+// A range of the field's text in UTF-16 units as bytes, -1 for none.
+static void byte_range(NSRange r, int64_t *lo, int64_t *hi) {
+  if (r.location == NSNotFound) {
+    *lo = *hi = -1;
+    return;
   }
-  *cp = 0xfffd;
-  if (w == 0 || n < w || s[1] < min || s[1] > max) return 1;
-  for (uint32_t i = 2; i < w; i++)
-    if (s[i] < 0x80 || s[i] > 0xbf) return 1;
-  uint32_t r = c & (0xff >> (w + 1));
-  for (uint32_t i = 1; i < w; i++) r = r << 6 | (s[i] & 0x3f);
-  *cp = r;
-  return w;
-}
-
-// field_sanitize cleans n bytes of text as the app's field does (sanitize
-// in src/ui/edit.odin): a run of line breaks and tabs (LF, CR, tab, NEL,
-// U+2028, U+2029) becomes one space, or none at the start, and the other
-// C0 and C1 controls, DEL, U+FFFD and invalid bytes go. It writes to out,
-// which has room for n bytes, and returns the length.
-static uint32_t field_sanitize(const char *text, uint32_t n, char *out) {
-  const uint8_t *s = (const uint8_t *)text;
-  uint32_t o = 0;
-  for (uint32_t i = 0; i < n;) {
-    uint32_t cp, w = utf8_decode(s + i, n - i, &cp);
-    if (cp == '\n' || cp == '\r' || cp == '\t' || cp == 0x85 || cp == 0x2028 || cp == 0x2029) {
-      if (o > 0 && out[o - 1] != ' ') out[o++] = ' ';
-    } else if (!(cp < 0x20 || (cp >= 0x7f && cp <= 0x9f) || cp == 0xfffd)) {
-      memcpy(out + o, s + i, w);
-      o += w;
-    }
-    i += w;
-  }
-  return o;
-}
-
-// field_fits says whether n bytes in place of [lo, hi) keep the field
-// within its limit. An input method's edit that doesn't fit is refused
-// whole, by the app too, so the two never cut text in different places.
-static bool field_fits(uint32_t n, uint32_t lo, uint32_t hi) {
-  return !g_ti.limit || (uint64_t)g_ti.length - (hi - lo) + n <= g_ti.limit;
-}
-
-// utf8_start moves p back to the start of the UTF-8 sequence it's in.
-static uint32_t utf8_start(const uint8_t *s, uint32_t n, uint32_t p) {
-  while (p > 0 && p < n && (s[p] & 0xc0) == 0x80) p--;
-  return p;
-}
-
-static void text_insert(id string, NSRange replacement) {
-  const char *utf8 = plain_string(string).UTF8String ?: "";
-  uint32_t n = (uint32_t)strlen(utf8);
-  Event e = {.kind = EVENT_TEXT, .time = CACurrentMediaTime()};
-  push_text(&e, utf8, n);
-  uint32_t lo, hi;
-  edit_range(replacement, &e, &lo, &hi);
-  char *clean = malloc(n + 1);
-  uint32_t cn = field_sanitize(utf8, n, clean);
-  if (!field_fits(cn, lo, hi)) {
-    // Refused: a composition ends as it was, as unmarkText does.
-    if (g_ti.marked_start >= 0) g_ti.sel_start = g_ti.sel_end = (uint32_t)g_ti.marked_end;
-  } else if (cn > 0 || lo != hi) {
-    // The field leaves itself alone when nothing goes in and nothing goes.
-    mirror_replace(lo, hi, clean, cn);
-    g_ti.sel_start = g_ti.sel_end = lo + cn;
-  }
-  free(clean);
-  g_ti.marked_start = g_ti.marked_end = -1;
-  g_ime_handled = true;
-  push_event(e);
-  request_redraw();
-}
-
-static void text_set_marked(id string, NSRange selected, NSRange replacement) {
-  const char *utf8 = plain_string(string).UTF8String ?: "";
-  uint32_t n = (uint32_t)strlen(utf8);
-  Event e = {.kind = EVENT_MARKED_TEXT, .time = CACurrentMediaTime()};
-  push_text(&e, utf8, n);
-  uint32_t sel_lo = byte_of_utf16((const uint8_t *)utf8, n, selected.location);
-  uint32_t sel_hi = byte_of_utf16((const uint8_t *)utf8, n, selected.location + selected.length);
-  e.select_start = (int32_t)sel_lo;
-  e.select_end = (int32_t)(sel_hi < sel_lo ? sel_lo : sel_hi);
-  uint32_t lo, hi;
-  edit_range(replacement, &e, &lo, &hi);
-  char *clean = malloc(n + 1);
-  uint32_t cn = field_sanitize(utf8, n, clean);
-  if (!field_fits(cn, lo, hi)) {
-    // Refused: the mirror stays as it was.
-  } else if (cn > 0) {
-    mirror_replace(lo, hi, clean, cn);
-    // The selection was found in the text as given. The field clamps it to
-    // what it kept and rounds it down to a codepoint.
-    uint32_t end = (uint32_t)e.select_end;
-    g_ti.marked_start = (int32_t)lo;
-    g_ti.marked_end = (int32_t)(lo + cn);
-    g_ti.sel_start = lo + utf8_start((const uint8_t *)clean, cn, sel_lo < cn ? sel_lo : cn);
-    g_ti.sel_end = lo + utf8_start((const uint8_t *)clean, cn, end < cn ? end : cn);
-  } else {
-    mirror_replace(lo, hi, clean, cn);
-    g_ti.marked_start = g_ti.marked_end = -1;
-    g_ti.sel_start = g_ti.sel_end = lo;
-  }
-  free(clean);
-  g_ime_handled = true;
-  push_event(e);
-  request_redraw();
-}
-
-static void text_unmark(void) {
-  if (g_ti.marked_start >= 0) g_ti.sel_start = g_ti.sel_end = (uint32_t)g_ti.marked_end;
-  g_ti.marked_start = g_ti.marked_end = -1;
-  g_ime_handled = true;
-  push_event((Event){.kind = EVENT_UNMARK_TEXT, .time = CACurrentMediaTime()});
-  request_redraw();
+  *lo = byte_of_utf16(g_ti.bytes, g_ti.length, utf16_index(r.location));
+  *hi = byte_of_utf16(g_ti.bytes, g_ti.length, utf16_index(r.location + r.length));
 }
 
 static void set_text_input(const Text_Input *ti) {
-  if (!ti || !ti->text) {
-    if (g_ti.active && g_ti.marked_start >= 0) [g_view.inputContext discardMarkedText];
-    g_ti.active = false;
-    g_ti.length = g_ti.sel_start = g_ti.sel_end = 0;
-    g_ti.marked_start = g_ti.marked_end = -1;
-    return;
-  }
   // The app ended a composition itself, as when the field lost the focus:
   // the input method has to forget it too.
-  bool discard = g_ti.active && g_ti.marked_start >= 0 && ti->marked_start < 0;
-  g_ti.length = 0;
-  mirror_replace(0, 0, (const char *)ti->text, ti->length);
-  g_ti.sel_start = ti->selection_start;
-  g_ti.sel_end = ti->selection_end;
-  g_ti.marked_start = ti->marked_start;
-  g_ti.marked_end = ti->marked_end;
-  g_ti.limit = ti->limit;
-  NSRect caret = NSMakeRect(ti->caret[0], ti->caret[1], ti->caret[2], ti->caret[3]);
-  bool moved = !NSEqualRects(caret, g_ti.caret);
-  g_ti.caret = caret;
-  g_ti.active = true;
-  if (discard) [g_view.inputContext discardMarkedText];
-  if (moved) [g_view.inputContext invalidateCharacterCoordinates];
+  bool was_marked = g_ti.active && g_ti.marked_start >= 0;
+  float caret[4];
+  memcpy(caret, g_ti.caret, sizeof caret);
+  mirror_set(ti);
+  if (was_marked && g_ti.marked_start < 0) [g_view.inputContext discardMarkedText];
+  if (g_ti.active && memcmp(caret, g_ti.caret, sizeof caret) != 0) [g_view.inputContext invalidateCharacterCoordinates];
 }
 
 // Window dragging
 
 // The view draws under the titlebar, so the app says which parts of it are
 // empty and move the window, as the titlebar itself would.
-#define MAX_DRAG_REGIONS 16
-static NSRect g_drag_regions[MAX_DRAG_REGIONS];
+#define MAX_DRAG_REGIONS 64
+static float g_drag_regions[MAX_DRAG_REGIONS][4];
 static uint32_t g_drag_region_count;
 
 static void set_drag_regions(const float (*rects)[4], uint32_t count) {
-  g_drag_region_count = count < MAX_DRAG_REGIONS ? count : MAX_DRAG_REGIONS;
-  for (uint32_t i = 0; i < g_drag_region_count; i++) {
-    g_drag_regions[i] = NSMakeRect(rects[i][0], rects[i][1], rects[i][2], rects[i][3]);
-  }
+  if (count > MAX_DRAG_REGIONS) count = MAX_DRAG_REGIONS;
+  memcpy(g_drag_regions, rects, count * sizeof rects[0]);
+  g_drag_region_count = count;
 }
 
 static bool in_drag_region(NSPoint p) {
   for (uint32_t i = 0; i < g_drag_region_count; i++) {
-    if (NSPointInRect(p, g_drag_regions[i])) return true;
+    const float *r = g_drag_regions[i];
+    if (p.x >= r[0] && p.x < r[0] + r[2] && p.y >= r[1] && p.y < r[1] + r[3]) return true;
   }
   return false;
 }
@@ -663,22 +385,12 @@ static size_t get_clipboard(uint8_t *buffer, size_t capacity) {
 // Accessibility
 //
 // The app sends the tree after any frame that changed it (set_accessibility).
-// The shell keeps a copy and makes NSAccessibilityElements from it only
+// The shell keeps a copy (access_store) and makes NSAccessibilityElements from it only
 // once an assistive app has asked the view for its children, and from then
 // on after every change. Elements are kept by node id, so VoiceOver's
 // cursor stays on an element while it moves or changes. Frames are kept in
 // view points and turned into screen coordinates when asked for.
 
-typedef struct {
-  uint64_t id;
-  int32_t parent;
-  uint32_t role, flags;
-  NSRect frame;
-  char *label, *value; // malloc'd, or NULL
-} Shell_Node;
-
-static Shell_Node *g_nodes;
-static uint32_t g_node_count, g_node_cap;
 static bool g_access_dirty; // the nodes changed since the elements were made
 static bool g_access_seen; // an assistive app asked for the tree
 static bool g_access_changed; // set_accessibility ran this frame
@@ -688,7 +400,7 @@ static NSArray *g_access_all; // every element in node order
 static uint64_t g_access_focus;
 
 static void access_event(uint32_t kind, uint64_t id) {
-  push_event((Event){.kind = kind, .target = id, .time = CACurrentMediaTime()});
+  push_event((Event){.kind = kind, .target = id, .time = now_seconds()});
   request_redraw();
 }
 
@@ -743,34 +455,10 @@ static NSAccessibilityRole access_role(uint32_t role) {
   }
 }
 
-static bool access_pressable(uint32_t role) {
-  return role == ACCESS_BUTTON || role == ACCESS_ROW || role == ACCESS_MENU_ITEM;
-}
-
 static NSString *node_string(const char *s) { return s ? [NSString stringWithUTF8String:s] : nil; }
 
 static void set_accessibility(const Access_Node *nodes, uint32_t count) {
-  for (uint32_t i = 0; i < g_node_count; i++) {
-    free(g_nodes[i].label);
-    free(g_nodes[i].value);
-  }
-  if (count > g_node_cap) {
-    g_node_cap = count * 2;
-    g_nodes = realloc(g_nodes, g_node_cap * sizeof(Shell_Node));
-  }
-  for (uint32_t i = 0; i < count; i++) {
-    const Access_Node *n = &nodes[i];
-    g_nodes[i] = (Shell_Node){
-        .id = n->id,
-        .parent = n->parent,
-        .role = n->role,
-        .flags = n->flags,
-        .frame = NSMakeRect(n->frame[0], n->frame[1], n->frame[2], n->frame[3]),
-        .label = n->label ? strdup(n->label) : NULL,
-        .value = n->value ? strdup(n->value) : NULL,
-    };
-  }
-  g_node_count = count;
+  access_store(nodes, count);
   g_access_dirty = true;
   g_access_changed = true;
 }
@@ -788,7 +476,7 @@ static void access_materialize(void) {
     Access_Element *el = (Access_Element *)g_elements[@(n->id)];
     if (!el || el.class != cls) el = [cls new];
     el.node_id = n->id;
-    el.view_frame = n->frame;
+    el.view_frame = NSMakeRect(n->frame[0], n->frame[1], n->frame[2], n->frame[3]);
     el.node_flags = n->flags;
     el.accessibilityElement = YES;
     el.accessibilityRole = access_role(n->role);
@@ -1046,13 +734,29 @@ static Event key_event(NSEvent *e, uint32_t kind) {
 
 // NSTextInputClient
 
-- (void)insertText:(id)string replacementRange:(NSRange)range { text_insert(string, range); }
-
-- (void)setMarkedText:(id)string selectedRange:(NSRange)selected replacementRange:(NSRange)range {
-  text_set_marked(string, selected, range);
+- (void)insertText:(id)string replacementRange:(NSRange)range {
+  int64_t lo, hi;
+  byte_range(range, &lo, &hi);
+  text_insert(plain_string(string).UTF8String ?: "", lo, hi);
+  g_ime_handled = true;
 }
 
-- (void)unmarkText { text_unmark(); }
+// The selection is in UTF-16 units of the marked text.
+- (void)setMarkedText:(id)string selectedRange:(NSRange)selected replacementRange:(NSRange)range {
+  const char *utf8 = plain_string(string).UTF8String ?: "";
+  uint32_t n = (uint32_t)strlen(utf8);
+  uint32_t sel_lo = byte_of_utf16((const uint8_t *)utf8, n, utf16_index(selected.location));
+  uint32_t sel_hi = byte_of_utf16((const uint8_t *)utf8, n, utf16_index(selected.location + selected.length));
+  int64_t lo, hi;
+  byte_range(range, &lo, &hi);
+  text_set_marked(utf8, sel_lo, sel_hi, lo, hi);
+  g_ime_handled = true;
+}
+
+- (void)unmarkText {
+  text_unmark();
+  g_ime_handled = true;
+}
 
 // The key event that led here goes to the app as a key event.
 - (void)doCommandBySelector:(SEL)selector {}
@@ -1088,7 +792,7 @@ static Event key_event(NSEvent *e, uint32_t kind) {
 // The candidate window goes under the marked text, or the caret.
 - (NSRect)firstRectForCharacterRange:(NSRange)range actualRange:(NSRangePointer)actual {
   if (actual) *actual = range;
-  NSRect r = g_ti.caret;
+  NSRect r = NSMakeRect(g_ti.caret[0], g_ti.caret[1], g_ti.caret[2], g_ti.caret[3]);
   if (r.size.height <= 0) r.size.height = 16;
   return [self.window convertRectToScreen:[self convertRect:r toView:nil]];
 }
@@ -1182,62 +886,26 @@ static void update_display_link(void) {
   }
 }
 
-// TIDALFAST_SHELL_TEST runs steps against the shell's own entry points,
-// for checking text input and accessibility without a person at the
-// keyboard: "2:key=cmd+f;3:mark=にほんご;4:commit=日本語;6:ax-dump;7:ax-press=Next".
-// Steps are seconds after launch and a command, separated by semicolons.
-// Commands joined with | run together, with no frame between them.
+// The test steps of this shell, on top of common.c's. The input method's
+// and accessibility's shared steps go through AppKit here, as an input
+// method's and an assistive app's calls do, in place of common.c's:
 //
-//   key=cmd+shift+z     a key down and up, as from the keyboard (letters, escape, return, tab, left...)
 //   mark=text           setMarkedText, with the caret at the end of text
 //   commit=text         insertText
 //   mark-range=l,n,text setMarkedText replacing UTF-16 units [l, l+n)
 //   commit-range=l,n,text insertText replacing UTF-16 units [l, l+n)
 //   commit-marked=text  insertText replacing what markedRange says, as an input method does
 //   unmark              unmarkText
-//   clean=hex           print what field_sanitize makes of the bytes, in hex
 //   ime                 print what NSTextInputClient answers
 //   ax-dump             print the window's accessibility tree, as an assistive app reads it
 //   ax-press=label      AXPress on the first element whose label or value starts with label
+//   quit                quit through NSApplication, as Cmd-Q does
+//
+// And its own:
+//
+//   size=w,h            make the window's content w by h points
 //   menu=title          the menu bar's item with that title, as clicking it does
 //   hide, unhide        hide the app and show it again, as Cmd-H and clicking its Dock icon do
-//   capture=path        copy the last TIDALFAST_CAPTURE frame to path
-//   quit
-
-static Key key_named(NSString *name) {
-  NSDictionary *named = @{
-    @"return" : @(KEY_RETURN), @"tab" : @(KEY_TAB), @"space" : @(KEY_SPACE), @"backspace" : @(KEY_BACKSPACE),
-    @"escape" : @(KEY_ESCAPE), @"delete" : @(KEY_DELETE), @"home" : @(KEY_HOME), @"end" : @(KEY_END),
-    @"left" : @(KEY_LEFT), @"right" : @(KEY_RIGHT), @"down" : @(KEY_DOWN), @"up" : @(KEY_UP),
-  };
-  if (named[name]) return [named[name] unsignedIntValue];
-  if (name.length == 1) {
-    unichar c = [name characterAtIndex:0];
-    if (c >= 'a' && c <= 'z') return KEY_A + (c - 'a');
-    if (c >= '0' && c <= '9') return KEY_DIGIT_0 + (c - '0');
-  }
-  return KEY_NONE;
-}
-
-static void test_key(NSString *spec) {
-  uint32_t mods = 0;
-  NSArray *parts = [spec componentsSeparatedByString:@"+"];
-  for (NSString *p in parts) {
-    if ([p isEqualToString:@"cmd"]) mods |= MODIFIER_SUPER;
-    else if ([p isEqualToString:@"shift"]) mods |= MODIFIER_SHIFT;
-    else if ([p isEqualToString:@"opt"]) mods |= MODIFIER_ALT;
-    else if ([p isEqualToString:@"ctrl"]) mods |= MODIFIER_CONTROL;
-  }
-  Key key = key_named(parts.lastObject);
-  if (key == KEY_NONE) {
-    fprintf(stderr, "shell: test: no key named %s\n", [parts.lastObject UTF8String]);
-    return;
-  }
-  double now = CACurrentMediaTime();
-  push_event((Event){.kind = EVENT_KEY_DOWN, .modifiers = mods, .key = key, .time = now});
-  push_event((Event){.kind = EVENT_KEY_UP, .modifiers = mods, .key = key, .time = now});
-  request_redraw();
-}
 
 static void test_menu(NSString *title) {
   for (NSMenuItem *top in NSApp.mainMenu.itemArray) {
@@ -1298,18 +966,6 @@ static void ax_walk(id el, int depth, NSString *press, bool *pressed) {
   for (id child in [el accessibilityChildren]) ax_walk(child, depth + 1, press, pressed);
 }
 
-static void test_clean(NSString *hex) {
-  uint32_t n = (uint32_t)hex.length / 2;
-  char *in = malloc(n + 1), *out = malloc(n + 1);
-  for (uint32_t i = 0; i < n; i++) in[i] = (char)strtoul([hex substringWithRange:NSMakeRange(i * 2, 2)].UTF8String, NULL, 16);
-  uint32_t o = field_sanitize(in, n, out);
-  fprintf(stderr, "shell: clean %s -> ", hex.UTF8String);
-  for (uint32_t i = 0; i < o; i++) fprintf(stderr, "%02x", (uint8_t)out[i]);
-  fprintf(stderr, "\n");
-  free(in);
-  free(out);
-}
-
 // test_range splits "location,length,text" for mark-range and commit-range.
 static NSRange test_range(NSString *arg, NSString **text) {
   NSArray *parts = [arg componentsSeparatedByString:@","];
@@ -1321,80 +977,59 @@ static NSRange test_range(NSString *arg, NSString **text) {
   return NSMakeRange((NSUInteger)[parts[0] integerValue], (NSUInteger)[parts[1] integerValue]);
 }
 
-static void test_step(NSString *command, NSString *arg) {
+bool os_test_step(const char *command_utf8, char *arg_utf8) {
+  NSString *command = @(command_utf8), *arg = @(arg_utf8) ?: @"";
+  Metal_View *view = (Metal_View *)g_view;
   NSString *text;
-  if ([command isEqualToString:@"key"]) {
-    test_key(arg);
-  } else if ([command isEqualToString:@"mark"]) {
-    [(Metal_View *)g_view setMarkedText:arg selectedRange:NSMakeRange(arg.length, 0) replacementRange:NSMakeRange(NSNotFound, 0)];
+  if ([command isEqualToString:@"mark"]) {
+    [view setMarkedText:arg selectedRange:NSMakeRange(arg.length, 0) replacementRange:NSMakeRange(NSNotFound, 0)];
   } else if ([command isEqualToString:@"commit"]) {
-    [(Metal_View *)g_view insertText:arg replacementRange:NSMakeRange(NSNotFound, 0)];
+    [view insertText:arg replacementRange:NSMakeRange(NSNotFound, 0)];
   } else if ([command isEqualToString:@"mark-range"]) {
     NSRange r = test_range(arg, &text);
-    [(Metal_View *)g_view setMarkedText:text selectedRange:NSMakeRange(text.length, 0) replacementRange:r];
+    [view setMarkedText:text selectedRange:NSMakeRange(text.length, 0) replacementRange:r];
   } else if ([command isEqualToString:@"commit-range"]) {
     NSRange r = test_range(arg, &text);
-    [(Metal_View *)g_view insertText:text replacementRange:r];
+    [view insertText:text replacementRange:r];
   } else if ([command isEqualToString:@"commit-marked"]) {
-    [(Metal_View *)g_view insertText:arg replacementRange:((Metal_View *)g_view).markedRange];
-  } else if ([command isEqualToString:@"clean"]) {
-    test_clean(arg);
+    [view insertText:arg replacementRange:view.markedRange];
   } else if ([command isEqualToString:@"unmark"]) {
-    [(Metal_View *)g_view unmarkText];
+    [view unmarkText];
   } else if ([command isEqualToString:@"ime"]) {
     test_ime_state();
   } else if ([command isEqualToString:@"ax-dump"] || [command isEqualToString:@"ax-press"]) {
-    bool pressed = false;
-    ax_walk(g_window, 0, [command isEqualToString:@"ax-press"] ? arg : nil, &pressed);
-    if ([command isEqualToString:@"ax-press"] && !pressed) fprintf(stderr, "shell: ax: nothing to press called %s\n", arg.UTF8String);
-  } else if ([command isEqualToString:@"capture"]) {
-    const char *from = getenv("TIDALFAST_CAPTURE");
-    if (!from || copyfile(from, arg.fileSystemRepresentation, NULL, COPYFILE_DATA) != 0)
-      fprintf(stderr, "shell: test: couldn't copy the capture to %s\n", arg.UTF8String);
-    else
-      fprintf(stderr, "shell: test: captured %s\n", arg.UTF8String);
+    bool press = [command isEqualToString:@"ax-press"], pressed = false;
+    ax_walk(g_window, 0, press ? arg : nil, &pressed);
+    if (press && !pressed) fprintf(stderr, "shell: ax: nothing to press called %s\n", arg.UTF8String);
+  } else if ([command isEqualToString:@"quit"]) {
+    [NSApp terminate:nil];
   } else if ([command isEqualToString:@"size"]) {
     NSArray *wh = [arg componentsSeparatedByString:@","];
     double w = [wh.firstObject doubleValue], h = wh.count > 1 ? [wh[1] doubleValue] : 0;
     if (w < 1 || h < 1) {
       fprintf(stderr, "shell: test: size wants w,h\n");
-      return;
+      return true;
     }
     [g_window setContentSize:NSMakeSize(w, h)];
+  } else if ([command isEqualToString:@"menu"]) {
+    test_menu(arg);
   } else if ([command isEqualToString:@"hide"]) {
     [NSApp hide:nil];
   } else if ([command isEqualToString:@"unhide"]) {
     [NSApp unhide:nil];
     [NSApp activateIgnoringOtherApps:YES];
-  } else if ([command isEqualToString:@"menu"]) {
-    test_menu(arg);
-  } else if ([command isEqualToString:@"quit"]) {
-    [NSApp terminate:nil];
   } else {
-    fprintf(stderr, "shell: test: unknown step %s\n", command.UTF8String);
+    return false;
   }
+  return true;
 }
 
-static void setup_shell_test(void) {
-  const char *script = getenv("TIDALFAST_SHELL_TEST");
-  if (!script) return;
-  for (NSString *step in [@(script) componentsSeparatedByString:@";"]) {
-    NSRange colon = [step rangeOfString:@":"];
-    if (colon.location == NSNotFound) continue;
-    double at = [[step substringToIndex:colon.location] doubleValue];
-    NSArray *commands = [[step substringFromIndex:colon.location + 1] componentsSeparatedByString:@"|"];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(at * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-      fprintf(stderr, "shell: test step %s\n", step.UTF8String);
-      for (NSString *rest in commands) {
-        NSRange eq = [rest rangeOfString:@"="];
-        NSString *command = eq.location == NSNotFound ? rest : [rest substringToIndex:eq.location];
-        NSString *arg = eq.location == NSNotFound ? @"" : [rest substringFromIndex:eq.location + 1];
-        test_step(command, arg);
-      }
-    });
-  }
-}
+// The timer repeats 1e9 s later, so it only fires when armed.
+static void test_timer_fired(CFRunLoopTimerRef timer, void *info) { run_due_steps(); }
 
+void os_arm_test_timer(double after) { CFRunLoopTimerSetNextFireDate(g_test_timer, CFAbsoluteTimeGetCurrent() + after); }
+
+// App
 // App
 
 @interface App_Delegate : NSObject <NSApplicationDelegate, NSWindowDelegate>
@@ -1450,7 +1085,7 @@ static void setup_blur_reference(void) {
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
   measure_mark("launched");
-  NSRect frame = NSMakeRect(0, 0, 1100, 700);
+  NSRect frame = NSMakeRect(0, 0, DEFAULT_WIDTH, DEFAULT_HEIGHT);
   g_window = [[NSWindow alloc]
       initWithContentRect:frame
                 styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable |
@@ -1459,6 +1094,7 @@ static void setup_blur_reference(void) {
                     defer:NO];
   measure_mark("ns_window");
   g_window.title = @"TIDALfast";
+  g_window.contentMinSize = NSMakeSize(MIN_WIDTH, MIN_HEIGHT);
   // The app draws the titlebar: the view goes under it and only the window's
   // buttons stay.
   g_window.titleVisibility = NSWindowTitleHidden;
@@ -1527,6 +1163,8 @@ static void setup_blur_reference(void) {
 
   g_wake_timer = CFRunLoopTimerCreate(NULL, CFAbsoluteTimeGetCurrent() + 1e9, 1e9, 0, 0, wake_timer_fired, NULL);
   CFRunLoopAddTimer(g_main_run_loop, g_wake_timer, kCFRunLoopCommonModes);
+  g_test_timer = CFRunLoopTimerCreate(NULL, CFAbsoluteTimeGetCurrent() + 1e9, 1e9, 0, 0, test_timer_fired, NULL);
+  CFRunLoopAddTimer(g_main_run_loop, g_test_timer, kCFRunLoopCommonModes);
   [(Metal_View *)g_view update_drawable_size];
   measure_mark("app_start");
   @autoreleasepool {
@@ -1594,9 +1232,9 @@ int shell_main(int argc, char **argv) {
   // ignored, so the menu item can't quit the app.
   signal(SIGUSR1, SIG_IGN);
   @autoreleasepool {
+    common_init();
     measure_init();
     measure_mark("main");
-    g_start_time = CACurrentMediaTime();
     g_main_run_loop = CFRunLoopGetMain();
 
     // mmap memory starts zeroed and is only backed by pages as they are touched.

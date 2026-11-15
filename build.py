@@ -391,7 +391,7 @@ def build_linux(b):
 
 
 # macOS: Odin links the executable: src/app has main, which calls the
-# shell's shell_main. The shell goes in as an object, with the frameworks it
+# shell's shell_main. The shell goes in as objects, with the frameworks it
 # uses.
 def build_macos(b):
 	if b.target == "test":
@@ -399,14 +399,18 @@ def build_macos(b):
 	sign_identity = os.environ.get("TIDALFAST_SIGN_IDENTITY", "")
 	clang_flags = ["-O2"] if b.mode == "release" else ["-g", "-O0"]
 
-	def shell_object(out, flags):
-		run("clang", "-c", "shell/shell.m", "-o", out, "-fobjc-arc", f"-mmacosx-version-min={MACOS_MIN}",
-			"-Wall", "-Wno-unused-parameter", flags)
+	def shell_objects(out_dir, flags):
+		remove(out_dir)
+		mkdir(out_dir)
+		for source, arc in [("shell/shell_cocoa.m", ["-fobjc-arc"]), ("shell/common.c", [])]:
+			run("clang", "-c", source, "-o", f"{out_dir}/{stem(source)}.o", arc, f"-mmacosx-version-min={MACOS_MIN}",
+				"-Wall", "-Wno-unused-parameter", flags)
 
-	def app_build(out, obj, flags):
+	def app_build(out, objects_dir, flags):
+		objects = " ".join(sorted(glob.glob(f"{objects_dir}/*.o")))
 		run("odin", "build", "src/app", f"-out:{out}", "-vet", "-strict-style", f"-minimum-os-version:{MACOS_MIN}",
 			flags, b.app_flags,
-			f"-extra-linker-flags:{obj} -framework Cocoa -framework Metal -framework QuartzCore -framework MediaPlayer")
+			f"-extra-linker-flags:{objects} -framework Cocoa -framework Metal -framework QuartzCore -framework MediaPlayer")
 
 	if b.target == "dist":
 		# TIDALfast.app holds the app in Contents/MacOS and is signed ad hoc:
@@ -416,9 +420,9 @@ def build_macos(b):
 		bundle = f"{dist}/TIDALfast.app"
 		remove(dist)
 		mkdir(f"{bundle}/Contents/MacOS", f"{bundle}/Contents/Resources", f"{dist}/dmg")
-		shell_object(f"{dist}/shell.o", clang_flags)
-		app_build(f"{bundle}/Contents/MacOS/tidalfast", f"{dist}/shell.o", b.odin_flags())
-		remove(f"{bundle}/Contents/MacOS/tidalfast.dSYM", f"{dist}/shell.o")
+		shell_objects(f"{dist}/shell", clang_flags)
+		app_build(f"{bundle}/Contents/MacOS/tidalfast", f"{dist}/shell", b.odin_flags())
+		remove(f"{bundle}/Contents/MacOS/tidalfast.dSYM", f"{dist}/shell")
 		fill_template("packaging/macos/Info.plist", f"{bundle}/Contents/Info.plist",
 			{"@VERSION@": b.version, "@MACOS_MIN@": MACOS_MIN})
 		shutil.copy("packaging/macos/AppIcon.icns", f"{bundle}/Contents/Resources/")
@@ -433,8 +437,8 @@ def build_macos(b):
 	if b.target == "measure":
 		measure = os.path.join(b.out, "measure")
 		mkdir(f"{measure}/app")
-		shell_object(f"{measure}/shell.o", ["-O2"])
-		app_build(f"{measure}/app/tidalfast", f"{measure}/shell.o", ["-o:speed", "-define:TIDALFAST_MOCK_API=true"])
+		shell_objects(f"{measure}/shell", ["-O2"])
+		app_build(f"{measure}/app/tidalfast", f"{measure}/shell", ["-o:speed", "-define:TIDALFAST_MOCK_API=true"])
 		build_measure_tools(b)
 		return
 
@@ -444,8 +448,8 @@ def build_macos(b):
 	# it asks again for access to the saved TIDAL login.
 	out = b.out
 	mkdir(f"{out}/measure")
-	shell_object(f"{out}/shell.o", clang_flags)
-	app_build(f"{out}/tidalfast.tmp", f"{out}/shell.o", b.odin_flags())
+	shell_objects(f"{out}/shell", clang_flags)
+	app_build(f"{out}/tidalfast.tmp", f"{out}/shell", b.odin_flags())
 	remove(f"{out}/tidalfast.dSYM")
 	if os.path.isdir(f"{out}/tidalfast.tmp.dSYM"):
 		os.rename(f"{out}/tidalfast.tmp.dSYM", f"{out}/tidalfast.dSYM")

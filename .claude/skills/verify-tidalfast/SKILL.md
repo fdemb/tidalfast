@@ -41,11 +41,11 @@ Teardown happens on its own: the last step is `quit`. If the app is still up 15 
 
 ## Drive
 
-`$V run <label> <fake|mock> "<steps>"` passes the steps to `TIDALFAST_SHELL_TEST`. Steps are `seconds:command[=arg]`, separated by `;`. Several commands at one time go together, separated by `|`. Times count from the window appearing. The commands, all from `test_step` in `shell/shell.m`:
+`$V run <label> <fake|mock> "<steps>"` passes the steps to `TIDALFAST_SHELL_TEST`. Steps are `seconds:command[=arg]`, separated by `;`. Several commands at one time go together, separated by `|`. Times count from the window appearing. The commands, from `test_step` in `shell/common.c` and `os_test_step` in `shell/shell_cocoa.m`:
 
 | Step | What it does |
 | --- | --- |
-| `key=cmd+f` | a key press with modifiers `cmd`, `shift`, `opt`, `ctrl`. Named keys: `return`, `tab`, `space`, `backspace`, `escape`, `delete`, `home`, `end`, `left`, `right`, `up`, `down`, and single characters |
+| `key=cmd+f` | a key press with modifiers `cmd` (or `super`), `shift`, `opt` (or `alt`), `ctrl`. Named keys: `return`, `tab`, `space`, `backspace`, `escape`, `delete`, `home`, `end`, `left`, `right`, `up`, `down`, and single characters |
 | `commit=text` | text typed through the input method, as a keyboard would |
 | `mark=text`, `unmark`, `commit-marked=text`, `mark-range=loc,len,text`, `commit-range=loc,len,text` | input method composition |
 | `ime` | logs the text field's input method state |
@@ -54,6 +54,8 @@ Teardown happens on its own: the last step is `quit`. If the app is still up 15 
 | `ax-press=prefix` | presses the first pressable element whose label or value starts with prefix |
 | `capture=@name` | copies the last presented frame to `name.png` in the evidence directory |
 | `hide`, `unhide` | hides the app and shows it again, as Cmd-H and clicking its Dock icon do |
+| `menu=title` | picks the menu bar item with that title |
+| `clean=hex` | logs what the shell's `field_sanitize` makes of the bytes |
 | `quit` | quits the app |
 
 Prefer `ax-press` with a label from `ax-dump` over keys that depend on focus. Labels are in the app's words: search tabs are `Songs  203` (two spaces), track rows are `title, artist, album`, sidebar rows are `name, Playlist · N songs`. `ax-press` on a track row plays it, on a sidebar row opens the playlist, and on a button clicks it.

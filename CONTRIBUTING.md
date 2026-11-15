@@ -19,9 +19,9 @@ Keep `./build.py` clean with `-vet -strict-style`. Per-OS code lives in `_darwin
 ## Layout
 
 ```
-shell/          the platform side: window, event queue, input methods and clipboard. shell.m is
-                the macOS one (CAMetalLayer, media keys, Now Playing, accessibility), shell_wayland.c the Linux one,
-                shell_win32.c the Windows one, and common.c what those two share
+shell/          the platform side: window, event queue, input methods and clipboard. shell_cocoa.m
+                is the macOS one (CAMetalLayer, media keys, Now Playing, accessibility), shell_wayland.c the Linux
+                one, shell_win32.c the Windows one, and common.c what all three share
 src/platform/   the ABI between shell and app (shell/platform.h mirrors it)
 src/app/        the app, with main
 src/render/     renderer, with Metal (metal_darwin.odin) or Vulkan (vulkan.odin) as its backend

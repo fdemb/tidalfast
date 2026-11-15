@@ -162,7 +162,7 @@ cmd_run() {
 		TIDALFAST_AUDIO_NULL=1
 	)
 	# Only with captures: it keeps the window's drawables full size while
-	# the window is covered or hidden, see update_parking in shell.m.
+	# the window is covered or hidden, see update_parking in shell_cocoa.m.
 	case $steps in *capture=*) env_args+=(TIDALFAST_CAPTURE="$STATE/frame.tga") ;; esac
 	[ -n "${AUDIO_CAPTURE:-}" ] && env_args+=(TIDALFAST_AUDIO_CAPTURE="$EVIDENCE/audio.wav")
 	[ -n "${BLUR_REFERENCE:-}" ] && env_args+=(TIDALFAST_BLUR_REFERENCE="$BLUR_REFERENCE")

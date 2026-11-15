@@ -246,7 +246,7 @@ State :: struct {
 	temp_boxes:     []Box, // the rest of this frame's last chunk of TEMP_BOXES
 	hits:           []Hit,
 	hit_count:      int,
-	drag_rects:     [16]render.Rect, // the Window_Drag boxes, from end_frame; MAX_DRAG_REGIONS in shell.m
+	drag_rects:     [16]render.Rect, // the Window_Drag boxes, from end_frame; MAX_DRAG_REGIONS in the shells
 	drag_count:     int,
 	drag_from:      [16]int, // the hit list's length when each drag rect was found
 

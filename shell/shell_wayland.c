@@ -1,8 +1,9 @@
 // The platform side of the Linux executable. Owns the Wayland connection,
-// the window and its surface, collects input into an event array, and
-// drives the app through the entry points in platform.h, as shell.m does on
-// macOS. src/app's main calls shell_main. The renderer makes its own Vulkan
-// surface from the Wayland_Surface it gets.
+// the window and its surface, collects input into the event queue
+// (common.c), and drives the app through the entry points in platform.h, as
+// shell_cocoa.m and shell_win32.c do on macOS and Windows. src/app's main
+// calls shell_main. The renderer makes its own Vulkan surface from the
+// Wayland_Surface it gets.
 //
 // It redraws only when something asks for it: input, a resize or
 // request_redraw from any thread. While the app reports it is animating, a
@@ -16,9 +17,10 @@
 // an input method, and otherwise from the keyboard through xkbcommon, with
 // compose sequences for dead keys. Trackpad scrolls carry phases, and the
 // shell adds momentum after the fingers lift, since Wayland leaves that to
-// the client; scroll.c has the model, which follows GTK's. Not here yet: accessibility (AT-SPI) and Now Playing (MPRIS);
-// the shell takes the app's tree only for the test driver's ax-dump and
-// ax-press, and media keys reach the app while the window has the keyboard.
+// the client; scroll.c has the model, which follows GTK's. Not here yet:
+// accessibility (AT-SPI) and Now Playing (MPRIS). The shell takes the app's
+// tree only for the test driver's ax-dump and ax-press, and media keys
+// reach the app while the window has the keyboard.
 
 #define _GNU_SOURCE
 #include <errno.h>
@@ -60,13 +62,15 @@
 #define FRAME_SIZE (64ull << 20)
 #define DEFAULT_WIDTH 1100
 #define DEFAULT_HEIGHT 700
+#define MIN_WIDTH 480
+#define MIN_HEIGHT 360
 
 static bool g_app_started; // app_init has run, so frames can be drawn
-
 static Memory g_memory;
 static Shell g_shell;
 static Wayland_Surface g_surface_info;
 static bool g_animating;
+static bool g_in_frame; // inside app_frame
 
 // Wayland
 static struct wl_display *g_display;
@@ -221,8 +225,10 @@ static void apply_scale(void) {
   }
 }
 
+// A frame that asks for another from inside app_frame gets the next one;
+// the app is never re-entered.
 static void draw_frame(void) {
-  if (!g_app_started || !g_configured) return;
+  if (!g_app_started || !g_configured || g_in_frame) return;
   atomic_store(&g_needs_redraw, false);
   g_configure_unanswered = false;
   // The callback goes with the commit the renderer's present makes.
@@ -235,14 +241,10 @@ static void draw_frame(void) {
   apply_scale();
   glide_frame(now_seconds());
   Frame_Input input = {
-      .events = g_events,
-      .event_count = g_event_count,
       .width = g_width,
       .height = g_height,
       .scale = g_scale,
       .time = now_seconds() - g_start_time,
-      .text = g_text,
-      .text_length = g_text_len,
       .key_window = g_key_window,
       .mouse_buttons = g_buttons,
       .frame_interval = (float)g_frame_interval,
@@ -250,9 +252,10 @@ static void draw_frame(void) {
   };
   if (input.window & WINDOW_FLAG_BUTTONS) input.titlebar_height = TITLEBAR_HEIGHT;
   update_border();
+  queue_take(&input.events, &input.event_count, &input.text, &input.text_length);
+  g_in_frame = true;
   Frame_Result result = app_frame(&g_memory, &g_shell, &input);
-  g_event_count = 0;
-  g_text_len = 0;
+  g_in_frame = false;
   g_animating = result.animating || g_kinetic.running;
   arm_timer(g_wake_fd, result.wake_after > 0 ? result.wake_after : 0, 0);
   wl_display_flush(g_display);
@@ -283,12 +286,10 @@ static double frame_deadline(void) {
   return now_seconds() < deadline ? deadline : 0;
 }
 
-
-
-
-
-// text-input-v3. The compositor speaks for an input method; without one it
-// never sends anything and keys arrive on the keyboard as usual.
+// Text input
+//
+// Through text-input-v3. The compositor speaks for an input method; without
+// one it never sends anything and keys arrive on the keyboard as usual.
 
 static bool g_ti_entered; // the text input has the window's surface
 static bool g_ti_enabled; // enabled with the compositor
@@ -373,7 +374,6 @@ static const struct zwp_text_input_v3_listener g_ti_listener = {
     .delete_surrounding_text = ti_delete,
     .done = ti_done,
 };
-
 
 // set_text_input_state tells the compositor about the field: enabled while
 // one has the focus, with its text around the caret and where the caret is.
@@ -647,7 +647,6 @@ static const struct wl_data_device_listener g_device_listener = {
     .drop = device_drop,
     .selection = device_selection,
 };
-
 
 // Input
 
@@ -1145,7 +1144,6 @@ static const struct xdg_wm_base_listener g_wm_listener = {.ping = wm_ping};
 
 static float g_pending_width, g_pending_height;
 static uint32_t g_pending_states;
-static void update_border(void);
 
 static void xdg_surface_configure(void *data, struct xdg_surface *s, uint32_t serial) {
   xdg_surface_ack_configure(s, serial);
@@ -1700,7 +1698,7 @@ static bool connect_wayland(void) {
   xdg_toplevel_add_listener(g_toplevel, &g_toplevel_listener, NULL);
   xdg_toplevel_set_title(g_toplevel, "TIDALfast");
   xdg_toplevel_set_app_id(g_toplevel, "tidalfast");
-  xdg_toplevel_set_min_size(g_toplevel, 480, 360);
+  xdg_toplevel_set_min_size(g_toplevel, MIN_WIDTH, MIN_HEIGHT);
   // The first commit waits for app_init, which says whose title bar the
   // settings want (set_decorations).
   g_surface_info = (Wayland_Surface){.display = g_display, .surface = g_surface};
@@ -1770,9 +1768,9 @@ lost:
 }
 
 int shell_main(int argc, char **argv) {
+  common_init();
   measure_init();
   measure_mark("main");
-  g_start_time = now_seconds();
 
   // mmap memory starts zeroed and is only backed by pages as they are touched.
   g_memory = (Memory){
@@ -1813,11 +1811,11 @@ int shell_main(int argc, char **argv) {
   g_shell = (Shell){
       .surface = &g_surface_info,
       .request_redraw = request_redraw,
-      .set_now_playing = set_now_playing,
+      .set_now_playing = print_now_playing,
       .set_text_input = set_text_input,
       .set_clipboard = set_clipboard,
       .get_clipboard = get_clipboard,
-      .set_accessibility = getenv("TIDALFAST_SHELL_TEST") ? set_accessibility : NULL,
+      .set_accessibility = getenv("TIDALFAST_SHELL_TEST") ? access_store : NULL,
       .set_drag_regions = set_drag_regions,
       .window_command = window_command,
       .set_decorations = set_decorations,

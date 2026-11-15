@@ -1,8 +1,8 @@
 // The platform side of the Windows executable. Owns the window, collects
 // input into the event queue (common.c), and drives the app through the
-// entry points in platform.h, as shell_wayland.c does on Linux. src/app's
-// main calls shell_main. The renderer makes its own Direct3D 11 swap chain
-// for the window in the Win32_Surface it gets.
+// entry points in platform.h, as shell_cocoa.m and shell_wayland.c do on
+// macOS and Linux. src/app's main calls shell_main. The renderer makes its
+// own Direct3D 11 swap chain for the window in the Win32_Surface it gets.
 //
 // It redraws only when something asks for it: input, a resize or
 // request_redraw from any thread. The main loop waits in
@@ -1329,11 +1329,11 @@ int shell_main(int argc, char **argv) {
   // file or a pipe would lose the shell's lines.
   setvbuf(stderr, NULL, _IONBF, 0);
   QueryPerformanceFrequency(&g_qpc_frequency);
+  common_init();
   measure_init();
   measure_mark("main");
   const char *capture = getenv("TIDALFAST_CAPTURE");
   g_capture = capture && *capture;
-  g_start_time = now_seconds();
   SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
   g_memory = (Memory){
@@ -1358,11 +1358,11 @@ int shell_main(int argc, char **argv) {
   g_shell = (Shell){
       .surface = &g_surface_info,
       .request_redraw = request_redraw,
-      .set_now_playing = set_now_playing,
+      .set_now_playing = print_now_playing,
       .set_text_input = set_text_input,
       .set_clipboard = set_clipboard,
       .get_clipboard = get_clipboard,
-      .set_accessibility = getenv("TIDALFAST_SHELL_TEST") ? set_accessibility : NULL,
+      .set_accessibility = getenv("TIDALFAST_SHELL_TEST") ? access_store : NULL,
       .set_drag_regions = set_drag_regions,
       .window_command = window_command,
       .set_window_buttons = set_window_buttons,

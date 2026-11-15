@@ -526,7 +526,7 @@ fit :: proc(s: string, room: int) -> string {
 // sanitize makes s one line: a run of line breaks and tabs (LF, CR, tab,
 // NEL, U+2028, U+2029) becomes one space, or none at the start, and the
 // other C0 and C1 controls, DEL, U+FFFD and invalid UTF-8 go, an invalid
-// byte at a time as utf8.decode_rune reads them. shell.m's field_sanitize
+// byte at a time as utf8.decode_rune reads them. the shell's field_sanitize (common.c)
 // does the same byte for byte.
 @(private)
 sanitize :: proc(s: string) -> string {
