@@ -1,13 +1,12 @@
-#+build linux, windows
+#+build linux
 package text
 
-// FreeType behind the text code on Linux and Windows. The text font is the
-// built-in Noto Sans. Each OS finds fallback fonts on the loader thread in
-// its own file: fontconfig on Linux (fonts_linux.odin), the fonts folder
-// on Windows (fonts_windows.odin). FreeType rasterizes glyphs for the
-// atlas on the UI thread. Faces load into kb_text_shape on the loader as
-// on macOS, and get their FreeType face on the UI thread the first time a
-// glyph is drawn, so FreeType is only ever used from one thread.
+// FreeType behind the text code on Linux. The text font is the built-in
+// Noto Sans. Fontconfig finds fallback fonts on the loader thread
+// (fonts_linux.odin). FreeType rasterizes glyphs for the atlas on the UI
+// thread. Faces load into kb_text_shape on the loader as on macOS, and get
+// their FreeType face on the UI thread the first time a glyph is drawn, so
+// FreeType is only ever used from one thread.
 //
 // Glyphs are rasterized from their outlines unhinted, at the exact
 // subpixel offset asked for, with plain grayscale antialiasing, which is
@@ -22,11 +21,7 @@ import "core:math"
 import "../../third_party/kbts"
 import "../sys"
 
-when ODIN_OS == .Windows {
-	foreign import freetype "../../build/windows/freetype/freetype.lib"
-} else {
-	foreign import freetype "system:freetype"
-}
+foreign import freetype "system:freetype"
 
 // The loader never takes a font by reference here, so this stays nil.
 Font_Ref :: rawptr
@@ -63,13 +58,8 @@ FT_BBox :: struct {
 	x_min, y_min, x_max, y_max: c.long,
 }
 
-FT_Color :: struct {
-	blue, green, red, alpha: u8,
-}
-
 // The start of FT_FaceRec and FT_GlyphSlotRec, up to the fields used here,
-// at the offsets FreeType 2 has had since 2.1. FT_Long is a C long, 32 bits
-// on Windows and 64 on Linux, so the offsets differ between the two.
+// at the offsets FreeType 2 has had since 2.1.
 FT_FaceRec :: struct {
 	num_faces, face_index, face_flags, style_flags, num_glyphs: c.long,
 	family_name, style_name:                                     cstring,
@@ -99,17 +89,11 @@ FT_GlyphSlotRec :: struct {
 }
 
 // What a C compiler gives with FreeType's headers.
-when ODIN_OS == .Windows {
-	#assert(offset_of(FT_FaceRec, available_sizes) == 48 && offset_of(FT_FaceRec, glyph) == 120)
-	#assert(offset_of(FT_GlyphSlotRec, bitmap) == 104 && offset_of(FT_GlyphSlotRec, outline) == 152)
-} else {
-	#assert(offset_of(FT_FaceRec, available_sizes) == 64 && offset_of(FT_FaceRec, glyph) == 152)
-	#assert(offset_of(FT_GlyphSlotRec, bitmap) == 152 && offset_of(FT_GlyphSlotRec, outline) == 200)
-}
+#assert(offset_of(FT_FaceRec, available_sizes) == 64 && offset_of(FT_FaceRec, glyph) == 152)
+#assert(offset_of(FT_GlyphSlotRec, bitmap) == 152 && offset_of(FT_GlyphSlotRec, outline) == 200)
 
 FT_FACE_FLAG_FIXED_SIZES :: 1 << 1
 FT_LOAD_NO_SCALE :: 1 << 0
-FT_FACE_FLAG_COLOR :: 1 << 14
 FT_LOAD_NO_HINTING :: 1 << 1
 FT_LOAD_NO_BITMAP :: 1 << 3
 FT_LOAD_COLOR :: 1 << 20
@@ -117,7 +101,6 @@ FT_GLYPH_FORMAT_OUTLINE :: 0x6f75_746c // 'outl'
 FT_GLYPH_FORMAT_BITMAP :: 0x6269_7473 // 'bits'
 FT_PIXEL_MODE_GRAY :: 2
 FT_PIXEL_MODE_BGRA :: 7
-FT_RENDER_MODE_NORMAL :: 0
 
 @(default_calling_convention = "c")
 foreign freetype {
@@ -131,8 +114,6 @@ foreign freetype {
 	FT_Get_Advance :: proc(face: ^FT_FaceRec, glyph_index: c.uint, load_flags: i32, advance: ^c.long) -> FT_Error ---
 	FT_Outline_Get_CBox :: proc(outline: ^FT_Outline, box: ^FT_BBox) ---
 	FT_Outline_Translate :: proc(outline: ^FT_Outline, dx, dy: c.long) ---
-	FT_Render_Glyph :: proc(slot: ^FT_GlyphSlotRec, render_mode: c.int) -> FT_Error ---
-	FT_Palette_Set_Foreground_Color :: proc(face: ^FT_FaceRec, color: FT_Color) -> FT_Error ---
 	FT_Outline_Get_Bitmap :: proc(library: FT_Library, outline: ^FT_Outline, bitmap: ^FT_Bitmap) -> FT_Error ---
 }
 
@@ -142,9 +123,11 @@ Face_Native :: struct {
 	index:     int, // in a collection, with a variable font's named instance in the high bits
 	ft:        ^FT_FaceRec,
 	ft_failed: bool,
-	colr:      bool, // colour from COLR layers, which FreeType renders to BGRA at the size asked for
 	ft_size:   f32, // the pixel size last set on ft
 }
+
+// Loader_Native is empty: fontconfig needs nothing kept.
+Loader_Native :: struct {}
 
 // Raster is the FreeType library, and the glyph last loaded into a face's
 // slot, so rasterize after glyph_box doesn't load it again.
@@ -215,12 +198,6 @@ load_system :: proc(t: ^State, font: Font) -> bool {
 	return true
 }
 
-// file_face_name is the name of face index in the font file at path.
-@(private)
-file_face_name :: proc(path: cstring, index: int) -> u64 {
-	return hash.fnv64a(transmute([]byte)string(path)) ~ (u64(index) + 1) * 0x9e37_79b9_7f4a_7c15
-}
-
 // load_embedded loads one of the built-in faces from its #load data, in
 // place, as on macOS.
 @(private)
@@ -245,9 +222,7 @@ FONT_NAMES := [Font]string {
 
 // face_native_init notes which face of a collection this is and whether
 // it's a colour bitmap font. The FreeType face comes later, on the UI
-// thread. The Windows build's FreeType has no PNG decoder, which CBDT and
-// sbix strikes need, so there a font that has only those draws nothing and
-// is refused, and the fallback goes on to the next font.
+// thread.
 @(private)
 face_native_init :: proc(face: ^Face, ct: Font_Ref, index: int) -> bool {
 	if face.units_per_em == 0 {
@@ -255,14 +230,6 @@ face_native_init :: proc(face: ^Face, ct: Font_Ref, index: int) -> bool {
 	}
 	face.index = index
 	face.color = font_table(face.file, index, "CBDT") != nil || font_table(face.file, index, "sbix") != nil
-	when ODIN_OS == .Windows {
-		if face.color && font_table(face.file, index, "glyf") == nil && font_table(face.file, index, "CFF ") == nil {
-			return false
-		}
-		// Segoe UI Emoji's colour is COLR layers over its outlines.
-		face.colr = font_table(face.file, index, "COLR") != nil && font_table(face.file, index, "CPAL") != nil
-		face.color = face.colr
-	}
 	return true
 }
 
@@ -341,10 +308,6 @@ face_ft :: proc(a: ^Atlas, face: ^Face) -> ^FT_FaceRec {
 		if FT_New_Memory_Face(a.raster.library, raw_data(face.file), c.long(len(face.file)), c.long(face.index), &face.ft) != 0 {
 			face.ft = nil
 			face.ft_failed = true
-		} else if face.colr {
-			// Layers in the text's colour: white, as the app's text is
-			// light on dark. FreeType's default is black.
-			FT_Palette_Set_Foreground_Color(face.ft, {255, 255, 255, 255})
 		}
 	}
 	return face.ft
@@ -397,15 +360,7 @@ load_glyph :: proc(a: ^Atlas, face: ^Face, px_size: f32, glyph: u16) -> (slot: ^
 		face.ft_size = px_size
 	}
 	flags: i32 = FT_LOAD_COLOR if strike_ppem > 0 else FT_LOAD_NO_HINTING | FT_LOAD_NO_BITMAP
-	if face.colr {
-		flags = FT_LOAD_COLOR | FT_LOAD_NO_HINTING | FT_LOAD_NO_BITMAP
-	}
 	if FT_Load_Glyph(ft, c.uint(glyph), flags) != 0 {
-		return
-	}
-	// FreeType blends the layers in the default palette into a BGRA bitmap
-	// at px_size, which rasterize then places like a strike's at scale 1.
-	if face.colr && FT_Render_Glyph(ft.glyph, FT_RENDER_MODE_NORMAL) != 0 {
 		return
 	}
 	r.loaded_face, r.loaded_id, r.loaded_size = ft, glyph, px_size
@@ -431,7 +386,7 @@ glyph_box :: proc(a: ^Atlas, face: ^Face, px_size, size: f32, glyph: u16) -> [4]
 		return {f64(box.x_min) / 64, f64(box.y_min) / 64, f64(box.x_max) / 64, f64(box.y_max) / 64}
 	case FT_GLYPH_FORMAT_BITMAP:
 		b := slot.bitmap
-		if (b.pixel_mode != FT_PIXEL_MODE_BGRA && !(face.colr && b.pixel_mode == FT_PIXEL_MODE_GRAY)) || b.width == 0 || b.rows == 0 {
+		if b.pixel_mode != FT_PIXEL_MODE_BGRA || b.width == 0 || b.rows == 0 {
 			return {}
 		}
 		left, top := f64(slot.bitmap_left), f64(slot.bitmap_top)
@@ -468,24 +423,6 @@ rasterize :: proc(a: ^Atlas, face: ^Face, px_size, size: f32, glyph: u16, w, h: 
 		}
 		FT_Outline_Get_Bitmap(a.raster.library, &slot.outline, &target)
 		FT_Outline_Translate(&slot.outline, -dx, -dy)
-		return out
-	}
-	if face.colr && slot.format == FT_GLYPH_FORMAT_BITMAP && slot.bitmap.pixel_mode == FT_PIXEL_MODE_GRAY {
-		// A glyph without colour layers, such as Segoe UI Emoji's check
-		// mark: white, as premultiplied BGRA, at its place.
-		b := slot.bitmap
-		x0 := int(math.round(origin.x)) + int(slot.bitmap_left)
-		y0 := h - (int(math.round(origin.y)) + int(slot.bitmap_top))
-		for row in 0 ..< int(b.rows) {
-			for col in 0 ..< int(b.width) {
-				x, y := x0 + col, y0 + row
-				if x >= 0 && x < w && y >= 0 && y < h {
-					v := b.buffer[row * int(b.pitch) + col]
-					at := (y * w + x) * 4
-					out[at], out[at + 1], out[at + 2], out[at + 3] = v, v, v, v
-				}
-			}
-		}
 		return out
 	}
 	if slot.format != FT_GLYPH_FORMAT_BITMAP || slot.bitmap.pixel_mode != FT_PIXEL_MODE_BGRA || !face.color {

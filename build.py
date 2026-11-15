@@ -33,7 +33,6 @@ again for the saved login.
 """
 
 import glob
-import hashlib
 import os
 import platform
 import shlex
@@ -62,17 +61,6 @@ WAYLAND_PROTOCOLS = [
 	"unstable/xdg-decoration/xdg-decoration-unstable-v1.xml",
 	"unstable/text-input/text-input-unstable-v3.xml",
 	"unstable/pointer-gestures/pointer-gestures-unstable-v1.xml",
-]
-
-# FreeType 2.13.3 for Windows, which doesn't have it, with the modules and
-# options in third_party/freetype.
-FREETYPE = "freetype-2.13.3"
-FREETYPE_URL = "https://download.savannah.gnu.org/releases/freetype/freetype-2.13.3.tar.xz"
-FREETYPE_SHA256 = "0550350666d427c74daeb85d5ac7bb353acba5f76956395995311a9c6f063289"
-FREETYPE_SOURCES = [
-	"base/ftsystem.c", "base/ftinit.c", "base/ftdebug.c", "base/ftbase.c", "base/ftbbox.c",
-	"base/ftbitmap.c", "base/ftmm.c", "truetype/truetype.c", "cff/cff.c", "sfnt/sfnt.c",
-	"psaux/psaux.c", "psnames/psnames.c", "pshinter/pshinter.c", "smooth/smooth.c",
 ]
 
 # The Direct3D 11 shaders, one entry point of rect.hlsl each, with its stage.
@@ -481,7 +469,6 @@ def build_windows(b):
 			cl(join(src, f"{lib}.c"), obj, "/O2", "/W3")
 			run("lib", "/nologo", f"/out:{out}", obj)
 			remove(obj)
-	freetype(libs_dir)
 	if b.target in ("libs", "test"):
 		return
 
@@ -541,39 +528,6 @@ def build_windows(b):
 
 def cl(source, obj, *flags):
 	run("cl", "/nologo", "/c", "/MT", "/std:c11", "/experimental:c11atomics", flags, source, f"/Fo{obj}")
-
-
-def freetype(libs_dir):
-	"""FreeType from its release, checked against its SHA-256, with only the modules the app uses."""
-	join = os.path.join
-	out = join(libs_dir, "freetype", "freetype.lib")
-	config = join("third_party", "freetype")
-	if not stale(out, join(config, "tf_ftmodule.h"), join(config, "tf_ftoption.h")):
-		return
-	ft = join(libs_dir, FREETYPE)
-	if not os.path.isdir(ft):
-		archive = ft + ".tar.xz"
-		run("curl", "-fsSL", "-o", archive, FREETYPE_URL)
-		with open(archive, "rb") as f:
-			digest = hashlib.sha256(f.read()).hexdigest()
-		if digest != FREETYPE_SHA256:
-			remove(archive)
-			fail(f"{FREETYPE}.tar.xz doesn't match its SHA-256")
-		run("tar", "xf", archive, "-C", libs_dir)
-		remove(archive)
-	obj_dir = join(libs_dir, "freetype", "obj")
-	mkdir(obj_dir)
-	objects = []
-	for c in FREETYPE_SOURCES:
-		obj = join(obj_dir, f"{stem(c)}.obj")
-		# FreeType's own code, so its warnings are off.
-		run("cl", "/nologo", "/c", "/MT", "/W0", "/O2", "-I" + join(ft, "include"), "-I" + config,
-			"-DFT2_BUILD_LIBRARY", "-DFT_CONFIG_MODULES_H=<tf_ftmodule.h>", "-DFT_CONFIG_OPTIONS_H=<tf_ftoption.h>",
-			join(ft, "src", *c.split("/")), f"/Fo{obj}")
-		objects.append(obj)
-	run("lib", "/nologo", f"/out:{out}", objects)
-	remove(obj_dir)
-
 
 if __name__ == "__main__":
 	try:

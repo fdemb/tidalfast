@@ -64,6 +64,7 @@ Loader :: struct {
 	known:         [MAX_FACES]Known_Face,
 	known_count:   int,
 	primary:       [Font]Font_Ref,
+	native:        Loader_Native, // what the OS's fallback needs, set in init
 }
 
 @(private)

@@ -1270,6 +1270,13 @@ fvar_instance :: proc(data: []byte, tag: string, value: f32) -> int {
 	return -1
 }
 
+// file_face_name is the name of face index in the font file at path, for
+// the systems that find fallback fonts by file.
+@(private)
+file_face_name :: proc(path: cstring, index: int) -> u64 {
+	return hash.fnv64a(transmute([]byte)string(path)) ~ (u64(index) + 1) * 0x9e37_79b9_7f4a_7c15
+}
+
 // font_table returns table tag of face index in the font file data, or nil.
 font_table :: proc(data: []byte, index: int, tag: string) -> []byte {
 	offset := 0

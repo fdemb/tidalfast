@@ -19,6 +19,9 @@ SCRATCH_SIZE :: 256 // glyphs bigger than this get their own bitmap context
 // CoreText picked while shaping.
 Font_Ref :: CTFontRef
 
+// Loader_Native is empty: the loader asks CoreText with Loader.primary.
+Loader_Native :: struct {}
+
 // Face_Native is a face's CoreText side: the font at BASE_SIZE and the last
 // few sizes the shaper and the atlas asked for.
 Face_Native :: struct {
