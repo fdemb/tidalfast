@@ -10,7 +10,7 @@ shell/            the shell: window, GPU layer, event queue, IME, media keys, se
 src/platform/     types shared by the shell and Odin (events, frame input, shell callbacks)
 src/app/          the app: main, frame loop, views, app state
 src/render/       instanced rect renderer, Metal on macOS, Vulkan on Linux, Direct3D 11 on Windows
-src/text/         font loading, shaping (kb_text_shape), rasterizing (CoreText, FreeType), glyph atlas
+src/text/         font loading, shaping (kb_text_shape), rasterizing (CoreText, FreeType, DirectWrite), glyph atlas
 src/ui/           box tree, layout, interaction, animation
 src/tidal/        the TIDAL API library (package `tidal`)
 src/audio/        decoding, playback, CoreAudio and PipeWire device control
@@ -20,7 +20,7 @@ src/cacert/       where libcurl finds CA certificates on Linux when its built-in
 src/os_services/  secret store (Keychain, libsecret, Credential Manager), opening URLs, settings and cache paths
 src/sys/          threads, local time, page size and file mappings for shared code, per OS
 third_party/      C libraries with their Odin bindings, which build.py compiles into build/<name>: kbts (kb_text_shape) and dr_flac.
-                  The Windows build adds FreeType, from its release, and keeps its libraries in build/windows
+                  The Windows build keeps its libraries in build/windows
 tests/            `odin test tests`
 examples/cli/     CLI on top of src/tidal
 tools/measure/    startup and memory measurement (docs/measuring.md)

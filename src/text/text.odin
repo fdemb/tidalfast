@@ -1,6 +1,7 @@
-// Text: the system's UI font (SF Pro on macOS, Noto Sans on Linux) and the
-// built-in Phosphor icons loaded into kb_text_shape and the OS's font
-// rasterizer (CoreText on macOS, FreeType on Linux), shaping with
+// Text: the system's UI font (SF Pro on macOS, Segoe UI Variable on
+// Windows, the built-in Noto Sans on Linux) and the built-in Phosphor icons
+// loaded into kb_text_shape and the OS's font rasterizer (CoreText on
+// macOS, DirectWrite on Windows, FreeType on Linux), shaping with
 // kb_text_shape, rasterizing into glyph atlases, and drawing through the
 // rect renderer.
 //
@@ -10,11 +11,11 @@
 // rasterized at physical pixel sizes and placed on whole pixels, with one of
 // four bitmaps per glyph for the fractional x position.
 //
-// Characters the system font lacks go to a fallback font that CTFontCreateForString
-// picks on macOS, fontconfig on Linux and a list of the system's fonts on
-// Windows (fonts_darwin.odin, fonts_linux.odin, fonts_windows.odin). Its
-// file is loaded into kb_text_shape too, so both
-// sides see the same glyph IDs. Fallbacks load on a worker thread
+// Characters the system font lacks go to a fallback font that
+// CTFontCreateForString picks on macOS, DirectWrite's system font fallback
+// on Windows and fontconfig on Linux (fonts_darwin.odin,
+// fonts_windows.odin, fonts_linux.odin). Its file is loaded into
+// kb_text_shape too, so both sides see the same glyph IDs. Fallbacks load on a worker thread
 // (loader.odin). Some macOS fonts (Geeza Pro for Arabic, Apple Color Emoji)
 // carry only Apple's morx shaping tables, which kb_text_shape can't read.
 // Runs in those fonts are shaped by CoreText instead, which still gets them

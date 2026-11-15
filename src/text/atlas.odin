@@ -8,7 +8,8 @@ import stbrp "vendor:stb/rect_pack"
 import "../render"
 
 // Glyph bitmaps, rasterized by the OS (glyph_box and rasterize in
-// fonts_darwin.odin and fonts_freetype.odin) at physical pixel sizes. Coverage
+// fonts_darwin.odin, fonts_freetype.odin and fonts_windows.odin) at
+// physical pixel sizes. Coverage
 // goes into R8 pages, colour glyphs (emoji) into BGRA pages. A page starts
 // at a quarter of its full side and doubles when it fills, keeping what it
 // holds; a full-size page that fills gets a sibling. When the entries fill,
@@ -209,10 +210,10 @@ glyph_key :: proc(face: u8, id: u16, sizes: u64, bucket: u8, tone := Tone.None) 
 // The renderer blends in linear light, which draws light text on a dark
 // ground heavier, and dark text on a light one thinner, than text blended
 // in sRGB, which is how text looks everywhere else on Windows. It shows
-// at 100% to 150% scaling, where FreeType's unhinted glyphs are a few
-// pixels across. Where TONES is set, coverage goes through a curve for the
-// text's tone before it goes in the atlas: light text is taken to be on a
-// dark ground and dark text on a light one. macOS draws at 2x, and
+// at 100% to 150% scaling, where glyphs are a few pixels across. Where
+// TONES is set, coverage goes through a curve for the text's tone before
+// it goes in the atlas: light text is taken to be on a dark ground and
+// dark text on a light one. macOS draws at 2x, and
 // CoreText's glyphs blended this way look as other Mac apps' do.
 Tone :: enum u8 {
 	None,
