@@ -84,5 +84,26 @@ dwrite_draws_text_into_the_atlas :: proc(t: ^testing.T) {
 	testing.expect(t, color, "the emoji are in a colour page")
 	each := time.duration_microseconds(spent) / f64(max(glyphs, 1))
 	log.infof("dwrite: %d glyphs in %.1f ms, %.0f us each", glyphs, time.duration_milliseconds(spent), each)
+	{ // TEMP
+		ra := &s.atlas.raster
+		log.infof("dwrite cold: analyses %d %.1f ms, bounds %.1f ms, texture %.1f ms, color %.1f ms", ra.n_analysis, time.duration_milliseconds(ra.t_analysis), time.duration_milliseconds(ra.t_bounds), time.duration_milliseconds(ra.t_texture), time.duration_milliseconds(ra.t_color))
+		ra.t_analysis, ra.t_bounds, ra.t_texture, ra.t_color, ra.n_analysis = 0, 0, 0, 0, 0
+		warm, warm_spent := 0, time.Duration(0)
+		for size: f32 = 14; size < 30; size += 1 {
+			for frame := 0; frame < 200; frame += 1 {
+				free_all(context.temp_allocator)
+				render.begin_frame(r, 400, 300, 1, {})
+				text.begin_frame(s, r)
+				text.draw(s, r, .Regular, size, {0, 0}, render.WHITE, LINES[0])
+				warm += s.stats.rasterized
+				warm_spent += s.atlas.raster_time
+				render.end_frame(r)
+				if !s.needs_redraw {
+					break
+				}
+			}
+		}
+		log.infof("dwrite warm: %d glyphs in %.1f ms, %.0f us each; analyses %d %.1f ms, bounds %.1f ms, texture %.1f ms", warm, time.duration_milliseconds(warm_spent), time.duration_microseconds(warm_spent) / f64(max(warm, 1)), ra.n_analysis, time.duration_milliseconds(ra.t_analysis), time.duration_milliseconds(ra.t_bounds), time.duration_milliseconds(ra.t_texture))
+	}
 	testing.expectf(t, each < 500, "a glyph takes %.0f us", each)
 }

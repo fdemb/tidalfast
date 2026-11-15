@@ -19,6 +19,7 @@ import "core:log"
 import "core:mem"
 import "core:strings"
 import "core:sys/windows"
+import "core:time"
 
 import "../../third_party/kbts"
 import "../sys"
@@ -54,6 +55,8 @@ Raster :: struct {
 	fallback:    ^IDWriteFontFallback,
 	system:      ^IDWriteFontResource, // Segoe UI Variable
 	system_opsz: DWRITE_FONT_AXIS_RANGE,
+	t_analysis, t_bounds, t_texture, t_color, t_sized: time.Duration, // TEMP
+	n_analysis: int, // TEMP
 }
 
 // Loader_Native is what the loader thread asks the fallback with.
@@ -544,9 +547,14 @@ glyph_run :: proc(face: ^Face, px_size, size: f32, glyph: ^u16) -> DWRITE_GLYPH_
 // pixels from a bitmap's top left, and the coverage's bounds.
 @(private)
 glyph_analysis :: proc(r: ^Raster, run: ^DWRITE_GLYPH_RUN, x, y: f32) -> (analysis: ^IDWriteGlyphRunAnalysis, bounds: windows.RECT) {
+	t0 := time.tick_now()
 	if r.factory->CreateGlyphRunAnalysis(run, nil, DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC, DWRITE_MEASURING_MODE_NATURAL, DWRITE_GRID_FIT_MODE_DEFAULT, DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE, x, y, &analysis) < 0 {
 		return nil, {}
 	}
+	r.t_analysis += time.tick_since(t0)
+	r.n_analysis += 1
+	t0 = time.tick_now()
+	defer r.t_bounds += time.tick_since(t0)
 	if analysis->GetAlphaTextureBounds(DWRITE_TEXTURE_ALIASED_1x1, &bounds) < 0 {
 		release(analysis)
 		return nil, {}
@@ -559,6 +567,8 @@ glyph_analysis :: proc(r: ^Raster, run: ^DWRITE_GLYPH_RUN, x, y: f32) -> (analys
 @(private)
 color_layers :: proc(r: ^Raster, run: ^DWRITE_GLYPH_RUN, x, y: f32) -> ^IDWriteColorGlyphRunEnumerator {
 	layers: ^IDWriteColorGlyphRunEnumerator
+	t0 := time.tick_now()
+	defer r.t_color += time.tick_since(t0)
 	if r.factory->TranslateColorGlyphRun(x, y, run, nil, DWRITE_MEASURING_MODE_NATURAL, nil, 0, &layers) < 0 {
 		return nil
 	}
@@ -631,6 +641,8 @@ draw_coverage :: proc(r: ^Raster, run: ^DWRITE_GLYPH_RUN, x, y: f32, out: []byte
 		return
 	}
 	alpha := make([]byte, bw * bh, context.temp_allocator)
+	t0 := time.tick_now()
+	defer r.t_texture += time.tick_since(t0)
 	if analysis->CreateAlphaTexture(DWRITE_TEXTURE_ALIASED_1x1, &b, raw_data(alpha), u32(len(alpha))) < 0 {
 		return
 	}
