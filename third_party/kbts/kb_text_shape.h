@@ -15597,9 +15597,30 @@ static float kbts__ItemVariationStoreDelta(kbts__item_variation_store *Store, kb
     kbts__region_axis_coordinates *RegionAxisCoordinates = KBTS__POINTER_AFTER(kbts__region_axis_coordinates, VariationRegionList);
     kbts_un AxisCount = kbts__ReadU16Unaligned(&VariationRegionList->AxisCount);
 
-    kbts__item_variation_data *ItemVariationData = KBTS__POINTER_OFFSET(kbts__item_variation_data, Store, kbts__ReadU32Unaligned(&Store_ItemVariationDataOffsets[DeltaSetOuterIndex]));
+    // TIDALfast: an index past the store, or into a missing ItemVariationData, is no delta. That
+    // includes NO_VARIATION_INDEX (0xFFFF, 0xFFFF), which fontTools writes for values that don't
+    // vary next to ones that do. Long word deltas (WordDeltaCount & 0x8000) aren't read below, so
+    // they're no delta too.
+    if(DeltaSetOuterIndex >= kbts__ReadU16Unaligned(kbts__item_variation_store_ItemVariationDataCount(Store)))
+    {
+      return 0;
+    }
+
+    kbts_un ItemVariationDataOffset = kbts__ReadU32Unaligned(&Store_ItemVariationDataOffsets[DeltaSetOuterIndex]);
+    if(!ItemVariationDataOffset)
+    {
+      return 0;
+    }
+
+    kbts__item_variation_data *ItemVariationData = KBTS__POINTER_OFFSET(kbts__item_variation_data, Store, ItemVariationDataOffset);
     kbts_un RegionIndexCount = kbts__ReadU16Unaligned(&ItemVariationData->RegionIndexCount);
     kbts_un WordDeltaCount = kbts__ReadU16Unaligned(&ItemVariationData->WordDeltaCount);
+
+    if((DeltaSetInnerIndex >= kbts__ReadU16Unaligned(&ItemVariationData->ItemCount)) ||
+       (WordDeltaCount & 0x8000))
+    {
+      return 0;
+    }
 
     kbts_u16 *RegionIndices = KBTS__POINTER_AFTER(kbts_u16, ItemVariationData);
     char *Deltas = (char *)(RegionIndices + RegionIndexCount);
