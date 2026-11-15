@@ -93,7 +93,6 @@ FT_GlyphSlotRec :: struct {
 #assert(offset_of(FT_GlyphSlotRec, bitmap) == 152 && offset_of(FT_GlyphSlotRec, outline) == 200)
 
 FT_FACE_FLAG_FIXED_SIZES :: 1 << 1
-FT_LOAD_NO_SCALE :: 1 << 0
 FT_LOAD_NO_HINTING :: 1 << 1
 FT_LOAD_NO_BITMAP :: 1 << 3
 FT_LOAD_COLOR :: 1 << 20
@@ -111,7 +110,6 @@ foreign freetype {
 	FT_Set_Char_Size :: proc(face: ^FT_FaceRec, width, height: c.long, h_res, v_res: c.uint) -> FT_Error ---
 	FT_Select_Size :: proc(face: ^FT_FaceRec, strike: c.int) -> FT_Error ---
 	FT_Load_Glyph :: proc(face: ^FT_FaceRec, glyph_index: c.uint, load_flags: i32) -> FT_Error ---
-	FT_Get_Advance :: proc(face: ^FT_FaceRec, glyph_index: c.uint, load_flags: i32, advance: ^c.long) -> FT_Error ---
 	FT_Outline_Get_CBox :: proc(outline: ^FT_Outline, box: ^FT_BBox) ---
 	FT_Outline_Translate :: proc(outline: ^FT_Outline, dx, dy: c.long) ---
 	FT_Outline_Get_Bitmap :: proc(library: FT_Library, outline: ^FT_Outline, bitmap: ^FT_Bitmap) -> FT_Error ---
@@ -173,9 +171,8 @@ NOTO_WEIGHTS := #partial [Font]f32 {
 }
 
 // load_system loads the built-in Noto Sans at font's weight. The weights
-// share its bytes and kb_text_shape tables, which hold the default
-// instance, so the others get their advances from FreeType, which
-// FT_New_Memory_Face gives the instance.
+// share its bytes and kb_text_shape tables. FreeType draws each from its
+// named instance, and kb_text_shape shapes each at the instance's wght.
 @(private)
 load_system :: proc(t: ^State, font: Font) -> bool {
 	instance := fvar_instance(NOTO_SANS, "wght", NOTO_WEIGHTS[font])
@@ -194,7 +191,8 @@ load_system :: proc(t: ^State, font: Font) -> bool {
 		face.name = hash.fnv64a(transmute([]byte)FONT_NAMES[font])
 	}
 	face.index = instance << 16
-	face.native_advances = instance > 0 && face.hmetrics > 0
+	face.axis_count = 0
+	add_axis(face, WGHT, NOTO_WEIGHTS[font])
 	return true
 }
 
@@ -280,25 +278,6 @@ known_or_load :: proc(l: ^Loader, path: cstring, index: int, need: rune, res: ^L
 @(private)
 coretext_shape :: proc(t: ^State, face: int, sh: ^Shaping, start, end: int, size: f32, pending: ^bool) -> f32 {
 	return 0
-}
-
-// A face is one fixed instance, so its advances scale with the size and one
-// cached advance serves every size.
-ADVANCES_BY_SIZE :: false
-
-// native_advance is glyph id's advance in the face's instance, in em, from
-// FreeType, which applies the instance's HVAR or gvar.
-@(private)
-native_advance :: proc(t: ^State, face: int, size: f32, id: u16) -> f32 {
-	f := &t.faces[face]
-	ft := face_ft(&t.atlas, f)
-	units: c.long
-	if ft == nil || FT_Get_Advance(ft, c.uint(id), FT_LOAD_NO_SCALE, &units) != 0 {
-		return default_advance(f, id) / f.units_per_em
-	}
-	// Without HVAR it loads the glyph into the slot load_glyph remembers.
-	t.atlas.raster.loaded_face = nil
-	return f32(units) / f.units_per_em
 }
 
 // face_ft returns the face's FreeType face, making it the first time.

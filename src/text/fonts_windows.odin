@@ -237,6 +237,7 @@ load_system :: proc(t: ^State, font: Font) -> bool {
 		face.resource = r.system
 		face.weight = SYSTEM_WEIGHTS[font]
 		face.opsz = r.system_opsz
+		face.optical_size = r.system_opsz.axisTag != 0
 	}
 	// The instance's metrics rather than the default one's.
 	metrics: DWRITE_FONT_METRICS
@@ -406,10 +407,33 @@ face_native_init :: proc(face: ^Face, ct: Font_Ref, index: int) -> bool {
 		return false
 	}
 	face.color = has(face, index, "COLR") && has(face, index, "CPAL")
-	face.native_advances = face.hmetrics > 0 && has(face, index, "fvar")
+	face.axis_count = 0
+	face.optical_size = false
+	if has(face, index, "fvar") {
+		instance_axes(face, ct)
+	}
 	ct->AddRef()
 	face.dw = ct
 	return true
+}
+
+// instance_axes adds the axis values of the variable font instance ct is,
+// which DirectWrite says from Windows 10 1903 on.
+@(private = "file")
+instance_axes :: proc(face: ^Face, ct: Font_Ref) {
+	ct5: ^IDWriteFontFace5
+	if ct->QueryInterface(&IID_IDWriteFontFace5, (^rawptr)(&ct5)) < 0 {
+		return
+	}
+	defer release(ct5)
+	values: [MAX_AXES]DWRITE_FONT_AXIS_VALUE
+	n := ct5->GetFontAxisValueCount()
+	if n > MAX_AXES || ct5->GetFontAxisValues(&values[0], n) < 0 {
+		return
+	}
+	for v in values[:n] {
+		add_axis(face, v.axisTag, v.value)
+	}
 }
 
 @(private)
@@ -534,23 +558,6 @@ warm_face :: proc(l: ^Loader, face: ^Face, r: rune) {
 @(private)
 coretext_shape :: proc(t: ^State, face: int, sh: ^Shaping, start, end: int, size: f32, pending: ^bool) -> f32 {
 	return 0
-}
-
-// Segoe UI Variable's optical size axis changes its advances with the
-// point size, so cached advances are kept per size.
-ADVANCES_BY_SIZE :: true
-
-// native_advance is glyph id's advance in the face's instance at size, in
-// em.
-@(private)
-native_advance :: proc(t: ^State, face: int, size: f32, id: u16) -> f32 {
-	f := &t.faces[face]
-	id := id
-	metrics: DWRITE_GLYPH_METRICS
-	if sized_face(f, size)->GetDesignGlyphMetrics(&id, 1, &metrics, false) < 0 {
-		return default_advance(f, id) / f.units_per_em
-	}
-	return f32(metrics.advanceWidth) / f.units_per_em
 }
 
 // sized_face is face's instance for text size points: at that optical

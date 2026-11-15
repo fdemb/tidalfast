@@ -66,6 +66,7 @@ CT_FONT_BOLD_TRAIT :: 1 << 1
 CT_FONT_COLOR_GLYPHS_TRAIT :: 1 << 13
 CT_FONT_UI_FONT_SYSTEM :: 2
 CF_NUMBER_CGFLOAT_TYPE :: 16
+CF_NUMBER_SINT64_TYPE :: 4
 
 @(default_calling_convention = "c")
 foreign CoreFoundation {
@@ -86,6 +87,9 @@ foreign CoreFoundation {
 	CFStringGetLength :: proc(s: CFStringRef) -> CFIndex ---
 	CFDictionaryCreate :: proc(allocator: rawptr, keys: [^]rawptr, values: [^]rawptr, count: CFIndex, key_callbacks: ^CFDictionaryKeyCallBacks, value_callbacks: ^CFDictionaryValueCallBacks) -> CFDictionaryRef ---
 	CFDictionaryGetValue :: proc(dict: CFDictionaryRef, key: rawptr) -> rawptr ---
+	CFDictionaryGetCount :: proc(dict: CFDictionaryRef) -> CFIndex ---
+	CFDictionaryGetKeysAndValues :: proc(dict: CFDictionaryRef, keys: [^]rawptr, values: [^]rawptr) ---
+	CFNumberGetValue :: proc(number: CFTypeRef, type: CFIndex, value: rawptr) -> bool ---
 	CFAttributedStringCreate :: proc(allocator: rawptr, s: CFStringRef, attributes: CFDictionaryRef) -> CFAttributedStringRef ---
 	CFArrayCreate :: proc(allocator: rawptr, values: [^]rawptr, count: CFIndex, callbacks: ^CFArrayCallBacks) -> CFArrayRef ---
 	CFCharacterSetCreateWithCharactersInString :: proc(allocator: rawptr, s: CFStringRef) -> CFTypeRef ---
@@ -135,15 +139,16 @@ foreign CoreText {
 	CTFontCopyAttribute :: proc(font: CTFontRef, attribute: CFStringRef) -> CFTypeRef ---
 	CTFontCopyPostScriptName :: proc(font: CTFontRef) -> CFStringRef ---
 	CTFontCopyTable :: proc(font: CTFontRef, tag: u32, options: u32) -> CFDataRef ---
+	CTFontCopyVariation :: proc(font: CTFontRef) -> CFDictionaryRef ---
 	CTFontGetSymbolicTraits :: proc(font: CTFontRef) -> u32 ---
 	CTFontGetUnitsPerEm :: proc(font: CTFontRef) -> u32 ---
 	CTFontGetAscent :: proc(font: CTFontRef) -> CGFloat ---
 	CTFontGetDescent :: proc(font: CTFontRef) -> CGFloat ---
-	CTFontGetAdvancesForGlyphs :: proc(font: CTFontRef, orientation: u32, glyphs: [^]CGGlyph, advances: [^]CGSize, count: CFIndex) -> f64 ---
 	CTFontGetBoundingRectsForGlyphs :: proc(font: CTFontRef, orientation: u32, glyphs: [^]CGGlyph, rects: [^]CGRect, count: CFIndex) -> CGRect ---
 	CTFontDrawGlyphs :: proc(font: CTFontRef, glyphs: [^]CGGlyph, positions: [^]CGPoint, count: uint, ctx: CGContextRef) ---
 	CTLineCreateWithAttributedString :: proc(s: CFAttributedStringRef) -> CTLineRef ---
 	CTLineGetGlyphRuns :: proc(line: CTLineRef) -> CFArrayRef ---
+	CTLineGetTypographicBounds :: proc(line: CTLineRef, ascent, descent, leading: ^CGFloat) -> f64 ---
 	CTRunGetGlyphCount :: proc(run: CTRunRef) -> CFIndex ---
 	CTRunGetGlyphs :: proc(run: CTRunRef, range: CFRange, buffer: [^]CGGlyph) ---
 	CTRunGetPositions :: proc(run: CTRunRef, range: CFRange, buffer: [^]CGPoint) ---

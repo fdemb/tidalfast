@@ -34,6 +34,7 @@ DWRITE_NO_PALETTE_INDEX :: 0xffff
 IID_IDWriteFactory5 := IID{0x958db99a, 0xbe2a, 0x4f09, {0xaf, 0x7d, 0x65, 0x18, 0x98, 0x03, 0xd1, 0xd3}}
 IID_IDWriteFactory6 := IID{0xf3744d80, 0x21f7, 0x42eb, {0xb3, 0x5d, 0x99, 0x5b, 0xc7, 0x2f, 0xc2, 0x23}}
 IID_IDWriteLocalFontFileLoader := IID{0xb2d9f3ec, 0xc9fe, 0x4a11, {0xa2, 0xec, 0xd8, 0x62, 0x08, 0xf7, 0xc0, 0xa2}}
+IID_IDWriteFontFace5 := IID{0x98eff3a5, 0xb667, 0x479a, {0xb1, 0x45, 0xe2, 0xfa, 0x5b, 0x9f, 0xdc, 0x29}}
 IID_IDWriteTextAnalysisSource := IID{0x688e1a58, 0x5094, 0x47c8, {0xad, 0xc8, 0xfb, 0xce, 0xa6, 0x0a, 0xe9, 0x2b}}
 
 // axis_tag is DWRITE_MAKE_FONT_AXIS_TAG.
@@ -52,16 +53,6 @@ DWRITE_FONT_METRICS :: struct {
 	underlineThickness:     u16,
 	strikethroughPosition:  i16,
 	strikethroughThickness: u16,
-}
-
-DWRITE_GLYPH_METRICS :: struct {
-	leftSideBearing:   i32,
-	advanceWidth:      u32,
-	rightSideBearing:  i32,
-	topSideBearing:    i32,
-	advanceHeight:     u32,
-	bottomSideBearing: i32,
-	verticalOriginY:   i32,
 }
 
 DWRITE_GLYPH_RUN :: struct {
@@ -102,7 +93,7 @@ DWRITE_FONT_AXIS_RANGE :: struct {
 // What a C compiler gives with dwrite.h.
 #assert(size_of(DWRITE_GLYPH_RUN) == 48 && offset_of(DWRITE_GLYPH_RUN, glyphIndices) == 16)
 #assert(size_of(DWRITE_COLOR_GLYPH_RUN) == 88 && offset_of(DWRITE_COLOR_GLYPH_RUN, runColor) == 64)
-#assert(size_of(DWRITE_FONT_METRICS) == 20 && size_of(DWRITE_GLYPH_METRICS) == 28)
+#assert(size_of(DWRITE_FONT_METRICS) == 20)
 
 @(default_calling_convention = "system")
 foreign dwrite {
@@ -207,8 +198,19 @@ IDWriteFontFace_VTable :: struct {
 	IsSymbolFont:          proc "system" (this: ^IDWriteFontFace) -> windows.BOOL,
 	GetMetrics:            proc "system" (this: ^IDWriteFontFace, metrics: ^DWRITE_FONT_METRICS),
 	GetGlyphCount:         proc "system" (this: ^IDWriteFontFace) -> u16,
-	GetDesignGlyphMetrics: proc "system" (this: ^IDWriteFontFace, glyphs: [^]u16, count: u32, metrics: [^]DWRITE_GLYPH_METRICS, sideways: windows.BOOL) -> HRESULT,
 }
+
+IDWriteFontFace5 :: struct #raw_union {
+	#subtype iunknown: IUnknown,
+	using vtable:      ^IDWriteFontFace5_VTable,
+}
+IDWriteFontFace5_VTable :: struct {
+	using iunknown_vtable: IUnknown_VTable,
+	_:                     [50]rawptr, // IDWriteFontFace to IDWriteFontFace4
+	GetFontAxisValueCount: proc "system" (this: ^IDWriteFontFace5) -> u32,
+	GetFontAxisValues:     proc "system" (this: ^IDWriteFontFace5, values: [^]DWRITE_FONT_AXIS_VALUE, count: u32) -> HRESULT,
+}
+#assert(offset_of(IDWriteFontFace5_VTable, GetFontAxisValueCount) == 53 * size_of(rawptr))
 
 IDWriteFontFile :: struct #raw_union {
 	#subtype iunknown: IUnknown,

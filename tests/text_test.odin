@@ -404,6 +404,29 @@ test_shape_direction :: proc(t: ^testing.T) {
 	testing.expect(t, run.rtl)
 	testing.expect_value(t, run.glyphs[0].cluster, 14)
 	testing.expect_value(t, run.glyphs[len(run.glyphs) - 1].cluster, 0)
+	// It reads "2024 (Remix) عيونك": the brackets pair around "Remix" and
+	// go right to left, so the closing one (7 to 12 is "Remix)") is on the
+	// left of "Remix", drawn as an opening one, and the other way round.
+	// kb_text_shape puts the closing one in the left to right run of
+	// "Remix) 2024".
+	remix, close, open := -1, -1, -1
+	for g, i in run.glyphs {
+		switch g.cluster {
+		case 7:
+			remix = i
+		case 12:
+			close = i
+		case 6:
+			open = i
+		}
+	}
+	if testing.expect(t, remix >= 0 && close >= 0 && open >= 0, "every bracket and Remix drawn") {
+		testing.expectf(t, close < remix && remix < open, "closing bracket at %d, Remix at %d, opening at %d", close, remix, open)
+		face := &s.state.faces[run.glyphs[close].face].kb
+		testing.expect_value(t, run.glyphs[close].id, u16(kbts.CodepointToGlyphId(face, '(')))
+		face = &s.state.faces[run.glyphs[open].face].kb
+		testing.expect_value(t, run.glyphs[open].id, u16(kbts.CodepointToGlyphId(face, ')')))
+	}
 
 	run = shape_loaded(&s, .Regular, 13, "2024 שלום abc")
 	testing.expect(t, run.rtl)
@@ -485,7 +508,7 @@ test_shape :: proc(t: ^testing.T) {
 	bold := text.shape(state, .Bold, 13, "Blue in Green")
 	testing.expect(t, bold.width > a.width, "bold is wider")
 	// The weights are instances of one variable font, SF Pro or Noto Sans,
-	// whose default instance is all kb_text_shape reads.
+	// shaped at their own wght.
 	width: f32
 	for font in ([]text.Font{.Regular, .Medium, .Semibold, .Bold}) {
 		w := text.shape(state, font, 13, "Blue in Green").width
@@ -812,8 +835,8 @@ test_text_field_drag_select :: proc(t: ^testing.T) {
 	testing.expect_value(t, f.cursor, 0)
 }
 
-// Text at size 0 measures as nothing, not NaN, even in a face whose
-// advances come from its instance at the size.
+// Text at size 0 measures as nothing, not NaN, even in a face shaped at
+// an optical size of 0, with tracking for size 0.
 @(test)
 test_measure_size_zero :: proc(t: ^testing.T) {
 	f: Fonts

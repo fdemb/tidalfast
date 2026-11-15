@@ -79,3 +79,39 @@ test_hangul_matches_coretext :: proc(t: ^testing.T) {
 		testing.expectf(t, hangul == syllables, "%q: %d Hangul glyphs for %d syllables", str, hangul, syllables)
 	}
 }
+
+// SF Pro's weights are instances of one variable font with an optical size
+// axis, so its advances and kerning change with the weight and the size.
+// Lines shaped by kb_text_shape come out as wide as CoreText's.
+@(test)
+test_variable_widths_match_coretext :: proc(t: ^testing.T) {
+	s: Shaper
+	context.allocator = shaper_init(&s)
+	defer shaper_destroy(&s)
+
+	line :: "Sphinx of black quartz, judge my vow. The quick brown fox jumps over"
+	for font in ([]text.Font{.Regular, .Medium, .Semibold, .Bold}) {
+		for size in ([]f32{11, 13, 17, 32}) {
+			run := shape_loaded(&s, font, size, line)
+			want := coretext_width(s.state, u8(font), size, line)
+			testing.expectf(t, abs(run.width - want) < want * 0.0005, "%v at %v pt: %v wide, CoreText %v (%.2f%%)", font, size, run.width, want, (run.width - want) / want * 100)
+		}
+	}
+}
+
+@(private = "file")
+coretext_width :: proc(state: ^text.State, face: u8, size: f32, str: string) -> f32 {
+	font := text.CTFontCreateCopyWithAttributes(state.faces[face].ct, text.CGFloat(size), nil, nil)
+	defer text.cf_release(font)
+	cf := text.CFStringCreateWithBytes(nil, raw_data(str), len(str), text.CF_STRING_ENCODING_UTF8, false)
+	defer text.cf_release(cf)
+	keys := [1]rawptr{text.kCTFontAttributeName}
+	values := [1]rawptr{font}
+	attrs := text.CFDictionaryCreate(nil, &keys[0], &values[0], 1, &text.kCFTypeDictionaryKeyCallBacks, &text.kCFTypeDictionaryValueCallBacks)
+	defer text.cf_release(attrs)
+	attributed := text.CFAttributedStringCreate(nil, cf, attrs)
+	defer text.cf_release(attributed)
+	line := text.CTLineCreateWithAttributedString(attributed)
+	defer text.cf_release(line)
+	return f32(text.CTLineGetTypographicBounds(line, nil, nil, nil))
+}
