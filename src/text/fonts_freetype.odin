@@ -369,9 +369,10 @@ load_glyph :: proc(a: ^Atlas, face: ^Face, px_size: f32, glyph: u16) -> (slot: ^
 
 // glyph_box is the glyph's ink at px_size in pixels from the pen on the
 // baseline, y up: left, bottom, right, top. Empty for a glyph with none.
-// size matters only on macOS.
+// size matters only on macOS, and x, the pen's subpixel offset, only on
+// Windows.
 @(private)
-glyph_box :: proc(a: ^Atlas, face: ^Face, px_size, size: f32, glyph: u16) -> [4]f64 {
+glyph_box :: proc(a: ^Atlas, face: ^Face, px_size, size: f32, glyph: u16, x: f64) -> [4]f64 {
 	slot, scale, ok := load_glyph(a, face, px_size, glyph)
 	if !ok {
 		return {}

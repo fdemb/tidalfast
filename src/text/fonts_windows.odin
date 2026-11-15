@@ -16,6 +16,7 @@ package text
 
 import "core:hash"
 import "core:log"
+import "core:math"
 import "core:mem"
 import "core:strings"
 import "core:sys/windows"
@@ -55,13 +56,31 @@ Raster :: struct {
 	fallback:    ^IDWriteFontFallback,
 	system:      ^IDWriteFontResource, // Segoe UI Variable
 	system_opsz: DWRITE_FONT_AXIS_RANGE,
-	t_analysis, t_bounds, t_texture, t_color, t_sized: time.Duration, // TEMP
-	n_analysis: int, // TEMP
+	// The analysis glyph_box made, which rasterize uses next.
+	last:        Last_Analysis,
+}
+
+// TEMP
+timing: struct {
+	analysis, texture: time.Duration,
+	n:                 int,
+}
+
+// Last_Analysis is a glyph's coverage with its pen at x, 0, and what it
+// was made for.
+Last_Analysis :: struct {
+	analysis:      ^IDWriteGlyphRunAnalysis,
+	bounds:        windows.RECT,
+	face:          ^Face,
+	glyph:         u16,
+	px_size, size: f32,
+	x:             f32,
 }
 
 // Loader_Native is what the loader thread asks the fallback with.
 Loader_Native :: struct {
-	fallback: ^IDWriteFontFallback, // the atlas's, which outlives the loader
+	factory:  ^IDWriteFactory, // the atlas's, which outlives the loader
+	fallback: ^IDWriteFontFallback,
 	locale:   [windows.LOCALE_NAME_MAX_LENGTH]u16,
 }
 
@@ -130,6 +149,7 @@ raster_init :: proc(r: ^Raster) {
 
 @(private)
 raster_destroy :: proc(r: ^Raster) {
+	release(r.last.analysis)
 	release(r.system)
 	release(r.fallback)
 	if r.memory != nil {
@@ -156,6 +176,7 @@ load_system :: proc(t: ^State, font: Font) -> bool {
 	}
 	if font == .Regular {
 		l := &t.loader.native
+		l.factory = r.factory
 		l.fallback = r.fallback
 		if GetUserDefaultLocaleName(&l.locale[0], len(l.locale)) == 0 {
 			copy(l.locale[:], []u16{'e', 'n', '-', 'U', 'S', 0})
@@ -478,12 +499,36 @@ known_or_load :: proc(l: ^Loader, ff: ^IDWriteFontFace, need: rune, res: ^Load_R
 	}
 	face.name = name
 	face.file_name = name
+	warm_face(l, &face, need)
 	l.known[l.known_count] = {name, face.kb}
 	l.known_count += 1
 	res.found = name
 	res.face = face
 	res.loaded = true
 	return true
+}
+
+// warm_face draws r once in a newly loaded face, on the loader thread.
+// DirectWrite's first glyph in a font takes it ten times as long as the
+// ones after, which would otherwise come out of the UI thread's raster
+// budget.
+@(private)
+warm_face :: proc(l: ^Loader, face: ^Face, r: rune) {
+	glyph := u16(kbts.CodepointToGlyphId(&face.kb, r))
+	if l.native.factory == nil || glyph == 0 {
+		return
+	}
+	run := DWRITE_GLYPH_RUN{fontFace = face.dw, fontEmSize = 16, glyphCount = 1, glyphIndices = &glyph}
+	analysis, _ := glyph_analysis(l.native.factory, &run, 0, 0)
+	release(analysis)
+	if face.color {
+		layers := color_layers(l.native.factory, &run, 0, 0)
+		defer release(layers)
+		for layer := next_layer(layers); layer != nil; layer = next_layer(layers) {
+			analysis, _ = glyph_analysis(l.native.factory, &layer.glyphRun, 0, 0)
+			release(analysis)
+		}
+	}
 }
 
 // coretext_shape never runs here: no face has coretext_shaping set.
@@ -546,15 +591,13 @@ glyph_run :: proc(face: ^Face, px_size, size: f32, glyph: ^u16) -> DWRITE_GLYPH_
 // glyph_analysis is DirectWrite's coverage of run with its pen at x, y in
 // pixels from a bitmap's top left, and the coverage's bounds.
 @(private)
-glyph_analysis :: proc(r: ^Raster, run: ^DWRITE_GLYPH_RUN, x, y: f32) -> (analysis: ^IDWriteGlyphRunAnalysis, bounds: windows.RECT) {
+glyph_analysis :: proc(factory: ^IDWriteFactory, run: ^DWRITE_GLYPH_RUN, x, y: f32) -> (analysis: ^IDWriteGlyphRunAnalysis, bounds: windows.RECT) {
 	t0 := time.tick_now()
-	if r.factory->CreateGlyphRunAnalysis(run, nil, DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC, DWRITE_MEASURING_MODE_NATURAL, DWRITE_GRID_FIT_MODE_DEFAULT, DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE, x, y, &analysis) < 0 {
+	if factory->CreateGlyphRunAnalysis(run, nil, DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC, DWRITE_MEASURING_MODE_NATURAL, DWRITE_GRID_FIT_MODE_DEFAULT, DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE, x, y, &analysis) < 0 {
 		return nil, {}
 	}
-	r.t_analysis += time.tick_since(t0)
-	r.n_analysis += 1
-	t0 = time.tick_now()
-	defer r.t_bounds += time.tick_since(t0)
+	timing.analysis += time.tick_since(t0)
+	timing.n += 1
 	if analysis->GetAlphaTextureBounds(DWRITE_TEXTURE_ALIASED_1x1, &bounds) < 0 {
 		release(analysis)
 		return nil, {}
@@ -565,11 +608,9 @@ glyph_analysis :: proc(r: ^Raster, run: ^DWRITE_GLYPH_RUN, x, y: f32) -> (analys
 // color_layers are the colour layers of run with its pen at x, y, or nil
 // for a glyph without any.
 @(private)
-color_layers :: proc(r: ^Raster, run: ^DWRITE_GLYPH_RUN, x, y: f32) -> ^IDWriteColorGlyphRunEnumerator {
+color_layers :: proc(factory: ^IDWriteFactory, run: ^DWRITE_GLYPH_RUN, x, y: f32) -> ^IDWriteColorGlyphRunEnumerator {
 	layers: ^IDWriteColorGlyphRunEnumerator
-	t0 := time.tick_now()
-	defer r.t_color += time.tick_since(t0)
-	if r.factory->TranslateColorGlyphRun(x, y, run, nil, DWRITE_MEASURING_MODE_NATURAL, nil, 0, &layers) < 0 {
+	if factory->TranslateColorGlyphRun(x, y, run, nil, DWRITE_MEASURING_MODE_NATURAL, nil, 0, &layers) < 0 {
 		return nil
 	}
 	return layers
@@ -589,66 +630,80 @@ next_layer :: proc(layers: ^IDWriteColorGlyphRunEnumerator) -> ^DWRITE_COLOR_GLY
 }
 
 // glyph_box is the glyph's ink at px_size, for text size points, in pixels
-// from the pen on the baseline, y up: left, bottom, right, top. Empty for a
-// glyph with none.
+// from the pen on the baseline, y up: left, bottom, right, top, with the
+// pen at subpixel offset x. Empty for a glyph with none. The coverage it
+// measures is kept for rasterize, which comes next.
 @(private)
-glyph_box :: proc(a: ^Atlas, face: ^Face, px_size, size: f32, glyph: u16) -> [4]f64 {
+glyph_box :: proc(a: ^Atlas, face: ^Face, px_size, size: f32, glyph: u16, x: f64) -> [4]f64 {
+	r := &a.raster
 	glyph := glyph
 	run := glyph_run(face, px_size, size, &glyph)
 	box: windows.RECT
-	add :: proc(box: ^windows.RECT, r: ^Raster, run: ^DWRITE_GLYPH_RUN, x, y: f32) {
-		analysis, b := glyph_analysis(r, run, x, y)
-		if analysis == nil {
-			return
+	if face.color {
+		add :: proc(box: ^windows.RECT, factory: ^IDWriteFactory, run: ^DWRITE_GLYPH_RUN, x, y: f32) {
+			analysis, b := glyph_analysis(factory, run, x, y)
+			release(analysis)
+			if b.right <= b.left || b.bottom <= b.top {
+				return
+			}
+			if box.right <= box.left {
+				box^ = b
+				return
+			}
+			box^ = {min(box.left, b.left), min(box.top, b.top), max(box.right, b.right), max(box.bottom, b.bottom)}
 		}
-		release(analysis)
-		if b.right <= b.left || b.bottom <= b.top {
-			return
-		}
-		if box.right <= box.left {
-			box^ = b
-			return
-		}
-		box^ = {min(box.left, b.left), min(box.top, b.top), max(box.right, b.right), max(box.bottom, b.bottom)}
-	}
-	layers := color_layers(&a.raster, &run, 0, 0) if face.color else nil
-	if layers != nil {
-		defer release(layers)
-		for layer := next_layer(layers); layer != nil; layer = next_layer(layers) {
-			add(&box, &a.raster, &layer.glyphRun, layer.baselineOriginX, layer.baselineOriginY)
+		layers := color_layers(r.factory, &run, f32(x), 0)
+		if layers != nil {
+			defer release(layers)
+			for layer := next_layer(layers); layer != nil; layer = next_layer(layers) {
+				add(&box, r.factory, &layer.glyphRun, layer.baselineOriginX, layer.baselineOriginY)
+			}
+		} else {
+			add(&box, r.factory, &run, f32(x), 0)
 		}
 	} else {
-		add(&box, &a.raster, &run, 0, 0)
+		release(r.last.analysis)
+		analysis, b := glyph_analysis(r.factory, &run, f32(x), 0)
+		r.last = {analysis, b, face, glyph, px_size, size, f32(x)}
+		box = b
 	}
-	if box.right <= box.left {
+	if box.right <= box.left || box.bottom <= box.top {
 		return {}
 	}
 	return {f64(box.left), -f64(box.bottom), f64(box.right), -f64(box.top)}
 }
 
-// draw_coverage writes run's coverage, with its pen at x, y, into the w by
-// h bitmap out, clipped to it.
+// draw_analysis writes the coverage of analysis, whose bounds are bounds,
+// moved by dx, dy whole pixels, into the w by h bitmap out, clipped to it.
 @(private)
-draw_coverage :: proc(r: ^Raster, run: ^DWRITE_GLYPH_RUN, x, y: f32, out: []byte, w, h: int) {
-	analysis, b := glyph_analysis(r, run, x, y)
-	if analysis == nil {
-		return
-	}
-	defer release(analysis)
-	b = {max(b.left, 0), max(b.top, 0), min(b.right, i32(w)), min(b.bottom, i32(h))}
+draw_analysis :: proc(analysis: ^IDWriteGlyphRunAnalysis, bounds: windows.RECT, dx, dy: i32, out: []byte, w, h: int) {
+	b := windows.RECT{max(bounds.left + dx, 0), max(bounds.top + dy, 0), min(bounds.right + dx, i32(w)), min(bounds.bottom + dy, i32(h))}
 	bw, bh := int(b.right - b.left), int(b.bottom - b.top)
 	if bw <= 0 || bh <= 0 {
 		return
 	}
 	alpha := make([]byte, bw * bh, context.temp_allocator)
+	from := windows.RECT{b.left - dx, b.top - dy, b.right - dx, b.bottom - dy}
 	t0 := time.tick_now()
-	defer r.t_texture += time.tick_since(t0)
-	if analysis->CreateAlphaTexture(DWRITE_TEXTURE_ALIASED_1x1, &b, raw_data(alpha), u32(len(alpha))) < 0 {
+	defer timing.texture += time.tick_since(t0)
+	if analysis->CreateAlphaTexture(DWRITE_TEXTURE_ALIASED_1x1, &from, raw_data(alpha), u32(len(alpha))) < 0 {
 		return
 	}
 	for row in 0 ..< bh {
 		copy(out[(int(b.top) + row) * w + int(b.left):][:bw], alpha[row * bw:][:bw])
 	}
+}
+
+// draw_coverage writes run's coverage, with its pen at x, y, into the w by
+// h bitmap out, clipped to it.
+@(private)
+draw_coverage :: proc(factory: ^IDWriteFactory, run: ^DWRITE_GLYPH_RUN, x, y: f32, out: []byte, w, h: int) {
+	analysis, bounds := glyph_analysis(factory, run, x, y)
+	if analysis == nil {
+		return
+	}
+	defer release(analysis)
+	draw_analysis(analysis, bounds, 0, 0, out, w, h)
 }
 
 // rasterize draws one glyph at px_size, for text size points, with its
@@ -664,15 +719,25 @@ rasterize :: proc(a: ^Atlas, face: ^Face, px_size, size: f32, glyph: u16, w, h: 
 	// DirectWrite's bitmaps go down from their top left.
 	x, y := f32(origin.x), f32(f64(h) - origin.y)
 	if !face.color {
-		draw_coverage(&a.raster, &run, x, y, out, w, h)
+		// glyph_box's coverage, at the same subpixel offset, moves by
+		// whole pixels to the pen here.
+		last := &a.raster.last
+		frac := f32(origin.x - math.floor(origin.x))
+		if last.analysis != nil && last.face == face && last.glyph == glyph && last.px_size == px_size && last.size == size && last.x == frac {
+			draw_analysis(last.analysis, last.bounds, i32(math.floor(origin.x)), i32(math.round(f64(h) - origin.y)), out, w, h)
+		} else {
+			draw_coverage(a.raster.factory, &run, x, y, out, w, h)
+		}
+		release(last.analysis)
+		last^ = {}
 		return out
 	}
 	coverage := make([]byte, w * h, context.temp_allocator)
-	layers := color_layers(&a.raster, &run, x, y)
+	layers := color_layers(a.raster.factory, &run, x, y)
 	if layers == nil {
 		// A glyph without colour layers, such as Segoe UI Emoji's check
 		// mark: white, as the app's text is light on dark.
-		draw_coverage(&a.raster, &run, x, y, coverage, w, h)
+		draw_coverage(a.raster.factory, &run, x, y, coverage, w, h)
 		for c, i in coverage {
 			out[i * 4], out[i * 4 + 1], out[i * 4 + 2], out[i * 4 + 3] = c, c, c, c
 		}
@@ -681,7 +746,7 @@ rasterize :: proc(a: ^Atlas, face: ^Face, px_size, size: f32, glyph: u16, w, h: 
 	defer release(layers)
 	for layer := next_layer(layers); layer != nil; layer = next_layer(layers) {
 		mem.zero_slice(coverage)
-		draw_coverage(&a.raster, &layer.glyphRun, layer.baselineOriginX, layer.baselineOriginY, coverage, w, h)
+		draw_coverage(a.raster.factory, &layer.glyphRun, layer.baselineOriginX, layer.baselineOriginY, coverage, w, h)
 		color := layer.runColor
 		if layer.paletteIndex == DWRITE_NO_PALETTE_INDEX {
 			color = {1, 1, 1, 1}

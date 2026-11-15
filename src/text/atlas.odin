@@ -366,7 +366,7 @@ glyph_add :: #force_no_inline proc(t: ^State, r: ^render.Renderer, slot: int, ke
 	defer a.raster_time += time.tick_since(start)
 
 	face := &t.faces[face_index]
-	box := glyph_box(a, face, px_size, size, id)
+	box := glyph_box(a, face, px_size, size, id, f64(bucket) / SUBPIXEL_STEPS)
 	e := Atlas_Entry{key = key, last_drawn = u16(a.frame)}
 	if box[2] > box[0] && box[3] > box[1] {
 		// One pixel of padding on each side, and room for the subpixel shift.

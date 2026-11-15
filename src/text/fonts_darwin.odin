@@ -591,9 +591,9 @@ rasterize :: proc(a: ^Atlas, face: ^Face, px_size, size: f32, glyph: u16, w, h: 
 
 // glyph_box is the glyph's ink at px_size, for text size points, in pixels
 // from the pen on the baseline, y up: left, bottom, right, top. Empty for a
-// glyph with none.
+// glyph with none. x, the pen's subpixel offset, matters only on Windows.
 @(private)
-glyph_box :: proc(a: ^Atlas, face: ^Face, px_size, size: f32, glyph: u16) -> [4]f64 {
+glyph_box :: proc(a: ^Atlas, face: ^Face, px_size, size: f32, glyph: u16, x: f64) -> [4]f64 {
 	font := raster_font(face, px_size, size)
 	glyph := glyph
 	bounds: CGRect
