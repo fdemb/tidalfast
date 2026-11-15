@@ -8,6 +8,14 @@ import "../text"
 MENU_BACKGROUND :: render.Color{0.13, 0.13, 0.13, 1}
 MENU_BORDER :: render.Color{1, 1, 1, 0.08}
 
+TOOLTIP_H :: 26
+TOOLTIP_GAP :: 6 // between a tooltip and its box
+TOOLTIP_KEYCAP_INSET :: 4 // around the keycap, inside the tooltip
+TOOLTIP_RADIUS :: 8
+TOOLTIP_BACKGROUND :: render.Color{0.135, 0.135, 0.165, 1}
+TOOLTIP_BORDER :: render.Color{1, 1, 1, 0.035}
+TOOLTIP_TEXT :: render.Color{1, 1, 1, 0.32} // dim, so a tooltip doesn't pull the eye from the button
+
 // label is a text box without a key: no state, no input. s must live until
 // end_frame.
 label :: proc(s: string, width: Size = {}, height: Size = {}) -> ^Box {
@@ -484,15 +492,20 @@ menu_separator :: proc() {
 	spacer(px(4))
 }
 
-// tooltip shows label next to the mouse once sig's box has been hovered
-// for TOOLTIP_DELAY. Until then it asks for a frame at the deadline so it
-// can appear without input. Within TOOLTIP_WARM of the last tooltip it
-// shows at once without fading in, so moving the mouse along a row of
-// buttons shows each one's. Boxes scrolling under a still mouse wait for
-// the delay. It stays where it showed while the mouse moves over the box.
-tooltip :: proc(sig: Signal, label: string) {
+// tooltip shows text in a box under sig's box, or above it when there's
+// no room below, once the box has been hovered for TOOLTIP_DELAY, with
+// shortcut in a keycap at its end if there is one. Until then it asks for
+// a frame at the deadline so it can appear without input. Within
+// TOOLTIP_WARM of the last tooltip it shows at once without fading in, so
+// moving the mouse along a row of buttons shows each one's. Boxes
+// scrolling under a still mouse wait for the delay. A click hides it until
+// the mouse leaves the box.
+tooltip :: proc(sig: Signal, text: string, shortcut := "") {
 	u := ctx
-	if !sig.hovering || u.input.buttons != {} || u.menu_open {
+	if sig.pressed || sig.held || sig.clicked || sig.right_clicked {
+		u.tooltip_dismissed = sig.box.key
+	}
+	if !sig.hovering || u.tooltip_dismissed == sig.box.key || u.input.buttons != {} || u.menu_open {
 		return
 	}
 	warm := u.hot_by_mouse && u.time - u.tooltip_seen < TOOLTIP_WARM
@@ -502,25 +515,34 @@ tooltip :: proc(sig: Signal, label: string) {
 	}
 	u.tooltip_seen = u.time
 	floating()
-	set_next_font_size(12)
-	set_next_text_pad(8)
-	set_next_text_color({0.95, 0.95, 0.95, 1})
-	set_next_background(MENU_BACKGROUND)
-	set_next_border_color(MENU_BORDER)
-	set_next_radius(5)
-	b := box_make("###tooltip", {.Floating_X, .Floating_Y, .Draw_Background, .Draw_Border, .Draw_Text})
-	b.label = label
-	b.pref_size = {.X = text_size(), .Y = text_size(10)}
+	set_next_background(TOOLTIP_BACKGROUND)
+	set_next_border_color(TOOLTIP_BORDER)
+	set_next_radius(TOOLTIP_RADIUS)
+	set_next_shadow({blur = 12, y = 4, alpha = 0.4})
+	b := row("###tooltip", {.Floating_X, .Floating_Y, .Draw_Background, .Draw_Border, .Draw_Shadow}, children_sum(), px(TOOLTIP_H))
+	b.pad.y = TOOLTIP_KEYCAP_INSET
+	// fit_floating places it once its size is known.
+	b.anchor = sig.box
 	if warm && b.first_frame == u.frame {
 		b.open_t = 1
 	}
 	b.open_t = approach(u, b.open_t, 1, 1 - math.exp(-u.dt * 20), 0.01)
 	b.opacity = b.open_t
-	if b.first_frame == u.frame || u.tooltip_owner != sig.box.key {
-		u.tooltip_owner = sig.box.key
-		u.tooltip_pos = u.input.mouse
+	spacer(px(10))
+	set_next_font_size(12)
+	set_next_text_color(TOOLTIP_TEXT)
+	label(text, text_size(), fill())
+	spacer(px(10))
+	if shortcut == "" {
+		return
 	}
-	b.fixed_pos = u.tooltip_pos + {10, 20}
-	b.keep_in_window = true
-	b.flip_y = u.tooltip_pos.y - 8
+	set_next_font(.Medium)
+	set_next_font_size(11)
+	set_next_text_color(TOOLTIP_TEXT)
+	set_next_text_pad(5)
+	set_next_radius(TOOLTIP_RADIUS - TOOLTIP_KEYCAP_INSET)
+	set_next_border_color(TOOLTIP_BORDER)
+	keycap := box_make("", {.Draw_Text, .Draw_Border}, text_size(), fill())
+	keycap.label = shortcut
+	spacer(px(TOOLTIP_KEYCAP_INSET))
 }

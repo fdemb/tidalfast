@@ -1606,6 +1606,12 @@ tooltip_frame :: proc(u: ^ui.State, now: ^f64, shift: f32, events: ..platform.Ev
 	return
 }
 
+// tooltip_text is the box with a tooltip's text, after the tooltip's padding.
+@(private = "file")
+tooltip_text :: proc(tip: ^ui.Box) -> ^ui.Box {
+	return tip.first.next
+}
+
 // A tooltip near the window's edges is inside the window from its first
 // frame, though it has no size before it's laid out.
 @(test)
@@ -1618,13 +1624,50 @@ test_ui_tooltip_fits_from_first_frame :: proc(t: ^testing.T) {
 	tooltip_frame(&u, &now, 0)
 	tip, _ := tooltip_frame(&u, &now, 0, {kind = .Mouse_Move, x = 290, y = 180})
 	testing.expect(t, tip == nil, "no tooltip before the delay")
-	now += 0.6
+	now += ui.TOOLTIP_DELAY + 0.1
 	tip, _ = tooltip_frame(&u, &now, 0)
 	testing.expect(t, tip != nil, "the tooltip shows after the delay")
 	// Without a text state the label has no width, only the padding's height.
 	r := tip.rect
 	testing.expect(t, r.h > 0)
-	testing.expect(t, r.y >= 8 && r.y + r.h <= 180 - 8, "above the mouse")
+	testing.expect(t, r.y >= 8 && r.y + r.h <= 160 - 6, "above its button, with no room below")
+}
+
+// With room below its button, a tooltip goes under it.
+@(test)
+test_ui_tooltip_below :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	now := 0.0
+	tip: ^ui.Box
+	for i in 0 ..< 4 {
+		events: []platform.Event
+		if i == 1 {
+			events = {{kind = .Mouse_Move, x = 120, y = 20}}
+		}
+		if i == 3 {
+			now += ui.TOOLTIP_DELAY + 0.1
+		}
+		ui.begin_frame(&u, events, nil, nil, 300, 200, now)
+		ui.spacer(ui.px(0))
+		{
+			ui.row("row", {}, ui.fill(), ui.px(40))
+			ui.spacer(ui.px(100))
+			a := ui.box_make("a", {.Clickable}, ui.px(40), ui.px(40))
+			ui.tooltip(ui.signal(a), "First")
+		}
+		if tip = ui.find("###tooltip"); tip != nil && tip.last_frame != u.frame {
+			tip = nil
+		}
+		ui.end_frame()
+	}
+	testing.expect(t, tip != nil, "the tooltip shows after the delay")
+	if tip == nil {
+		return
+	}
+	testing.expect_value(t, tip.rect.y, f32(40 + 6))
+	testing.expect_value(t, tip.rect.x + tip.rect.w / 2, f32(120))
 }
 
 // Right after a tooltip, the next one shows at once and at full opacity.
@@ -1638,9 +1681,9 @@ test_ui_tooltip_warm :: proc(t: ^testing.T) {
 	tooltip_frame(&u, &now, 0)
 	tooltip_frame(&u, &now, 0)
 	tooltip_frame(&u, &now, 0, {kind = .Mouse_Move, x = 240, y = 180})
-	now += 0.6
+	now += ui.TOOLTIP_DELAY + 0.1
 	tip, _ := tooltip_frame(&u, &now, 0)
-	testing.expect(t, tip != nil && tip.label == "First")
+	testing.expect(t, tip != nil && tooltip_text(tip).label == "First")
 
 	// Across the gap and onto the second button.
 	now += 0.1
@@ -1648,7 +1691,7 @@ test_ui_tooltip_warm :: proc(t: ^testing.T) {
 	testing.expect(t, tip == nil, "no tooltip over the gap")
 	now += 0.2
 	tip, _ = tooltip_frame(&u, &now, 0, {kind = .Mouse_Move, x = 280, y = 180})
-	testing.expect(t, tip != nil && tip.label == "Second", "the second tooltip shows at once")
+	testing.expect(t, tip != nil && tooltip_text(tip).label == "Second", "the second tooltip shows at once")
 	testing.expect_value(t, tip.opacity, f32(1))
 
 	// Away for longer than the warm time.
@@ -1670,9 +1713,9 @@ test_ui_tooltip_waits_while_scrolling :: proc(t: ^testing.T) {
 	tooltip_frame(&u, &now, 0)
 	tooltip_frame(&u, &now, 0)
 	tooltip_frame(&u, &now, 0, {kind = .Mouse_Move, x = 240, y = 180})
-	now += 0.6
+	now += ui.TOOLTIP_DELAY + 0.1
 	tip, _ := tooltip_frame(&u, &now, 0)
-	testing.expect(t, tip != nil && tip.label == "First")
+	testing.expect(t, tip != nil && tooltip_text(tip).label == "First")
 
 	// The second button moves under the mouse. Hot follows a frame later.
 	now += 0.05
@@ -1680,15 +1723,15 @@ test_ui_tooltip_waits_while_scrolling :: proc(t: ^testing.T) {
 	now += 0.05
 	tip, _ = tooltip_frame(&u, &now, 40)
 	testing.expect(t, tip == nil, "no tooltip for the button that moved under the mouse")
-	now += 0.6
+	now += ui.TOOLTIP_DELAY + 0.1
 	tip, _ = tooltip_frame(&u, &now, 40)
-	testing.expect(t, tip != nil && tip.label == "Second", "it shows after the delay")
+	testing.expect(t, tip != nil && tooltip_text(tip).label == "Second", "it shows after the delay")
 }
 
-// A tooltip stays where it showed while the mouse moves over its button,
-// and moves to the mouse for the next button.
+// A tooltip is centred on its button, wherever the mouse is over it, and
+// moves to the next button with the mouse.
 @(test)
-test_ui_tooltip_stays_put :: proc(t: ^testing.T) {
+test_ui_tooltip_anchored :: proc(t: ^testing.T) {
 	u: ui.State
 	ui.init(&u)
 	defer ui_destroy(&u)
@@ -1696,20 +1739,53 @@ test_ui_tooltip_stays_put :: proc(t: ^testing.T) {
 	tooltip_frame(&u, &now, 0)
 	tooltip_frame(&u, &now, 0)
 	tooltip_frame(&u, &now, 0, {kind = .Mouse_Move, x = 225, y = 180})
-	now += 0.6
+	now += ui.TOOLTIP_DELAY + 0.1
 	tip, _ := tooltip_frame(&u, &now, 0)
 	testing.expect(t, tip != nil)
 	if tip == nil {
 		return
 	}
-	x := tip.rect.x
+	testing.expect_value(t, tip.rect.x + tip.rect.w / 2, f32(240))
 	now += 0.05
-	tip, _ = tooltip_frame(&u, &now, 0, {kind = .Mouse_Move, x = 235, y = 185})
-	testing.expect_value(t, tip.rect.x, x)
+	tip, _ = tooltip_frame(&u, &now, 0, {kind = .Mouse_Move, x = 255, y = 195})
+	testing.expect_value(t, tip.rect.x + tip.rect.w / 2, f32(240))
 	now += 0.05
-	tip, _ = tooltip_frame(&u, &now, 0, {kind = .Mouse_Move, x = 270, y = 180})
-	testing.expect(t, tip != nil && tip.label == "Second")
-	testing.expect_value(t, tip.rect.x, x + 45)
+	tip, _ = tooltip_frame(&u, &now, 0, {kind = .Mouse_Move, x = 270, y = 165})
+	testing.expect(t, tip != nil && tooltip_text(tip).label == "Second")
+	testing.expect_value(t, tip.rect.x + tip.rect.w / 2, f32(280))
+}
+
+// A click hides the tooltip until the mouse leaves its button, so it
+// doesn't come back over what the click did.
+@(test)
+test_ui_tooltip_hides_after_click :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	now := 0.0
+	tooltip_frame(&u, &now, 0)
+	tooltip_frame(&u, &now, 0)
+	tooltip_frame(&u, &now, 0, {kind = .Mouse_Move, x = 240, y = 180})
+	now += ui.TOOLTIP_DELAY + 0.1
+	tip, _ := tooltip_frame(&u, &now, 0)
+	testing.expect(t, tip != nil, "the tooltip shows after the delay")
+
+	now += 0.05
+	tooltip_frame(&u, &now, 0, {kind = .Mouse_Down, x = 240, y = 180, click_count = 1}, {kind = .Mouse_Up, x = 240, y = 180, click_count = 1})
+	now += 0.05
+	tip, _ = tooltip_frame(&u, &now, 0)
+	testing.expect(t, tip == nil, "no tooltip after the click")
+	now += ui.TOOLTIP_DELAY + 1
+	tip, _ = tooltip_frame(&u, &now, 0, {kind = .Mouse_Move, x = 242, y = 181})
+	testing.expect(t, tip == nil, "none while the mouse stays on the button")
+
+	now += 0.05
+	tooltip_frame(&u, &now, 0, {kind = .Mouse_Move, x = 100, y = 180})
+	now += 0.05
+	tooltip_frame(&u, &now, 0, {kind = .Mouse_Move, x = 240, y = 180})
+	now += ui.TOOLTIP_DELAY + 0.1
+	tip, _ = tooltip_frame(&u, &now, 0)
+	testing.expect(t, tip != nil, "it shows again once the mouse has left and come back")
 }
 
 // A scroll view given its size in points builds the rows that fill it in
@@ -2467,8 +2543,8 @@ test_ui_floating_layer_ignores_the_style_around_it :: proc(t: ^testing.T) {
 	frame(&u, now)
 	tip := ui.box_lookup(&u, ui.key_from_string(0, "###tooltip"))
 	if testing.expect(t, tip != nil, "the tooltip shows") {
-		testing.expect_value(t, tip.font, text.Font.Regular)
-		testing.expect_value(t, tip.font_size, 12)
+		testing.expect_value(t, tooltip_text(tip).font, text.Font.Regular)
+		testing.expect_value(t, tooltip_text(tip).font_size, 12)
 	}
 
 	ui.open_menu("menu", {150, 100})

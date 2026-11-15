@@ -273,6 +273,12 @@ draw_library :: proc(s: ^State, w, h: f32) {
 
 VOLUME_STEP :: 0.1
 
+// The keys library_shortcuts takes for the player bar's buttons, shown in
+// their tooltips.
+PLAY_HINT :: "Space"
+NEXT_HINT :: "⌘→" when ODIN_OS == .Darwin else "Ctrl+→"
+PREVIOUS_HINT :: "⌘←" when ODIN_OS == .Darwin else "Ctrl+←"
+
 // library_shortcuts runs the shortcuts that work anywhere in the library,
 // with the keys the views didn't take, and the mouse's Back and Forward. A
 // text field keeps its own keys.
@@ -1194,20 +1200,20 @@ draw_player_bar :: proc(s: ^State, w, h: f32) {
 			if prev.clicked {
 				playback_previous(s)
 			}
-			ui.tooltip(prev, "Previous")
+			ui.tooltip(prev, "Previous", PREVIOUS_HINT)
 			ui.spacer(ui.px(16))
 			playing := playback_playing(s)
 			sig := play_button(playing)
 			if sig.clicked {
 				playback_toggle(s)
 			}
-			ui.tooltip(sig, "Pause" if playing else "Play")
+			ui.tooltip(sig, "Pause" if playing else "Play", PLAY_HINT)
 			ui.spacer(ui.px(16))
 			next := skip_button("next", true)
 			if next.clicked {
 				playback_next(s)
 			}
-			ui.tooltip(next, "Next")
+			ui.tooltip(next, "Next", NEXT_HINT)
 			ui.spacer(ui.px(16))
 			repeat := s.settings.repeat
 			REPEAT_NAMES := [audio.Repeat]string {
