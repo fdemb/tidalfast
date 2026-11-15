@@ -30,6 +30,12 @@ Gpu :: struct {
 	in_flight: [FRAMES_IN_FLIGHT]id, // id<MTLCommandBuffer>
 	in_flight_frame: [FRAMES_IN_FLIGHT]u64, // the frame_index each one drew
 	timed_frame: u64, // the newest frame gpu_ms has come from, plus 1
+	// With TIDALFAST_RENDER=cpu, the CPU rasterizer and its surfaces in
+	// place of everything above but the layer. See cpu_darwin.odin.
+	cpu:        ^Cpu,
+	surfaces:   [CPU_SURFACES]Cpu_Surface,
+	shown:      int, // the surface the layer shows, -1 for none
+	shown_hash: u64, // the frame it holds
 }
 
 Gpu_Texture :: struct {
@@ -283,6 +289,10 @@ fragment float4 blur_up(Blur_In in [[stage_in]],
 init :: proc(r: ^Renderer, surface: rawptr) -> bool {
 	g := &r.gpu
 	g.layer = surface
+	if cpu_mode(g.layer) {
+		cpu_darwin_init(r)
+		return true
+	}
 	g.device = msg(g.layer, "device")
 	g.queue = msg(g.device, "newCommandQueue")
 	if r.capture_path != "" {
@@ -298,6 +308,10 @@ init :: proc(r: ^Renderer, surface: rawptr) -> bool {
 
 destroy :: proc(r: ^Renderer) {
 	g := &r.gpu
+	if g.cpu != nil {
+		cpu_darwin_destroy(r)
+		return
+	}
 	for &cmd in g.in_flight {
 		if cmd != nil {
 			msg(cmd, "waitUntilCompleted")
@@ -335,6 +349,9 @@ gpu_allocated :: proc "contextless" (r: ^Renderer) -> int {
 // in it, see texture_bytes.
 gpu_memory :: proc(r: ^Renderer) -> Gpu_Memory {
 	g := &r.gpu
+	if g.cpu != nil {
+		return cpu_memory(g.cpu)
+	}
 	m: Gpu_Memory
 	for buf in g.buffers {
 		m.instances += resource_bytes(buf)
@@ -348,6 +365,9 @@ gpu_memory :: proc(r: ^Renderer) -> Gpu_Memory {
 
 @(private)
 gpu_texture_bytes :: proc(slot: ^Texture_Slot) -> int {
+	if slot.gpu.texture == nil {
+		return len(slot.cpu.pixels)
+	}
 	return resource_bytes(slot.gpu.texture)
 }
 
@@ -419,6 +439,9 @@ build_pipeline :: proc(r: ^Renderer, library: id, vertex, fragment: string, form
 // new_texture_slot returns a zero slot if Metal can't make the texture.
 @(private)
 new_texture_slot :: proc(r: ^Renderer, width, height: int, format: Texture_Format, mipmapped: bool) -> Texture_Slot {
+	if r.gpu.cpu != nil {
+		return cpu_texture_slot(width, height, format, mipmapped)
+	}
 	pixel_format: MTL.PixelFormat
 	switch format {
 	case .R8:
@@ -450,6 +473,10 @@ gpu_texture_free :: proc(r: ^Renderer, t: Gpu_Texture) {
 
 @(private)
 gpu_texture_write :: proc(r: ^Renderer, slot: ^Texture_Slot, pixels: []byte, x, y, w, h, bpp: int) {
+	if r.gpu.cpu != nil {
+		cpu_texture_write(slot, pixels, x, y, w, h, bpp)
+		return
+	}
 	t := &slot.gpu
 	if t.mip_cmd != nil {
 		msg(t.mip_cmd, "waitUntilCompleted")
@@ -472,6 +499,10 @@ gpu_texture_write :: proc(r: ^Renderer, slot: ^Texture_Slot, pixels: []byte, x, 
 
 @(private)
 gpu_texture_copy :: proc(r: ^Renderer, from, to: ^Texture_Slot, w, h: int) {
+	if r.gpu.cpu != nil {
+		cpu_texture_copy(from, to, w, h)
+		return
+	}
 	cmd := msg(r.gpu.queue, "commandBuffer")
 	blit := msg(cmd, "blitCommandEncoder")
 	msg_proc(proc "c" (id, SEL, id, uint, uint, Origin, Size, id, uint, uint, Origin))(
@@ -490,6 +521,9 @@ gpu_texture_copy :: proc(r: ^Renderer, from, to: ^Texture_Slot, w, h: int) {
 @(private)
 gpu_frame_begin :: proc(r: ^Renderer) -> [^]Instance {
 	g := &r.gpu
+	if g.cpu != nil {
+		return cpu_frame_begin(r, g.cpu)
+	}
 	read_gpu_time(r)
 	// The GPU usually finished this slot two frames ago, so this rarely waits.
 	r.slot_wait_ms = 0
@@ -542,6 +576,10 @@ read_gpu_time :: proc(r: ^Renderer) {
 // slot for later frames.
 @(private)
 grow_instances :: proc(r: ^Renderer) {
+	if r.gpu.cpu != nil {
+		cpu_grow(r, r.gpu.cpu)
+		return
+	}
 	capacity := r.capacity[r.slot] * 2
 	buf := new_instance_buffer(r, capacity)
 	instances := ([^]Instance)(msg(buf, "contents"))
@@ -561,6 +599,10 @@ new_instance_buffer :: proc(r: ^Renderer, capacity: int) -> id {
 // autorelease pool; the shell wraps every frame in one.
 end_frame :: proc(r: ^Renderer) {
 	g := &r.gpu
+	if g.cpu != nil {
+		cpu_darwin_end_frame(r)
+		return
+	}
 	// Counts frames that drew nothing too, so frame_index - FRAMES_IN_FLIGHT
 	// is always a frame the GPU has finished once begin_frame returns.
 	defer r.frame_index += 1

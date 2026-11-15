@@ -51,7 +51,10 @@ static double g_start_time;
 
 static NSWindow *g_window;
 static NSView *g_view;
-static CAMetalLayer *g_layer;
+static CALayer *g_layer; // a CAMetalLayer, or a plain CALayer with g_cpu_render
+// TIDALFAST_RENDER=cpu: src/render draws on the CPU into IOSurfaces it
+// sets as the layer's contents, and the app makes no Metal device.
+static bool g_cpu_render;
 static CADisplayLink *g_display_link;
 
 static void update_display_link(void);
@@ -887,15 +890,25 @@ static uint32_t scroll_phase(NSEventPhase phase) {
 }
 
 - (CALayer *)makeBackingLayer {
-  g_layer = [CAMetalLayer layer];
-  g_layer.device = MTLCreateSystemDefaultDevice();
+  const char *render = getenv("TIDALFAST_RENDER");
+  g_cpu_render = render && strcmp(render, "cpu") == 0;
+  if (g_cpu_render) {
+    g_layer = [CALayer layer];
+    g_layer.opaque = YES;
+    g_layer.contentsGravity = kCAGravityTopLeft;
+    measure_mark("metal_device");
+    return g_layer;
+  }
+  CAMetalLayer *layer = [CAMetalLayer layer];
+  g_layer = layer;
+  layer.device = MTLCreateSystemDefaultDevice();
   measure_mark("metal_device");
   // An sRGB format, so blending happens in linear space. See src/render.
-  g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm_sRGB;
-  g_layer.colorspace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-  g_layer.framebufferOnly = YES;
+  layer.pixelFormat = MTLPixelFormatBGRA8Unorm_sRGB;
+  layer.colorspace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+  layer.framebufferOnly = YES;
   // Two drawables while idle, see update_display_link.
-  g_layer.maximumDrawableCount = 2;
+  layer.maximumDrawableCount = 2;
   return g_layer;
 }
 
@@ -909,7 +922,13 @@ static uint32_t scroll_phase(NSEventPhase phase) {
 - (void)update_drawable_size {
   CGFloat scale = self.window ? self.window.backingScaleFactor : 1;
   g_layer.contentsScale = scale;
-  g_layer.drawableSize = g_parked ? CGSizeMake(1, 1) : CGSizeMake(self.bounds.size.width * scale, self.bounds.size.height * scale);
+  if (g_cpu_render) {
+    // The renderer reads this and lets go of its surfaces.
+    [g_layer setValue:@(g_parked) forKey:@"tidalfastParked"];
+    if (g_parked) g_layer.contents = nil;
+    return;
+  }
+  ((CAMetalLayer *)g_layer).drawableSize = g_parked ? CGSizeMake(1, 1) : CGSizeMake(self.bounds.size.width * scale, self.bounds.size.height * scale);
 }
 
 - (void)resized {
@@ -1174,8 +1193,8 @@ static void update_display_link(void) {
   // a run could lock into waiting most of a refresh in nextDrawable on
   // every frame.
   NSUInteger drawables = paused ? 2 : 3;
-  if (g_layer.maximumDrawableCount != drawables) {
-    g_layer.maximumDrawableCount = drawables;
+  if (!g_cpu_render && ((CAMetalLayer *)g_layer).maximumDrawableCount != drawables) {
+    ((CAMetalLayer *)g_layer).maximumDrawableCount = drawables;
     // The layer lets go of the third drawable in the next nextDrawable, and
     // an idle window may not draw again for a long time.
     if (paused) request_redraw();

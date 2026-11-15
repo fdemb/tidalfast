@@ -141,6 +141,8 @@ Batch :: struct {
 // A slot is free while its width is zero.
 Texture_Slot :: struct {
 	gpu:        Gpu_Texture,
+	cpu:        Cpu_Texture, // the texels, where the CPU rasterizer draws
+
 	width:      i32,
 	height:     i32,
 	generation: u16,
@@ -365,6 +367,7 @@ texture_destroy :: proc(r: ^Renderer, t: Texture) {
 		return
 	}
 	gpu_texture_free(r, slot.gpu)
+	delete(slot.cpu.pixels, cpu_allocator())
 	slot^ = {generation = slot.generation + 1}
 }
 

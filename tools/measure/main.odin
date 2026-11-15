@@ -302,7 +302,8 @@ app_env :: proc(cfg: ^Config, side: ^Side, setup, scenario: string) -> []string 
 	env := make([dynamic]string)
 	base, _ := os.environ(context.allocator)
 	for kv in base {
-		if !strings.has_prefix(kv, "TIDALFAST_") && !strings.has_prefix(kv, "MTL_") && !strings.has_prefix(kv, "METAL_") {
+		// TIDALFAST_RENDER picks the renderer, so a run can measure either.
+		if strings.has_prefix(kv, "TIDALFAST_RENDER=") || !strings.has_prefix(kv, "TIDALFAST_") && !strings.has_prefix(kv, "MTL_") && !strings.has_prefix(kv, "METAL_") {
 			append(&env, kv)
 		}
 	}
