@@ -33,7 +33,7 @@ NAV_BUTTONS :: platform.Mouse_Buttons{.Back, .Forward}
 MAX_EDIT_EVENTS :: 64
 MAX_SHORTCUTS :: 8
 STACK_DEPTH :: 64
-TOOLTIP_DELAY :: 0.5 // seconds of hovering before a tooltip shows
+TOOLTIP_DELAY :: 1 // seconds of hovering before a tooltip shows
 TOOLTIP_WARM :: 1 // seconds after a tooltip that the next one shows without the delay
 DRAG_THRESHOLD :: 4 // points the mouse moves before a press becomes a drag
 FADE_IN :: 0.08 // seconds hot_fade, active_t and focus_t take from 0 to 1
@@ -143,6 +143,7 @@ Build :: struct {
 	keep_in_window:            bool, // a floating box moved inside the window once its size is known, see fit_floating
 	flip_y:                    f32, // with keep_in_window, where its bottom goes when it doesn't fit below
 	above:                     bool, // with keep_in_window, its bottom goes at flip_y even when it fits below
+	anchor:                    ^Box, // a floating box centred under this one, or above it when there's no room below, see fit_floating
 	id:                        string, // as given; must live until end_frame
 	label:                     string, // the part of id before "##"
 	using style:               Style,
@@ -324,8 +325,7 @@ State :: struct {
 	menu_saved_vis: bool,
 	menu_lit:       Key, // the item highlighted when the menu closed, lit while it fades out
 	tooltip_seen:   f64, // when a tooltip was last built
-	tooltip_owner:  Key, // the box the tooltip is showing for
-	tooltip_pos:    [2]f32, // where it showed for that box, which it stays at
+	tooltip_dismissed: Key, // the box clicked, which shows no tooltip until the mouse leaves it
 
 	drag_active:    bool,
 	drag_payload:   u64,
@@ -701,6 +701,7 @@ process_events :: proc(u: ^State, events: []platform.Event, text_bytes: []u8) {
 		u.hot = hot
 		u.hot_since = u.time
 		u.hot_by_mouse = moved
+		u.tooltip_dismissed = 0
 	}
 	h, _ := find_hit(u, hot)
 	u.hot_parent = h.click_parent
@@ -1149,23 +1150,28 @@ drawn_opacity :: proc(b: ^Box) -> f32 {
 	return b.opacity
 }
 
-// fit_floating moves the floating boxes that keep_in_window into the
-// window, now that their sizes are known: left of the right edge, and up
-// so their bottom is at flip_y when they don't fit below. Placing them
-// while they're built would go by last frame's size, which a new box
-// doesn't have.
+// fit_floating places the floating boxes that have an anchor by it, and
+// moves those and the ones that keep_in_window into the window, now that
+// their sizes are known: left of the right edge, and up so their bottom is
+// at flip_y when they don't fit below. Placing them while they're built
+// would go by last frame's sizes, which a new box doesn't have.
 @(private)
 fit_floating :: proc(u: ^State) {
 	MARGIN :: 8
 	for b := u.floating_root.first; b != nil; b = b.next {
-		if !b.keep_in_window {
-			continue
-		}
 		pos := [2]f32{b.rect.x, b.rect.y}
-		pos.x = max(min(pos.x, u.width - b.rect.w - MARGIN), MARGIN)
-		if b.above || pos.y + b.rect.h > u.height - MARGIN {
+		if a := b.anchor; a != nil {
+			pos.x = a.rect.x + (a.rect.w - b.rect.w) / 2
+			pos.y = a.rect.y + a.rect.h + TOOLTIP_GAP
+			if pos.y + b.rect.h > u.height - MARGIN {
+				pos.y = a.rect.y - TOOLTIP_GAP - b.rect.h
+			}
+		} else if !b.keep_in_window {
+			continue
+		} else if b.above || pos.y + b.rect.h > u.height - MARGIN {
 			pos.y = b.flip_y - b.rect.h
 		}
+		pos.x = max(min(pos.x, u.width - b.rect.w - MARGIN), MARGIN)
 		pos.y = max(pos.y, MARGIN)
 		shift_box(b, pos - {b.rect.x, b.rect.y})
 	}
