@@ -514,13 +514,19 @@ warm_face :: proc(l: ^Loader, face: ^Face, r: rune) {
 	run := DWRITE_GLYPH_RUN{fontFace = face.dw, fontEmSize = 16, glyphCount = 1, glyphIndices = &glyph}
 	analysis, _ := glyph_analysis(l.native.factory, &run, 0, 0)
 	release(analysis)
-	if face.color {
-		layers := color_layers(l.native.factory, &run, 0, 0)
-		defer release(layers)
-		for layer := next_layer(layers); layer != nil; layer = next_layer(layers) {
-			analysis, _ = glyph_analysis(l.native.factory, &layer.glyphRun, 0, 0)
-			release(analysis)
-		}
+	if !face.color {
+		return
+	}
+	// A colour font's glyph may have no layers, as Segoe UI Emoji's check
+	// mark has none.
+	layers := color_layers(l.native.factory, &run, 0, 0)
+	if layers == nil {
+		return
+	}
+	defer release(layers)
+	for layer := next_layer(layers); layer != nil; layer = next_layer(layers) {
+		analysis, _ = glyph_analysis(l.native.factory, &layer.glyphRun, 0, 0)
+		release(analysis)
 	}
 }
 
