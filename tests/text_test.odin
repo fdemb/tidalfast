@@ -1,6 +1,7 @@
 package tidal_tests
 
 import "core:mem"
+import "core:mem/virtual"
 import "core:strconv"
 import "core:strings"
 import "core:sync"
@@ -404,6 +405,29 @@ test_shape_direction :: proc(t: ^testing.T) {
 	testing.expect(t, run.rtl)
 	testing.expect_value(t, run.glyphs[0].cluster, 14)
 	testing.expect_value(t, run.glyphs[len(run.glyphs) - 1].cluster, 0)
+	// It reads "2024 (Remix) عيونك": the brackets pair around "Remix" and
+	// go right to left, so the closing one (7 to 12 is "Remix)") is on the
+	// left of "Remix", drawn as an opening one, and the other way round.
+	// kb_text_shape puts the closing one in the left to right run of
+	// "Remix) 2024".
+	remix, close, open := -1, -1, -1
+	for g, i in run.glyphs {
+		switch g.cluster {
+		case 7:
+			remix = i
+		case 12:
+			close = i
+		case 6:
+			open = i
+		}
+	}
+	if testing.expect(t, remix >= 0 && close >= 0 && open >= 0, "every bracket and Remix drawn") {
+		testing.expectf(t, close < remix && remix < open, "closing bracket at %d, Remix at %d, opening at %d", close, remix, open)
+		face := &s.state.faces[run.glyphs[close].face].kb
+		testing.expect_value(t, run.glyphs[close].id, u16(kbts.CodepointToGlyphId(face, '(')))
+		face = &s.state.faces[run.glyphs[open].face].kb
+		testing.expect_value(t, run.glyphs[open].id, u16(kbts.CodepointToGlyphId(face, ')')))
+	}
 
 	run = shape_loaded(&s, .Regular, 13, "2024 שלום abc")
 	testing.expect(t, run.rtl)
@@ -485,7 +509,7 @@ test_shape :: proc(t: ^testing.T) {
 	bold := text.shape(state, .Bold, 13, "Blue in Green")
 	testing.expect(t, bold.width > a.width, "bold is wider")
 	// The weights are instances of one variable font, SF Pro or Noto Sans,
-	// whose default instance is all kb_text_shape reads.
+	// shaped at their own wght.
 	width: f32
 	for font in ([]text.Font{.Regular, .Medium, .Semibold, .Bold}) {
 		w := text.shape(state, font, 13, "Blue in Green").width
@@ -812,8 +836,8 @@ test_text_field_drag_select :: proc(t: ^testing.T) {
 	testing.expect_value(t, f.cursor, 0)
 }
 
-// Text at size 0 measures as nothing, not NaN, even in a face whose
-// advances come from its instance at the size.
+// Text at size 0 measures as nothing, not NaN, even in a face shaped at
+// an optical size of 0, with tracking for size 0.
 @(test)
 test_measure_size_zero :: proc(t: ^testing.T) {
 	f: Fonts
@@ -881,4 +905,69 @@ test_shaped_clusters_match_grapheme_starts :: proc(t: ^testing.T) {
 			testing.expectf(t, want[c], "%q: cluster %d isn't a grapheme start", str, c)
 		}
 	}
+}
+
+// Noto Sans kerns "&T" by -60 units in every instance: its value record
+// has a variation device whose index is NO_VARIATION_INDEX (0xFFFF, 0xFFFF),
+// as fontTools writes for values that don't vary. kb_text_shape read past its
+// variation store for it, which crashed on Windows. The tables sit at the
+// end of committed memory, so a read past them faults on every system.
+@(test)
+test_kern_without_variation :: proc(t: ^testing.T) {
+	data := #load("../assets/fonts/NotoSans-Variable.ttf")
+	font: kbts.font
+	state: kbts.load_font_state
+	scratch_size, out_size, err := kbts.LoadFont(&font, &state, data, 0)
+	if !testing.expect_value(t, err, kbts.load_font_error.NEED_TO_CREATE_BLOB) {
+		return
+	}
+	scratch := make([]byte, max(scratch_size, 1))
+	defer delete(scratch)
+	GRANULE :: 64 << 10
+	committed := uint(out_size + GRANULE - 1) / GRANULE * GRANULE
+	reserved, reserve_err := virtual.reserve(committed + GRANULE)
+	if !testing.expect_value(t, reserve_err, nil) {
+		return
+	}
+	defer virtual.release(raw_data(reserved), len(reserved))
+	if !testing.expect_value(t, virtual.commit(raw_data(reserved), committed), nil) {
+		return
+	}
+	blob := reserved[committed - uint(out_size + 15) / 16 * 16:committed]
+	if !testing.expect_value(t, kbts.PlaceBlob(&font, &state, raw_data(scratch), raw_data(blob)), kbts.load_font_error.NONE) {
+		return
+	}
+	memory := make([]byte, 1 << 20)
+	defer delete(memory)
+	ctx := kbts.PlaceShapeContextFixedMemory(memory)
+
+	first_advance :: proc(ctx: ^kbts.shape_context, font: ^kbts.font, weight: f32, s: string) -> i32 {
+		v := kbts.variation{Tag = u32('w') | u32('g') << 8 | u32('h') << 16 | u32('t') << 24, Value = weight}
+		_ = kbts.ShapePushFont2(ctx, font, &v, 1, nil)
+		defer _ = kbts.ShapePopFont(ctx)
+		kbts.ShapeBegin(ctx, .KBTS_DIRECTION_LTR, .DONT_KNOW)
+		for r in s {
+			kbts.ShapeCodepoint(ctx, r)
+		}
+		kbts.ShapeEnd(ctx)
+		advance: i32
+		first := true
+		for {
+			run, ok := kbts.ShapeRun(ctx)
+			if !ok {
+				break
+			}
+			for g in kbts.GlyphIteratorNext(&run.Glyphs) {
+				if first {
+					advance, first = g.AdvanceX, false
+				}
+			}
+		}
+		return advance
+	}
+	for weight in ([]f32{400, 700}) {
+		kern := first_advance(ctx, &font, weight, "&T") - first_advance(ctx, &font, weight, "&")
+		testing.expectf(t, kern == -60, "&T kerns %v units at wght %v", kern, weight)
+	}
+	testing.expect_value(t, kbts.ShapeError(ctx), kbts.shape_error.NONE)
 }

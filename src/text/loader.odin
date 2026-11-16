@@ -64,6 +64,7 @@ Loader :: struct {
 	known:         [MAX_FACES]Known_Face,
 	known_count:   int,
 	primary:       [Font]Font_Ref,
+	native:        Loader_Native, // what the OS's fallback needs, set in init
 }
 
 @(private)
@@ -186,10 +187,7 @@ load_face :: proc(face: ^Face, ct: Font_Ref, data: []byte, index: int, mapped: b
 	face.descent = -f32(info.Descent) / face.units_per_em
 	face.file = data
 	face.mapped = mapped
-	if hhea := font_table(data, index, "hhea"); len(hhea) >= 36 {
-		face.hmetrics = int(hhea[34]) << 8 | int(hhea[35])
-		face.hmtx = font_table(data, index, "hmtx")
-	}
+	face.trak = font_table(data, index, "trak")
 	if !face_native_init(face, ct, index) {
 		libc.free(blob)
 		face^ = {}

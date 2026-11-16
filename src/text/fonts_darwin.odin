@@ -5,6 +5,7 @@ package text
 // installed fonts find, CoreText shaping for morx-only fonts, and glyph
 // bounds and bitmaps for the atlas.
 
+import "base:intrinsics"
 import "core:hash"
 import "core:slice"
 import "core:strings"
@@ -18,6 +19,9 @@ SCRATCH_SIZE :: 256 // glyphs bigger than this get their own bitmap context
 // Font_Ref is a CTFontRef. The loader takes one in a request for a font
 // CoreText picked while shaping.
 Font_Ref :: CTFontRef
+
+// Loader_Native is empty: the loader asks CoreText with Loader.primary.
+Loader_Native :: struct {}
 
 // Face_Native is a face's CoreText side: the font at BASE_SIZE and the last
 // few sizes the shaper and the atlas asked for.
@@ -167,8 +171,36 @@ face_native_init :: proc(face: ^Face, ct: Font_Ref, index: int) -> bool {
 	face.name = font_name_hash(ct)
 	face.color = CTFontGetSymbolicTraits(ct) & CT_FONT_COLOR_GLYPHS_TRAIT != 0
 	face.coretext_shaping = !font_has_table(ct, "GSUB") && font_has_table(ct, "morx")
-	face.native_advances = face.hmetrics > 0 && font_has_table(ct, "fvar")
+	face.axis_count = 0
+	face.optical_size = false
+	if font_has_table(ct, "fvar") {
+		instance_axes(face, ct)
+		face.optical_size = has_axis(face, OPSZ)
+	}
 	return true
+}
+
+// instance_axes adds the axis values of the variable font instance ct is.
+// CoreText lists the axes away from their defaults, by the tag as a big
+// endian number.
+@(private = "file")
+instance_axes :: proc(face: ^Face, ct: Font_Ref) {
+	dict := CTFontCopyVariation(ct)
+	if dict == nil {
+		return
+	}
+	defer cf_release(dict)
+	n := CFDictionaryGetCount(dict)
+	keys := make([]rawptr, n, context.temp_allocator)
+	values := make([]rawptr, n, context.temp_allocator)
+	CFDictionaryGetKeysAndValues(dict, raw_data(keys), raw_data(values))
+	for i in 0 ..< n {
+		tag: i64
+		value: CGFloat
+		if CFNumberGetValue(keys[i], CF_NUMBER_SINT64_TYPE, &tag) && CFNumberGetValue(values[i], CF_NUMBER_CGFLOAT_TYPE, &value) {
+			add_axis(face, intrinsics.byte_swap(u32(tag)), f32(value))
+		}
+	}
 }
 
 @(private)
@@ -430,24 +462,10 @@ sized_font :: proc(face: ^Face, size: f32, optical: f32 = 0) -> CTFontRef {
 // raster_font is face's CTFont for drawing at px_size pixels for text
 // size points. A variable font's optical size would follow px_size, which
 // on a 2x screen picks the design for text twice the size, so it's pinned
-// to size.
+// to size, as kb_text_shape shapes it (push_face).
 @(private)
 raster_font :: proc(face: ^Face, px_size, size: f32) -> CTFontRef {
-	return sized_font(face, px_size, size if face.native_advances else 0)
-}
-
-// SF Pro's optical size axis changes its advances with the point size, so
-// cached advances are kept per size.
-ADVANCES_BY_SIZE :: true
-
-// native_advance is glyph id's advance in the face's instance at size, in
-// em.
-@(private)
-native_advance :: proc(t: ^State, face: int, size: f32, id: u16) -> f32 {
-	glyph := CGGlyph(id)
-	advance: CGSize
-	CTFontGetAdvancesForGlyphs(sized_font(&t.faces[face], size), 0, &glyph, &advance, 1)
-	return f32(advance.width) / size
+	return sized_font(face, px_size, size if face.optical_size else 0)
 }
 
 // coretext_shape shapes sh.runes[start:end], all one direction and one
@@ -588,9 +606,9 @@ rasterize :: proc(a: ^Atlas, face: ^Face, px_size, size: f32, glyph: u16, w, h: 
 
 // glyph_box is the glyph's ink at px_size, for text size points, in pixels
 // from the pen on the baseline, y up: left, bottom, right, top. Empty for a
-// glyph with none.
+// glyph with none. x, the pen's subpixel offset, matters only on Windows.
 @(private)
-glyph_box :: proc(a: ^Atlas, face: ^Face, px_size, size: f32, glyph: u16) -> [4]f64 {
+glyph_box :: proc(a: ^Atlas, face: ^Face, px_size, size: f32, glyph: u16, x: f64) -> [4]f64 {
 	font := raster_font(face, px_size, size)
 	glyph := glyph
 	bounds: CGRect

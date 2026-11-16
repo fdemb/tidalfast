@@ -1,6 +1,7 @@
-// Text: the system's UI font (SF Pro on macOS, Noto Sans on Linux) and the
-// built-in Phosphor icons loaded into kb_text_shape and the OS's font
-// rasterizer (CoreText on macOS, FreeType on Linux), shaping with
+// Text: the system's UI font (SF Pro on macOS, Segoe UI Variable on
+// Windows, the built-in Noto Sans on Linux) and the built-in Phosphor icons
+// loaded into kb_text_shape and the OS's font rasterizer (CoreText on
+// macOS, DirectWrite on Windows, FreeType on Linux), shaping with
 // kb_text_shape, rasterizing into glyph atlases, and drawing through the
 // rect renderer.
 //
@@ -10,19 +11,19 @@
 // rasterized at physical pixel sizes and placed on whole pixels, with one of
 // four bitmaps per glyph for the fractional x position.
 //
-// Characters the system font lacks go to a fallback font that CTFontCreateForString
-// picks on macOS, fontconfig on Linux and a list of the system's fonts on
-// Windows (fonts_darwin.odin, fonts_linux.odin, fonts_windows.odin). Its
-// file is loaded into kb_text_shape too, so both
-// sides see the same glyph IDs. Fallbacks load on a worker thread
+// Characters the system font lacks go to a fallback font that
+// CTFontCreateForString picks on macOS, DirectWrite's system font fallback
+// on Windows and fontconfig on Linux (fonts_darwin.odin,
+// fonts_windows.odin, fonts_linux.odin). Its file is loaded into
+// kb_text_shape too, so both sides see the same glyph IDs. Fallbacks load on a worker thread
 // (loader.odin). Some macOS fonts (Geeza Pro for Arabic, Apple Color Emoji)
 // carry only Apple's morx shaping tables, which kb_text_shape can't read.
 // Runs in those fonts are shaped by CoreText instead, which still gets them
 // the right glyphs from the same file.
 //
-// SF Pro is one variable font, and kb_text_shape reads only its default
-// instance, so for variable fonts the advances come from the OS
-// (native_advance) and kb_text_shape adds its kerning to them.
+// SF Pro is one variable font. Each face of a variable font carries the
+// axis values the OS draws it with, and kb_text_shape shapes with the same
+// ones, with the optical size following the point size (push_face).
 //
 // kb_text_shape splits text into runs of one direction, script and font,
 // but its bidi resolution is incomplete, so shape_uncached picks the
@@ -31,6 +32,7 @@
 //
 package text
 
+import "core:c"
 import "core:c/libc"
 import "core:hash"
 import "core:mem"
@@ -91,11 +93,11 @@ FALLBACK_CAPACITY :: 4096 // to start with; it doubles when three quarters full
 RUN_CAPACITY :: 8192 // slots; the cache holds at most half that
 GLYPH_POOL :: 1 << 18
 SHAPER_MEMORY :: 8 << 20
-ADVANCE_CAPACITY :: 4096 // slots; cleared when three quarters full
 // A cached run nobody drew for this many frames is dropped at the next sweep.
 EVICT_AFTER :: 600
 SWEEP_EVERY :: 256
 BASE_SIZE :: 16
+MAX_AXES :: 16 // of a variable font's instance that a face keeps
 
 ELLIPSIS :: "…"
 // Points a run may exceed max_width by and still fit: a box sized to the
@@ -148,12 +150,13 @@ Face :: struct {
 	ascent, descent:  f32, // in em
 	color:            bool, // colour bitmaps (emoji): drawn from the BGRA atlas
 	coretext_shaping: bool, // morx without GSUB: kb_text_shape can't shape it
-	// An instance of a variable font, whose advances kb_text_shape gets
-	// wrong: it reads the default instance's. They come from the OS, plus
-	// what kb_text_shape adds to the default ones (kerning).
-	native_advances:  bool,
-	hmtx:             []byte, // the default instance's advances, in file
-	hmetrics:         int, // advances in hmtx
+	// The instance of a variable font the OS draws the face with, which
+	// kb_text_shape shapes it with too. With optical_size, opsz is the
+	// point size instead, as the OS draws it.
+	axes:             [MAX_AXES]kbts.variation,
+	axis_count:       int,
+	optical_size:     bool,
+	trak:             []byte, // AAT tracking by point size, in file
 	file:             []byte,
 	mapped:           bool,
 	blob:             rawptr, // kb_text_shape's parsed tables, malloc'd
@@ -168,12 +171,6 @@ Fallback :: struct {
 
 NO_FACE :: -1
 PENDING :: -2 // asked the loader
-
-// A cached native_advance, by face, glyph and, if ADVANCES_BY_SIZE, size.
-Advance :: struct {
-	key: u64, // 0 is empty
-	em:  f32,
-}
 
 Stats :: struct {
 	shaped:     int, // runs shaped this frame (cache misses)
@@ -199,8 +196,6 @@ State :: struct {
 	// asked yet, 1 yes, 2 no. kb_text_shape's cmap lookup is slow enough
 	// (about half a microsecond) to matter once per character.
 	coverage:        [Font][]u8,
-	advances:        []Advance,
-	advance_count:   int,
 
 	shaper_memory:   []byte,
 	shaper:          ^kbts.shape_context,
@@ -236,7 +231,6 @@ init :: proc(t: ^State, wake: proc "c" () = nil) -> bool {
 		c = make([]u8, 0x10000 / 4)
 	}
 	t.runs = make([]Run, RUN_CAPACITY)
-	t.advances = make([]Advance, ADVANCE_CAPACITY)
 	t.pool = make([]Glyph, GLYPH_POOL)
 	t.shaper_memory = make([]byte, SHAPER_MEMORY)
 	t.shaper = kbts.PlaceShapeContextFixedMemory(t.shaper_memory)
@@ -562,12 +556,12 @@ kb_shape_once :: proc(t: ^State, font: Font, size: f32, sh: ^Shaping, stack: Fon
 			face := int(t.fallbacks[font][i])
 			on_top := stack.color_emoji && t.faces[face].color
 			if face in stack.needed && on_top == (pass == 1) {
-				_ = kbts.ShapePushFont(ctx, &t.faces[face].kb)
+				push_face(ctx, &t.faces[face], size)
 				pushed += 1
 			}
 		}
 	}
-	_ = kbts.ShapePushFont(ctx, &t.faces[font].kb)
+	push_face(ctx, &t.faces[font], size)
 	kbts.ShapeBegin(ctx, .KBTS_DIRECTION_RTL if paragraph_rtl else .KBTS_DIRECTION_LTR, .DONT_KNOW)
 	kbts.ShapeUtf32(ctx, sh.runes)
 	kbts.ShapeEnd(ctx)
@@ -577,15 +571,15 @@ kb_shape_once :: proc(t: ^State, font: Font, size: f32, sh: ^Shaping, stack: Fon
 			break
 		}
 		face := face_of(t, run.Font)
-		native := t.faces[face].native_advances
 		piece := Piece{face = face, rtl = run.Direction == .KBTS_DIRECTION_RTL, first = len(sh.glyphs)}
 		scale := size / t.faces[face].units_per_em
+		track := tracking(t.faces[face].trak, size) * scale
 		x: f32
 		for g in kbts.GlyphIteratorNext(&run.Glyphs) {
 			advance := f32(g.AdvanceX) * scale
 			// A mark's zero advance stays zero.
-			if native && g.AdvanceX != 0 {
-				advance += cached_advance(t, face, size, g.Id) - default_advance(&t.faces[face], g.Id) * scale
+			if g.AdvanceX != 0 {
+				advance += track
 			}
 			glyph := Glyph {
 				pen     = x,
@@ -639,11 +633,12 @@ coretext_reshape :: proc(t: ^State, size: f32, sh: ^Shaping, pending: ^bool) {
 // bidi_reorder settles each piece's direction and returns the pieces in
 // visual order. kb_text_shape gives each run a direction but resolves
 // neutrals at the end of the text and brackets around text of the other
-// direction wrongly, and has no embedding levels. So spaces and brackets at
-// the ends of runs become runs of their own, and resolve_levels redoes the
+// direction wrongly, and has no embedding levels. So brackets, and spaces at
+// the ends of runs, become runs of their own, and resolve_levels redoes the
 // neutral and number rules over whole runs.
 @(private)
 bidi_reorder :: proc(t: ^State, sh: ^Shaping, paragraph_rtl: bool) -> []int {
+	split_brackets(t, sh)
 	peel(t, sh)
 	n := len(sh.pieces)
 	kinds := make([]Bidi_Kind, n, context.temp_allocator)
@@ -812,6 +807,63 @@ pictographic :: proc(r: rune) -> bool {
 // space.
 is_space :: proc(r: rune) -> bool {
 	return r == ' ' || r == 0xa0 || r == 0x3000
+}
+
+// split_brackets splits runs at the brackets inside them, each a glyph to
+// itself. kb_text_shape can put a bracket in a run of the other direction
+// than its pair's: in "عيونك (Remix) 2024" the ")" goes with "Remix 2024".
+@(private)
+split_brackets :: proc(t: ^State, sh: ^Shaping) {
+	// part is glyphs [first, first + count) of p, codepoints [start, end).
+	part :: proc(sh: ^Shaping, p: Piece, start, end, first, count: int) -> Piece {
+		x: f32
+		for &g in sh.glyphs[first:][:count] {
+			g.pen = x
+			x += g.advance
+		}
+		return {face = p.face, rtl = p.rtl, start = start, end = end, first = first, count = count, width = x}
+	}
+	// bracket_glyph finds the one glyph of codepoint cp in cps, with the
+	// glyphs of the codepoints before it on one side and after it on the
+	// other.
+	bracket_glyph :: proc(cps: []int, cp: int, rtl: bool) -> (g: int, ok: bool) {
+		g = -1
+		for c, i in cps {
+			if c == cp {
+				if g >= 0 {
+					return
+				}
+				g = i
+			} else if before := (g < 0) != rtl; (c < cp) != before {
+				return
+			}
+		}
+		return g, g >= 0
+	}
+
+	pieces := make([dynamic]Piece, 0, len(sh.pieces), context.temp_allocator)
+	for p in sh.pieces {
+		rest := p
+		for k in p.start + 1 ..< p.end - 1 {
+			r := sh.runes[k]
+			if t.faces[p.face].coretext_shaping || mirror(r) == r || k == rest.start {
+				continue
+			}
+			g := bracket_glyph(sh.cps[rest.first:][:rest.count], k, rest.rtl) or_continue
+			left := part(sh, rest, k + 1 if rest.rtl else rest.start, rest.end if rest.rtl else k, rest.first, g)
+			right := part(sh, rest, rest.start if rest.rtl else k + 1, k if rest.rtl else rest.end, rest.first + g + 1, rest.count - g - 1)
+			bracket := part(sh, rest, k, k + 1, rest.first + g, 1)
+			if rest.rtl {
+				append(&pieces, right, bracket)
+				rest = left
+			} else {
+				append(&pieces, left, bracket)
+				rest = right
+			}
+		}
+		append(&pieces, rest)
+	}
+	sh.pieces = pieces
 }
 
 // peel splits spaces and brackets at either logical end of a run into
@@ -1195,42 +1247,101 @@ face_named :: proc(t: ^State, name: u64) -> int {
 	return NO_FACE
 }
 
-// default_advance is glyph id's advance in the default instance, in font
-// units, from the hmtx table. Glyphs past the last entry take its advance.
+// add_axis adds the face's value for axis tag.
 @(private)
-default_advance :: proc(face: ^Face, id: u16) -> f32 {
-	i := 4 * min(int(id), face.hmetrics - 1)
-	if i < 0 || i + 2 > len(face.hmtx) {
-		return 0
+add_axis :: proc(face: ^Face, tag: u32, value: f32) {
+	if face.axis_count < MAX_AXES {
+		face.axes[face.axis_count] = {Tag = tag, Value = value}
+		face.axis_count += 1
 	}
-	return f32(int(face.hmtx[i]) << 8 | int(face.hmtx[i + 1]))
 }
 
-// cached_advance is native_advance in points, from the advances cache when
-// it can.
+// has_axis says whether face's font has a variation axis tag.
 @(private)
-cached_advance :: proc(t: ^State, face: int, size: f32, id: u16) -> f32 {
-	key := 1 << 63 | u64(face) << 48 | u64(id) << 32
-	when ADVANCES_BY_SIZE {
-		key |= u64(transmute(u32)size)
-	}
-	mask := len(t.advances) - 1
-	slot := int(mix64(key)) & mask
-	for t.advances[slot].key != 0 {
-		if t.advances[slot].key == key {
-			return t.advances[slot].em * size
+has_axis :: proc(face: ^Face, tag: u32) -> bool {
+	axes, instances: c.int
+	kbts.GetVariationInfo(&face.kb, &axes, &instances)
+	for i in 0 ..< axes {
+		info: kbts.variation_axis_info
+		if kbts.GetVariationAxisInfo(&face.kb, i, &info) && info.Tag == tag {
+			return true
 		}
-		slot = (slot + 1) & mask
 	}
-	if t.advance_count >= len(t.advances) * 3 / 4 {
-		mem.zero_slice(t.advances)
-		t.advance_count = 0
-		slot = int(mix64(key)) & mask
+	return false
+}
+
+OPSZ :: u32('o') | u32('p') << 8 | u32('s') << 16 | u32('z') << 24
+WGHT :: u32('w') | u32('g') << 8 | u32('h') << 16 | u32('t') << 24
+
+// push_face pushes face onto kb_text_shape's font stack, set to its
+// instance at size points. kb_text_shape keeps a shape config, about 25 KB,
+// for each font and script it shapes until the context is reset. A font
+// with feature variations needs one per instance too, so with
+// optical_size one per point size: keep sizes to a few fixed values for
+// those, or the context runs out of memory and kb_shape resets it.
+@(private)
+push_face :: proc(ctx: ^kbts.shape_context, face: ^Face, size: f32) {
+	axes := face.axes
+	n := face.axis_count
+	if face.optical_size {
+		i := 0
+		for i < n && axes[i].Tag != OPSZ {
+			i += 1
+		}
+		if i < MAX_AXES {
+			axes[i] = {Tag = OPSZ, Value = size}
+			n = max(n, i + 1)
+		}
 	}
-	em := native_advance(t, face, size, id)
-	t.advances[slot] = {key, em}
-	t.advance_count += 1
-	return em * size
+	_ = kbts.ShapePushFont2(ctx, &face.kb, &axes[0], c.int(n), nil)
+}
+
+// tracking is the normal track of trak, an AAT tracking table, at size
+// points, in font units. CoreText adds it to every advance, and kb_text_shape
+// doesn't read trak. SF Pro's tightens text between 12 and 24 pt and loosens it
+// around 28. Between the table's sizes it's interpolated, and past its ends
+// it's the nearest one's, as HarfBuzz does.
+@(private)
+tracking :: proc(trak: []byte, size: f32) -> f32 {
+	horizontal := be16(trak, 6)
+	if len(trak) < 12 || horizontal <= 0 {
+		return 0
+	}
+	tracks, sizes, size_table := be16(trak, horizontal), be16(trak, horizontal + 2), be32(trak, horizontal + 4)
+	if sizes <= 0 || size_table < 0 || size_table + 4 * sizes > len(trak) {
+		return 0
+	}
+	for k in 0 ..< max(tracks, 0) {
+		entry := horizontal + 8 + 8 * k
+		values := be16(trak, entry + 6)
+		if values < 0 || values + 2 * sizes > len(trak) {
+			return 0
+		}
+		if be32(trak, entry) != 0 {
+			continue
+		}
+		size_at :: proc(trak: []byte, table, i: int) -> f32 {
+			return f32(i32(u32(be32(trak, table + 4 * i)))) / 65536
+		}
+		value_at :: proc(trak: []byte, values, i: int) -> f32 {
+			return f32(i16(u16(be16(trak, values + 2 * i))))
+		}
+		i := 0
+		for i + 2 < sizes && size_at(trak, size_table, i + 1) < size {
+			i += 1
+		}
+		j := min(i + 1, sizes - 1)
+		s0, s1 := size_at(trak, size_table, i), size_at(trak, size_table, j)
+		v0, v1 := value_at(trak, values, i), value_at(trak, values, j)
+		if size <= s0 || s1 <= s0 {
+			return v0
+		}
+		if size >= s1 {
+			return v1
+		}
+		return v0 + (size - s0) / (s1 - s0) * (v1 - v0)
+	}
+	return 0
 }
 
 // fvar_instance returns the 1-based number of the first named instance in
@@ -1270,6 +1381,13 @@ fvar_instance :: proc(data: []byte, tag: string, value: f32) -> int {
 	return -1
 }
 
+// file_face_name is the name of face index in the font file at path, for
+// the systems that find fallback fonts by file.
+@(private)
+file_face_name :: proc(path: cstring, index: int) -> u64 {
+	return hash.fnv64a(transmute([]byte)string(path)) ~ (u64(index) + 1) * 0x9e37_79b9_7f4a_7c15
+}
+
 // font_table returns table tag of face index in the font file data, or nil.
 font_table :: proc(data: []byte, index: int, tag: string) -> []byte {
 	offset := 0
@@ -1298,6 +1416,15 @@ font_table :: proc(data: []byte, index: int, tag: string) -> []byte {
 // CTFontCopyTable wants it.
 table_tag :: proc(s: string) -> u32 {
 	return u32(s[0]) << 24 | u32(s[1]) << 16 | u32(s[2]) << 8 | u32(s[3])
+}
+
+// be16 reads a big-endian u16 at at, or -1 past the end.
+@(private)
+be16 :: proc(data: []byte, at: int) -> int {
+	if at < 0 || at + 2 > len(data) {
+		return -1
+	}
+	return int(data[at]) << 8 | int(data[at + 1])
 }
 
 // be32 reads a big-endian u32 at at, or -1 past the end.
