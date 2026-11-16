@@ -1,0 +1,105 @@
+# Checks media keys and Now Playing on Linux and Windows the way the
+# desktop reaches them. Runs the app with fake data and drives it from
+# outside: playerctl over MPRIS on Linux, under a headless Weston, and the
+# System Media Transport Controls' session manager on Windows. Then checks
+# the app's log for the commands, and uploads the logs.
+name: media
+
+on:
+  push:
+    paths:
+      - "shell/mpris.*"
+      - "shell/png.*"
+      - "shell/smtc_win32.*"
+      - "shell/shell_wayland.c"
+      - "shell/shell_win32.c"
+      - "tests/mpris_linux.odin"
+      - "tests/smtc_session.ps1"
+      - ".github/workflows/media.yml"
+  workflow_dispatch:
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang pkg-config libwayland-dev wayland-protocols libxkbcommon-dev \
+            libvulkan-dev glslang-tools libfreetype-dev libfontconfig-dev libcurl4-openssl-dev weston mesa-vulkan-drivers \
+            dbus playerctl
+      - uses: ./.github/actions/install-odin
+      - run: python3 build.py
+      - name: Drive MPRIS
+        run: |
+          export XDG_RUNTIME_DIR="$RUNNER_TEMP/xdg"
+          mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+          out="$RUNNER_TEMP/media"
+          mkdir -p "$out"
+          weston --backend=headless --socket=wl-test --width=1600 --height=1000 &
+          sleep 3
+          cat > "$out/drive.sh" <<'EOF'
+          set -eu
+          WAYLAND_DISPLAY=wl-test TIDALFAST_FAKE=1 TIDALFAST_AUDIO_NULL=1 TIDALFAST_NOW_PLAYING_LOG=1 \
+            TIDALFAST_SHELL_TEST="25:quit" ./build/tidalfast > "$1/app.log" 2>&1 &
+          app=$!
+          sleep 5
+          p="playerctl -p tidalfast"
+          test "$($p status)" = Stopped
+          $p play; sleep 2
+          test "$($p status)" = Playing
+          $p metadata | tee "$1/metadata.txt"
+          $p metadata title | grep .
+          $p pause; sleep 1
+          test "$($p status)" = Paused
+          $p position 12; sleep 1
+          $p next; sleep 1
+          $p previous; sleep 1
+          wait $app
+          EOF
+          dbus-run-session -- sh "$out/drive.sh" "$out"
+          kill %1 || true
+          cat "$out/app.log"
+          for want in "remote command 1 " "remote command 2 " "remote command 6 (12.000)" "remote command 4 " "remote command 5 "; do
+            grep -q "shell: $want" "$out/app.log" || { echo "missing: $want"; exit 1; }
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: media-linux
+          path: ${{ runner.temp }}/media
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/install-odin
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - run: python build.py
+      - name: Drive the System Media Transport Controls
+        shell: bash
+        run: |
+          mkdir -p media
+          TIDALFAST_FAKE=1 TIDALFAST_AUDIO_NULL=1 TIDALFAST_NOW_PLAYING_LOG=1 TIDALFAST_SHELL_TEST="3:key=space;30:quit" \
+            timeout 120 ./build/windows/tidalfast.exe > media/app.log 2>&1 &
+          app=$!
+          sleep 10
+          status=0
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/smtc_session.ps1 2>&1 | tee media/session.txt || status=1
+          wait $app || true
+          cat media/app.log
+          grep -q 'shell: smtc: status 3, enabled 1, title "' media/app.log || { echo "the controls didn't show the track"; exit 1; }
+          for want in "remote command 2 " "remote command 6 (10.000)" "remote command 4 "; do
+            grep -q "shell: $want" media/app.log || { echo "missing: $want"; status=1; }
+          done
+          exit $status
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: media-windows
+          path: media

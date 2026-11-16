@@ -22,6 +22,7 @@ package app
 
 import "base:intrinsics"
 import "base:runtime"
+import "core:c/libc"
 import "core:fmt"
 import "core:log"
 import "core:math"
@@ -444,6 +445,7 @@ resolve :: proc(s: ^State, t: ^Track_Source) {
 		} else {
 			audio.set_next(pb.player, source_of(pb, t))
 		}
+		request_artwork(s, t)
 		return
 	}
 	push_job(&s.data, {payload = Stream_Job{track = pb.entries[t.item].id, serial = t.serial}})
@@ -453,11 +455,36 @@ resolve :: proc(s: ^State, t: ^Track_Source) {
 @(private = "file")
 request_artwork :: proc(s: ^State, t: ^Track_Source) {
 	pb := &s.playback
-	if pb.fake || pb.items[t.item].cover == "" {
+	if pb.fake {
+		fake_artwork(pb, t)
+		return
+	}
+	if pb.items[t.item].cover == "" {
 		return
 	}
 	image := Image_Job{id = small(pb.items[t.item].cover), size = ARTWORK_SIZE, fetch = ARTWORK_SIZE}
 	push_job(&s.data, {payload = Artwork_Job{serial = t.serial, image = image}}, PRIORITY_COVER)
+}
+
+// fake_artwork gives a fake track a small cover of its own colour, so Now
+// Playing shows one without a server.
+@(private = "file")
+fake_artwork :: proc(pb: ^Playback, t: ^Track_Source) {
+	SIDE :: 64
+	pixels := ([^]u8)(libc.malloc(SIDE * SIDE * 4)) // freed as stb_image's are
+	if pixels == nil {
+		return
+	}
+	h := u32(t.track) * 2654435761
+	for i in 0 ..< SIDE * SIDE {
+		pixels[i * 4 + 0] = u8(h >> 8)
+		pixels[i * 4 + 1] = u8(h >> 16)
+		pixels[i * 4 + 2] = u8(i % SIDE * 4)
+		pixels[i * 4 + 3] = 255
+	}
+	a := &pb.art if t == &pb.cur else &pb.next_art
+	artwork_free(a)
+	a^ = {pixels[:SIDE * SIDE * 4], SIDE, SIDE, t.serial}
 }
 
 // artwork_result takes an Artwork job's result.
@@ -1025,9 +1052,9 @@ playing_row :: proc(s: ^State) -> int {
 	return pb.found_row
 }
 
-// update_now_playing tells macOS what plays when the track, its state, its
-// length, a finished seek or the artwork changed. macOS moves the elapsed
-// time along by itself from the rate.
+// update_now_playing tells the system what plays when the track, its
+// state, its length, a finished seek or the artwork changed. The system
+// moves the elapsed time along by itself from the rate.
 @(private = "file")
 update_now_playing :: proc(s: ^State) {
 	pb := &s.playback

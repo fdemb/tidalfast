@@ -52,7 +52,7 @@ Wayland sends finger scrolls as they happen and nothing after the fingers lift, 
 
 The shell differs from GTK in three places. The glide ends once less than a quarter point is left on both axes and sends that rest at once, so an idle window uses no CPU. GTK runs until the speed is under 0.1 points per second. The wheel keeps the app's three lines with easing, where GTK jumps by the view's height to the power 2/3. There is no overshoot. GTK lets fingers pull up to 100 points past an edge and then springs back, critically damped. The views here stop at their edges, on macOS too, and the spring needs the view's bounds, which only `src/ui` knows.
 
-Not done yet: media keys and MPRIS, the screen reader tree (AT-SPI), and following a change to GNOME's button layout while the app runs. The Vulkan backend gives each texture its own `VkDeviceMemory`, which is fine for the few hundred textures the app makes but could use a sub-allocator.
+Not done yet: the screen reader tree (AT-SPI), and following a change to GNOME's button layout while the app runs. The Vulkan backend gives each texture its own `VkDeviceMemory`, which is fine for the few hundred textures the app makes but could use a sub-allocator.
 
 One test, `keychain_round_trip`, needs a Secret Service. The login tests keep the login in memory. Run the tests in a private D-Bus session with a throwaway keyring.
 

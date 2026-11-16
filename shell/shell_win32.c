@@ -23,11 +23,12 @@
 // inserted, as NSTextInputClient does on macOS. The input method is only
 // on while a text field has the focus. Letters and digits are mapped by
 // the virtual key the layout gives them, so shortcuts follow the layout,
-// and the other keys by their scan code, their place on the keyboard. Not
-// here yet: accessibility (UI Automation), Now Playing and the media
-// overlay (System Media Transport Controls), drag and drop and touchpad
-// momentum (Windows sends precision touchpad scrolls as fine wheel deltas,
-// which arrive as precise scrolls without phases).
+// and the other keys by their scan code, their place on the keyboard. Now
+// Playing and the media overlay go through the System Media Transport
+// Controls (smtc_win32.c), which post the buttons pressed there to the
+// window as WM_SMTC. Not here yet: accessibility (UI Automation), drag and
+// drop and touchpad momentum (Windows sends precision touchpad scrolls as
+// fine wheel deltas, which arrive as precise scrolls without phases).
 //
 // The window has no titlebar of its own. The view goes up to the window's
 // top, and the app draws minimise, maximise and close at its top right
@@ -57,6 +58,7 @@
 #include <string.h>
 
 #include "common.h"
+#include "smtc_win32.h"
 
 #define PERSISTENT_SIZE (256ull << 20)
 #define FRAME_SIZE (64ull << 20)
@@ -962,6 +964,9 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     // The app draws the composition itself.
     lp &= ~(LPARAM)ISC_SHOWUICOMPOSITIONWINDOW;
     break;
+  case WM_SMTC:
+    remote_command((uint32_t)wp, (double)lp / 1000);
+    return 0;
   case WM_APPCOMMAND:
     switch (GET_APPCOMMAND_LPARAM(lp)) {
     case APPCOMMAND_BROWSER_BACKWARD: mouse_button(MOUSE_BUTTON_BACK, true), mouse_button(MOUSE_BUTTON_BACK, false); return TRUE;
@@ -1296,6 +1301,11 @@ static void pump_messages(void) {
   }
 }
 
+static void set_now_playing(const Now_Playing *np) {
+  print_now_playing(np);
+  smtc_set(g_window, np);
+}
+
 static void main_loop(void) {
   while (!atomic_load(&g_quit)) {
     // A frame is due when something asked for one or the app animates;
@@ -1358,7 +1368,7 @@ int shell_main(int argc, char **argv) {
   g_shell = (Shell){
       .surface = &g_surface_info,
       .request_redraw = request_redraw,
-      .set_now_playing = print_now_playing,
+      .set_now_playing = set_now_playing,
       .set_text_input = set_text_input,
       .set_clipboard = set_clipboard,
       .get_clipboard = get_clipboard,
@@ -1381,6 +1391,7 @@ int shell_main(int argc, char **argv) {
   request_redraw();
   main_loop();
   shut_down();
+  smtc_close();
   DestroyWindow(g_window);
   return 0;
 }
