@@ -64,37 +64,37 @@
     </linearGradient>
 
     <linearGradient id="wave-deep" x1="0.2" y1="0.3" x2="0.85" y2="0.85">
-      <stop offset="0" stop-color="#074d59"/>
-      <stop offset="0.5" stop-color="#0a6575"/>
-      <stop offset="1" stop-color="#064652"/>
+      <stop offset="0" stop-color="#1ba4bc"/>
+      <stop offset="0.5" stop-color="#1cabc4"/>
+      <stop offset="1" stop-color="#1ba2ba"/>
     </linearGradient>
     <linearGradient id="wave-mid" x1="0.25" y1="0.25" x2="0.85" y2="0.8">
-      <stop offset="0" stop-color="#0d788a"/>
-      <stop offset="0.5" stop-color="#14a1b8"/>
-      <stop offset="1" stop-color="#0d6574"/>
+      <stop offset="0" stop-color="#1db0ca"/>
+      <stop offset="0.5" stop-color="#1fbcd8"/>
+      <stop offset="1" stop-color="#1cabc4"/>
     </linearGradient>
     <linearGradient id="wave-bright" x1="0.2" y1="0.3" x2="0.95" y2="0.65">
-      <stop offset="0" stop-color="#1895a9"/>
-      <stop offset="0.45" stop-color="#2dbdd4"/>
-      <stop offset="0.85" stop-color="#20b2c9"/>
-      <stop offset="1" stop-color="#117b8c"/>
+      <stop offset="0" stop-color="#1ebad5"/>
+      <stop offset="0.45" stop-color="#32bcd5"/>
+      <stop offset="0.85" stop-color="#23c0dc"/>
+      <stop offset="1" stop-color="#1db1cc"/>
     </linearGradient>
     <linearGradient id="wave-crest" x1="0.15" y1="0.2" x2="0.75" y2="0.65">
-      <stop offset="0" stop-color="#6fe5f7"/>
-      <stop offset="0.4" stop-color="#8cedfc"/>
-      <stop offset="0.75" stop-color="#5ed7ea"/>
-      <stop offset="1" stop-color="#2dbdd4"/>
+      <stop offset="0" stop-color="#41cbe4"/>
+      <stop offset="0.4" stop-color="#4acee5"/>
+      <stop offset="0.75" stop-color="#39c9e3"/>
+      <stop offset="1" stop-color="#32bcd5"/>
     </linearGradient>
     <linearGradient id="wave-foam" x1="0.1" y1="0.35" x2="0.65" y2="0.65">
-      <stop offset="0" stop-color="#99eaf6"/>
-      <stop offset="0.55" stop-color="#5ed7ea"/>
-      <stop offset="1" stop-color="#26aabf"/>
+      <stop offset="0" stop-color="#4ccee5"/>
+      <stop offset="0.55" stop-color="#39c9e3"/>
+      <stop offset="1" stop-color="#2abbd4"/>
     </linearGradient>
     <linearGradient id="wave-front" x1="0.15" y1="0.65" x2="0.75" y2="0.85">
-      <stop offset="0" stop-color="#7eebfc"/>
-      <stop offset="0.35" stop-color="#47d1e5"/>
-      <stop offset="0.75" stop-color="#1fb0c7"/>
-      <stop offset="1" stop-color="#0f6776"/>
+      <stop offset="0" stop-color="#46cde5"/>
+      <stop offset="0.35" stop-color="#32c7e2"/>
+      <stop offset="0.75" stop-color="#22c0dc"/>
+      <stop offset="1" stop-color="#1cacc5"/>
     </linearGradient>
   </defs>
 
@@ -111,24 +111,24 @@
     <use href="#play" fill="url(#glass-depth)"/>
 
     <g clip-path="url(#play-clip)">
-      <path d="M280,450 Q380,400 450,510 Q540,620 750,520 L750,790 L280,790 Z" fill="#052e36" opacity="0.65"/>
+      <path d="M280,450 Q380,400 450,510 Q540,620 750,520 L790,500 L790,790 L280,790 Z" fill="#199bb2" opacity="0.65"/>
       <path d="M285,480 C315,435 375,380 455,375 C495,372 525,392 505,418 C462,422 430,468 438,518 C448,578 525,615 615,595 C675,582 720,552 775,565 L775,770 L285,770 Z" fill="url(#wave-deep)" filter="url(#wave-shadow)"/>
       <path d="M332,492 C325,425 385,365 468,365 C495,365 512,382 496,405 C452,412 405,455 415,522 C425,585 508,632 618,618 C672,610 725,578 770,582 L770,750 L315,750 Z" fill="url(#wave-mid)" filter="url(#wave-shadow)"/>
-      <path d="M368,488 C365,425 418,378 482,382 C442,402 388,452 396,520 C406,595 505,652 632,630 C685,620 735,588 778,582 L778,720 L340,720 Z" fill="#0d788a" opacity="0.85"/>
+      <path d="M368,488 C365,425 418,378 482,382 C442,402 388,452 396,520 C406,595 505,652 632,630 C685,620 735,588 778,582 L778,720 L340,720 Z" fill="#1db0ca" opacity="0.85"/>
       <path d="M412,505 C405,442 448,402 498,402 C455,428 432,475 445,525 C462,588 538,618 612,578 C662,550 715,522 778,545 L778,610 C722,578 668,585 615,612 C535,652 428,605 412,505 Z" fill="url(#wave-bright)" filter="url(#wave-shadow)"/>
-      <path d="M416,495 C412,448 448,412 488,406 C450,438 438,485 455,532 C478,595 562,625 658,618 C620,645 522,648 455,585 C425,556 418,522 416,495 Z" fill="#5ed7ea" opacity="0.88"/>
-      <path d="M285,525 C315,475 365,480 385,535 C395,585 445,638 545,665 L515,745 L285,745 Z" fill="#085361"/>
-      <path d="M285,555 C312,508 355,518 368,565 C382,615 442,658 535,678 L485,755 L285,755 Z" fill="#0e7587"/>
+      <path d="M416,495 C412,448 448,412 488,406 C450,438 438,485 455,532 C478,595 562,625 658,618 C620,645 522,648 455,585 C425,556 418,522 416,495 Z" fill="#39c9e3" opacity="0.88"/>
+      <path d="M285,525 C315,475 365,480 385,535 C395,585 445,638 545,665 L515,745 L285,745 Z" fill="#1ba6be"/>
+      <path d="M285,555 C312,508 355,518 368,565 C382,615 442,658 535,678 L485,755 L285,755 Z" fill="#1db0ca"/>
       <path d="M285,488 C318,452 362,438 392,450 C402,454 405,464 396,467 C388,469 382,464 376,466 C385,472 396,482 394,496 C392,508 380,515 372,508 C376,502 374,492 364,490 C352,488 342,495 344,506 C346,518 334,528 324,522 C329,515 325,504 314,504 C300,504 290,518 285,535 Z" fill="url(#wave-foam)" filter="url(#wave-shadow)"/>
       <path d="M285,432 C338,385 408,332 458,318 C492,308 518,322 518,342 C518,352 508,358 502,350 C498,345 488,344 482,350 C476,356 478,364 492,365 C515,360 545,358 562,374 C574,386 572,402 560,404 C554,405 552,396 544,396 C536,396 534,404 542,412 C565,408 595,418 608,438 C620,456 614,482 598,484 C590,485 588,476 592,470 C595,464 588,454 574,454 C560,454 554,462 558,474 C564,494 552,516 530,518 C512,520 496,508 500,496 C502,490 510,492 515,496 C524,500 532,490 528,476 C522,456 502,442 478,440 C482,428 478,412 462,408 C442,404 422,415 416,428 C412,415 398,408 382,414 C360,422 346,445 344,468 C322,472 302,486 285,508 Z" fill="url(#wave-crest)" filter="url(#wave-shadow)"/>
-      <path d="M285,432 C338,385 408,332 458,318 C492,308 518,322 518,342 C518,352 508,358 502,350 C498,345 488,344 482,350 C476,356 478,364 492,365 C508,362 528,362 544,368 C512,374 475,368 442,385 C425,394 416,410 416,428 C416,436 408,442 400,440 C394,438 396,430 390,426 C382,422 368,426 358,438 C348,450 344,462 344,468 C322,472 302,486 285,508 Z" fill="#9eeffc" opacity="0.75"/>
+      <path d="M285,432 C338,385 408,332 458,318 C492,308 518,322 518,342 C518,352 508,358 502,350 C498,345 488,344 482,350 C476,356 478,364 492,365 C508,362 528,362 544,368 C512,374 475,368 442,385 C425,394 416,410 416,428 C416,436 408,442 400,440 C394,438 396,430 390,426 C382,422 368,426 358,438 C348,450 344,462 344,468 C322,472 302,486 285,508 Z" fill="#4fcfe6" opacity="0.75"/>
       <path d="M285,638 C328,605 392,598 448,622 C502,645 545,672 608,672 L562,705 C505,698 462,672 422,648 C408,642 398,648 408,660 C418,672 412,680 398,672 C382,662 365,658 358,668 C350,680 375,708 428,728 C452,738 478,742 502,742 L465,768 C412,762 368,735 335,712 C315,698 298,698 285,712 Z" fill="url(#wave-front)" filter="url(#wave-shadow)"/>
-      <path d="M285,712 C298,698 315,698 335,712 C368,735 412,762 465,768 L285,785 Z" fill="#074a56" opacity="0.85"/>
-      <path d="M342,360 C348,342 366,336 376,346 C382,352 378,362 370,362 C360,358 350,360 342,366 Z" fill="#8cedfc"/>
-      <path d="M392,322 C398,308 412,306 418,314 C422,320 416,328 408,326 C400,324 396,326 392,328 Z" fill="#8cedfc"/>
-      <circle cx="328" cy="378" r="6" fill="#8cedfc"/>
-      <circle cx="585" cy="512" r="5.5" fill="#7eebfc"/>
-      <circle cx="618" cy="494" r="6.5" fill="#7eebfc"/>
+      <path d="M285,712 C298,698 315,698 335,712 C368,735 412,762 465,768 L285,785 Z" fill="#1ba3bb" opacity="0.85"/>
+      <path d="M342,360 C348,342 366,336 376,346 C382,352 378,362 370,362 C360,358 350,360 342,366 Z" fill="#4acee5"/>
+      <path d="M392,322 C398,308 412,306 418,314 C422,320 416,328 408,326 C400,324 396,326 392,328 Z" fill="#4acee5"/>
+      <circle cx="328" cy="378" r="6" fill="#4acee5"/>
+      <circle cx="585" cy="512" r="5.5" fill="#46cde5"/>
+      <circle cx="618" cy="494" r="6.5" fill="#46cde5"/>
       <use href="#play" fill="none" stroke="url(#glass-bevel)" stroke-width="10"/>
     </g>
     <use href="#play" fill="none" stroke="url(#glass-rim)" stroke-width="6"/>
