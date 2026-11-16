@@ -27,7 +27,7 @@ tools/measure/    startup and memory measurement (docs/measuring.md)
 tools/save_cost/  times what a list save and a queue save cost the UI thread
 tools/audio_top/  macOS's pw-top: each output device's rate and formats, and the processes playing to it
 tools/icons.sh    cuts the Phosphor icon fonts down to the icons the app draws
-tools/icon.sh     renders the app icon in packaging/ for macOS and Linux
+tools/icon.sh     renders the app icon in packaging/ for macOS, Linux and Windows
 packaging/        Info.plist, the .desktop file and the app icon for `./build.py dist`
 build.py          builds everything, on every OS; `./build.py dist` packages a release
 .github/          the release workflow: a v* tag publishes the .dmg and the AppImage
