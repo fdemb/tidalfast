@@ -1,7 +1,8 @@
 # Drives TIDALfast's System Media Transport Controls from outside, as the
 # media overlay does: finds its session through
 # GlobalSystemMediaTransportControlsSessionManager, prints what it shows,
-# then pauses it, seeks to 10 s and skips to the next track. The media
+# reads its thumbnail as the overlay would, then pauses it, seeks to 10 s
+# and skips to the next track. The media
 # workflow checks the app's log for the commands. Needs Windows PowerShell
 # 5.1, which projects WinRT types.
 
@@ -28,6 +29,11 @@ $props = Await ($session.TryGetMediaPropertiesAsync()) ([Windows.Media.Control.G
 "title: $($props.Title)"
 "artist: $($props.Artist)"
 "album: $($props.AlbumTitle)"
+if (-not $props.Thumbnail) { throw 'no thumbnail' }
+$null = [Windows.Storage.Streams.IRandomAccessStreamWithContentType, Windows.Storage.Streams, ContentType = WindowsRuntime]
+$thumbnail = Await ($props.Thumbnail.OpenReadAsync()) ([Windows.Storage.Streams.IRandomAccessStreamWithContentType])
+"thumbnail: $($thumbnail.Size) bytes, $($thumbnail.ContentType)"
+if ($thumbnail.Size -eq 0) { throw 'empty thumbnail' }
 "status: $($session.GetPlaybackInfo().PlaybackStatus)"
 "end: $($session.GetTimelineProperties().EndTime)"
 
