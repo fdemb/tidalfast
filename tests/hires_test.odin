@@ -396,6 +396,11 @@ settings_persistence :: proc(t: ^testing.T) {
 	st, _ = app.settings_load(path)
 	testing.expect_value(t, st, app.Settings{bar = .Solid})
 
+	// Still covers too; a file from before them has covers that lean.
+	testing.expect(t, app.settings_save(path, {still_covers = true}))
+	st, _ = app.settings_load(path)
+	testing.expect_value(t, st, app.Settings{still_covers = true})
+
 	// Shuffle and repeat too; a file from before them has both off.
 	testing.expect(t, app.settings_save(path, {shuffle = true, repeat = .One}))
 	data, _ = os.read_entire_file(path, context.temp_allocator)

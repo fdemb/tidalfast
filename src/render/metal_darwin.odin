@@ -7,6 +7,7 @@ import "core:time"
 import MTL "vendor:darwin/Metal"
 
 BACKDROPS :: true
+TILT :: true // whether the shader has push_tilt's branch
 
 Gpu :: struct {
 	device:    id, // id<MTLDevice>

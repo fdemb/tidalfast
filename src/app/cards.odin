@@ -154,7 +154,7 @@ card :: proc(s: ^State, i: int, f: Found, kind: cover.Kind, filled: bool) -> ui.
 	{
 		ui.row("", {}, ui.fill(), ui.px(CARD_SIZE))
 		ui.spacer(ui.px(CARD_PAD))
-		cover_art(s, kind, f.image, hash.fnv32a(transmute([]u8)f.name), CARD_SIZE, ui.px(CARD_SIZE), CARD_SIZE / 2 if round else 6)
+		cover_art(s, kind, f.image, hash.fnv32a(transmute([]u8)f.name), CARD_SIZE, ui.px(CARD_SIZE), CARD_SIZE / 2 if round else 6, hovered = b.hot_t > 0)
 	}
 	ui.spacer(ui.px(10))
 	ui.text_pad(CARD_PAD)

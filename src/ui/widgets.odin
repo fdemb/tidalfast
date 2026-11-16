@@ -335,14 +335,14 @@ scroll_to :: proc(view: ^Box, y0, y1: f32) {
 
 // slide eases keyed box b's open_t toward 1 while on and toward 0 while
 // not, and returns it, for a switch's knob. A box on its first frame starts
-// where it's going.
-slide :: proc(b: ^Box, on: bool) -> f32 {
+// where it's going. rate is how fast it goes, in e-folds a second.
+slide :: proc(b: ^Box, on: bool, rate: f32 = 24) -> f32 {
 	u := ctx
 	target: f32 = 1 if on else 0
 	if b.first_frame == u.frame {
 		b.open_t = target
 	}
-	b.open_t = approach(u, b.open_t, target, 1 - math.exp(-u.dt * 24), 0.01)
+	b.open_t = approach(u, b.open_t, target, 1 - math.exp(-u.dt * rate), 0.01)
 	return b.open_t
 }
 
