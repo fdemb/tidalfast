@@ -202,6 +202,18 @@ static void tick_fallback_fired(CFRunLoopTimerRef timer, void *info) {}
 static MPMediaItemArtwork *g_artwork;
 static uint64_t g_artwork_key;
 
+// Play and toggle stay on, since they start the selected row when nothing is
+// loaded, as CanPlay does on Linux. The rest need a track, and seeking a
+// duration too.
+static void enable_commands(bool has, bool seekable) {
+  MPRemoteCommandCenter *center = MPRemoteCommandCenter.sharedCommandCenter;
+  center.pauseCommand.enabled = has;
+  center.stopCommand.enabled = has;
+  center.nextTrackCommand.enabled = has;
+  center.previousTrackCommand.enabled = has;
+  center.changePlaybackPositionCommand.enabled = seekable;
+}
+
 static MPMediaItemArtwork *make_artwork(const Now_Playing *np) {
   size_t w = np->artwork_width, h = np->artwork_height;
   NSData *pixels = [NSData dataWithBytes:np->artwork length:w * h * 4];
@@ -224,13 +236,17 @@ static void log_now_playing(void) {
   MPNowPlayingInfoCenter *center = MPNowPlayingInfoCenter.defaultCenter;
   NSDictionary *info = center.nowPlayingInfo;
   MPMediaItemArtwork *art = info[MPMediaItemPropertyArtwork];
-  fprintf(stderr, "shell: now playing: state %ld, title \"%s\", artist \"%s\", album \"%s\", duration %.3f, elapsed %.3f, rate %.1f, artwork %s\n",
+  MPRemoteCommandCenter *commands = MPRemoteCommandCenter.sharedCommandCenter;
+  fprintf(stderr, "shell: now playing: state %ld, title \"%s\", artist \"%s\", album \"%s\", duration %.3f, elapsed %.3f, rate %.1f, artwork %s, enabled play %d pause %d toggle %d stop %d next %d previous %d seek %d\n",
           (long)center.playbackState, [info[MPMediaItemPropertyTitle] UTF8String] ?: "",
           [info[MPMediaItemPropertyArtist] UTF8String] ?: "", [info[MPMediaItemPropertyAlbumTitle] UTF8String] ?: "",
           [info[MPMediaItemPropertyPlaybackDuration] doubleValue],
           [info[MPNowPlayingInfoPropertyElapsedPlaybackTime] doubleValue],
           [info[MPNowPlayingInfoPropertyPlaybackRate] doubleValue],
-          art ? [NSString stringWithFormat:@"%.0fx%.0f", art.bounds.size.width, art.bounds.size.height].UTF8String : "none");
+          art ? [NSString stringWithFormat:@"%.0fx%.0f", art.bounds.size.width, art.bounds.size.height].UTF8String : "none",
+          commands.playCommand.enabled, commands.pauseCommand.enabled, commands.togglePlayPauseCommand.enabled,
+          commands.stopCommand.enabled, commands.nextTrackCommand.enabled, commands.previousTrackCommand.enabled,
+          commands.changePlaybackPositionCommand.enabled);
 }
 
 static void set_now_playing(const Now_Playing *np) {
@@ -240,6 +256,7 @@ static void set_now_playing(const Now_Playing *np) {
     center.playbackState = MPNowPlayingPlaybackStateStopped;
     g_artwork = nil;
     g_artwork_key = 0;
+    enable_commands(false, false);
     if (g_now_playing_log) log_now_playing();
     return;
   }
@@ -260,6 +277,7 @@ static void set_now_playing(const Now_Playing *np) {
   center.playbackState = np->state == NOW_PLAYING_PLAYING  ? MPNowPlayingPlaybackStatePlaying
                          : np->state == NOW_PLAYING_PAUSED ? MPNowPlayingPlaybackStatePaused
                                                            : MPNowPlayingPlaybackStateStopped;
+  enable_commands(true, np->duration > 0);
   if (g_now_playing_log) log_now_playing();
 }
 
@@ -274,20 +292,22 @@ static void setup_remote_commands(void) {
       {center.togglePlayPauseCommand, MEDIA_TOGGLE},
       {center.nextTrackCommand, MEDIA_NEXT},
       {center.previousTrackCommand, MEDIA_PREVIOUS},
+      {center.stopCommand, MEDIA_PAUSE}, // there's no stop, only pause
   };
   for (size_t i = 0; i < sizeof simple / sizeof simple[0]; i++) {
     uint32_t kind = simple[i].kind;
-    simple[i].command.enabled = YES;
     [simple[i].command addTargetWithHandler:^MPRemoteCommandHandlerStatus(MPRemoteCommandEvent *event) {
       remote_command(kind, 0);
       return MPRemoteCommandHandlerStatusSuccess;
     }];
   }
-  center.changePlaybackPositionCommand.enabled = YES;
   [center.changePlaybackPositionCommand addTargetWithHandler:^MPRemoteCommandHandlerStatus(MPRemoteCommandEvent *event) {
     remote_command(MEDIA_SEEK, ((MPChangePlaybackPositionCommandEvent *)event).positionTime);
     return MPRemoteCommandHandlerStatusSuccess;
   }];
+  center.playCommand.enabled = YES;
+  center.togglePlayPauseCommand.enabled = YES;
+  enable_commands(false, false);
 }
 
 // Text input
