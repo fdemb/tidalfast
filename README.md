@@ -1,13 +1,13 @@
 <h1>
 <p align="center">
-  <img src="packaging/linux/tidalfast.png" alt="TIDALfast icon" width="128">
+  <img src="packaging/linux/image.png" alt="TIDALfast icon" width="128">
   <br>TIDALfast
 </p>
 </h1>
 <p align="center">
   A native TIDAL client for macOS and Linux.
   <br>
-  Lossless, hi-res, gapless and bit-perfect, in under 100 MB of memory.
+  Focused on performance, small footprint and great UI feel without sacrificing modern UI niceties.
   <br>
   <br>
   <a href="#about">About</a>
