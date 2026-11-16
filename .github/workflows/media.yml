@@ -28,7 +28,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential clang pkg-config libwayland-dev wayland-protocols libxkbcommon-dev \
-            libvulkan-dev glslang-tools libfreetype-dev libfontconfig-dev libcurl4-openssl-dev weston mesa-vulkan-drivers \
+            libvulkan-dev glslang-tools libfreetype-dev libfontconfig-dev libcurl4-openssl-dev libsystemd-dev weston mesa-vulkan-drivers \
             dbus playerctl
       - uses: ./.github/actions/install-odin
       - run: python3 build.py

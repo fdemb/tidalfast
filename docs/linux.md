@@ -1,15 +1,15 @@
 # Linux
 
-The Linux build runs on Wayland, draws with Vulkan, plays through a PipeWire stream and keeps the login in the Secret Service. It needs Odin, clang (Odin links with it), a C compiler and pkg-config, plus the development files for wayland-client, wayland-cursor, wayland-protocols, xkbcommon, Vulkan, FreeType, fontconfig and curl, and the `wayland-scanner` and `glslangValidator` tools. On Debian and Ubuntu:
+The Linux build runs on Wayland, draws with Vulkan, plays through a PipeWire stream and keeps the login in the Secret Service. It needs Odin, clang (Odin links with it), a C compiler and pkg-config, plus the development files for wayland-client, wayland-cursor, wayland-protocols, xkbcommon, Vulkan, FreeType, fontconfig, curl and libsystemd (only its sd-bus header, for MPRIS), and the `wayland-scanner` and `glslangValidator` tools. On Debian and Ubuntu:
 
 ```
 apt install build-essential clang pkg-config libwayland-dev wayland-protocols libxkbcommon-dev libvulkan-dev \
-    glslang-tools libfreetype-dev libfontconfig-dev libcurl4-openssl-dev
+    glslang-tools libfreetype-dev libfontconfig-dev libcurl4-openssl-dev libsystemd-dev
 ```
 
 The text is in Noto Sans, which the app has built in (see [Text](text.md#text-font)). Other scripts and emoji come from the system's fonts through fontconfig: on Debian and Ubuntu `fonts-noto-core`, `fonts-noto-cjk` and `fonts-noto-color-emoji` cover them. The `linux-text` workflow runs the tests and captures frames with the system's Noto Sans removed.
 
-Odin's `vendor:stb` links static libraries that Odin doesn't ship built for Linux. Build them once in the Odin install by running `build_stb.sh` in `$(odin root)/vendor/stb/src`. `build.py` builds kb_text_shape and dr_flac itself. libsecret is opened with `dlopen` when the login is first saved or read, so it's only needed at run time, and only to keep the login. libpipewire (`libpipewire-0.3.so.0`, 0.3.50 or newer) is opened the same way when the first track plays, and the app needs it and a running PipeWire for any sound: there is no PulseAudio or ALSA output. Without it the app still runs, and a track fails with "PipeWire isn't installed" in the player bar ([Playback](playback.md#output-on-linux)).
+Odin's `vendor:stb` links static libraries that Odin doesn't ship built for Linux. Build them once in the Odin install by running `build_stb.sh` in `$(odin root)/vendor/stb/src`. `build.py` builds kb_text_shape and dr_flac itself. libsecret is opened with `dlopen` when the login is first saved or read, so it's only needed at run time, and only to keep the login. libsystemd's sd-bus (`libsystemd.so.0`, or elogind's or basu's copy) is opened the same way after the first frame, for MPRIS, and without it there are no media controls from the desktop. libpipewire (`libpipewire-0.3.so.0`, 0.3.50 or newer) is opened the same way when the first track plays, and the app needs it and a running PipeWire for any sound: there is no PulseAudio or ALSA output. Without it the app still runs, and a track fails with "PipeWire isn't installed" in the player bar ([Playback](playback.md#output-on-linux)).
 
 `./build.py` takes the same arguments as on macOS and writes `build/tidalfast`. It generates the Wayland protocol code into `build/wayland` and compiles the shaders in `src/render/shaders` to SPIR-V in `build/shaders`, which the app `#load`s. The shell and the protocol code are compiled to objects in `build/shell`, which Odin links into the app with the Wayland and xkbcommon libraries.
 
