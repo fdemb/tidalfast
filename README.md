@@ -1,6 +1,6 @@
 <h1>
 <p align="center">
-  <img src="packaging/linux/image.png" alt="TIDALfast icon" width="128">
+  <img src="packaging/linux/icon.png" alt="TIDALfast icon" width="128">
   <br>TIDALfast
 </p>
 </h1>
@@ -20,7 +20,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshot.png" alt="Björk's artist page in TIDALfast" width="900">
+  <img src="docs/image.png" alt="Home page in TIDALfast" width="900">
 </p>
 
 ## About
