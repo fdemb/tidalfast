@@ -26,10 +26,14 @@ jobs:
       - run: python build.py test
       - name: Capture frames
         shell: bash
+        # The runner draws with the software renderer, where the text screen
+        # takes about 35 frames of 55 to 70 ms to rasterize all its glyphs,
+        # most of a font's sizes costing DirectWrite 5 ms for the first. So
+        # it gets 5 s before its capture; 2 s left the list half blank.
         run: |
           mkdir -p frames
           TIDALFAST_FAKE=1 TIDALFAST_AUDIO_NULL=1 TIDALFAST_CAPTURE=frames/last.tga \
-            TIDALFAST_SHELL_TEST="3:size=820,700;5:capture=frames/lib820.tga;6:size=1100,760;8:capture=frames/lib1100.tga;9:size=1600,1000;11:capture=frames/lib1600.tga;12:key=ctrl+2;14:capture=frames/text.tga;15:quit" \
+            TIDALFAST_SHELL_TEST="3:size=820,700;5:capture=frames/lib820.tga;6:size=1100,760;8:capture=frames/lib1100.tga;9:size=1600,1000;11:capture=frames/lib1600.tga;12:key=ctrl+2;17:capture=frames/text.tga;18:quit" \
             timeout 120 ./build/windows/tidalfast.exe 2>&1 | tee frames/app.log
           python -m pip install --quiet pillow
           python -c 'import glob, PIL.Image as I; [I.open(f).save(f[:-4] + ".png") for f in glob.glob("frames/*.tga")]'
