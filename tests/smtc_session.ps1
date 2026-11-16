@@ -32,8 +32,12 @@ $props = Await ($session.TryGetMediaPropertiesAsync()) ([Windows.Media.Control.G
 if (-not $props.Thumbnail) { throw 'no thumbnail' }
 $null = [Windows.Storage.Streams.IRandomAccessStreamWithContentType, Windows.Storage.Streams, ContentType = WindowsRuntime]
 $thumbnail = Await ($props.Thumbnail.OpenReadAsync()) ([Windows.Storage.Streams.IRandomAccessStreamWithContentType])
-"thumbnail: $($thumbnail.Size) bytes, $($thumbnail.ContentType)"
-if ($thumbnail.Size -eq 0) { throw 'empty thumbnail' }
+# PowerShell can't see the stream's own properties, so read it through .NET.
+$bytes = New-Object System.IO.MemoryStream
+[System.IO.WindowsRuntimeStreamExtensions]::AsStreamForRead($thumbnail).CopyTo($bytes)
+$head = $bytes.ToArray() | Select-Object -First 4
+"thumbnail: $($bytes.Length) bytes, starting $(($head | ForEach-Object { '{0:x2}' -f $_ }) -join ' ')"
+if ($bytes.Length -eq 0 -or $head[1] -ne 0x50 -or $head[2] -ne 0x4e -or $head[3] -ne 0x47) { throw 'the thumbnail is not a PNG' }
 "status: $($session.GetPlaybackInfo().PlaybackStatus)"
 "end: $($session.GetTimelineProperties().EndTime)"
 
