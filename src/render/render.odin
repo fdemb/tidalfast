@@ -114,7 +114,7 @@ Instance_Flag :: enum u32 {
 Instance_Flags :: bit_set[Instance_Flag; u32]
 
 // One rect as the shader sees it, all in physical pixels. Matches `Instance`
-// in SHADER_SOURCE.
+// in shaders/rect.metal.
 Instance :: struct {
 	dst:      [4]f32, // x0 y0 x1 y1
 	src:      [4]f32, // u0 v0 u1 v1, normalized

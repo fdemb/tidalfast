@@ -23,6 +23,11 @@ Prompt for Visual Studio, so cl, lib, rc and link are on PATH, with odin on
 PATH too. fxc from the Windows SDK compiles the shaders when it's on PATH;
 otherwise the build uses the bytecode in src/render/shaders/dxbc.
 
+On macOS, the Metal compiler from Xcode (not the command line tools; since
+Xcode 26 also `xcodebuild -downloadComponent MetalToolchain`) compiles the
+shaders when xcrun finds it; otherwise the build uses the library in
+src/render/shaders/metallib.
+
 TIDALFAST_VERSION=1.2.3 sets the version, else a v1.2.3 tag on HEAD, else 0.0.0.
 
 TIDALFAST_SIGN_IDENTITY=name signs the macOS app and the dist bundle with
@@ -386,6 +391,13 @@ def build_linux(b):
 def build_macos(b):
 	if b.target == "test":
 		return
+
+	# The library is checked in, so a build without the Metal compiler, which
+	# only comes with Xcode and not the command line tools, still has it.
+	if try_output("xcrun", "-f", "metal"):
+		run("xcrun", "metal", f"-mmacosx-version-min={MACOS_MIN}", "-Wall", "-Werror",
+			"src/render/shaders/rect.metal", "-o", "src/render/shaders/metallib/rect.metallib")
+
 	sign_identity = os.environ.get("TIDALFAST_SIGN_IDENTITY", "")
 	clang_flags = ["-O2"] if b.mode == "release" else ["-g", "-O0"]
 
