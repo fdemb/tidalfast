@@ -103,7 +103,7 @@ The startup marks, in order:
 | `metal_device` | macOS: `MTLCreateSystemDefaultDevice` returned, in the view's `makeBackingLayer` |
 | `app_start` | the shell calls `app_init` |
 | `render_device` | Linux: the Vulkan instance and device are made |
-| `render_shaders` | macOS: `newLibraryWithSource` compiled the shaders |
+| `render_shaders` | macOS: `newLibraryWithData` loaded the shader library |
 | `init_render` ... `init_search` | each step of the app's `start` returned, in order: render, text, ui, library, data, rows, playback, search |
 | `text_fonts` | inside the text step: the system font and the icon fonts are loaded, before the fallback faces |
 | `init` | the app's `init` returned: renderer, shaders, fonts, caches, workers |

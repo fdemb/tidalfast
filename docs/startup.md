@@ -167,6 +167,6 @@ Ordered by what they could save.
 3. **Find the extra 10 ms of ordering front.** It takes 3 ms in the minimal app and 13 ms in TIDALfast. `makeFirstResponder`, the toolbar and the blur reference are the differences.
 4. **Prewarm fewer fallback fonts.** `text.init` asks the loader thread for the fallback faces of six scripts (`PREWARM` in `src/text/loader.odin`), and on macOS that came to 16 faces and 7 MB of parsed tables. The loader runs on its own thread, so this doesn't hold up `start`, but it competes with the main thread for the CPU during startup and the memory stays. Asking only when a glyph needs a face would save the memory, and a first CJK or emoji glyph would take a few ms when it appears. This is more about memory than startup.
 
-An `MTLBinaryArchive` for the shaders, an earlier idea, would save at most the 1.2 ms of `newLibraryWithSource`.
+The shaders have since been compiled at build time, and `newLibraryWithData` takes about 0.7 ms where `newLibraryWithSource` took 1.2. An `MTLBinaryArchive` for the pipelines, an earlier idea, would save at most what is left.
 
 AppKit and Metal themselves can't be dropped. OpenGL on macOS runs on top of Metal and is deprecated.
