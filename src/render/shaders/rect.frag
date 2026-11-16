@@ -38,6 +38,13 @@ const uint COVERAGE = 4u;
 const uint BACKDROP = 8u;
 const uint ADDITIVE = 16u;
 const uint GLASS = 32u;
+const uint TILT = 64u;
+
+// How push_tilt's box moves with all of the effect in.
+const float TILT_LEAN = 0.055; // the slope it tips to with the pointer at an edge, about 3 degrees
+const float TILT_EYE = 2.5;    // how far the eye is from it, in its sides
+const float TILT_NEARER = 0.04; // how much it grows coming nearer
+const float TILT_LIGHT = 0.18;  // how much the light under the pointer brightens it
 
 // Signed distance from p to a box centred on the origin with rounded corners.
 // Negative inside.
@@ -120,6 +127,59 @@ vec4 glass(Instance r, vec2 local, vec2 half_size, float radius, vec2 t) {
 	return color;
 }
 
+// The colour of a Tilt instance at t, 0 to 1 across its box: its top and
+// bottom colours, times its texture's.
+vec4 tilt_colour(Instance r, vec2 t) {
+	vec4 c = mix(premultiply(r.colors[0]), premultiply(r.colors[1]), t.y);
+	vec3 rgb = c.a > 0.0 ? c.rgb / c.a : vec3(0.0);
+	vec4 color = vec4(linear_from_srgb(rgb) * c.a, c.a);
+	if ((r.flags & TEXTURED) != 0u) {
+		// Half a texel in, so the covers next to it in its page stay out.
+		vec2 texel = 0.5 / vec2(textureSize(sampler2D(colour_tex, linear_sampler), 0));
+		vec2 uv = clamp(mix(r.src.xy, r.src.zw, t), r.src.xy + texel, r.src.zw - texel);
+		color *= textureLod(sampler2D(colour_tex, linear_sampler), uv, 0.0);
+	}
+	return color;
+}
+
+// tilt is a box the pointer leans on, see push_tilt in render.odin. The
+// box is a plane seen from TILT_EYE sides away that tips about its centre,
+// away from the eye where the pointer is. Each pixel finds where its ray
+// meets the plane, and the shape, the picture and the light all work from
+// that point, so the outline leans with the picture.
+vec4 tilt(Instance r, vec2 local, vec2 half_size) {
+	float amount = r.colors[2].z;
+	vec2 size = half_size * 2.0;
+	float side = max(size.x, size.y);
+	float radius = min(r.radii.x, min(half_size.x, half_size.y));
+	// Where the pointer is on the box, -1 to 1, held at its edges, so the
+	// box settles from there once the pointer has left.
+	vec2 m = clamp((r.colors[2].xy - r.dst.xy - half_size) / half_size, -1.0, 1.0);
+
+	// The plane's height is -dot(lean, p) at p, and the ray through this
+	// pixel meets it at local * scale.
+	vec2 lean = m * (TILT_LEAN * amount);
+	float eye = TILT_EYE * side;
+	float scale = eye / (eye - dot(lean, local)) / (1.0 + TILT_NEARER * amount);
+	vec2 p = local * scale;
+	float d = box_sdf(p, half_size, radius) / scale; // in pixels
+	float coverage = inside(d, 0.5);
+
+	vec4 color = tilt_colour(r, clamp(p / size + 0.5, 0.0, 1.0));
+	float opacity = r.colors[0].a;
+
+	// A light held at the pointer: a soft patch that brightens what it's
+	// over more than it adds, so a dark cover gets a sheen and not a grey
+	// spot, and the rim catching it.
+	vec2 from_pointer = (p - m * half_size) / side;
+	float near = amount * exp(-5.0 * dot(from_pointer, from_pointer));
+	color.rgb += near * (0.015 * opacity + TILT_LIGHT * color.rgb);
+	float rim = (1.0 - smoothstep(r.colors[3].x - 0.5, r.colors[3].x + 0.5, -d)) * opacity;
+	float catch_light = 0.16 * near;
+	color.rgb = color.rgb * (1.0 - (r.colors[3].y + catch_light) * rim) + (r.colors[2].w + catch_light) * rim;
+	return color * coverage;
+}
+
 void main() {
 	Instance r = instances[iid];
 	// The pixel centre in the drawable, top left origin.
@@ -128,6 +188,10 @@ void main() {
 	vec2 half_size = size * 0.5;
 	vec2 local = pixel - (r.dst.xy + half_size);
 	vec2 t = (pixel - r.dst.xy) / size;
+	if ((r.flags & TILT) != 0u) {
+		out_color = tilt(r, local, half_size);
+		return;
+	}
 
 	float radius = local.y < 0.0 ? (local.x < 0.0 ? r.radii.x : r.radii.y)
 	                             : (local.x < 0.0 ? r.radii.z : r.radii.w);

@@ -86,7 +86,7 @@ Gpu_Buffer :: struct {
 }
 
 BACKDROPS :: true
-TILT :: false // whether the shader has push_tilt's branch
+TILT :: true // whether the shader has push_tilt's branch
 
 // An image an offscreen pass draws into and later ones sample: the
 // backdrop's scene or one of the blur's levels.
