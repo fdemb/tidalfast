@@ -54,7 +54,7 @@ typedef struct {
 
 static void (*g_command)(uint32_t command, double position);
 static int g_fd = -1;
-static bool g_tried; // a connection was tried; there is no second try
+static double g_next_try; // when to try connecting again, on the clock below; INFINITY for never
 static bool g_authed; // the bus said OK, and what follows is messages
 static Buf g_in, g_out;
 static size_t g_out_sent;
@@ -702,6 +702,7 @@ static void disconnect(const char *why) {
   free(g_out.p);
   g_in = g_out = (Buf){0};
   g_out_sent = 0;
+  g_next_try = mono_seconds() + 10;
 }
 
 static void flush(void) {
@@ -755,8 +756,10 @@ static bool bus_socket(const char *address, struct sockaddr_un *addr, socklen_t 
   return false;
 }
 
+// A failed connection is tried again 10 s later, at the next change, and
+// one that can never work (no bus, or no unix socket in its address) isn't.
 static void connect_bus(void) {
-  g_tried = true;
+  g_next_try = INFINITY;
   const char *address = getenv("DBUS_SESSION_BUS_ADDRESS");
   char fallback[PATH_MAX + 16];
   if (!address || !*address) {
@@ -774,15 +777,27 @@ static void connect_bus(void) {
     fprintf(stderr, "shell: mpris: no unix socket in the session bus's address\n");
     return;
   }
-  int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-  if (fd < 0) return;
-  if (connect(fd, (struct sockaddr *)&addr, len) < 0) {
-    fprintf(stderr, "shell: mpris: can't connect to the session bus\n");
+  int fd = -1;
+  for (int attempt = 0; attempt < 3 && fd < 0; attempt++) {
+    fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) break;
+    if (connect(fd, (struct sockaddr *)&addr, len) == 0) break;
+    int err = errno;
     close(fd);
+    fd = -1;
+    // Interrupted, or the bus's backlog was full: a new socket at once.
+    if (err == EINTR || err == EAGAIN) continue;
+    errno = err;
+    break;
+  }
+  if (fd < 0) {
+    fprintf(stderr, "shell: mpris: can't connect to the session bus: %s\n", strerror(errno));
+    g_next_try = mono_seconds() + 10;
     return;
   }
   fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
   g_fd = fd;
+  g_tried_instance = false;
   // EXTERNAL: the uid in decimal, hex-encoded, which the bus checks
   // against the socket's credentials. BEGIN goes without waiting for OK.
   char uid[32], auth[128];
@@ -875,7 +890,7 @@ const char *mpris_name(void) { return g_name[0] ? g_name : NULL; }
 void mpris_init(void (*command)(uint32_t command, double position)) { g_command = command; }
 
 void mpris_start(void) {
-  if (!g_tried) connect_bus();
+  if (g_fd < 0 && mono_seconds() >= g_next_try) connect_bus();
 }
 
 // Now Playing
@@ -972,4 +987,5 @@ void mpris_set(const Now_Playing *np) {
 void mpris_close(void) {
   remove_art();
   disconnect(NULL);
+  g_next_try = INFINITY;
 }

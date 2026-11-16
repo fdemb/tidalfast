@@ -15,7 +15,8 @@ void mpris_init(void (*command)(uint32_t command, double position));
 // mpris_start connects to the session bus and takes the name
 // org.mpris.MediaPlayer2.tidalfast, or one with .instance<pid> after it
 // when another instance has that. It doesn't wait for the bus's answers.
-// Only the first call does anything.
+// While connected it does nothing, and after a failed or lost connection
+// it tries again once 10 s have passed.
 void mpris_start(void);
 // mpris_set is Shell.set_now_playing. It starts MPRIS if nothing has.
 void mpris_set(const Now_Playing *np);
