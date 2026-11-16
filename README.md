@@ -1,11 +1,11 @@
 <h1>
 <p align="center">
-  <img src="packaging/linux/icon.png" alt="TIDALfast icon" width="128">
+  <img src="packaging/linux/tidalfast.png" alt="TIDALfast icon" width="128">
   <br>TIDALfast
 </p>
 </h1>
 <p align="center">
-  A native TIDAL client for macOS and Linux.
+  Finally, a better desktop TIDAL app. 
   <br>
   Focused on performance, small footprint and great UI feel without sacrificing modern UI niceties.
   <br>
@@ -25,9 +25,7 @@
 
 ## About
 
-TIDALfast is a TIDAL player written from scratch in Odin. It doesn't embed a browser. It draws its own UI on the GPU, with Metal on macOS and Vulkan on Linux, and decodes FLAC itself.
-
-On an M1 MacBook Air it shows your library about 180 ms after launch. It takes about 70 MB of memory at start and stays under 100 MB while it plays. An idle window uses no CPU, because the app draws only when something changes. The numbers and how they were measured are in [docs/measuring.md](docs/measuring.md).
+TIDALfast is a TIDAL player written from scratch in Odin.
 
 ## Features
 
@@ -43,7 +41,7 @@ On an M1 MacBook Air it shows your library about 180 ms after launch. It takes a
 
 ## Download
 
-Get the `.dmg` (macOS 14 or later, Apple silicon) or the AppImage (Linux on Wayland with PipeWire, x86_64) from [Releases](https://github.com/fdemb/tidalfast/releases). You need a TIDAL subscription.
+Get it from [Releases](https://github.com/fdemb/tidalfast/releases). You need a TIDAL subscription.
 
 The macOS app isn't notarized yet, so Gatekeeper blocks it the first time. Allow it in System Settings > Privacy & Security, or run:
 
@@ -54,8 +52,6 @@ xattr -dr com.apple.quarantine /Applications/TIDALfast.app
 ## Status
 
 TIDALfast is in early pre-release, so expect rough edges.
-
-On Linux, bit-perfect output, media keys, Now Playing and screen readers aren't done yet. On compositors without server-side decorations, such as GNOME, the window has no title bar. Windows has a first build, cross-compiled from macOS or Linux, without bit-perfect output, Now Playing or screen readers yet; [docs/windows.md](docs/windows.md) has how to build it.
 
 ## Contributing
 
