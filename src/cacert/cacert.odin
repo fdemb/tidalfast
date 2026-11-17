@@ -1,7 +1,7 @@
 // Package cacert finds the CA certificates for libcurl on Linux.
 //
 // libcurl looks for them where the distribution that built it keeps them.
-// The AppImage carries Debian's libcurl, which looks for
+// The AppImage's libcurl, which build.py builds, looks where Debian's does,
 // /etc/ssl/certs/ca-certificates.crt. openSUSE has no file there, and every
 // HTTPS request would fail with CURLE_SSL_CACERT_BADFILE. Set CURLOPT_CAINFO
 // to path() on each handle.
