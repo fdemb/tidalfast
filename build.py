@@ -330,7 +330,7 @@ def build_linux(b):
 	def shell_objects(out_dir, flags):
 		remove(out_dir)
 		mkdir(out_dir)
-		sources = ["shell/shell_wayland.c", "shell/common.c", "shell/scroll.c"]
+		sources = ["shell/shell_wayland.c", "shell/common.c", "shell/scroll.c", "shell/mpris.c", "shell/png.c"]
 		for c in sources + sorted(glob.glob("build/wayland/*-protocol.c")):
 			shell_object(c, out_dir, flags)
 
@@ -340,9 +340,11 @@ def build_linux(b):
 			f"-extra-linker-flags:{objects} {shell_libs}")
 
 	if b.target == "test":
-		# tests/scroll_linux.odin links the shell's scrolling code.
+		# tests/scroll_linux.odin and mpris_linux.odin link the shell's
+		# scrolling, MPRIS and PNG code.
 		mkdir("build/shell")
-		shell_object("shell/scroll.c", "build/shell", ["-O2"])
+		for c in ["shell/scroll.c", "shell/mpris.c", "shell/png.c"]:
+			shell_object(c, "build/shell", ["-O2"])
 		return
 
 	if b.target == "dist":
@@ -508,7 +510,7 @@ def build_windows(b):
 	measure = b.target == "measure"
 	optimize = ["/O2"] if b.mode == "release" or measure else ["/Od", "/Z7"]
 	objects = []
-	for c in ["shell_win32.c", "common.c"]:
+	for c in ["shell_win32.c", "common.c", "smtc_win32.c", "png.c"]:
 		obj = join(shell_dir, f"{stem(c)}.obj")
 		cl(join("shell", c), obj, optimize, "/W3", "/Ishell")
 		objects.append(obj)

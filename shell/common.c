@@ -107,11 +107,10 @@ void queue_take(Event **events, uint32_t *count, const uint8_t **text, uint32_t 
 
 // Now Playing
 //
-// macOS shows it in Control Center (shell_cocoa.m). Linux and Windows
-// don't show it anywhere yet, MPRIS over D-Bus and the System Media
-// Transport Controls to come, and print_now_playing only logs what the app
-// sets.
-// TIDALFAST_NOW_PLAYING_LOG=1 prints it, and
+// macOS shows it in Control Center (shell_cocoa.m), Linux through MPRIS
+// (mpris.c) and Windows in the System Media Transport Controls
+// (smtc_win32.c). Each turns the commands those send into remote_command.
+// TIDALFAST_NOW_PLAYING_LOG=1 prints what the app sets, and
 // TIDALFAST_REMOTE_TEST="3:pause,5:play,7:seek=42,9:next" sends media
 // commands as the media keys do.
 

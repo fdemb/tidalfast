@@ -77,8 +77,9 @@ uint32_t byte_of_utf16(const uint8_t *s, uint32_t len, uint32_t u16);
 // (TIDALFAST_NOW_PLAYING_LOG).
 extern bool g_now_playing_log;
 void remote_command(uint32_t command, double position);
-// print_now_playing is Shell.set_now_playing where the OS shows it nowhere
-// yet: it only logs.
+// print_now_playing logs what the app sets as Now Playing. The Linux and
+// Windows shells call it before handing Now Playing to MPRIS and the
+// System Media Transport Controls.
 void print_now_playing(const Now_Playing *np);
 
 // The accessibility tree as the app last sent it, which access_store

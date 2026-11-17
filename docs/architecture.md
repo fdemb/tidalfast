@@ -47,7 +47,7 @@ Read-only checkouts in `~/.t3/scratch/2026-10-14-please-analyze-how-spotifast-is
 
 ## Decisions
 
-- **Platform shell.** The shell owns the window and the GPU layer. On macOS that's `NSApplication` and a `CAMetalLayer`, with IME (`NSTextInputClient`), media keys and Now Playing (`MPRemoteCommandCenter`, `MPNowPlayingInfoCenter`), Keychain, clipboard and drag and drop in `shell_cocoa.m` too. `docs/linux.md` covers the Wayland shell and `docs/windows.md` the Win32 one. `shell/common.c` has what the three share: the event queue, the mirror of the focused text field, the copy of the accessibility tree, the Now Playing log and the test driver.
+- **Platform shell.** The shell owns the window and the GPU layer. On macOS that's `NSApplication` and a `CAMetalLayer`, with IME (`NSTextInputClient`), media keys and Now Playing (`MPRemoteCommandCenter`, `MPNowPlayingInfoCenter`), Keychain, clipboard and drag and drop in `shell_cocoa.m` too. `docs/linux.md` covers the Wayland shell, with MPRIS for media keys and Now Playing, and `docs/windows.md` the Win32 one, with the System Media Transport Controls. `shell/common.c` has what the three share: the event queue, the mirror of the focused text field, the copy of the accessibility tree, the Now Playing log and the test driver.
 - **One executable.** `build.py` compiles the shell to an object and Odin links it into the app. The app's `main` calls `shell_main`, and the shell calls `app_init`, `app_frame` and `app_shutdown`, declared in `platform.h`. State lives in memory the shell maps, see [Memory](memory.md).
 - **Memory.** Arenas. A per-frame arena holds the box tree and temporary strings and resets every frame. Persistent arenas hold caches and app data.
 - **Renderer.** One instanced pipeline. Each instance is a rect with corner radii, border width, edge softness (shadows), two colours for gradients, a clip rect, and a texture and UV rect. Glyphs, cover art, rounded boxes and shadows all go through it. Fleury's `R_Rect2DInst` in raddebugger's `src/render/` is the reference.
@@ -56,8 +56,8 @@ Read-only checkouts in `~/.t3/scratch/2026-10-14-please-analyze-how-spotifast-is
 
 ## Not done yet
 
-- Linux: MPRIS for media keys and Now Playing, AT-SPI for screen readers, and client-side decorations for compositors without xdg-decoration, such as GNOME.
-- Windows: the System Media Transport Controls, UI Automation and packaging. [windows.md](windows.md) lists the rest.
+- Linux: AT-SPI for screen readers, and client-side decorations for compositors without xdg-decoration, such as GNOME.
+- Windows: UI Automation and packaging. [windows.md](windows.md) lists the rest.
 
 ## Pitfalls
 

@@ -17,10 +17,12 @@
 // an input method, and otherwise from the keyboard through xkbcommon, with
 // compose sequences for dead keys. Trackpad scrolls carry phases, and the
 // shell adds momentum after the fingers lift, since Wayland leaves that to
-// the client; scroll.c has the model, which follows GTK's. Not here yet:
-// accessibility (AT-SPI) and Now Playing (MPRIS). The shell takes the app's
-// tree only for the test driver's ax-dump and ax-press, and media keys
-// reach the app while the window has the keyboard.
+// the client; scroll.c has the model, which follows GTK's. Now Playing and
+// media commands from the desktop go through MPRIS on the session bus
+// (mpris.c), whose socket is polled with the rest, and the media keys also
+// reach the app while the window has the keyboard. Not here yet:
+// accessibility (AT-SPI). The shell takes the app's tree only for the test
+// driver's ax-dump and ax-press.
 
 #define _GNU_SOURCE
 #include <errno.h>
@@ -56,6 +58,7 @@
 #include "xdg-shell-client-protocol.h"
 
 #include "common.h"
+#include "mpris.h"
 #include "scroll.h"
 
 #define PERSISTENT_SIZE (256ull << 20)
@@ -1705,8 +1708,13 @@ static bool connect_wayland(void) {
   return true;
 }
 
+static void set_now_playing(const Now_Playing *np) {
+  print_now_playing(np);
+  mpris_set(np);
+}
+
 static void main_loop(void) {
-  enum { FD_WAYLAND, FD_REDRAW, FD_WAKE, FD_REPEAT, FD_TEST, FD_SIGNAL, FD_RECEIVE, FD_SEND, FD_COUNT = FD_SEND + CLIP_SENDS };
+  enum { FD_WAYLAND, FD_REDRAW, FD_WAKE, FD_REPEAT, FD_TEST, FD_SIGNAL, FD_RECEIVE, FD_MPRIS, FD_SEND, FD_COUNT = FD_SEND + CLIP_SENDS };
   struct pollfd fds[FD_COUNT];
   int wl_fd = wl_display_get_fd(g_display);
   while (!g_quit) {
@@ -1728,6 +1736,7 @@ static void main_loop(void) {
     }
     int fd_list[FD_SEND] = {wl_fd, g_redraw_fd, g_wake_fd, g_repeat_fd, g_test_fd, g_signal_fd, g_receive_fd};
     for (int i = 0; i < FD_SEND; i++) fds[i] = (struct pollfd){.fd = fd_list[i], .events = POLLIN};
+    fds[FD_MPRIS].fd = mpris_fd(&fds[FD_MPRIS].events);
     for (int i = 0; i < CLIP_SENDS; i++) fds[FD_SEND + i] = (struct pollfd){.fd = g_sends[i].fd, .events = POLLOUT};
     if (unflushed) fds[FD_WAYLAND].events |= POLLOUT;
     int n = poll(fds, FD_COUNT, timeout);
@@ -1756,6 +1765,7 @@ static void main_loop(void) {
       if (read(g_signal_fd, &info, sizeof info) > 0) g_quit = true;
     }
     if (fds[FD_RECEIVE].revents) receive_more();
+    if (fds[FD_MPRIS].revents) mpris_dispatch(fds[FD_MPRIS].revents);
     for (int i = 0; i < CLIP_SENDS; i++)
       if (fds[FD_SEND + i].revents) send_more(&g_sends[i]);
     // A burst of events becomes one frame. A redraw waits for the pending
@@ -1811,7 +1821,7 @@ int shell_main(int argc, char **argv) {
   g_shell = (Shell){
       .surface = &g_surface_info,
       .request_redraw = request_redraw,
-      .set_now_playing = print_now_playing,
+      .set_now_playing = set_now_playing,
       .set_text_input = set_text_input,
       .set_clipboard = set_clipboard,
       .get_clipboard = get_clipboard,
@@ -1820,6 +1830,8 @@ int shell_main(int argc, char **argv) {
       .window_command = window_command,
       .set_decorations = set_decorations,
   };
+
+  mpris_init(remote_command);
 
   measure_mark("app_start");
   app_init(&g_memory, &g_shell);
@@ -1831,10 +1843,13 @@ int shell_main(int argc, char **argv) {
   }
   draw_frame();
   measure_mark("window");
+  // After the first frame, which it would otherwise hold up.
+  mpris_start();
   setup_shell_test();
   request_redraw();
   main_loop();
   app_shutdown(&g_memory);
+  mpris_close();
   wl_display_disconnect(g_display);
   return 0;
 }

@@ -23,7 +23,8 @@ typedef enum {
   EVENT_ACCESS_FOCUS,
 } Event_Kind;
 
-// Media keys, Control Center and headphones, from MPRemoteCommandCenter.
+// Media keys, headphones and the system's media controls: MPRemoteCommandCenter
+// on macOS, MPRIS on Linux, the System Media Transport Controls on Windows.
 typedef enum {
   MEDIA_NONE,
   MEDIA_PLAY,
@@ -170,8 +171,9 @@ typedef enum {
   NOW_PLAYING_PAUSED,
 } Now_Playing_State;
 
-// What macOS shows in Control Center and on the lock screen. The shell
-// copies everything before set_now_playing returns.
+// What the system shows as playing: Control Center on macOS, the desktop's
+// media widget on Linux, the media overlay on Windows. The shell copies
+// everything before set_now_playing returns.
 typedef struct {
   const char *title; // UTF-8; NULL clears Now Playing
   const char *artist;
