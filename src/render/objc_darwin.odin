@@ -1,9 +1,9 @@
 package render
 
-// Odin dev-2026-10 hits a compiler assertion ("missing procedure
+// Odin dev-2026-10 hit a compiler assertion ("missing procedure
 // 'sel_registerName'") on any intrinsics.objc_send, which every method in
-// vendor:darwin/Metal uses. Until that is fixed, messages go through
-// objc_msgSend directly, cast to the method's C signature as you would in C.
+// vendor:darwin/Metal uses, so messages go through objc_msgSend directly,
+// cast to the method's C signature as you would in C. dev-2026-11a fixes it.
 // arm64 only: there is no objc_msgSend_stret.
 
 import "base:intrinsics"

@@ -384,7 +384,7 @@ warm_face :: proc(face: ^Face, r: rune) {
 font_path :: proc(ct: CTFontRef, buf: []u8) -> bool {
 	url := CTFontCopyAttribute(ct, kCTFontURLAttribute)
 	defer cf_release(url)
-	return url != nil && CFURLGetFileSystemRepresentation(url, true, raw_data(buf), len(buf))
+	return url != nil && bool(CFURLGetFileSystemRepresentation(url, true, raw_data(buf), len(buf)))
 }
 
 // collection_index returns the index of the face in a .ttc whose name

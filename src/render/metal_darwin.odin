@@ -49,7 +49,6 @@ foreign import system "system:System"
 foreign system {
 	// A nil destructor makes the data copy the bytes.
 	dispatch_data_create :: proc(buffer: rawptr, size: uint, queue: rawptr, destructor: rawptr) -> id ---
-	dispatch_release :: proc(object: id) ---
 }
 
 // init draws to surface, a CAMetalLayer, on the layer's device.
@@ -140,7 +139,7 @@ build_pipelines :: proc(r: ^Renderer) -> (rect, down, up: id) {
 	bytes := SHADER_LIBRARY
 	data := dispatch_data_create(raw_data(bytes), len(bytes), nil, nil)
 	library := msg_proc(proc "c" (id, SEL, id, ^id) -> id)(r.gpu.device, sel_registerName("newLibraryWithData:error:"), data, &err)
-	dispatch_release(data)
+	release(data)
 	if library == nil {
 		log.error("render: shader library failed to load:", error_string(err))
 		return

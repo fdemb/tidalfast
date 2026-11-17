@@ -17,7 +17,7 @@ TIDALfast is a native TIDAL client in Odin for macOS and Linux, with a first Win
 
 Per-OS code lives in `_darwin.odin`, `_linux.odin` and `_windows.odin` files. Shared code doesn't import `core:sys/posix`; `src/sys` has threads, local time, the page size and file mappings for every OS. CI (`.github/workflows/ci.yml`) builds and tests all three on every push and pull request, so push a branch to check shared code on the other systems.
 
-Odin dev-2026-10 crashes the compiler on any Obj-C method call (`missing procedure 'objc_lookUpClass'`). Call Obj-C through `objc_msgSend` casts as `src/render` does, call C frameworks (CoreText, CoreAudio, Security) through hand-written foreign declarations, or put Obj-C-only code in `shell_cocoa.m`.
+Odin dev-2026-10 crashed the compiler on any Obj-C method call (`missing procedure 'objc_lookUpClass'`), and dev-2026-11a fixes it. The code from before still calls Obj-C through `objc_msgSend` casts as `src/render` does, C frameworks (CoreText, CoreAudio, Security) through hand-written foreign declarations, and Obj-C-only code from `shell_cocoa.m`. `vendor:darwin/Metal` brings in `core:sys/darwin/CoreFoundation`, and Odin rejects a C function declared twice with different types, so a hand-written CoreFoundation declaration has to match that package's: `b8` for `Boolean`, `int` for `CFStringEncoding`.
 
 ## Seeing what the app does
 

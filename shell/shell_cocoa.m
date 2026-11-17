@@ -1246,7 +1246,7 @@ static NSMenu *main_menu(void) {
   return bar;
 }
 
-int shell_main(int argc, char **argv) {
+int shell_main(void) {
   // SIGUSR1 asks the app for a memory snapshot (src/app/snapshot.odin),
   // and the app sets its handler once it's loaded. Until then it's
   // ignored, so the menu item can't quit the app.

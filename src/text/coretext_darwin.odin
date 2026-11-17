@@ -1,13 +1,11 @@
 package text
 
 // The parts of CoreFoundation, CoreGraphics and CoreText the text code uses.
-// They are plain C APIs, so they don't hit the compiler's Obj-C bug.
+// They are plain C APIs, declared by hand.
 
 foreign import CoreFoundation "system:CoreFoundation.framework"
 foreign import CoreGraphics "system:CoreGraphics.framework"
 foreign import CoreText "system:CoreText.framework"
-
-import CF "core:sys/darwin/CoreFoundation"
 
 CFTypeRef :: rawptr
 CFStringRef :: rawptr
@@ -68,6 +66,10 @@ CT_FONT_UI_FONT_SYSTEM :: 2
 CF_NUMBER_CGFLOAT_TYPE :: 16
 CF_NUMBER_SINT64_TYPE :: 4
 
+// vendor:darwin/Metal brings in core:sys/darwin/CoreFoundation, and Odin
+// rejects a C function declared twice with different types. So these match
+// its declarations: b8 for Boolean and int for CFStringEncoding, a UInt32
+// that it declares as a long.
 @(default_calling_convention = "c")
 foreign CoreFoundation {
 	kCFTypeDictionaryKeyCallBacks:   CFDictionaryKeyCallBacks
@@ -78,24 +80,25 @@ foreign CoreFoundation {
 	CFRelease :: proc(cf: CFTypeRef) ---
 	CFRetain :: proc(cf: CFTypeRef) -> CFTypeRef ---
 	CFNumberCreate :: proc(allocator: rawptr, type: CFIndex, value: rawptr) -> CFTypeRef ---
-	CFEqual :: proc(a, b: CFTypeRef) -> bool ---
+	CFEqual :: proc(a, b: CFTypeRef) -> b8 ---
 	CFDataCreate :: proc(allocator: rawptr, bytes: [^]u8, length: CFIndex) -> CFDataRef ---
 	CFDataCreateWithBytesNoCopy :: proc(allocator: rawptr, bytes: [^]u8, length: CFIndex, bytes_deallocator: rawptr) -> CFDataRef ---
 	CFDataGetBytePtr :: proc(data: CFDataRef) -> [^]u8 ---
 	CFDataGetLength :: proc(data: CFDataRef) -> CFIndex ---
-	CFStringCreateWithBytes :: proc(allocator: rawptr, bytes: [^]u8, num_bytes: CFIndex, encoding: u32, external_representation: bool) -> CFStringRef ---
+	CFStringCreateWithBytes :: proc(allocator: rawptr, bytes: [^]u8, num_bytes: CFIndex, encoding: int, external_representation: b8) -> CFStringRef ---
 	CFStringGetLength :: proc(s: CFStringRef) -> CFIndex ---
+	CFStringGetCString :: proc(s: CFStringRef, buffer: [^]u8, size: CFIndex, encoding: int) -> b8 ---
 	CFDictionaryCreate :: proc(allocator: rawptr, keys: [^]rawptr, values: [^]rawptr, count: CFIndex, key_callbacks: ^CFDictionaryKeyCallBacks, value_callbacks: ^CFDictionaryValueCallBacks) -> CFDictionaryRef ---
 	CFDictionaryGetValue :: proc(dict: CFDictionaryRef, key: rawptr) -> rawptr ---
 	CFDictionaryGetCount :: proc(dict: CFDictionaryRef) -> CFIndex ---
 	CFDictionaryGetKeysAndValues :: proc(dict: CFDictionaryRef, keys: [^]rawptr, values: [^]rawptr) ---
-	CFNumberGetValue :: proc(number: CFTypeRef, type: CFIndex, value: rawptr) -> bool ---
+	CFNumberGetValue :: proc(number: CFTypeRef, type: CFIndex, value: rawptr) -> b8 ---
 	CFAttributedStringCreate :: proc(allocator: rawptr, s: CFStringRef, attributes: CFDictionaryRef) -> CFAttributedStringRef ---
 	CFArrayCreate :: proc(allocator: rawptr, values: [^]rawptr, count: CFIndex, callbacks: ^CFArrayCallBacks) -> CFArrayRef ---
 	CFCharacterSetCreateWithCharactersInString :: proc(allocator: rawptr, s: CFStringRef) -> CFTypeRef ---
 	CFArrayGetCount :: proc(array: CFArrayRef) -> CFIndex ---
 	CFArrayGetValueAtIndex :: proc(array: CFArrayRef, index: CFIndex) -> rawptr ---
-	CFURLGetFileSystemRepresentation :: proc(url: CFURLRef, resolve_against_base: bool, buffer: [^]u8, max_length: CFIndex) -> bool ---
+	CFURLGetFileSystemRepresentation :: proc(url: CFURLRef, resolve_against_base: b8, buffer: [^]u8, max_length: CFIndex) -> b8 ---
 }
 
 @(default_calling_convention = "c")
@@ -160,7 +163,7 @@ foreign CoreText {
 // cf_string copies s into buf as UTF-8 and returns it, or "" if it doesn't
 // fit.
 cf_string :: proc(s: CFStringRef, buf: []u8) -> string {
-	if s == nil || !CF.StringGetCString(CF.String(s), raw_data(buf), CF.Index(len(buf)), CF.StringEncoding(CF_STRING_ENCODING_UTF8)) {
+	if s == nil || !CFStringGetCString(s, raw_data(buf), len(buf), CF_STRING_ENCODING_UTF8) {
 		return ""
 	}
 	return string(cstring(raw_data(buf)))

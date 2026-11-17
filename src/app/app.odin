@@ -69,14 +69,14 @@ State :: struct {
 }
 
 main :: proc() {
-	os.exit(int(shell_main(i32(len(runtime.args__)), raw_data(runtime.args__))))
+	os.exit(int(shell_main()))
 }
 
 // Linked in by build.py: shell/shell_cocoa.m on macOS, shell/shell_wayland.c
 // on Linux and shell/shell_win32.c on Windows, with shell/common.c on all
 // three.
 foreign {
-	shell_main :: proc "c" (argc: i32, argv: [^]cstring) -> i32 ---
+	shell_main :: proc "c" () -> i32 ---
 }
 
 @(export)

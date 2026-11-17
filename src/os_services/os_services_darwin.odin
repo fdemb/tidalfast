@@ -46,17 +46,18 @@ CFDictionaryValueCallBacks :: struct {
 	_: [5]rawptr,
 }
 
+// Typed as core:sys/darwin/CoreFoundation types them (see src/text).
 @(private, default_calling_convention = "c")
 foreign CoreFoundation {
 	kCFBooleanTrue: CFTypeRef
 
 	CFRelease :: proc(cf: CFTypeRef) ---
-	CFStringCreateWithBytes :: proc(alloc: rawptr, bytes: [^]u8, count: CFIndex, encoding: u32, external: bool) -> CFStringRef ---
+	CFStringCreateWithBytes :: proc(alloc: rawptr, bytes: [^]u8, count: CFIndex, encoding: int, external: b8) -> CFStringRef ---
 	CFDataCreate :: proc(alloc: rawptr, bytes: [^]u8, length: CFIndex) -> CFDataRef ---
 	CFDataGetBytePtr :: proc(data: CFDataRef) -> [^]u8 ---
 	CFDataGetLength :: proc(data: CFDataRef) -> CFIndex ---
 	CFDictionaryCreate :: proc(alloc: rawptr, keys: [^]CFTypeRef, values: [^]CFTypeRef, count: CFIndex, key_callbacks: ^CFDictionaryKeyCallBacks, value_callbacks: ^CFDictionaryValueCallBacks) -> CFDictionaryRef ---
-	CFURLCreateWithBytes :: proc(alloc: rawptr, bytes: [^]u8, length: CFIndex, encoding: u32, base: CFURLRef) -> CFURLRef ---
+	CFURLCreateWithBytes :: proc(alloc: rawptr, bytes: [^]u8, length: CFIndex, encoding: int, base: CFURLRef) -> CFURLRef ---
 }
 
 @(private, default_calling_convention = "c")

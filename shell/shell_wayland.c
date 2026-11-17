@@ -1777,7 +1777,7 @@ lost:
   fprintf(stderr, "shell: lost the Wayland connection\n");
 }
 
-int shell_main(int argc, char **argv) {
+int shell_main(void) {
   common_init();
   measure_init();
   measure_mark("main");

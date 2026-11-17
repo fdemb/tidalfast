@@ -21,7 +21,6 @@ import "core:fmt"
 import "core:os"
 import "core:slice"
 import "core:strings"
-import CF "core:sys/darwin/CoreFoundation"
 import "core:sys/posix"
 import "core:time"
 
@@ -33,6 +32,7 @@ Options :: struct {
 }
 
 foreign import CoreAudio "system:CoreAudio.framework"
+foreign import CoreFoundation "system:CoreFoundation.framework"
 foreign import libc "system:System"
 
 Audio_Object_ID :: u32
@@ -95,6 +95,14 @@ foreign CoreAudio {
 	AudioObjectGetPropertyData :: proc(id: Audio_Object_ID, addr: ^Property_Address, qualifier_size: u32, qualifier: rawptr, size: ^u32, data: rawptr) -> OS_Status ---
 }
 
+CF_STRING_ENCODING_UTF8 :: 0x08000100
+
+@(default_calling_convention = "c")
+foreign CoreFoundation {
+	CFRelease :: proc(cf: rawptr) ---
+	CFStringGetCString :: proc(s: rawptr, buffer: [^]u8, size: int, encoding: int) -> b8 ---
+}
+
 @(default_calling_convention = "c")
 foreign libc {
 	proc_name :: proc(pid: posix.pid_t, buffer: [^]u8, size: u32) -> i32 ---
@@ -122,13 +130,13 @@ get_array :: proc(id: Audio_Object_ID, selector, scope: u32, $T: typeid) -> []T 
 
 // string_property reads a CFString property into the temp allocator.
 string_property :: proc(id: Audio_Object_ID, selector: u32) -> string {
-	str: CF.String
+	str: rawptr
 	if !get(id, selector, SCOPE_GLOBAL, &str) || str == nil {
 		return ""
 	}
-	defer CF.CFRelease(CF.TypeRef(str))
+	defer CFRelease(str)
 	buf := make([]u8, 256, context.temp_allocator)
-	if !CF.StringGetCString(str, raw_data(buf), CF.Index(len(buf)), CF.StringEncoding(CF.StringBuiltInEncodings.UTF8)) {
+	if !CFStringGetCString(str, raw_data(buf), len(buf), CF_STRING_ENCODING_UTF8) {
 		return ""
 	}
 	return string(cstring(raw_data(buf)))

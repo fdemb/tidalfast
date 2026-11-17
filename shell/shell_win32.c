@@ -1332,7 +1332,7 @@ static void main_loop(void) {
   }
 }
 
-int shell_main(int argc, char **argv) {
+int shell_main(void) {
   log_to_file();
   // The CRT buffers stderr whole when it isn't a console, and the app
   // leaves through ExitProcess, which doesn't flush it: a log sent to a
