@@ -15,7 +15,8 @@ fade :: proc(c: render.Color, a: f32) -> render.Color {
 // draw_box draws b and its children in order: shadow, background, texture,
 // rim, hot and active overlays, border, focus ring, label, then the children
 // inside b's clip if it has one. A box clipped away entirely draws nothing
-// itself, but its children may lie outside it.
+// itself, but its children may lie outside it. A tilted box draws its
+// background or texture and its rim as one, see render.push_tilt.
 @(private)
 draw_box :: proc(u: ^State, b: ^Box, alpha: f32) {
 	r := u.renderer
@@ -32,6 +33,9 @@ draw_box :: proc(u: ^State, b: ^Box, alpha: f32) {
 		return
 	}
 	rect := b.rect
+	tilt := b.tilt
+	tilt.pointer = u.input.mouse
+	tilted := render.TILT && tilt.amount > 0
 	if .Draw_Shadow in b.flags {
 		sh := b.shadow if b.shadow != {} else SHADOW_DEFAULT
 		render.push_shadow(r, rect, b.radius, sh.blur, {0, sh.y}, 0, {0, 0, 0, sh.alpha * a})
@@ -41,16 +45,21 @@ draw_box :: proc(u: ^State, b: ^Box, alpha: f32) {
 	} else if .Draw_Glass in b.flags {
 		draw_glass(u, b, a)
 	} else if .Draw_Background in b.flags {
-		if b.gradient.a > 0 {
+		if tilted && b.texture == 0 {
+			top := fade(b.background, a)
+			render.push_tilt(r, rect, top, fade(b.gradient, a) if b.gradient.a > 0 else top, b.radius, tilt, b.rim)
+		} else if b.gradient.a > 0 {
 			render.push_gradient(r, rect, fade(b.background, a), fade(b.gradient, a), false, b.radius)
 		} else if b.background.a > 0 {
 			render.push_rect(r, rect, fade(b.background, a), b.radius)
 		}
 	}
-	if b.texture != 0 {
+	if b.texture != 0 && tilted {
+		render.push_tilt(r, rect, {1, 1, 1, a}, {1, 1, 1, a}, b.radius, tilt, b.rim, b.texture, b.texture_src)
+	} else if b.texture != 0 {
 		render.push_image(r, rect, b.texture, b.texture_src, tint = {1, 1, 1, a}, radius = b.radius)
 	}
-	if b.rim != {} {
+	if b.rim != {} && !tilted {
 		render.push_rim(r, rect, {b.rim.lift * a, b.rim.darken * a}, b.radius)
 	}
 	if .Draw_Hot_Effects in b.flags && b.hot_t > 0 {

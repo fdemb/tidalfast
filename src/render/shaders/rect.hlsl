@@ -41,6 +41,13 @@ static const uint COVERAGE = 4u;
 static const uint BACKDROP = 8u;
 static const uint ADDITIVE = 16u;
 static const uint GLASS = 32u;
+static const uint TILT = 64u;
+
+// How push_tilt's box moves with all of the effect in.
+static const float TILT_LEAN = 0.055; // the slope it tips to with the pointer at an edge, about 3 degrees
+static const float TILT_EYE = 2.5;    // how far the eye is from it, in its sides
+static const float TILT_NEARER = 0.04; // how much it grows coming nearer
+static const float TILT_LIGHT = 0.18;  // how much the light under the pointer brightens it
 
 struct Rect_Varyings {
 	float4 pos : SV_Position;
@@ -52,6 +59,10 @@ Rect_Varyings vs_rect(uint vid : SV_VertexID, uint instance : SV_InstanceID) {
 	uint i = instance + first;
 	Instance r = instances[i];
 	float pad = max(r.softness, 0.5) + 1.0;
+	if ((r.flags & TILT) != 0u) {
+		// Room for the box coming nearer.
+		pad += 0.05 * max(r.dst.z - r.dst.x, r.dst.w - r.dst.y);
+	}
 	float2 p0 = max(r.dst.xy - pad, r.clip.xy);
 	float2 p1 = max(min(r.dst.zw + pad, r.clip.zw), p0);
 	float2 p = lerp(p0, p1, float2(float(vid & 1u), float(vid >> 1u)));
@@ -133,6 +144,61 @@ float4 glass(Instance r, float2 local, float2 half_size, float radius, float2 t)
 	return color;
 }
 
+// The colour of a Tilt instance at t, 0 to 1 across its box: its top and
+// bottom colours, times its texture's.
+float4 tilt_colour(Instance r, float2 t) {
+	float4 c = lerp(premultiply(r.colors[0]), premultiply(r.colors[1]), t.y);
+	float3 rgb = c.a > 0.0 ? c.rgb / c.a : 0.0;
+	float4 color = float4(linear_from_srgb(rgb) * c.a, c.a);
+	if ((r.flags & TEXTURED) != 0u) {
+		// Half a texel in, so the covers next to it in its page stay out.
+		float2 texture_size;
+		colour_tex.GetDimensions(texture_size.x, texture_size.y);
+		float2 texel = 0.5 / texture_size;
+		float2 uv = clamp(lerp(r.src.xy, r.src.zw, t), r.src.xy + texel, r.src.zw - texel);
+		color *= colour_tex.SampleLevel(linear_sampler, uv, 0);
+	}
+	return color;
+}
+
+// tilt is a box the pointer leans on, see push_tilt in render.odin. The
+// box is a plane seen from TILT_EYE sides away that tips about its centre,
+// away from the eye where the pointer is. Each pixel finds where its ray
+// meets the plane, and the shape, the picture and the light all work from
+// that point, so the outline leans with the picture.
+float4 tilt(Instance r, float2 local, float2 half_size) {
+	float amount = r.colors[2].z;
+	float2 size = half_size * 2.0;
+	float side = max(size.x, size.y);
+	float radius = min(r.radii.x, min(half_size.x, half_size.y));
+	// Where the pointer is on the box, -1 to 1, held at its edges, so the
+	// box settles from there once the pointer has left.
+	float2 m = clamp((r.colors[2].xy - r.dst.xy - half_size) / half_size, -1.0, 1.0);
+
+	// The plane's height is -dot(lean, p) at p, and the ray through this
+	// pixel meets it at local * scale.
+	float2 lean = m * (TILT_LEAN * amount);
+	float eye = TILT_EYE * side;
+	float scale = eye / (eye - dot(lean, local)) / (1.0 + TILT_NEARER * amount);
+	float2 p = local * scale;
+	float d = box_sdf(p, half_size, radius) / scale; // in pixels
+	float coverage = inside(d, 0.5);
+
+	float4 color = tilt_colour(r, saturate(p / size + 0.5));
+	float opacity = r.colors[0].a;
+
+	// A light held at the pointer: a soft patch that brightens what it's
+	// over more than it adds, so a dark cover gets a sheen and not a grey
+	// spot, and the rim catching it.
+	float2 from_pointer = (p - m * half_size) / side;
+	float near = amount * exp(-5.0 * dot(from_pointer, from_pointer));
+	color.rgb += near * (0.015 * opacity + TILT_LIGHT * color.rgb);
+	float rim = (1.0 - smoothstep(r.colors[3].x - 0.5, r.colors[3].x + 0.5, -d)) * opacity;
+	float catch_light = 0.16 * near;
+	color.rgb = color.rgb * (1.0 - (r.colors[3].y + catch_light) * rim) + (r.colors[2].w + catch_light) * rim;
+	return color * coverage;
+}
+
 float4 ps_rect(Rect_Varyings v) : SV_Target {
 	Instance r = instances[v.iid];
 	float2 pixel = v.pos.xy * origin.zw + origin.xy;
@@ -140,6 +206,9 @@ float4 ps_rect(Rect_Varyings v) : SV_Target {
 	float2 half_size = size * 0.5;
 	float2 local = pixel - (r.dst.xy + half_size);
 	float2 t = (pixel - r.dst.xy) / size;
+	if ((r.flags & TILT) != 0u) {
+		return tilt(r, local, half_size);
+	}
 
 	float radius = local.y < 0.0 ? (local.x < 0.0 ? r.radii.x : r.radii.y)
 	                             : (local.x < 0.0 ? r.radii.z : r.radii.w);

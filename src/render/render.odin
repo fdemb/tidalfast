@@ -24,7 +24,7 @@
 //
 // The backend is picked by file: metal_darwin.odin on macOS, vulkan.odin
 // on Linux and d3d11_windows.odin on Windows. Each defines Gpu and Gpu_Texture, the
-// backend's part of Renderer and of a texture slot, BACKDROPS, and the procs
+// backend's part of Renderer and of a texture slot, BACKDROPS, TILT, and the procs
 // this file leaves out: init, destroy, end_frame and gpu_allocated,
 // and privately new_texture_slot, gpu_texture_free, gpu_texture_write,
 // gpu_texture_copy, gpu_frame_begin and grow_instances.
@@ -110,6 +110,7 @@ Instance_Flag :: enum u32 {
 	// under it, as plus-lighter does.
 	Additive,
 	Glass, // a lens of glass, see push_glass
+	Tilt, // a cover leaning under the pointer, see push_tilt
 }
 Instance_Flags :: bit_set[Instance_Flag; u32]
 
@@ -597,6 +598,55 @@ push_glass :: proc(r: ^Renderer, rect: Rect, radius: f32, glass: Glass) {
 	}
 	inst.clip = r.clips[min(r.clip_depth, MAX_CLIP_DEPTH) - 1]
 	append_instance(r, inst, 0, 0)
+}
+
+// Tilt is how push_tilt leans a box under the pointer.
+Tilt :: struct {
+	amount:  f32, // 0 leaves it flat, 1 is all of the effect
+	pointer: [2]f32, // points
+}
+
+// push_tilt draws a box, textured or filled top to bottom, that the pointer
+// leans on: it comes a little nearer and tips away where the pointer is, in
+// perspective, and a light follows the pointer over it. The picture stays
+// fixed in the box, as printed on it. rim is the hairline
+// push_rim would draw over it. The GPU does all of it in the instance's
+// fragments, from the pointer and the amount alone. Only where TILT is
+// true.
+//
+// The instance's colours carry numbers for the Tilt branch of the shader:
+// colors[0] and colors[1] are the top and bottom colours, colors[2] the
+// pointer in pixels, the amount and the rim's lift, and colors[3] the
+// rim's width in pixels and its darken.
+push_tilt :: proc(r: ^Renderer, rect: Rect, top, bottom: Color, radius: f32, tilt: Tilt, rim: Rim = {}, texture: Texture = 0, src: Rect = {}) {
+	inst: Instance
+	inst.dst = snap(r, rect)
+	if inst.dst.x >= inst.dst.z || inst.dst.y >= inst.dst.w {
+		return
+	}
+	inst.flags = {.Tilt}
+	texture := texture
+	if slot := texture_slot(r, texture); slot != nil && texture != 0 && slot.format != .R8 {
+		inst.flags += {.Textured}
+		src := src
+		if src.w == 0 || src.h == 0 {
+			src = {0, 0, f32(slot.width), f32(slot.height)}
+		}
+		tw, th := f32(slot.width), f32(slot.height)
+		inst.src = {src.x / tw, src.y / th, (src.x + src.w) / tw, (src.y + src.h) / th}
+	} else {
+		texture = 0
+	}
+	s := r.scale
+	for c in Corner {
+		inst.radii[c] = radius * s
+	}
+	inst.colors[0] = top
+	inst.colors[1] = bottom
+	inst.colors[2] = {tilt.pointer.x * s, tilt.pointer.y * s, clamp(tilt.amount, 0, 1), rim.lift}
+	inst.colors[3] = {max(math.round(s), 1), rim.darken, 0, 0}
+	inst.clip = r.clips[min(r.clip_depth, MAX_CLIP_DEPTH) - 1]
+	append_instance(r, inst, texture, 0)
 }
 
 // backdrop_hash hashes what a backdrop over region blurs: the instances in

@@ -14,19 +14,30 @@ import "../ui"
 COVER_PREFETCH_ROWS :: 4 // rows above and below the view whose covers load too
 DATA_SLOTS :: 16 // job queue slots covers leave free for data jobs
 COVER_RIM :: render.Rim{lift = 0.025, darken = 0.025} // the 1 pt rim around a cover
+COVER_TILT_RATE :: 12 // how fast a hovered cover's tilt comes in and goes, see ui.slide
 
 // cover_art draws a cover size points square, centred in a cell of width
 // cell_w. Without an image id it draws the fake data's gradient for seed.
 // A radius of half the size draws it round, as artist pictures are. A cover
 // whose size follows the window's passes its largest as texture_size and is
-// drawn scaled down from that, so a resize asks for nothing new.
-cover_art :: proc(s: ^State, kind: cover.Kind, id: string, seed: u32, size: f32, cell_w: ui.Size, radius: f32 = 4, texture_size: f32 = 0) {
+// drawn scaled down from that, so a resize asks for nothing new. A cover
+// given hovered leans under the pointer while it's true (render.push_tilt),
+// unless the settings keep covers still.
+cover_art :: proc(s: ^State, kind: cover.Kind, id: string, seed: u32, size: f32, cell_w: ui.Size, radius: f32 = 4, texture_size: f32 = 0, hovered: Maybe(bool) = nil) {
 	ui.column("", {.Center_Children}, cell_w, ui.fill())
 	ui.radius(radius)
 	hue := f32(seed % 997) / 997
 	ui.set_next_background(hsv(hue, 0.55, 0.75) if id == "" else SURFACE_ACTIVE)
-	b := ui.box_make("", {.Draw_Background}, ui.px(size), ui.px(size))
+	on, tilts := hovered.?
+	tilts &&= render.TILT && !s.settings.still_covers
+	// Keyed when it tilts, to keep how far in the tilt is.
+	b := ui.box_make("##cover" if tilts else "", {.Draw_Background}, ui.px(size), ui.px(size))
 	b.rim = COVER_RIM
+	tilt: render.Tilt
+	if tilts {
+		tilt.amount = ui.slide(b, on, COVER_TILT_RATE)
+	}
+	b.tilt = tilt
 	if id == "" {
 		b.gradient = hsv(hue + 0.08, 0.7, 0.35)
 		return
@@ -39,6 +50,7 @@ cover_art :: proc(s: ^State, kind: cover.Kind, id: string, seed: u32, size: f32,
 		img.texture = cover.texture(&s.data.covers, e)
 		img.texture_src = cover.src(&s.data.covers, e)
 		img.rim = COVER_RIM
+		img.tilt = tilt
 		img.opacity = cover.alpha(e, s.ui.time)
 		if img.opacity < 1 {
 			ui.request_frame()

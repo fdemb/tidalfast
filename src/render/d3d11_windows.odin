@@ -42,6 +42,7 @@ import "vendor:directx/dxgi"
 import "../platform"
 
 BACKDROPS :: true
+TILT :: true // whether the shader has push_tilt's branch
 
 VS_RECT :: #load("shaders/dxbc/vs_rect.dxbc")
 PS_RECT :: #load("shaders/dxbc/ps_rect.dxbc")

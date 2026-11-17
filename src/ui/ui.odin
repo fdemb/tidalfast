@@ -152,6 +152,7 @@ Build :: struct {
 	texture:                   render.Texture, // drawn over the background, rounded by radius
 	texture_src:               render.Rect, // texels of texture to draw; zero for all of it
 	rim:                       render.Rim, // a hairline inside the edge, see render.push_rim
+	tilt:                      render.Tilt, // the background or texture leans under the pointer, see render.push_tilt; draw sets the pointer
 	opacity:                   f32, // multiplies the box and everything inside it
 	shown_by:                  ^Box, // drawn at least as opaque as this box's hot_t, see show_on_hover
 	run:                       ^text.Run,
@@ -1605,6 +1606,14 @@ mouse :: proc() -> [2]f32 {
 mouse_over :: proc(b: ^Box) -> bool {
 	u := ctx
 	return u.input.mouse_inside && rect_contains(b.clip, u.input.mouse)
+}
+
+// mouse_on says whether the mouse is over b's rect from the last layout
+// with nothing clickable under it and no button held on anything, for a
+// box that shows the hover and takes no clicks.
+mouse_on :: proc(b: ^Box) -> bool {
+	u := ctx
+	return u.hot == 0 && u.active[.Left] == 0 && mouse_over(b)
 }
 
 // Drag and drop. A source calls drag_begin with a payload once its signal

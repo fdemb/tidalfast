@@ -28,12 +28,18 @@ layout(push_constant) uniform Push {
 
 layout(location = 0) flat out uint iid;
 
+const uint TILT = 64u;
+
 // The quad covers the rect plus its soft edge, cut down to the clip rect.
 // The fragment shader works from the pixel position alone, so clipping the
 // quad clips the shape exactly, and a clipped-away instance costs no pixels.
 void main() {
 	Instance r = instances[gl_InstanceIndex];
 	float pad = max(r.softness, 0.5) + 1.0;
+	if ((r.flags & TILT) != 0u) {
+		// Room for the box coming nearer.
+		pad += 0.05 * max(r.dst.z - r.dst.x, r.dst.w - r.dst.y);
+	}
 	vec2 p0 = max(r.dst.xy - pad, r.clip.xy);
 	vec2 p1 = max(min(r.dst.zw + pad, r.clip.zw), p0);
 	uint vid = uint(gl_VertexIndex);

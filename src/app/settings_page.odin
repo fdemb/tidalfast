@@ -74,6 +74,14 @@ draw_settings :: proc(s: ^State, main_w, view_h: f32) {
 				}
 			}
 		}
+		if render.TILT {
+			settings_separator()
+			settings_row("Cover hover", "Lean and light a cover under the pointer")
+			if settings_switch("Cover hover", !s.settings.still_covers) {
+				s.settings.still_covers = !s.settings.still_covers
+				settings_queue(d, settings_to_save(s))
+			}
+		}
 		if s.window.decorations {
 			settings_separator()
 			settings_row("Title bar", "The desktop's or TIDALfast's own")
