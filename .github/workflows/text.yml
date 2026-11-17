@@ -1,0 +1,124 @@
+# Checks text on macOS, Linux and Windows. Each job runs the tests, then the app
+# with fake data, and uploads frames of the library at three widths and of
+# the text screen, with the app's log.
+#
+# On Linux, Noto Sans is built in. The system's Noto Sans is removed, so
+# nothing can come from it; the fallback fonts for other scripts and emoji
+# stay. The app runs under a headless Weston on Mesa's software Vulkan.
+#
+# On macOS, CoreText finds and draws the fonts, and the app draws through
+# the runner's paravirtual Metal device.
+#
+# On Windows, DirectWrite finds and draws the fonts.
+name: text
+
+on:
+  push:
+    paths:
+      - "src/text/**"
+      - "assets/fonts/**"
+      - "tests/text_test.odin"
+      - ".github/workflows/text.yml"
+      - ".odin-version"
+  workflow_dispatch:
+
+jobs:
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/install-odin
+      - run: python3 build.py
+      - run: python3 build.py test
+      - name: Capture frames
+        # macOS has no timeout(1), so perl's alarm stands in for it.
+        run: |
+          out="$RUNNER_TEMP/frames"
+          mkdir -p "$out"
+          TIDALFAST_FAKE=1 TIDALFAST_AUDIO_NULL=1 TIDALFAST_CAPTURE="$out/last.tga"             TIDALFAST_SHELL_TEST="3:size=820,700;5:capture=$out/lib820.tga;6:size=1100,760;8:capture=$out/lib1100.tga;9:size=1600,1000;11:capture=$out/lib1600.tga;12:key=cmd+2;17:capture=$out/text.tga;18:quit"             perl -e 'alarm 120; exec @ARGV' ./build/tidalfast 2>&1 | tee "$out/app.log"
+          for f in "$out"/*.tga; do sips -s format png "$f" --out "${f%.tga}.png" > /dev/null; done
+          rm -f "$out"/*.tga
+          ls -l "$out"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: frames-macos
+          path: ${{ runner.temp }}/frames
+
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang pkg-config libwayland-dev wayland-protocols libxkbcommon-dev \
+            libvulkan-dev glslang-tools libfreetype-dev libfontconfig-dev libcurl4-openssl-dev libsystemd-dev \
+            fonts-noto-core fonts-noto-color-emoji fonts-noto-cjk weston mesa-vulkan-drivers dbus gnome-keyring \
+            python3-pil
+      - name: Remove the system's Noto Sans
+        run: |
+          sudo rm /usr/share/fonts/truetype/noto/NotoSans-*.ttf
+          sudo fc-cache -f
+          if fc-list | grep -E '/NotoSans-[A-Za-z]+\.ttf'; then exit 1; fi
+      - uses: ./.github/actions/install-odin
+      - run: python3 build.py
+      - name: Test
+        run: |
+          # The inner sh expands these, in a private D-Bus session and keyring.
+          # shellcheck disable=SC2016
+          dbus-run-session -- sh -c 'export HOME=$(mktemp -d); eval "$(echo x | gnome-keyring-daemon --unlock --components=secrets)"; odin test tests'
+      - name: Capture frames
+        run: |
+          export XDG_RUNTIME_DIR="$RUNNER_TEMP/xdg"
+          mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+          out="$RUNNER_TEMP/frames"
+          mkdir -p "$out"
+          weston --backend=headless --socket=wl-test --width=1800 --height=1200 &
+          sleep 3
+          WAYLAND_DISPLAY=wl-test TIDALFAST_FAKE=1 TIDALFAST_AUDIO_NULL=1 TIDALFAST_CAPTURE="$out/last.tga" \
+            TIDALFAST_SHELL_TEST="3:size=820,700;5:capture=$out/lib820.tga;6:size=1100,760;8:capture=$out/lib1100.tga;9:size=1600,1000;11:capture=$out/lib1600.tga;12:key=ctrl+2;14:capture=$out/text.tga;15:quit" \
+            timeout 120 ./build/tidalfast 2>&1 | tee "$out/app.log"
+          kill %1 || true
+          python3 -c 'import glob, PIL.Image as I; [I.open(f).save(f[:-4] + ".png") for f in glob.glob("'"$out"'/*.tga")]'
+          rm -f "$out"/*.tga
+          ls -l "$out"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: frames-linux
+          path: ${{ runner.temp }}/frames
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/install-odin
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - run: python build.py
+      - run: python build.py test
+      - name: Capture frames
+        shell: bash
+        # The runner draws with the software renderer, where the text screen
+        # takes about 35 frames of 55 to 70 ms to rasterize all its glyphs,
+        # most of a font's sizes costing DirectWrite 5 ms for the first. So
+        # it gets 5 s before its capture; 2 s left the list half blank.
+        run: |
+          mkdir -p frames
+          TIDALFAST_FAKE=1 TIDALFAST_AUDIO_NULL=1 TIDALFAST_CAPTURE=frames/last.tga \
+            TIDALFAST_SHELL_TEST="3:size=820,700;5:capture=frames/lib820.tga;6:size=1100,760;8:capture=frames/lib1100.tga;9:size=1600,1000;11:capture=frames/lib1600.tga;12:key=ctrl+2;17:capture=frames/text.tga;18:quit" \
+            timeout 120 ./build/windows/tidalfast.exe 2>&1 | tee frames/app.log
+          python -m pip install --quiet pillow
+          python -c 'import glob, PIL.Image as I; [I.open(f).save(f[:-4] + ".png") for f in glob.glob("frames/*.tga")]'
+          rm -f frames/*.tga
+          ls -l frames
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: frames-windows
+          path: frames

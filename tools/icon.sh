@@ -1,30 +1,18 @@
 #!/bin/sh
-# tools/icon.sh  renders packaging/icon.svg to the macOS AppIcon.icns, the
-# Linux tidalfast.png and the Windows tidalfast.ico that ./build.py packs. Run
-# it on macOS after changing the SVG and commit what it writes. Needs
-# rsvg-convert (brew install librsvg), iconutil and python3.
-#
-# The SVG follows Apple's icon grid: an 824 pt tile with a shadow on a 1024 pt
-# canvas. The Linux and Windows icons drop the shadow and most of the margin,
-# since those desktops don't add their own.
+# tools/icon.sh  renders packaging/icon.svg to the Linux tidalfast.png and the
+# Windows tidalfast.ico that ./build.py packs. Run it after changing the SVG
+# and commit what it writes. Needs rsvg-convert (brew install librsvg) and
+# python3. The macOS icon is packaging/macos/AppIcon.icon, which ./build.py dist
+# compiles itself.
 set -eu
 cd "$(dirname "$0")/.."
 
 tmp=$(mktemp -d)
-iconset=$tmp/AppIcon.iconset
-mkdir -p "$iconset"
-for size in 16 32 128 256 512; do
-	rsvg-convert -w $size -h $size < packaging/icon.svg > "$iconset/icon_${size}x${size}.png"
-	rsvg-convert -w $((size * 2)) -h $((size * 2)) < packaging/icon.svg > "$iconset/icon_${size}x${size}@2x.png"
-done
-iconutil -c icns "$iconset" -o packaging/macos/AppIcon.icns
-
-sed -e '/url(#shadow)/d' -e 's/viewBox="0 0 1024 1024"/viewBox="84 84 856 856"/' packaging/icon.svg > "$tmp/flat.svg"
-rsvg-convert -w 512 -h 512 < "$tmp/flat.svg" > packaging/linux/tidalfast.png
+rsvg-convert -w 512 -h 512 < packaging/icon.svg > packaging/linux/tidalfast.png
 
 # An .ico of PNG entries, which Windows reads at every size since Vista.
 for size in 16 24 32 48 64 256; do
-	rsvg-convert -w $size -h $size < "$tmp/flat.svg" > "$tmp/$size.png"
+	rsvg-convert -w $size -h $size < packaging/icon.svg > "$tmp/$size.png"
 done
 python3 -I - "$tmp" packaging/windows/tidalfast.ico <<'EOF'
 import struct, sys
@@ -39,4 +27,4 @@ for s, png in zip(sizes, pngs):
 open(out, "wb").write(head + b"".join(pngs))
 EOF
 rm -rf "$tmp"
-ls -l packaging/macos/AppIcon.icns packaging/linux/tidalfast.png packaging/windows/tidalfast.ico
+ls -l packaging/linux/tidalfast.png packaging/windows/tidalfast.ico

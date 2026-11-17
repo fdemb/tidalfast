@@ -28,7 +28,8 @@ Event_Kind :: enum u32 {
 	Access_Focus, // an assistive app moved the focus to the node target
 }
 
-// Media keys, Control Center and headphones, from MPRemoteCommandCenter.
+// Media keys, headphones and the system's media controls: MPRemoteCommandCenter
+// on macOS, MPRIS on Linux, the System Media Transport Controls on Windows.
 Media_Command :: enum u8 {
 	None,
 	Play,
@@ -144,8 +145,9 @@ Now_Playing_State :: enum u32 {
 	Paused,
 }
 
-// What macOS shows in Control Center and on the lock screen. The shell
-// copies everything before set_now_playing returns.
+// What the system shows as playing: Control Center on macOS, the desktop's
+// media widget on Linux, the media overlay on Windows. The shell copies
+// everything before set_now_playing returns.
 Now_Playing :: struct {
 	title:          cstring, // nil clears Now Playing
 	artist:         cstring,

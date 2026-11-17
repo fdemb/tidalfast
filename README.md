@@ -1,6 +1,6 @@
 <h1>
 <p align="center">
-  <img src="packaging/linux/tidalfast.png" alt="TIDALfast icon" width="128">
+  <img src="docs/icon.png" alt="TIDALfast icon" width="128">
   <br>TIDALfast
 </p>
 </h1>
