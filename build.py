@@ -441,7 +441,16 @@ def build_macos(b):
 		remove(f"{bundle}/Contents/MacOS/tidalfast.dSYM", f"{dist}/shell")
 		fill_template("packaging/macos/Info.plist", f"{bundle}/Contents/Info.plist",
 			{"@VERSION@": b.version_numbers, "@MACOS_MIN@": MACOS_MIN})
-		shutil.copy("packaging/macos/AppIcon.icns", f"{bundle}/Contents/Resources/")
+		# actool, from Xcode 26 or newer, compiles the Icon Composer icon to
+		# Assets.car for macOS 26 and AppIcon.icns for the macOS before it.
+		run("xcrun", "actool", "packaging/macos/AppIcon.icon", "--compile", f"{bundle}/Contents/Resources",
+			"--app-icon", "AppIcon", "--platform", "macosx", "--target-device", "mac",
+			"--minimum-deployment-target", MACOS_MIN, "--output-partial-info-plist", f"{dist}/icon.plist",
+			"--output-format", "human-readable-text", "--errors", "--warnings", quiet=True)
+		remove(f"{dist}/icon.plist")
+		# An older actool skips an .icon it can't read and still exits 0.
+		if not os.path.exists(f"{bundle}/Contents/Resources/Assets.car"):
+			fail("actool made no Assets.car from packaging/macos/AppIcon.icon; it needs Xcode 26 or newer")
 		run("codesign", "--force", "--sign", sign_identity or "-", bundle)
 		shutil.copytree(bundle, f"{dist}/dmg/TIDALfast.app", symlinks=True)
 		os.symlink("/Applications", f"{dist}/dmg/Applications")
