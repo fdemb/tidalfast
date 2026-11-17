@@ -15,8 +15,10 @@
 // app does its work in frames (the queue moves on to the next track in
 // one), but it doesn't animate. While the user drags the window's edge or
 // title, or has the system menu open, Windows runs its own modal loop and
-// the main loop doesn't run; a timer does its work from inside it, so the
-// window keeps up with the drag.
+// the main loop doesn't run, so nothing animates and wake_after waits. A
+// resize still draws a frame for each size, from WM_SIZE, and the class's
+// brush, the app's background, fills what the system shows of a grown
+// window before that frame reaches it.
 //
 // Text comes from WM_CHAR, and from an input method through IMM32: the
 // composition string becomes marked text and the result string is
@@ -66,7 +68,8 @@
 #define DEFAULT_HEIGHT 700
 #define MIN_WIDTH 480
 #define MIN_HEIGHT 360
-#define MODAL_TIMER 1
+// The app's background, CLEAR_COLOR in src/app/app.odin.
+#define BACKGROUND RGB(16, 16, 16)
 
 static bool g_app_started; // app_init has run, so frames can be drawn
 static Memory g_memory;
@@ -78,7 +81,6 @@ static float g_scale = 1;
 static bool g_key_window;
 static bool g_animating;
 static bool g_in_size_move; // inside the modal loop of a drag or resize
-static int g_modal_loops; // modal loops running: a drag, a resize or the system menu
 static bool g_minimized; // frames only when asked, no animation, unless TIDALFAST_CAPTURE is set
 static bool g_capture;
 static bool g_in_frame; // inside app_frame, which a window message can re-enter
@@ -618,27 +620,6 @@ static size_t get_clipboard(uint8_t *buffer, size_t capacity) {
 
 static void shut_down(void);
 
-// A modal loop (a drag or resize of the window, or the system menu) keeps
-// the main loop from running until it ends. A timer does the main loop's
-// work from inside it: the test steps, the app's wake_after and the frames
-// asked for.
-static void modal_loop(bool entering) {
-  g_modal_loops += entering ? 1 : -1;
-  if (entering && g_modal_loops == 1) SetTimer(g_window, MODAL_TIMER, 8, NULL);
-  if (!entering && g_modal_loops == 0) KillTimer(g_window, MODAL_TIMER);
-}
-
-static void modal_tick(void) {
-  // Steps run whether their timer fired or not: a step can open the modal
-  // loop, as vkey=alt+space does, and the timer for the steps after it is
-  // only armed once that step returns.
-  WaitForSingleObject(g_test_timer, 0);
-  run_due_steps();
-  if (WaitForSingleObject(g_wake_timer, 0) == WAIT_OBJECT_0) atomic_store(&g_needs_redraw, true);
-  WaitForSingleObject(g_redraw_event, 0); // g_needs_redraw says the same
-  if (atomic_load(&g_needs_redraw) || animating()) draw_frame();
-}
-
 // The top of the window
 
 static void set_drag_regions(const float (*rects)[4], uint32_t count) {
@@ -831,27 +812,25 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   }
   case WM_ENTERSIZEMOVE:
     g_in_size_move = true;
-    modal_loop(true);
     return 0;
   case WM_EXITSIZEMOVE:
     g_in_size_move = false;
-    modal_loop(false);
     return 0;
-  case WM_ENTERMENULOOP:
-    modal_loop(true);
+  case WM_PAINT: {
+    // BeginPaint erases what's invalid with the class's brush (WM_ERASEBKGND
+    // goes to DefWindowProc), so the part a resize uncovers is the app's
+    // background, not white, until a frame covers it. Inside a resize the
+    // frame comes now, unless WM_SIZE has drawn this size already.
+    PAINTSTRUCT ps;
+    BeginPaint(hwnd, &ps);
+    EndPaint(hwnd, &ps);
+    if (g_in_size_move) {
+      if (atomic_load(&g_needs_redraw)) draw_frame();
+    } else {
+      request_redraw();
+    }
     return 0;
-  case WM_EXITMENULOOP:
-    modal_loop(false);
-    return 0;
-  case WM_TIMER:
-    if (wp == MODAL_TIMER) modal_tick();
-    return 0;
-  case WM_PAINT:
-    ValidateRect(hwnd, NULL);
-    request_redraw();
-    return 0;
-  case WM_ERASEBKGND:
-    return 1;
+  }
   case WM_SETFOCUS:
     g_key_window = true;
     modifiers_changed();
@@ -1004,7 +983,6 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 //   snapshot            ask the app for a memory snapshot, as SIGUSR1 does elsewhere
 //   minimize, restore   minimize the window, and show it again
 //   endsession          WM_QUERYENDSESSION and WM_ENDSESSION, as when the user logs off
-//   endmenu             print how many modal loops run, and close the open menu, such as alt+space's
 
 // app_take_snapshot is in src/app/snapshot_windows.odin.
 void app_take_snapshot(void);
@@ -1144,9 +1122,6 @@ bool os_test_step(const char *command, char *arg) {
   } else if (!strcmp(command, "restore")) {
     ShowWindow(g_window, SW_RESTORE);
     request_redraw();
-  } else if (!strcmp(command, "endmenu")) {
-    fprintf(stderr, "shell: test: %d modal loops, ending the menu\n", g_modal_loops);
-    EndMenu();
   } else if (!strcmp(command, "endsession")) {
     if (SendMessageW(g_window, WM_QUERYENDSESSION, 0, ENDSESSION_LOGOFF)) SendMessageW(g_window, WM_ENDSESSION, TRUE, ENDSESSION_LOGOFF);
   } else {
@@ -1251,6 +1226,7 @@ static bool open_window(void) {
       .hInstance = instance,
       .hIcon = LoadIconW(instance, MAKEINTRESOURCEW(1)),
       .hCursor = LoadCursorW(NULL, IDC_ARROW),
+      .hbrBackground = CreateSolidBrush(BACKGROUND),
       .lpszClassName = L"TIDALfast",
   };
   char message[128];

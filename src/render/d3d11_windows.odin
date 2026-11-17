@@ -53,6 +53,38 @@ SWAP_BUFFERS :: 2
 
 // Present's success code for a window that can't be seen.
 DXGI_STATUS_OCCLUDED :: 0x087A0001
+
+GUI_INMOVESIZE :: 0x2
+
+GUITHREADINFO :: struct {
+	cbSize:        u32,
+	flags:         u32,
+	hwndActive:    win.HWND,
+	hwndFocus:     win.HWND,
+	hwndCapture:   win.HWND,
+	hwndMenuOwner: win.HWND,
+	hwndMoveSize:  win.HWND,
+	hwndCaret:     win.HWND,
+	rcCaret:       win.RECT,
+}
+
+foreign import user32 "system:User32.lib"
+
+@(default_calling_convention = "system")
+foreign user32 {
+	GetGUIThreadInfo :: proc(idThread: win.DWORD, pgui: ^GUITHREADINFO) -> win.BOOL ---
+}
+
+// Whether this thread is in the modal loop of a drag or resize of the
+// window, where each frame comes from a WM_SIZE and the next size step
+// waits for it.
+@(private)
+in_move_size :: proc() -> bool {
+	info := GUITHREADINFO {
+		cbSize = size_of(GUITHREADINFO),
+	}
+	return bool(GetGUIThreadInfo(win.GetCurrentThreadId(), &info)) && info.flags & GUI_INMOVESIZE != 0
+}
 // D3D11CreateDevice's answer to the debug flag without the SDK layers,
 // which come with Windows' optional Graphics Tools.
 DXGI_ERROR_SDK_COMPONENT_MISSING :: 0x887A002D
@@ -980,8 +1012,12 @@ end_frame :: proc(r: ^Renderer) {
 	if r.capture_path != "" {
 		capture(r)
 	}
+	// While the user drags the window's edge, the frame goes out without
+	// waiting for vsync, so the resize loop gets on to the next size at
+	// once and the frame keeps up with the edge. The compositor shows the
+	// latest frame at its next vsync anyway.
 	wait := time.tick_now()
-	hr := g.swapchain->Present(1, {})
+	hr := g.swapchain->Present(0 if in_move_size() else 1, {})
 	r.drawable_wait_ms = f32(time.duration_milliseconds(time.tick_since(wait)))
 	if hr < 0 {
 		if !lose(r, hr) {
