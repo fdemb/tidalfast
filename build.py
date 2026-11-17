@@ -41,6 +41,7 @@ again for the saved login.
 import glob
 import os
 import platform
+import re
 import shlex
 import shutil
 import subprocess
@@ -173,6 +174,7 @@ class Build:
 		self.out = out
 		self.test_args = test_args
 		self.version = ""
+		self.version_numbers = ""
 		self.app_flags = []
 
 	def odin_flags(self):
@@ -225,12 +227,14 @@ def main(argv):
 		commit += "-dirty"
 	b.app_flags = [f"-define:TIDALFAST_COMMIT={commit or 'unknown'}"]
 
-	# A tag v1.2.3 gives 1.2.3. Info.plist wants numbers, so anything else is 0.0.0.
+	# A tag v1.2.3 gives 1.2.3, and v1.2.3-beta 1.2.3-beta. Info.plist and the
+	# Windows resource want only numbers, so they get version_numbers, 1.2.3.
 	version = os.environ.get("TIDALFAST_VERSION") or try_output(
 		"git", "describe", "--tags", "--exact-match", "--match", "v[0-9]*")
 	if version.startswith("v"):
 		version = version[1:]
 	b.version = version or "0.0.0"
+	b.version_numbers = version_numbers(b.version)
 
 	if sys.platform == "win32":
 		build_windows(b)
@@ -238,6 +242,13 @@ def main(argv):
 		build_unix(b)
 	if target == "test":
 		run("odin", "test", "tests", [WINDOWS_LINKER] if sys.platform == "win32" else [], test_args)
+
+
+def version_numbers(version):
+	"""The leading 1 to 3 numbers of a version, padded to three: 1.2-rc gives 1.2.0."""
+	numbers = re.match(r"\d+(\.\d+){0,2}", version)
+	parts = numbers.group(0).split(".") if numbers else []
+	return ".".join(parts + ["0"] * (3 - len(parts)))
 
 
 def check_odin_version():
@@ -429,7 +440,7 @@ def build_macos(b):
 		app_build(f"{bundle}/Contents/MacOS/tidalfast", f"{dist}/shell", b.odin_flags())
 		remove(f"{bundle}/Contents/MacOS/tidalfast.dSYM", f"{dist}/shell")
 		fill_template("packaging/macos/Info.plist", f"{bundle}/Contents/Info.plist",
-			{"@VERSION@": b.version, "@MACOS_MIN@": MACOS_MIN})
+			{"@VERSION@": b.version_numbers, "@MACOS_MIN@": MACOS_MIN})
 		shutil.copy("packaging/macos/AppIcon.icns", f"{bundle}/Contents/Resources/")
 		run("codesign", "--force", "--sign", sign_identity or "-", bundle)
 		shutil.copytree(bundle, f"{dist}/dmg/TIDALfast.app", symlinks=True)
@@ -503,7 +514,7 @@ def build_windows(b):
 	rc = join(shell_dir, "tidalfast.rc")
 	res = join(shell_dir, "tidalfast.res")
 	fill_template(join("packaging", "windows", "tidalfast.rc"), rc,
-		{"@VERSION_COMMAS@": b.version.replace(".", ",") + ",0", "@VERSION@": b.version})
+		{"@VERSION_COMMAS@": b.version_numbers.replace(".", ",") + ",0", "@VERSION@": b.version})
 	shutil.copy(join("packaging", "windows", "tidalfast.ico"), shell_dir)
 	shutil.copy(join("packaging", "windows", "tidalfast.manifest"), shell_dir)
 	run("rc", "/nologo", "/fo", res, rc)
