@@ -1,6 +1,19 @@
 {
   "fill" : {
-    "automatic-gradient" : "extended-srgb:0.00000,0.53333,1.00000,1.00000"
+    "linear-gradient" : [
+      "srgb:0.01569,0.01569,0.01961,1.00000",
+      "srgb:0.13725,0.14118,0.15686,1.00000"
+    ],
+    "orientation" : {
+      "start" : {
+        "x" : 0.15,
+        "y" : 0
+      },
+      "stop" : {
+        "x" : 0.85,
+        "y" : 1
+      }
+    }
   },
   "groups" : [
     {
@@ -16,11 +29,6 @@
         {
           "image-name" : "triangle.svg",
           "name" : "triangle"
-        },
-        {
-          "hidden" : false,
-          "image-name" : "background.svg",
-          "name" : "bg"
         }
       ],
       "shadow" : {
