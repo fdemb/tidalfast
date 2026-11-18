@@ -20,6 +20,22 @@ runs:
           if [ "$RUNNER_OS" = Linux ]; then
             (cd "$("$dir/odin" root)/vendor/stb/src" && sh build_stb.sh)
           fi
+          if [ "$RUNNER_OS" = macOS ]; then
+            # dev-2026-11a ships some universal stb archives with slices
+            # aligned to 8 bytes, which the runner's ld rejects. Rebuild
+            # every universal archive with page-aligned slices.
+            for f in "$dir"/vendor/stb/lib/darwin/*.a; do
+              archs=$(lipo -archs "$f")
+              [ "$(echo $archs | wc -w)" -gt 1 ] || continue
+              args=()
+              for a in $archs; do
+                lipo "$f" -thin "$a" -output "$f.$a"
+                args+=("$f.$a" -segalign "$a" 4000)
+              done
+              lipo -create "${args[@]}" -output "$f"
+              rm "$f".*
+            done
+          fi
           ;;
         Windows)
           curl -fsSL -o "$RUNNER_TEMP/odin.zip" "$url/odin-windows-amd64-$version.zip"
