@@ -260,7 +260,8 @@ def check_odin_version():
 	have = try_output("odin", "version")
 	if not have:
 		fail("odin isn't on PATH")
-	if want not in have:
+	# A hotfix release such as dev-2026-11a calls itself dev-2026-11-nightly.
+	if re.sub(r"^(dev-\d{4}-\d{2})[a-z]$", r"\1-", want) not in have:
 		print(f"{PROG}: warning: the project builds with Odin {want}, and this is {have.split()[-1]}", file=sys.stderr)
 
 

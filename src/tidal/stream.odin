@@ -170,6 +170,26 @@ manifest_hls :: proc(m: Stream_Manifest, allocator := context.allocator) -> (hls
 @(private = "file")
 MAX_DASH_SEGMENTS :: 200_000
 
+// pad_for_xml works around core:encoding/xml in Odin dev-2026-11. It keeps
+// attributes and decoded strings in an arena with blocks of a quarter of the
+// input, at least 256 bytes, and the arena fails any allocation between its
+// block size and 6554 bytes, so an element loses every attribute after its
+// 8th. TIDAL's MPD root has mediaPresentationDuration 9th. Trailing
+// whitespace, which XML allows after the root element, makes the blocks big
+// enough to close the gap. Odin fixed the arena in cc7c5617a.
+pad_for_xml :: proc(s: string) -> string {
+	when ODIN_VERSION == "dev-2026-11" {
+		MIN_LEN :: 4 * mem.DYNAMIC_ARENA_OUT_OF_BAND_SIZE_DEFAULT
+		if len(s) < MIN_LEN {
+			buf := make([]u8, MIN_LEN, context.temp_allocator)
+			copy(buf, s)
+			mem.set(&buf[len(s)], ' ', MIN_LEN - len(s))
+			return string(buf)
+		}
+	}
+	return s
+}
+
 // dash_info_from_mpd parses the MPD XML that TIDAL sends for DASH streams:
 // one period, adaptation set and representation with a SegmentTemplate.
 dash_info_from_mpd :: proc(mpd_xml: string, allocator := context.allocator) -> (info: Dash_Info, err: Error) {
@@ -178,7 +198,7 @@ dash_info_from_mpd :: proc(mpd_xml: string, allocator := context.allocator) -> (
 		return make_error(.Manifest_Decode, what, detail = what)
 	}
 
-	doc, xerr := xml.parse_string(mpd_xml, allocator = context.temp_allocator)
+	doc, xerr := xml.parse_string(pad_for_xml(mpd_xml), allocator = context.temp_allocator)
 	if xerr != nil || doc == nil || doc.element_count == 0 {
 		log.debugf("MPD is not XML: %v, %d bytes, first byte 0x%02x", xerr, len(mpd_xml), mpd_xml[0] if len(mpd_xml) > 0 else 0)
 		return {}, decode_error("MPD: not XML")

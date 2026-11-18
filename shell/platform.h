@@ -328,4 +328,4 @@ Frame_Result app_frame(Memory *mem, Shell *shell, Frame_Input *input);
 void app_shutdown(Memory *mem);
 
 // The shell's own main, which src/app's main calls.
-int shell_main(int argc, char **argv);
+int shell_main(void);

@@ -3,14 +3,13 @@ package audio
 
 // The CoreAudio HAL and AudioUnit calls bitperfect_darwin.odin makes. They
 // are plain C functions in CoreAudio.framework and AudioToolbox.framework,
-// declared by hand, so Odin calls them without the Obj-C runtime. Private
+// with the two CoreFoundation calls that read a CFString, declared by hand, so Odin calls them without the Obj-C runtime. Private
 // to the package: the player goes through the procedures
 // bitperfect_linux.odin also has.
 
-import CF "core:sys/darwin/CoreFoundation"
-
 foreign import CoreAudio "system:CoreAudio.framework"
 foreign import AudioToolbox "system:AudioToolbox.framework"
+foreign import CoreFoundation "system:CoreFoundation.framework"
 
 Audio_Object_ID :: u32
 OS_Status :: i32
@@ -99,6 +98,15 @@ foreign AudioToolbox {
 	AudioOutputUnitStop :: proc(unit: rawptr) -> OS_Status ---
 }
 
+CF_STRING_ENCODING_UTF8 :: 0x08000100
+
+// Typed as core:sys/darwin/CoreFoundation types them (see src/text).
+@(default_calling_convention = "c")
+foreign CoreFoundation {
+	CFRelease :: proc(cf: rawptr) ---
+	CFStringGetCString :: proc(s: rawptr, buffer: [^]u8, size: int, encoding: int) -> b8 ---
+}
+
 get :: proc(id: Audio_Object_ID, selector, scope: u32, out: ^$T) -> bool {
 	addr := Property_Address{selector, scope, ELEMENT_MAIN}
 	size := u32(size_of(T))
@@ -177,13 +185,13 @@ device_uid :: proc(dev: Audio_Object_ID) -> string {
 
 // string_property reads a CFString property into the temp allocator.
 string_property :: proc(dev: Audio_Object_ID, selector: u32) -> (string, bool) {
-	str: CF.String
+	str: rawptr
 	if !get(dev, selector, SCOPE_GLOBAL, &str) || str == nil {
 		return "", false
 	}
-	defer CF.CFRelease(CF.TypeRef(str))
+	defer CFRelease(str)
 	buf := make([]u8, 256, context.temp_allocator)
-	if !CF.StringGetCString(str, raw_data(buf), CF.Index(len(buf)), CF.StringEncoding(CF.StringBuiltInEncodings.UTF8)) {
+	if !CFStringGetCString(str, raw_data(buf), len(buf), CF_STRING_ENCODING_UTF8) {
 		return "", false
 	}
 	return string(cstring(raw_data(buf))), true

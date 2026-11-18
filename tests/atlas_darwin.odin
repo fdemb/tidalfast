@@ -2,42 +2,21 @@ package tidal_tests
 
 import "core:mem"
 import "core:strings"
+import NS "core:sys/darwin/Foundation"
 import "core:testing"
 import "core:time"
+import MTL "vendor:darwin/Metal"
 
 import "../src/render"
 import "../src/text"
-
-foreign import metal "system:Metal.framework"
-
-@(default_calling_convention = "c")
-foreign metal {
-	MTLCreateSystemDefaultDevice :: proc() -> rawptr ---
-}
-
-@(private = "file")
-Origin :: struct {
-	x, y, z: uint,
-}
-
-@(private = "file")
-Size :: struct {
-	w, h, d: uint,
-}
-
-@(private = "file")
-Region :: struct {
-	origin: Origin,
-	size:   Size,
-}
 
 // read_texels reads an R8 texture's w by h texels at (x, y) on the CPU.
 @(private = "file")
 read_texels :: proc(r: ^render.Renderer, t: render.Texture, x, y, w, h: int) -> []u8 {
 	out := make([]u8, w * h, context.temp_allocator)
 	tex := r.textures[t & 0xffff].gpu.texture
-	region := Region{{uint(x), uint(y), 0}, {uint(w), uint(h), 1}}
-	render.msg_proc(proc "c" (render.id, render.SEL, rawptr, uint, Region, uint))(tex, render.sel_registerName("getBytes:bytesPerRow:fromRegion:mipmapLevel:"), raw_data(out), uint(w), region, 0)
+	region := MTL.Region{{NS.UInteger(x), NS.UInteger(y), 0}, {NS.UInteger(w), NS.UInteger(h), 1}}
+	tex->getBytes_bytesPerRow_fromRegion_mipmapLevel(raw_data(out), NS.UInteger(w), region, 0)
 	return out
 }
 
@@ -46,7 +25,7 @@ read_texels :: proc(r: ^render.Renderer, t: render.Texture, x, y, w, h: int) -> 
 // there, at the same place, afterwards.
 @(test)
 atlas_pages_grow_and_keep_their_glyphs :: proc(t: ^testing.T) {
-	device := MTLCreateSystemDefaultDevice()
+	device := MTL.CreateSystemDefaultDevice()
 	if device == nil {
 		return // no GPU to test with
 	}
@@ -57,7 +36,7 @@ atlas_pages_grow_and_keep_their_glyphs :: proc(t: ^testing.T) {
 	context.allocator = mem.arena_allocator(&arena)
 	r := new(render.Renderer)
 	r.gpu.device = device
-	r.gpu.queue = render.msg(device, "newCommandQueue")
+	r.gpu.queue = device->newCommandQueue()
 	s := new(text.State)
 	testing.expect(t, text.init(s))
 	defer {
@@ -99,9 +78,9 @@ atlas_pages_grow_and_keep_their_glyphs :: proc(t: ^testing.T) {
 	testing.expect_value(t, a.pages[0].size, text.PAGE_SIZE >> (text.PAGE_START_SHIFT - 1))
 
 	// The copy runs on the GPU ahead of anything committed after it.
-	cmd := render.msg(r.gpu.queue, "commandBuffer")
-	render.msg(cmd, "commit")
-	render.msg(cmd, "waitUntilCompleted")
+	cmd := r.gpu.queue->commandBuffer()
+	cmd->commit()
+	cmd->waitUntilCompleted()
 	after := read_texels(r, a.pages[0].texture, int(glyph.x), int(glyph.y), int(glyph.w), int(glyph.h))
 	testing.expect_value(t, string(after), before)
 }
@@ -110,7 +89,7 @@ atlas_pages_grow_and_keep_their_glyphs :: proc(t: ^testing.T) {
 // Text drawn every frame keeps its bitmaps and isn't rasterized again.
 @(test)
 atlas_keeps_hot_pages_when_full :: proc(t: ^testing.T) {
-	device := MTLCreateSystemDefaultDevice()
+	device := MTL.CreateSystemDefaultDevice()
 	if device == nil {
 		return // no GPU to test with
 	}
@@ -121,7 +100,7 @@ atlas_keeps_hot_pages_when_full :: proc(t: ^testing.T) {
 	context.allocator = mem.arena_allocator(&arena)
 	r := new(render.Renderer)
 	r.gpu.device = device
-	r.gpu.queue = render.msg(device, "newCommandQueue")
+	r.gpu.queue = device->newCommandQueue()
 	s := new(text.State)
 	testing.expect(t, text.init(s))
 	defer {
@@ -162,7 +141,7 @@ atlas_keeps_hot_pages_when_full :: proc(t: ^testing.T) {
 // glyphs.
 @(test)
 atlas_full_table_on_a_hot_page_takes_new_glyphs :: proc(t: ^testing.T) {
-	device := MTLCreateSystemDefaultDevice()
+	device := MTL.CreateSystemDefaultDevice()
 	if device == nil {
 		return // no GPU to test with
 	}
@@ -173,7 +152,7 @@ atlas_full_table_on_a_hot_page_takes_new_glyphs :: proc(t: ^testing.T) {
 	context.allocator = mem.arena_allocator(&arena)
 	r := new(render.Renderer)
 	r.gpu.device = device
-	r.gpu.queue = render.msg(device, "newCommandQueue")
+	r.gpu.queue = device->newCommandQueue()
 	s := new(text.State)
 	testing.expect(t, text.init(s))
 	defer {
@@ -264,7 +243,7 @@ fill_table :: proc(s: ^text.State, r: ^render.Renderer, hot: string, hot_size: f
 // keeps its bitmaps and isn't rasterized again.
 @(test)
 atlas_full_table_drops_glyphs_not_drawn :: proc(t: ^testing.T) {
-	device := MTLCreateSystemDefaultDevice()
+	device := MTL.CreateSystemDefaultDevice()
 	if device == nil {
 		return // no GPU to test with
 	}
@@ -275,7 +254,7 @@ atlas_full_table_drops_glyphs_not_drawn :: proc(t: ^testing.T) {
 	context.allocator = mem.arena_allocator(&arena)
 	r := new(render.Renderer)
 	r.gpu.device = device
-	r.gpu.queue = render.msg(device, "newCommandQueue")
+	r.gpu.queue = device->newCommandQueue()
 	s := new(text.State)
 	testing.expect(t, text.init(s))
 	defer {
@@ -311,7 +290,7 @@ atlas_full_table_drops_glyphs_not_drawn :: proc(t: ^testing.T) {
 // rasterized again, so dropped glyphs can't hold most of the pages.
 @(test)
 atlas_full_table_frees_mostly_dead_pages :: proc(t: ^testing.T) {
-	device := MTLCreateSystemDefaultDevice()
+	device := MTL.CreateSystemDefaultDevice()
 	if device == nil {
 		return // no GPU to test with
 	}
@@ -322,7 +301,7 @@ atlas_full_table_frees_mostly_dead_pages :: proc(t: ^testing.T) {
 	context.allocator = mem.arena_allocator(&arena)
 	r := new(render.Renderer)
 	r.gpu.device = device
-	r.gpu.queue = render.msg(device, "newCommandQueue")
+	r.gpu.queue = device->newCommandQueue()
 	s := new(text.State)
 	testing.expect(t, text.init(s))
 	defer {
@@ -354,7 +333,7 @@ atlas_full_table_frees_mostly_dead_pages :: proc(t: ^testing.T) {
 // glyph must go with it rather than point into a freed page.
 @(test)
 atlas_full_table_drops_wrapped_glyphs_on_freed_pages :: proc(t: ^testing.T) {
-	device := MTLCreateSystemDefaultDevice()
+	device := MTL.CreateSystemDefaultDevice()
 	if device == nil {
 		return // no GPU to test with
 	}
@@ -365,7 +344,7 @@ atlas_full_table_drops_wrapped_glyphs_on_freed_pages :: proc(t: ^testing.T) {
 	context.allocator = mem.arena_allocator(&arena)
 	r := new(render.Renderer)
 	r.gpu.device = device
-	r.gpu.queue = render.msg(device, "newCommandQueue")
+	r.gpu.queue = device->newCommandQueue()
 	s := new(text.State)
 	testing.expect(t, text.init(s))
 	defer {

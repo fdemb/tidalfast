@@ -171,8 +171,8 @@ test_mpris_answers_a_media_widget :: proc(t: ^testing.T) {
 			if testing.expectf(t, err == nil, "the cover isn't a PNG: %v", err) {
 				testing.expect_value(t, img.width, 2)
 				testing.expect_value(t, img.channels, 4)
-				testing.expect_value(t, img.pixels.buf[0], 200)
-				testing.expect_value(t, img.pixels.buf[1], 100)
+				testing.expect_value(t, img.pixels[0], 200)
+				testing.expect_value(t, img.pixels[1], 100)
 			}
 		}
 	}
@@ -220,6 +220,6 @@ test_png_unpremultiplies_the_cover :: proc(t: ^testing.T) {
 	testing.expect_value(t, img.height, 1)
 	testing.expect_value(t, img.depth, 8)
 	got: [8]u8
-	copy(got[:], img.pixels.buf[:])
+	copy(got[:], img.pixels[:])
 	testing.expect_value(t, got, [8]u8{255, 128, 0, 128, 0, 0, 0, 0})
 }
