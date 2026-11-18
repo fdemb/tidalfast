@@ -8,7 +8,8 @@
                         also reads TIDALFAST_API, the mock server and the measure tool
 ./build.py libs         only the C libraries in third_party, into build/ (build/windows/ on Windows)
 ./build.py dist         release package in build/dist: TIDALfast.app and a .dmg on macOS,
-                        an AppImage on Linux (needs linuxdeploy, or LINUXDEPLOY=path),
+                        an AppImage on Linux (needs linuxdeploy, or LINUXDEPLOY=path,
+                        and cmake; it downloads and builds curl and mbedTLS once),
                         tidalfast.exe and a .zip of it on Windows
 ./build.py test         what the tests link, then `odin test tests`; arguments after
                         -- go to odin, such as -- -define:ODIN_TEST_NAMES=tests.name
@@ -39,6 +40,7 @@ again for the saved login.
 """
 
 import glob
+import hashlib
 import os
 import platform
 import re
@@ -46,6 +48,8 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tarfile
+import urllib.request
 import zipfile
 
 PROG = "build.py"
@@ -69,6 +73,15 @@ WAYLAND_PROTOCOLS = [
 	"unstable/text-input/text-input-unstable-v3.xml",
 	"unstable/pointer-gestures/pointer-gestures-unstable-v1.xml",
 ]
+
+# The AppImage links its own libcurl, built with only what the app uses:
+# HTTP and HTTPS over mbedTLS, and gzip through the system's zlib. Debian's
+# libcurl brought 18 MB of libraries the app never calls, from two TLS
+# libraries to Kerberos and LDAP.
+CURL = ("https://curl.se/download/curl-8.23.0.tar.xz",
+	"8dadd7d2536a314f982ad05a651b713f426bf7d02cc2c76cffb9796f2218e6c5")
+MBEDTLS = ("https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-4.3.0/mbedtls-4.3.0.tar.bz2",
+	"1c87cba094cb40f097ebe0eba440a74939b71dab4e1d0d566bc90749ff381d18")
 
 # The Direct3D 11 shaders, one entry point of rect.hlsl each, with its stage.
 D3D_SHADERS = [("vs_rect", "vs"), ("ps_rect", "ps"), ("vs_blur", "vs"), ("ps_blur_down", "ps"), ("ps_blur_up", "ps")]
@@ -95,11 +108,11 @@ def flatten(args):
 	return out
 
 
-def run(*args, env=None, quiet=False):
+def run(*args, env=None, quiet=False, cwd=None):
 	"""Runs a command and stops the build when it fails. Lists in args are spliced in."""
 	command = flatten(args)
 	try:
-		result = subprocess.run(command, env=env, stdout=subprocess.DEVNULL if quiet else None)
+		result = subprocess.run(command, env=env, cwd=cwd, stdout=subprocess.DEVNULL if quiet else None)
 	except FileNotFoundError:
 		fail(f"{command[0]} isn't on PATH")
 	if result.returncode != 0:
@@ -311,6 +324,73 @@ def build_measure_tools(b):
 	run("odin", "build", "tools/measure", f"-out:{measure}/measure", "-vet", "-strict-style")
 
 
+def download(source, folder):
+	"""Downloads a source archive into folder, checks its SHA-256 and unpacks it. Returns the folder it unpacked."""
+	url, sha256 = source
+	print(f"{PROG}: downloading {url}")
+	with urllib.request.urlopen(url) as response:
+		data = response.read()
+	if hashlib.sha256(data).hexdigest() != sha256:
+		fail(f"{os.path.basename(url)} doesn't have the SHA-256 build.py expects")
+	archive = os.path.join(folder, os.path.basename(url))
+	with open(archive, "wb") as f:
+		f.write(data)
+	with tarfile.open(archive) as tar:
+		tar.extractall(folder, filter="data")
+		top = tar.getnames()[0].split("/")[0]
+	return os.path.join(folder, top)
+
+
+def slim_curl():
+	"""Builds build/curl/libcurl.a, libcurl and mbedTLS in one archive, once for each pair of versions."""
+	out = "build/curl"
+	versions = f"{CURL[0]}\n{MBEDTLS[0]}\n"
+	try:
+		if open(f"{out}/versions").read() == versions and os.path.exists(f"{out}/libcurl.a"):
+			return out
+	except OSError:
+		pass
+	remove(out)
+	src = os.path.abspath(f"{out}/src")
+	prefix = os.path.abspath(f"{out}/prefix")
+	mkdir(src, f"{out}/licenses")
+	jobs = f"-j{os.cpu_count() or 4}"
+
+	# The app's workers call libcurl, and through it mbedTLS, from many threads.
+	mbedtls = download(MBEDTLS, src)
+	for option in ["MBEDTLS_THREADING_C", "MBEDTLS_THREADING_PTHREAD"]:
+		run(sys.executable, "scripts/config.py", "-f", "tf-psa-crypto/include/psa/crypto_config.h", "set", option,
+			cwd=mbedtls)
+	run("cmake", "-S", mbedtls, "-B", f"{src}/mbedtls-build", "-DCMAKE_BUILD_TYPE=Release",
+		"-DCMAKE_POSITION_INDEPENDENT_CODE=ON", "-DENABLE_PROGRAMS=OFF", "-DENABLE_TESTING=OFF",
+		f"-DCMAKE_INSTALL_PREFIX={prefix}", "-DCMAKE_INSTALL_LIBDIR=lib", quiet=True)
+	run("cmake", "--build", f"{src}/mbedtls-build", "--", jobs, quiet=True)
+	run("cmake", "--install", f"{src}/mbedtls-build", quiet=True)
+
+	# The CA bundle is Debian's path; src/cacert finds the others.
+	curl = download(CURL, src)
+	off = ["ldap", "ldaps", "rtsp", "dict", "telnet", "tftp", "pop3", "imap", "smtp", "gopher", "mqtt", "ftp",
+		"file", "ipfs", "websockets", "ntlm", "kerberos-auth", "negotiate-auth", "aws", "cookies", "alt-svc",
+		"hsts", "docs", "manual", "shared"]
+	without = ["brotli", "zstd", "nghttp2", "libpsl", "libidn2", "libssh2", "libssh", "gssapi", "ca-path"]
+	run("./configure", f"--prefix={prefix}", "--enable-static", "--with-pic", f"--with-mbedtls={prefix}",
+		"--with-zlib", "--with-ca-bundle=/etc/ssl/certs/ca-certificates.crt",
+		[f"--disable-{x}" for x in off], [f"--without-{x}" for x in without], cwd=curl, quiet=True)
+	run("make", jobs, "-C", "lib", "install", cwd=curl, quiet=True)
+
+	# One archive, so vendor:curl's -lcurl brings mbedTLS with it.
+	libs = [f"{prefix}/lib/{lib}.a" for lib in ["libcurl", "libmbedtls", "libmbedx509", "libtfpsacrypto"]]
+	script = f"create {out}/libcurl.a\n" + "".join(f"addlib {lib}\n" for lib in libs) + "save\nend\n"
+	if subprocess.run(["ar", "-M"], input=script, text=True).returncode != 0:
+		fail("ar couldn't merge libcurl and mbedTLS")
+	shutil.copy(f"{curl}/COPYING", f"{out}/licenses/curl")
+	shutil.copy(f"{mbedtls}/LICENSE", f"{out}/licenses/mbedtls")
+	remove(src, prefix)
+	with open(f"{out}/versions", "w") as f:
+		f.write(versions)
+	return out
+
+
 # Linux: a Wayland shell in C and a Vulkan renderer. The protocol glue comes
 # from wayland-scanner and the shaders from glslangValidator; the app #loads
 # the SPIR-V, so shaders are compiled before it.
@@ -345,10 +425,10 @@ def build_linux(b):
 		for c in sources + sorted(glob.glob("build/wayland/*-protocol.c")):
 			shell_object(c, out_dir, flags)
 
-	def app_build(out, objects_dir, flags):
+	def app_build(out, objects_dir, flags, libs=""):
 		objects = " ".join(sorted(glob.glob(f"{objects_dir}/*.o")))
 		run("odin", "build", "src/app", f"-out:{out}", "-vet", "-strict-style", flags, b.app_flags,
-			f"-extra-linker-flags:{objects} {shell_libs}")
+			f"-extra-linker-flags:{objects} {libs} {shell_libs}")
 
 	if b.target == "test":
 		# tests/scroll_linux.odin and mpris_linux.odin link the shell's
@@ -361,16 +441,24 @@ def build_linux(b):
 	if b.target == "dist":
 		# An AppDir with the app in usr/bin. linuxdeploy copies the libraries
 		# it links into usr/lib and packs the AppImage. It leaves out glibc,
-		# fontconfig and FreeType by itself. Wayland, xkbcommon and the Vulkan
-		# loader must come from the system too, to match its compositor,
-		# keymaps and GPU drivers.
+		# zlib, fontconfig and FreeType by itself. Wayland, xkbcommon and the
+		# Vulkan loader must come from the system too, to match its
+		# compositor, keymaps and GPU drivers. libcurl is linked in: ld looks
+		# in build/curl, which has only the archive, before the system's
+		# folders.
+		curl = slim_curl()
 		dist = os.path.join(b.out, "dist")
 		appdir = f"{dist}/AppDir"
 		remove(dist)
-		mkdir(f"{appdir}/usr/bin")
+		mkdir(f"{appdir}/usr/bin", f"{appdir}/usr/share/doc")
 		shell_objects(f"{dist}/shell", clang_flags)
-		app_build(f"{appdir}/usr/bin/tidalfast", f"{dist}/shell", b.odin_flags())
+		app_build(f"{appdir}/usr/bin/tidalfast", f"{dist}/shell", b.odin_flags(), f"-L{os.path.abspath(curl)}")
 		remove(f"{dist}/shell")
+		if "libcurl" in capture("readelf", "-d", f"{appdir}/usr/bin/tidalfast"):
+			fail("the app links the system's libcurl instead of build/curl/libcurl.a")
+		for name in os.listdir(f"{curl}/licenses"):
+			mkdir(f"{appdir}/usr/share/doc/{name}")
+			shutil.copy(f"{curl}/licenses/{name}", f"{appdir}/usr/share/doc/{name}/copyright")
 		env = dict(os.environ)
 		env["OUTPUT"] = f"{dist}/TIDALfast-{b.version}-{platform.machine()}.AppImage"
 		env["LINUXDEPLOY_OUTPUT_VERSION"] = b.version
