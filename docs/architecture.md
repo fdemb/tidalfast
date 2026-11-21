@@ -29,6 +29,8 @@ tools/audio_top/  macOS's pw-top: each output device's rate and formats, and the
 tools/icons.sh    cuts the Phosphor icon fonts down to the icons the app draws
 tools/noto.sh     copies Noto Sans, the Linux build's text font, into assets/fonts
 tools/icon.sh     renders the app icon in packaging/ for macOS, Linux and Windows
+tools/headless.sh runs the app on Linux with no display, under a private headless Weston (docs/linux.md)
+tools/idle_check.sh checks that an idle window uses no CPU, through headless.sh
 packaging/        Info.plist, the .desktop file, the Windows resources and the app icons for `./build.py dist`
 build.py          builds everything, on every OS; `./build.py dist` packages a release
 .github/          workflows: ci builds and tests on all three systems, text and media check fonts and media controls,

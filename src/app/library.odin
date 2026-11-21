@@ -143,6 +143,8 @@ Status :: enum u8 {
 	Adding,
 	Already_In,
 	Add_Failed,
+	Playing_Next,
+	Queued,
 }
 
 PLAYLISTS := [?]string {
@@ -269,53 +271,6 @@ draw_library :: proc(s: ^State, w, h: f32) {
 	draw_track_menu(s)
 	draw_drag_ghost(s)
 	library_shortcuts(s)
-}
-
-VOLUME_STEP :: 0.1
-
-// The keys library_shortcuts takes for the player bar's buttons, shown in
-// their tooltips.
-PLAY_HINT :: "Space"
-NEXT_HINT :: "⌘→" when ODIN_OS == .Darwin else "Ctrl+→"
-PREVIOUS_HINT :: "⌘←" when ODIN_OS == .Darwin else "Ctrl+←"
-
-// library_shortcuts runs the shortcuts that work anywhere in the library,
-// with the keys the views didn't take, and the mouse's Back and Forward. A
-// text field keeps its own keys.
-library_shortcuts :: proc(s: ^State) {
-	if ui.take_button(.Back) {
-		pending_set(s, Go_Back{})
-	}
-	if ui.take_button(.Forward) {
-		pending_set(s, Go_Forward{})
-	}
-	// On the search page the field takes these itself (focus_shortcut).
-	for ui.take_key(.F, {ui.PRIMARY}) || ui.take_key(.L, {ui.PRIMARY}) {
-		pending_set(s, Search_Place{})
-	}
-	if ui.text_focused() {
-		return
-	}
-	for ui.take_key(.Space, repeats = false) {
-		playback_toggle(s)
-		ui.data_changed()
-	}
-	for ui.take_key(.Right, {ui.PRIMARY}) {
-		playback_next(s)
-		ui.data_changed()
-	}
-	for ui.take_key(.Left, {ui.PRIMARY}) {
-		playback_previous(s)
-		ui.data_changed()
-	}
-	for ui.take_key(.Up, {ui.PRIMARY}) {
-		playback_set_volume(s, min(s.settings.volume + VOLUME_STEP, 1), true)
-		ui.data_changed()
-	}
-	for ui.take_key(.Down, {ui.PRIMARY}) {
-		playback_set_volume(s, max(s.settings.volume - VOLUME_STEP, 0), true)
-		ui.data_changed()
-	}
 }
 
 // draw_history_buttons is Back and Forward through the places visited
@@ -1049,6 +1004,14 @@ draw_track_menu :: proc(s: ^State) {
 		if ui.menu_item("Play").clicked && i >= 0 {
 			pending_set(s, Play_Row{index = i})
 		}
+		if row_playable(s, i) {
+			if ui.menu_item("Play next").clicked {
+				pending_set(s, Queue_Row{index = i, next = true})
+			}
+			if ui.menu_item("Add to queue").clicked {
+				pending_set(s, Queue_Row{index = i})
+			}
+		}
 		fake := s.data.fake
 		if row != nil && (fake || row.album_id != 0 || first_artist(row.artists) != 0) {
 			ui.menu_separator()
@@ -1194,26 +1157,26 @@ draw_player_bar :: proc(s: ^State, w, h: f32) {
 				playback_set_shuffle(s, !shuffle)
 				ui.data_changed() // this frame drew the old state
 			}
-			ui.tooltip(shuffle_sig, "Shuffle")
+			ui.tooltip(shuffle_sig, "Shuffle", shortcut_keys(.Shuffle))
 			ui.spacer(ui.px(16))
 			prev := skip_button("prev", false)
 			if prev.clicked {
 				playback_previous(s)
 			}
-			ui.tooltip(prev, "Previous", PREVIOUS_HINT)
+			ui.tooltip(prev, "Previous", shortcut_keys(.Previous))
 			ui.spacer(ui.px(16))
 			playing := playback_playing(s)
 			sig := play_button(playing)
 			if sig.clicked {
 				playback_toggle(s)
 			}
-			ui.tooltip(sig, "Pause" if playing else "Play", PLAY_HINT)
+			ui.tooltip(sig, "Pause" if playing else "Play", shortcut_keys(.Play))
 			ui.spacer(ui.px(16))
 			next := skip_button("next", true)
 			if next.clicked {
 				playback_next(s)
 			}
-			ui.tooltip(next, "Next", NEXT_HINT)
+			ui.tooltip(next, "Next", shortcut_keys(.Next))
 			ui.spacer(ui.px(16))
 			repeat := s.settings.repeat
 			REPEAT_NAMES := [audio.Repeat]string {
@@ -1223,10 +1186,10 @@ draw_player_bar :: proc(s: ^State, w, h: f32) {
 			}
 			repeat_sig := toggle_button("repeat", text.ICON_REPEAT_ONCE if repeat == .One else text.ICON_REPEAT, "Repeat", REPEAT_NAMES[repeat], repeat != .Off)
 			if repeat_sig.clicked {
-				playback_set_repeat(s, audio.Repeat((int(repeat) + 1) % len(audio.Repeat)))
+				playback_set_repeat(s, repeat_after(repeat))
 				ui.data_changed()
 			}
-			ui.tooltip(repeat_sig, "Repeat one" if repeat == .One else "Repeat")
+			ui.tooltip(repeat_sig, "Repeat one" if repeat == .One else "Repeat", shortcut_keys(.Repeat))
 			ui.spacer(ui.fill())
 		}
 		ui.spacer(ui.px(6))
@@ -1448,6 +1411,10 @@ status_text :: proc(s: ^State) -> string {
 		return fmt.tprintf("Couldn't add %s to %s", t.title, sidebar_entry(s, lib.status_list).name)
 	case .Copied:
 		return fmt.tprintf("Copied the link to %s", t.title)
+	case .Playing_Next:
+		return fmt.tprintf("Playing %s next", t.title)
+	case .Queued:
+		return fmt.tprintf("Added %s to the queue", t.title)
 	case .Copied_Page:
 	}
 	return ""
@@ -1470,6 +1437,7 @@ Pending :: union {
 	Search_Now,
 	Close_Search,
 	Play_Row,
+	Queue_Row,
 	Go_Back,
 	Go_Forward,
 	Log_Out,
@@ -1493,6 +1461,13 @@ Search_Now :: struct {
 Play_Row :: struct {
 	index: int,
 	order: Play_Order,
+}
+
+// Queue_Row is Play next (next set) or Add to queue on row index of the
+// open list. It waits like Play: a queue it starts replaces the old one.
+Queue_Row :: struct {
+	index: int,
+	next:  bool,
 }
 
 Go_Back :: struct {}
@@ -1624,6 +1599,11 @@ apply_pending :: proc(s: ^State) -> bool {
 		if !play_ordered(s, p) {
 			return false
 		}
+	case Queue_Row:
+		if !playback_queue_row(s, p.index, p.next) {
+			return false
+		}
+		set_status(s, .Playing_Next if p.next else .Queued, p.index)
 	case Go_Back:
 		if !history_step(s, -1) {
 			return false

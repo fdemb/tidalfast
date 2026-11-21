@@ -1,5 +1,6 @@
 package tidal_tests
 
+import "core:mem"
 import vmem "core:mem/virtual"
 import "core:testing"
 
@@ -91,6 +92,31 @@ settings_page_has_the_title_bar :: proc(t: ^testing.T) {
 	testing.expect(t, .Selected in own.flags, "TIDALfast shows as chosen")
 }
 
+// At the bottom of the page every shortcut has a row, with what it does
+// and its keys as static text.
+@(test)
+settings_page_lists_the_shortcuts :: proc(t: ^testing.T) {
+	// The keycaps are as wide as their text, and the window tall enough
+	// for the whole page.
+	fonts: Fonts
+	if !testing.expect(t, fonts_init(&fonts)) {
+		return
+	}
+	defer fonts_destroy(&fonts)
+	context.allocator = mem.arena_allocator(&fonts.arena)
+	s := library_state(true)
+	defer library_state_free(s)
+	f := Frame{fonts = &fonts, size = {1100, 1400}}
+	library_frame(t, s, &f)
+	library_frame(t, s, &f)
+	open_settings(t, s, &f, "Fake data")
+	testing.expect(t, static_text(s, "Keyboard shortcuts"), "the shortcuts' card")
+	for sc in app.SHORTCUTS {
+		testing.expectf(t, static_text(s, sc.does), "the shortcut to %s", sc.does)
+		testing.expectf(t, static_text(s, sc.keys), "its keys, %s", sc.keys)
+	}
+}
+
 // Signed in, the page has the account's card, whose button logs out.
 @(test)
 settings_page_logs_out :: proc(t: ^testing.T) {
@@ -133,6 +159,18 @@ open_settings :: proc(t: ^testing.T, s: ^app.State, f: ^Frame, user: string, loc
 		library_frame(t, s, f, loc = loc)
 	}
 	testing.expect(t, app.settings_showing(s), "Settings shows the settings page", loc = loc)
+}
+
+// static_text says whether the last frame has a static text labelled label.
+@(private = "file")
+static_text :: proc(s: ^app.State, label: string) -> bool {
+	nodes, _ := ui.access_tree(&s.ui)
+	for n in nodes {
+		if n.role == .Static_Text && string(n.label) == label {
+			return true
+		}
+	}
+	return false
 }
 
 // settings_button is the last frame's button labelled label.

@@ -363,10 +363,13 @@ static void request_name(const char *name) {
 
 static int name_reply(sd_bus_message *m, void *userdata, sd_bus_error *e) {
   uint32_t result = 0;
-  if (!g_sd.message_is_method_error(m, NULL)) g_sd.message_read(m, "u", &result);
+  bool refused = g_sd.message_is_method_error(m, NULL);
+  if (!refused) g_sd.message_read(m, "u", &result);
   if (result == NAME_PRIMARY_OWNER || result == NAME_ALREADY_OWNER) {
     snprintf(g_name, sizeof g_name, "%s", g_request_name);
+    fprintf(stderr, "shell: mpris: took %s\n", g_name);
   } else if (!g_tried_instance) {
+    fprintf(stderr, "shell: mpris: %s %s\n", refused ? "the bus refused" : "someone else has", g_request_name);
     // MPRIS: a second instance adds .instance<pid> to the name.
     g_tried_instance = true;
     char name[128];
@@ -390,11 +393,12 @@ static void close_bus(void) {
 static void connect_bus(void) {
   g_next_try = INFINITY;
   if (!load_sd_bus()) return;
+  const char *step = "connect to the session bus";
   int r = g_sd.open_user(&g_bus);
-  if (r >= 0) r = g_sd.add_object_vtable(g_bus, NULL, OBJECT_PATH, "org.mpris.MediaPlayer2", g_root_vtable, NULL);
-  if (r >= 0) r = g_sd.add_object_vtable(g_bus, NULL, OBJECT_PATH, PLAYER_INTERFACE, g_player_vtable, NULL);
+  if (r >= 0) step = "add the root interface", r = g_sd.add_object_vtable(g_bus, NULL, OBJECT_PATH, "org.mpris.MediaPlayer2", g_root_vtable, NULL);
+  if (r >= 0) step = "add the player interface", r = g_sd.add_object_vtable(g_bus, NULL, OBJECT_PATH, PLAYER_INTERFACE, g_player_vtable, NULL);
   if (r < 0) {
-    fprintf(stderr, "shell: mpris: can't connect to the session bus: %s\n", strerror(-r));
+    fprintf(stderr, "shell: mpris: can't %s: %s\n", step, strerror(-r));
     close_bus();
     g_next_try = mono_seconds() + 10;
     return;
