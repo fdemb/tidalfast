@@ -4,7 +4,7 @@ package app
 // bit-perfect output, how lists
 // show their scrollbars, whether the player bar blurs them, whether covers
 // lean under the pointer, whether the bar shows a track's length or the
-// time left and, on Linux,
+// time left, the sidebar's width and, on Linux,
 // whose title bar the window has and GNOME's button layout. They live in
 // a small JSON file, ~/Library/Application Support/tidalfast/settings.json,
 // or wherever TIDALFAST_SETTINGS points. The fake data has none unless
@@ -55,6 +55,10 @@ Settings :: struct {
 	// GNOME's window button layout as the portal last gave it, for the
 	// window's first frame. nil until it has.
 	button_layout: Maybe(Button_Layout),
+	// The width the sidebar was dragged to, 0 for SIDEBAR_DEFAULT. A narrow
+	// window draws it narrower for as long as it is narrow
+	// (sidebar_width), which leaves this alone.
+	sidebar_w:     f32,
 }
 
 VOLUME_DEFAULT :: 0.7
@@ -147,6 +151,7 @@ Settings_File :: struct {
 	still_covers:  bool,
 	show_duration: bool,
 	button_layout: string `json:"button_layout,omitempty"`,
+	sidebar_width: Maybe(f32) `json:"sidebar_width,omitempty"`,
 }
 
 @(private = "file")
@@ -183,6 +188,7 @@ settings_decode_json :: proc(data: []u8) -> (st: Settings, ok: bool) {
 	if f.button_layout != "" {
 		st.button_layout = button_layout_parse(f.button_layout)
 	}
+	st.sidebar_w = sidebar_pref_clean(f.sidebar_width.? or_else 0)
 	if c, has := f.device_change.?; has && c.rate != 0 && len(c.uid) <= len(st.device.uid) {
 		st.device = {orig_rate = c.orig_rate, orig_format = c.orig_format, rate = c.rate}
 		st.device.uid_len = copy(st.device.uid[:], c.uid)
@@ -213,6 +219,9 @@ settings_save :: proc(path: string, st: Settings) -> bool {
 	}
 	if l, ok := st.button_layout.?; ok {
 		f.button_layout = button_layout_string(l)
+	}
+	if st.sidebar_w != 0 {
+		f.sidebar_width = st.sidebar_w
 	}
 	if st.device.rate != 0 {
 		c := st.device
