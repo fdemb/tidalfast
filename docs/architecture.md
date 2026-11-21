@@ -5,15 +5,15 @@ A native TIDAL client for macOS, Linux and, in a first build, Windows. Odin for 
 ## Layout
 
 ```
-shell/            the shell: window, GPU layer, event queue, IME, media keys, secrets. shell_cocoa.m on macOS, shell_wayland.c on Linux,
-                  shell_win32.c on Windows, with common.c for what all three share
+shell/            the shell: window, GPU layer, event queue, IME, media keys, clipboard. shell_cocoa.m on macOS, shell_wayland.c on Linux
+                  (mpris.c for MPRIS), shell_win32.c on Windows (smtc_win32.c for media controls), with common.c for what all three share
 src/platform/     types shared by the shell and Odin (events, frame input, shell callbacks)
 src/app/          the app: main, frame loop, views, app state
 src/render/       instanced rect renderer, Metal on macOS, Vulkan on Linux, Direct3D 11 on Windows
 src/text/         font loading, shaping (kb_text_shape), rasterizing (CoreText, FreeType, DirectWrite), glyph atlas
 src/ui/           box tree, layout, interaction, animation
 src/tidal/        the TIDAL API library (package `tidal`)
-src/audio/        decoding, playback, CoreAudio and PipeWire device control
+src/audio/        decoding, playback, CoreAudio, PipeWire and WASAPI output
 src/jobs/         bounded priority queues between the UI thread and the workers, plain data
 src/cover/        cover art sizes, decoding on a worker, and the texture cache
 src/cacert/       where libcurl finds CA certificates on Linux when its built-in path is missing
@@ -27,12 +27,14 @@ tools/measure/    startup and memory measurement (docs/measuring.md)
 tools/save_cost/  times what a list save and a queue save cost the UI thread
 tools/audio_top/  macOS's pw-top: each output device's rate and formats, and the processes playing to it
 tools/icons.sh    cuts the Phosphor icon fonts down to the icons the app draws
+tools/noto.sh     copies Noto Sans, the Linux build's text font, into assets/fonts
 tools/icon.sh     renders the app icon in packaging/ for macOS, Linux and Windows
 tools/headless.sh runs the app on Linux with no display, under a private headless Weston (docs/linux.md)
 tools/idle_check.sh checks that an idle window uses no CPU, through headless.sh
-packaging/        Info.plist, the .desktop file and the app icon for `./build.py dist`
+packaging/        Info.plist, the .desktop file, the Windows resources and the app icons for `./build.py dist`
 build.py          builds everything, on every OS; `./build.py dist` packages a release
-.github/          the release workflow: a v* tag publishes the .dmg and the AppImage
+.github/          workflows: ci builds and tests on all three systems, text and media check fonts and media controls,
+                  and release publishes the .dmg, the AppImage and the .zip for a v* tag; actions/install-odin installs .odin-version
 ```
 
 The API library is one component. Only `src/app` knows about all the others.
@@ -49,7 +51,7 @@ Read-only checkouts in `~/.t3/scratch/2026-10-14-please-analyze-how-spotifast-is
 
 ## Decisions
 
-- **Platform shell.** The shell owns the window and the GPU layer. On macOS that's `NSApplication` and a `CAMetalLayer`, with IME (`NSTextInputClient`), media keys and Now Playing (`MPRemoteCommandCenter`, `MPNowPlayingInfoCenter`), Keychain, clipboard and drag and drop in `shell_cocoa.m` too. `docs/linux.md` covers the Wayland shell, with MPRIS for media keys and Now Playing, and `docs/windows.md` the Win32 one, with the System Media Transport Controls. `shell/common.c` has what the three share: the event queue, the mirror of the focused text field, the copy of the accessibility tree, the Now Playing log and the test driver.
+- **Platform shell.** The shell owns the window and the GPU layer. On macOS that's `NSApplication` and a `CAMetalLayer`, with IME (`NSTextInputClient`), media keys and Now Playing (`MPRemoteCommandCenter`, `MPNowPlayingInfoCenter`), clipboard and window dragging in `shell_cocoa.m` too. The secret store isn't the shell's: `src/os_services` calls the Keychain, libsecret or the Credential Manager from Odin. `docs/linux.md` covers the Wayland shell, with MPRIS for media keys and Now Playing, and `docs/windows.md` the Win32 one, with the System Media Transport Controls. `shell/common.c` has what the three share: the event queue, the mirror of the focused text field, the copy of the accessibility tree, the Now Playing log and the test driver.
 - **One executable.** `build.py` compiles the shell to an object and Odin links it into the app. The app's `main` calls `shell_main`, and the shell calls `app_init`, `app_frame` and `app_shutdown`, declared in `platform.h`. State lives in memory the shell maps, see [Memory](memory.md).
 - **Memory.** Arenas. A per-frame arena holds the box tree and temporary strings and resets every frame. Persistent arenas hold caches and app data.
 - **Renderer.** One instanced pipeline. Each instance is a rect with corner radii, border width, edge softness (shadows), two colours for gradients, a clip rect, and a texture and UV rect. Glyphs, cover art, rounded boxes and shadows all go through it. Fleury's `R_Rect2DInst` in raddebugger's `src/render/` is the reference.
@@ -58,7 +60,7 @@ Read-only checkouts in `~/.t3/scratch/2026-10-14-please-analyze-how-spotifast-is
 
 ## Not done yet
 
-- Linux: AT-SPI for screen readers, and client-side decorations for compositors without xdg-decoration, such as GNOME.
+- Linux: AT-SPI for screen readers. [linux.md](linux.md) lists the rest.
 - Windows: UI Automation and packaging. [windows.md](windows.md) lists the rest.
 
 ## Pitfalls

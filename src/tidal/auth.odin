@@ -136,7 +136,6 @@ finish_login :: proc(s: ^Session) -> (err: Error) {
 		sync.guard(&s.mutex)
 		set_owned(s, &s.session_id, jstr(obj, "sessionId"))
 		set_owned(s, &s.country_code, jstr(obj, "countryCode"))
-		set_owned(s, &s.locale, "en_US") // TODO: get locale from system configuration
 	}
 	u := user_get(s, user_id, context.temp_allocator) or_return
 	sync.guard(&s.mutex)

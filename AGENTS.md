@@ -8,14 +8,14 @@ TIDALfast is a native TIDAL client in Odin for macOS and Linux, with a first Win
 ./build.py              # debug build/tidalfast
 ./build.py release      # optimized
 ./build.py measure      # the measurement app, mock server and tool in build/measure/
-./build.py dist         # TIDALfast.app and .dmg, or the AppImage, in build/dist/
+./build.py dist         # TIDALfast.app and .dmg, the AppImage, or the .zip, in build/dist/
 ./build.py libs         # only the C libraries in third_party, into build/kbts and build/dr_flac
 ./build.py test         # what the tests link, then odin test tests; odin's flags go after --
 ```
 
 `--out DIR` puts a build in `DIR` in place of `build/`. Keep `./build.py` clean with `-vet -strict-style`. The tests run without `-strict-style`.
 
-Per-OS code lives in `_darwin.odin`, `_linux.odin` and `_windows.odin` files. Shared code doesn't import `core:sys/posix`; `src/sys` has threads, local time, the page size and file mappings for every OS. CI (`.github/workflows/ci.yml`) builds and tests all three on every push and pull request, so push a branch to check shared code on the other systems.
+Per-OS code lives in `_darwin.odin`, `_linux.odin` and `_windows.odin` files. Shared code doesn't import `core:sys/posix`; `src/sys` has threads, local time, the page size and file mappings for every OS. CI (`.github/workflows/ci.yml`) builds and tests all three on every pull request and every push to main, so open a pull request to check shared code on the other systems.
 
 Odin dev-2026-10 crashes the compiler on any Obj-C method call (`missing procedure 'objc_lookUpClass'`). Call Obj-C through `objc_msgSend` casts as `src/render` does, call C frameworks (CoreText, CoreAudio, Security) through hand-written foreign declarations, or put Obj-C-only code in `shell_cocoa.m`.
 
@@ -30,7 +30,7 @@ The window is often covered or the screen locked, and real input may not reach i
 - **Audio without speakers.** `TIDALFAST_AUDIO_NULL=1` plays to a null device in real time. `TIDALFAST_AUDIO_CAPTURE=/tmp/a.wav` records exactly what reaches the device; `tests/audio_check` (gapless) and `tests/bitperfect_check` compare it with the source.
 - **Media keys and Now Playing.** `TIDALFAST_REMOTE_TEST` sends remote commands through the media key path, and `TIDALFAST_NOW_PLAYING_LOG=1` prints what the app sets, and on macOS and Windows what the system holds. On Linux, `playerctl -p tidalfast` (or `dbus-send`) asks the app's MPRIS server as a desktop would, inside the tests' own `dbus-run-session`.
 - **Logs.** The app logs through `core:log` to stderr, info and up. `TIDALFAST_LOG_HTTP=1` adds a debug line per TIDAL request, with the URL cut at its query by `tidal.url_for_log`. A Windows release build without a console logs to `%LOCALAPPDATA%\tidalfast\tidalfast.log`.
-- **Frame time.** `TIDALFAST_BENCH=1` (library), `=text` or `=covers` (live data, so set `TIDALFAST_API` to the mock with it) auto-scrolls and logs CPU time per frame; `measure frames` (see `docs/measuring.md`) runs it for the frame rate and the CPU and GPU time per frame. `TIDALFAST_OVERLAY=1` or the backtick key shows the overlay: frame and UI time, the GPU's time on macOS, draw calls, instances, memory.
+- **Frame time.** `TIDALFAST_BENCH=1` (library), `=text` or `=covers` (live data, so set `TIDALFAST_API` to the mock with it) auto-scrolls and logs CPU time per frame; `measure frames` (see `docs/measuring.md`) runs it for the frame rate and the CPU and GPU time per frame. `TIDALFAST_OVERLAY=1` or the backtick key shows the overlay: frame and UI time, the GPU's time on macOS and Windows, draw calls, instances, memory.
 - **Profiling.** `TIDALFAST_SPALL=path` writes a spall trace. `sample <pid>` has hung in this environment before; timers inside the code worked when it did.
 - **Metal.** `MTL_DEBUG_LAYER=1 METAL_DEVICE_WRAPPER_TYPE=1` turns on validation.
 - **Direct3D 11.** `TIDALFAST_D3D11_DEBUG=1` makes the device with the debug layer, from Windows' optional Graphics Tools, and logs its messages through `core:log`. Without the layer installed it logs a warning and carries on. `TIDALFAST_D3D_BLT=1` makes a blt-model swap chain, which the compositor always composes and never hands to the display as an overlay plane, to tell a fault in that path from one in the frames.
@@ -54,7 +54,7 @@ The app draws only on input, worker results or a running animation. After any ch
 
 - **Keychain.** Never read, write or delete the real item, service `tidalfast`, and never log in to real TIDAL. Against the mock, use `TIDALFAST_KEYCHAIN=tidalfast-<task>-<random>` and delete it afterwards with `security delete-generic-password -s <name>`, or `secret-tool clear service <name>` on Linux. On Windows the login is a generic credential named `<name>/auth` (and `<name>/auth#1` and on for a long one). On a Linux desktop, run the tests in their own `dbus-run-session` with throwaway `HOME`, `XDG_DATA_HOME`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `XDG_RUNTIME_DIR`, or a keyring daemon started for them writes into the user's real keyrings (`docs/linux.md`).
 - **Processes.** The user may have the app running. Kill only processes you started, by PID. Never `pkill tidalfast`. Put throwaway builds outside `build/` (`./build.py --out /tmp/...`), so the user's next launch doesn't pick them up.
-- **Audio devices.** Bit-perfect mode changes the output device's sample rate and format and skips the volume. On Linux it forces PipeWire's graph rate while it plays. Test it only with the mock's -60 dBFS tracks, never with the fake tones. Afterwards, check that the default output device is back at its old nominal rate and physical format (`build/audio_top -once`, see `docs/playback.md`), and restore it if not.
+- **Audio devices.** Bit-perfect mode changes the output device's sample rate and format and skips the volume. On Linux it forces PipeWire's graph rate while it plays. Test it only with the mock's -60 dBFS tracks, never with the fake tones. Afterwards, check that the default output device is back at its old nominal rate and physical format (`build/audio_top -once` on macOS, `pw-top` on Linux, see `docs/playback.md`), and restore it if not.
 - **Logs.** Never print tokens, Authorization headers, stream or CDN URLs, the pasted PKCE redirect or raw server text. Log error kinds, HTTP status and known codec names (`tidal.error_summary`).
 
 ## Conventions
