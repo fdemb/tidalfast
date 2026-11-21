@@ -401,12 +401,41 @@ settings_persistence :: proc(t: ^testing.T) {
 	st, _ = app.settings_load(path)
 	testing.expect_value(t, st, app.Settings{still_covers = true})
 
+	// The player bar's length in place of the time left too; a file from
+	// before it shows the time left.
+	testing.expect(t, app.settings_save(path, {show_duration = true}))
+	data, _ = os.read_entire_file(path, context.temp_allocator)
+	testing.expect(t, strings.contains(string(data), `"show_duration": true`))
+	st, _ = app.settings_load(path)
+	testing.expect_value(t, st, app.Settings{show_duration = true})
+	st, ok = app.settings_decode_json(transmute([]u8)string(`{"volume": 0.5, "still_covers": true}`))
+	testing.expect(t, ok && !st.show_duration)
+
 	// Shuffle and repeat too; a file from before them has both off.
 	testing.expect(t, app.settings_save(path, {shuffle = true, repeat = .One}))
 	data, _ = os.read_entire_file(path, context.temp_allocator)
 	testing.expect(t, strings.contains(string(data), `"repeat": "One"`))
 	st, _ = app.settings_load(path)
 	testing.expect_value(t, st, app.Settings{shuffle = true, repeat = .One})
+
+	// ReplayGain too, by name. A file from before it, or with a name it
+	// doesn't know, has it Automatic, and the rest of the file still loads.
+	for g in audio.Gain_Setting {
+		testing.expect(t, app.settings_save(path, {replay_gain = g, volume = 0.5}))
+		st, ok = app.settings_load(path)
+		testing.expect(t, ok)
+		testing.expect_value(t, st, app.Settings{replay_gain = g, volume = 0.5})
+	}
+	data, _ = os.read_entire_file(path, context.temp_allocator)
+	testing.expect(t, strings.contains(string(data), `"replay_gain": "Off"`))
+	_ = os.write_entire_file(path, transmute([]u8)string(`{"shuffle": true}`))
+	st, ok = app.settings_load(path)
+	testing.expect(t, ok)
+	testing.expect_value(t, st.replay_gain, audio.Gain_Setting.Automatic)
+	_ = os.write_entire_file(path, transmute([]u8)string(`{"replay_gain": "Loud", "shuffle": true}`))
+	st, ok = app.settings_load(path)
+	testing.expect(t, ok)
+	testing.expect_value(t, st, app.Settings{shuffle = true, volume = 0.7})
 
 	_ = os.write_entire_file(path, transmute([]u8)string("{not json"))
 	st, ok = app.settings_load(path)

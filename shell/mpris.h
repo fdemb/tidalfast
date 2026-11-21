@@ -10,7 +10,9 @@
 #include "platform.h"
 
 // mpris_init takes the procedure the commands go to, which gets a
-// Media_Command and, for MEDIA_SEEK, the position in seconds.
+// Media_Command and its value: the position in seconds for MEDIA_SEEK, and
+// for the property writes the volume, 1 or 0 for shuffle, or a
+// Player_Repeat.
 void mpris_init(void (*command)(uint32_t command, double position));
 // mpris_start connects to the session bus and takes the name
 // org.mpris.MediaPlayer2.tidalfast, or one with .instance<pid> after it
@@ -20,6 +22,9 @@ void mpris_init(void (*command)(uint32_t command, double position));
 void mpris_start(void);
 // mpris_set is Shell.set_now_playing. It starts MPRIS if nothing has.
 void mpris_set(const Now_Playing *np);
+// mpris_set_controls is Shell.set_player_controls: Volume, Shuffle and
+// LoopStatus. It doesn't start MPRIS.
+void mpris_set_controls(const Player_Controls *c);
 // The socket to poll, and what for, or -1 while not connected.
 int mpris_fd(short *events);
 // mpris_dispatch reads and answers what came, and sends what waits, after

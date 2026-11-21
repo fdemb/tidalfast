@@ -346,10 +346,11 @@ player_bar_fits_at_every_width :: proc(t: ^testing.T) {
 		rail := progress.first.next
 		fill := rail.first
 		at := find_box(root, app.clock(3500))
-		left := find_box(root, fmt.tprintf("-%s", app.clock(225)))
+		left := find_box(root, "###bar_time")
 		if !testing.expect(t, at != nil && left != nil) {
 			return
 		}
+		testing.expect_value(t, left.label, fmt.tprintf("-%s", app.clock(225)))
 		right :: proc(r: render.Rect) -> f32 {return r.x + r.w}
 		testing.expectf(t, fill.rect.w > 0 && right(fill.rect) <= right(rail.rect) + 0.01, "%v: the fill ends at %v, the rail at %v", w, right(fill.rect), right(rail.rect))
 		testing.expectf(t, abs(fill.rect.w - rail.rect.w * 3500 / 3725) < 0.5, "%v: the fill is %v of a %v rail", w, fill.rect.w, rail.rect.w)

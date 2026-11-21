@@ -32,6 +32,32 @@ replay_gain_linear :: proc(rg: Replay_Gain, mode: Gain_Mode) -> f32 {
 	return f32(g)
 }
 
+// Gain_Setting is how the user has ReplayGain applied. Automatic leaves
+// the choice of track or album gain to queue_gain_mode.
+Gain_Setting :: enum u8 {
+	Automatic,
+	Track,
+	Album,
+	Off,
+}
+
+// setting_gain is the factor for rg under setting, auto being what
+// queue_gain_mode chose for the track. Album gain without an album gain
+// in the stream is the track's, as the playbackinfo reader fills it in.
+setting_gain :: proc(rg: Replay_Gain, setting: Gain_Setting, auto: Gain_Mode) -> f32 {
+	switch setting {
+	case .Automatic:
+		return replay_gain_linear(rg, auto)
+	case .Track:
+		return replay_gain_linear(rg, .Track)
+	case .Album:
+		return replay_gain_linear(rg, .Album)
+	case .Off:
+		return 1
+	}
+	return 1
+}
+
 // volume_gain maps the volume slider (0 to 1) to a factor. A cube follows
 // loudness more closely than a straight line: half way is about -18 dB.
 volume_gain :: proc "contextless" (v: f32) -> f32 {

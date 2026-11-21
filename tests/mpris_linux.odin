@@ -32,6 +32,7 @@ foreign import mpris_c {MPRIS_OBJ, PNG_OBJ, "system:m"}
 foreign mpris_c {
 	mpris_init :: proc(command: proc "c" (command: u32, position: f64)) ---
 	mpris_set :: proc(np: ^platform.Now_Playing) ---
+	mpris_set_controls :: proc(c: ^platform.Player_Controls) ---
 	mpris_fd :: proc(events: ^i16) -> i32 ---
 	mpris_dispatch :: proc(revents: i16) ---
 	mpris_close :: proc() ---
@@ -193,6 +194,8 @@ test_mpris_answers_a_media_widget :: proc(t: ^testing.T) {
 		testing.expectf(t, commands[3].position >= 5 && commands[3].position < 8, "seek -5 s went to %v", commands[3].position)
 	}
 
+	check_controls(t)
+
 	np.state = .Paused
 	mpris_set(&np)
 	testing.expect(t, strings.contains(get(t, "PlaybackStatus"), `"Paused"`))
@@ -203,6 +206,105 @@ test_mpris_answers_a_media_widget :: proc(t: ^testing.T) {
 	mpris_set(&none)
 	testing.expect(t, strings.contains(get(t, "PlaybackStatus"), `"Stopped"`))
 	testing.expect(t, strings.contains(get(t, "Metadata"), "/org/mpris/MediaPlayer2/TrackList/NoTrack"))
+}
+
+@(private = "file")
+set :: proc(t: ^testing.T, property, value: string) -> string {
+	return ask(t, "/org/mpris/MediaPlayer2", "org.freedesktop.DBus.Properties.Set", "string:org.mpris.MediaPlayer2.Player", fmt.tprintf("string:%s", property), value)
+}
+
+// check_controls sets Volume, Shuffle and LoopStatus as a media widget
+// would, and checks what they read back, the commands the app gets, and the
+// PropertiesChanged signals for the writes and for the app's own changes.
+@(private = "file")
+check_controls :: proc(t: ^testing.T) {
+	controls := platform.Player_Controls {
+		volume = 0.5,
+		repeat = .All,
+	}
+	mpris_set_controls(&controls)
+	testing.expectf(t, strings.contains(get(t, "Volume"), "double 0.5"), "volume: %s", get(t, "Volume"))
+	testing.expect(t, strings.contains(get(t, "Shuffle"), "boolean false"))
+	testing.expect(t, strings.contains(get(t, "LoopStatus"), `"Playlist"`))
+
+	// What the signals say, from a monitor on the bus.
+	monitor_path := fmt.tprintf("/tmp/tidalfast-mpris-monitor-%d.out", posix.getpid())
+	defer os.remove(monitor_path)
+	monitor_out, err := os.create(monitor_path)
+	if !testing.expect(t, err == nil, "can't make dbus-monitor's output file") {
+		return
+	}
+	match := "type='signal',interface='org.freedesktop.DBus.Properties',member='PropertiesChanged',path='/org/mpris/MediaPlayer2'"
+	monitor, merr := os.process_start({command = {"dbus-monitor", "--session", match}, stdout = monitor_out, stderr = monitor_out})
+	os.close(monitor_out)
+	if !testing.expectf(t, merr == nil, "dbus-monitor didn't start: %v", merr) {
+		return
+	}
+	pump(0.5)
+
+	command_count = 0
+	set(t, "Volume", "variant:double:0.25")
+	set(t, "Volume", "variant:double:-3")
+	set(t, "Volume", "variant:double:7")
+	set(t, "Shuffle", "variant:boolean:true")
+	set(t, "LoopStatus", "variant:string:Track")
+	set(t, "LoopStatus", "variant:string:None")
+	bad := set(t, "LoopStatus", "variant:string:Album")
+	testing.expectf(t, strings.contains(bad, "org.freedesktop.DBus.Error.InvalidArgs"), "an unknown loop status: %s", bad)
+	bad = set(t, "Volume", "variant:double:nan")
+	testing.expectf(t, strings.contains(bad, "org.freedesktop.DBus.Error.InvalidArgs"), "a volume that isn't a number: %s", bad)
+	bad = set(t, "Volume", "variant:string:loud")
+	testing.expectf(t, strings.contains(bad, "Error"), "a volume of the wrong type: %s", bad)
+	want := []Command{{.Volume, 0.25}, {.Volume, 0}, {.Volume, 1}, {.Shuffle, 1}, {.Repeat, f64(platform.Player_Repeat.One)}, {.Repeat, f64(platform.Player_Repeat.Off)}}
+	if testing.expect_value(t, command_count, len(want)) {
+		for w, i in want {
+			testing.expect_value(t, commands[i], w)
+		}
+	}
+	// Read back at once, before the app answers.
+	testing.expectf(t, strings.contains(get(t, "Volume"), "double 1"), "volume: %s", get(t, "Volume"))
+	testing.expect(t, strings.contains(get(t, "Shuffle"), "boolean true"))
+	testing.expect(t, strings.contains(get(t, "LoopStatus"), `"None"`))
+
+	// The app's answer matches, so it changes nothing; then the app changes
+	// all three itself.
+	controls = {volume = 1, shuffle = true, repeat = .Off}
+	mpris_set_controls(&controls)
+	controls = {volume = 0.75, shuffle = false, repeat = .One}
+	mpris_set_controls(&controls)
+	testing.expect(t, strings.contains(get(t, "Volume"), "double 0.75"))
+	testing.expect(t, strings.contains(get(t, "Shuffle"), "boolean false"))
+	testing.expect(t, strings.contains(get(t, "LoopStatus"), `"Track"`))
+	pump(0.5)
+	_ = os.process_kill(monitor)
+	_, _ = os.process_wait(monitor)
+
+	data, _ := os.read_entire_file(monitor_path, context.temp_allocator)
+	// The monitor also prints its own NameAcquired and NameLost.
+	signals := make([dynamic]string, context.temp_allocator)
+	for m in strings.split(string(data), "signal time=", context.temp_allocator) {
+		if strings.contains(m, "member=PropertiesChanged") {
+			append(&signals, m)
+		}
+	}
+	// Each write that changed something, then the app's three changes in one.
+	changes := [][]string {
+		{"Volume", "double 0.25"},
+		{"Volume", "double 0"},
+		{"Volume", "double 1"},
+		{"Shuffle", "boolean true"},
+		{"LoopStatus", `"Track"`},
+		{"LoopStatus", `"None"`},
+		{"Volume", "double 0.75", "Shuffle", "boolean false", "LoopStatus", `"Track"`},
+	}
+	if !testing.expectf(t, len(signals) == len(changes), "%d PropertiesChanged, want %d:\n%s", len(signals), len(changes), string(data)) {
+		return
+	}
+	for change, i in changes {
+		for part in change {
+			testing.expectf(t, strings.contains(signals[i], part), "signal %d has no %s:\n%s", i, part, signals[i])
+		}
+	}
 }
 
 @(test)

@@ -81,6 +81,8 @@ void remote_command(uint32_t command, double position);
 // Windows shells call it before handing Now Playing to MPRIS and the
 // System Media Transport Controls.
 void print_now_playing(const Now_Playing *np);
+// print_player_controls logs the volume, shuffle and repeat the app sets.
+void print_player_controls(const Player_Controls *c);
 
 // The accessibility tree as the app last sent it, which access_store
 // copies. Linux and Windows keep it only for the test driver; macOS makes

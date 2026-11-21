@@ -71,6 +71,7 @@ Track_Source :: struct {
 	timescale: i64, // DASH: units of the segments' starts per second
 	dash_end:  i64, // DASH: where the last segment ends, in those units
 	gain:      f32,
+	rg:        audio.Replay_Gain, // what gain came from
 	rate:      int,
 	at:        i64, // where to start, in samples, once resolved
 	retried:   bool, // re-resolved once after the stream URL stopped working
@@ -85,6 +86,8 @@ Artwork :: struct {
 Playback :: struct {
 	player:          ^audio.Player,
 	set_now_playing: proc "c" (info: ^platform.Now_Playing), // the shell's
+	set_controls:    proc "c" (controls: ^platform.Player_Controls), // the shell's, or nil
+	controls_sent:   Maybe(platform.Player_Controls),
 	capture:         Small, // TIDALFAST_AUDIO_CAPTURE
 	window:          int, // TIDALFAST_AUDIO_WINDOW_KB, in bytes
 	null_output:     bool, // TIDALFAST_AUDIO_NULL: play to the silent null device
@@ -144,6 +147,7 @@ playback_start :: proc(s: ^State, shell: ^platform.Shell) {
 	pb := &s.playback
 	pb.index = -1
 	pb.set_now_playing = shell.set_now_playing
+	pb.set_controls = shell.set_player_controls
 	pb.capture = small(os.get_env("TIDALFAST_AUDIO_CAPTURE", context.temp_allocator))
 	pb.window = audio.STREAM_WINDOW
 	if kb, ok := strconv.parse_int(os.get_env("TIDALFAST_AUDIO_WINDOW_KB", context.temp_allocator)); ok {
@@ -607,6 +611,8 @@ playback_stop :: proc(s: ^State) {
 	pb^ = {
 		player          = pb.player,
 		set_now_playing = pb.set_now_playing,
+		set_controls    = pb.set_controls,
+		controls_sent   = pb.controls_sent,
 		capture         = pb.capture,
 		window          = pb.window,
 		null_output     = pb.null_output,
@@ -779,7 +785,7 @@ stream_result :: proc(s: ^State, res: ^Result, job: Stream_Job) {
 	stream, _ := res.payload.(Stream_Result)
 	info := stream.info
 	mode := audio.queue_gain_mode(pb.entries, pb.order, t.item)
-	rg := audio.Replay_Gain{info.track_gain, info.track_peak, info.album_gain, info.album_peak}
+	t.rg = audio.Replay_Gain{info.track_gain, info.track_peak, info.album_gain, info.album_peak}
 	heap := runtime.heap_allocator()
 	source_forget_url(t)
 	t.url = strings.clone(info.url, heap)
@@ -792,18 +798,36 @@ stream_result :: proc(s: ^State, res: ^Result, job: Stream_Job) {
 		t.timescale = i64(info.timescale)
 		t.dash_end = last.start + last.length
 	}
-	t.gain = audio.replay_gain_linear(rg, mode)
+	t.gain = audio.setting_gain(t.rg, s.settings.replay_gain, mode)
 	// A restored position is in the rate it was saved at.
 	if t.rate > 0 && info.sample_rate > 0 && t.rate != info.sample_rate {
 		t.at = t.at * i64(info.sample_rate) / i64(t.rate)
 	}
 	t.rate = info.sample_rate
 	t.resolved = true
-	log.infof("app: track %d resolved: %s %s%s, %d-bit %d Hz, %s gain %.2f dB -> x%.3f", info.track_id, tidal.quality_name(info.quality), tidal.codec_name(info.codec), fmt.tprintf(" in DASH, %d segments", len(info.segments)) if info.dash else "", info.bit_depth, info.sample_rate, mode, 20 * math.log10(f64(t.gain)), t.gain)
+	log.infof("app: track %d resolved: %s %s%s, %d-bit %d Hz, %s gain (%s) %.2f dB -> x%.3f", info.track_id, tidal.quality_name(info.quality), tidal.codec_name(info.codec), fmt.tprintf(" in DASH, %d segments", len(info.segments)) if info.dash else "", info.bit_depth, info.sample_rate, mode, s.settings.replay_gain, 20 * math.log10(f64(t.gain)), t.gain)
 	if t == &pb.cur {
 		audio.play(pb.player, source_of(pb, t), t.at, pb.paused)
 	} else {
 		audio.set_next(pb.player, source_of(pb, t))
+	}
+}
+
+// playback_set_replay_gain changes how ReplayGain is applied. The playing
+// track keeps its gain: its next seconds are already in the player's ring
+// at it, and changing it there would step the level. The next track gets
+// the new one, also when it's already resolved and waiting.
+playback_set_replay_gain :: proc(s: ^State, g: audio.Gain_Setting) {
+	pb := &s.playback
+	s.settings.replay_gain = g
+	settings_queue(&s.data, settings_to_save(s))
+	t := &pb.next
+	if t.serial == 0 || !t.resolved || pb.fake {
+		return
+	}
+	t.gain = audio.setting_gain(t.rg, g, audio.queue_gain_mode(pb.entries, pb.order, t.item))
+	if pb.player != nil {
+		audio.set_next_gain(pb.player, t.serial, t.gain)
 	}
 }
 
@@ -1049,6 +1073,26 @@ playback_media :: proc(s: ^State, events: []platform.Event) {
 			playback_previous(s)
 		case .Seek:
 			playback_seek(s, f64(e.dx))
+		case .Volume:
+			// Saved at once, as when the slider is let go.
+			if !math.is_nan(e.dx) {
+				playback_set_volume(s, clamp(e.dx, 0, 1), true)
+			}
+		case .Shuffle:
+			if on := e.dx != 0; on != s.settings.shuffle {
+				playback_set_shuffle(s, on)
+			}
+		case .Repeat:
+			REPEATS := [platform.Player_Repeat]audio.Repeat {
+				.Off = .Off,
+				.All = .All,
+				.One = .One,
+			}
+			if e.dx >= 0 && e.dx <= f32(max(platform.Player_Repeat)) {
+				if r := REPEATS[platform.Player_Repeat(e.dx)]; r != s.settings.repeat {
+					playback_set_repeat(s, r)
+				}
+			}
 		}
 	}
 }
@@ -1159,6 +1203,7 @@ playback_update :: proc(s: ^State, events: []platform.Event) {
 	}
 	s.library.playing = playing_row(s)
 	update_now_playing(s)
+	update_controls(s)
 	queue_save(s)
 }
 
@@ -1359,6 +1404,31 @@ update_now_playing :: proc(s: ^State) {
 		np.artwork_height = u32(pb.art.h)
 	}
 	pb.set_now_playing(&np)
+}
+
+// update_controls tells the shell the player bar's volume, shuffle and
+// repeat when they change, so the desktop's media controls show them.
+@(private = "file")
+update_controls :: proc(s: ^State) {
+	pb := &s.playback
+	if pb.set_controls == nil {
+		return
+	}
+	REPEATS := [audio.Repeat]platform.Player_Repeat {
+		.Off = .Off,
+		.All = .All,
+		.One = .One,
+	}
+	c := platform.Player_Controls {
+		volume  = f64(s.settings.volume),
+		shuffle = b32(s.settings.shuffle),
+		repeat  = REPEATS[s.settings.repeat],
+	}
+	if sent, ok := pb.controls_sent.?; ok && sent == c {
+		return
+	}
+	pb.controls_sent = c
+	pb.set_controls(&c)
 }
 
 // queue_save writes the queue's file when its rows change, and its
