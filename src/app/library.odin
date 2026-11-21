@@ -1206,11 +1206,12 @@ draw_player_bar :: proc(s: ^State, w, h: f32) {
 
 	{
 		// Laid out by hand so it fits in side at any window width: the volume
-		// slider gives up room before anything else does.
+		// slider gives up room before anything else does, and the speaker
+		// button none.
 		ui.row("extras", {}, ui.px(side), ui.fill())
-		output_w := min(output_width(s), side - OUTPUT_GAP)
-		slider_w := clamp(side - output_w - OUTPUT_GAP, 0, VOLUME_W)
-		ui.spacer(ui.px(side - output_w - OUTPUT_GAP - slider_w, 0))
+		output_w := min(output_width(s), side - OUTPUT_GAP - SPEAKER_W)
+		slider_w := clamp(side - output_w - OUTPUT_GAP - SPEAKER_W, 0, VOLUME_W)
+		ui.spacer(ui.px(side - output_w - OUTPUT_GAP - SPEAKER_W - slider_w, 0))
 		draw_output_button(s, output_w)
 		ui.spacer(ui.px(OUTPUT_GAP))
 		draw_volume(s, slider_w)
@@ -1222,6 +1223,14 @@ TIME_PAD :: 8 // between the times and the progress bar
 OUTPUT_GAP :: 12
 VOLUME_W :: 110
 VOLUME_H :: 28 // the slider takes presses this far around its bar
+SPEAKER_SIZE :: 28
+SPEAKER_W :: SPEAKER_SIZE + 4 // the speaker button and the gap after it
+VOLUME_NOTCH :: 0.05 // a mouse wheel's notch turns the volume this much
+// The lines a notch scrolls: macOS's one, and three in the Linux shell and
+// by default on Windows.
+WHEEL_NOTCH_LINES :: 1 when ODIN_OS == .Darwin else 3
+VOLUME_PER_POINT :: 1.0 / 400 // a trackpad's scroll, in proportion
+VOLUME_SCROLL_SAVE :: 0.5 // seconds after the wheel stops
 
 // clock formats seconds as m:ss, or h:mm:ss from an hour.
 clock :: proc(seconds: f64) -> string {
@@ -1302,29 +1311,80 @@ toggle_button :: proc(id, icon, name, value: string, on: bool) -> ui.Signal {
 	return ui.signal(b)
 }
 
-// draw_volume is a slider: press or drag along it to set the volume. A
-// press and release in one frame still counts, at the release.
+// draw_volume is the speaker button, which mutes and unmutes, and a slider:
+// press or drag along it to set the volume. A press and release in one
+// frame still counts, at the release. The wheel over either turns the
+// volume. While muted the slider shows none.
 draw_volume :: proc(s: ^State, width: f32) {
+	{
+		ui.column("", {.Center_Children}, ui.px(SPEAKER_SIZE), ui.fill())
+		silent := volume_silent(s.settings)
+		icon := text.ICON_SPEAKER_X
+		if !silent {
+			icon = text.ICON_SPEAKER_LOW if s.settings.volume < 0.5 else text.ICON_SPEAKER_HIGH
+		}
+		ui.text_style(.Icon, OUTPUT_ICON, SECONDARY)
+		ui.text_align(.Center)
+		ui.text_pad(0)
+		ui.set_next_background({})
+		ui.set_next_hover_color({1, 1, 1, 0.08})
+		ui.set_next_radius(SPEAKER_SIZE / 2)
+		b := ui.box_make("###speaker", {.Clickable, .Focusable, .Takes_Scroll, .Draw_Background, .Draw_Text, .Draw_Hot_Effects, .Draw_Active_Effects}, ui.px(SPEAKER_SIZE), ui.px(SPEAKER_SIZE))
+		b.label = icon
+		name := "Unmute" if silent else "Mute"
+		ui.accessible(b, .Button, name)
+		sig := ui.signal(b)
+		if sig.clicked {
+			playback_toggle_mute(s)
+			ui.data_changed()
+		}
+		volume_wheel(s, sig)
+		ui.tooltip(sig, name, shortcut_keys(.Mute))
+	}
+	ui.spacer(ui.px(SPEAKER_W - SPEAKER_SIZE))
 	ui.column("", {}, ui.px(width), ui.fill())
 	ui.spacer(ui.fill())
 	{
-		slider := ui.column("volume", {.Clickable}, ui.fill(), ui.px(VOLUME_H))
-		ui.accessible(slider, .Slider, "Volume", cat(num(int(math.round(s.settings.volume * 100))), "%"))
+		slider := ui.column("volume", {.Clickable, .Takes_Scroll}, ui.fill(), ui.px(VOLUME_H))
+		ui.accessible(slider, .Slider, "Volume", "Muted" if s.settings.muted else cat(num(int(math.round(s.settings.volume * 100))), "%"))
 		sig := ui.signal(slider)
 		if (sig.held || sig.released) && slider.rect.w > 0 {
 			playback_set_volume(s, clamp((sig.mouse.x - slider.rect.x) / slider.rect.w, 0, 1), sig.released)
 		}
+		volume_wheel(s, sig)
 		ui.spacer(ui.fill())
 		{
 			ui.radius(2)
 			ui.set_next_background(SURFACE_ACTIVE)
 			ui.row("", {.Draw_Background}, ui.fill(), ui.px(4))
 			ui.set_next_background(mix(SECONDARY, ACCENT, max(slider.hot_t, slider.active_t)))
-			ui.box_make("", {.Draw_Background}, ui.pct(s.settings.volume, 1), ui.fill())
+			ui.box_make("", {.Draw_Background}, ui.pct(volume_heard(s.settings), 1), ui.fill())
 		}
 		ui.spacer(ui.fill())
 	}
 	ui.spacer(ui.fill())
+	// The wheel's volume is saved once it stops turning, not every line.
+	if at := s.playback.volume_save_at; at != 0 {
+		if s.ui.time >= at {
+			volume_save(s)
+		} else {
+			ui.wake_at(at)
+		}
+	}
+}
+
+// volume_wheel turns the volume by a scroll over one of its controls, up
+// or down from the level before any mute: a wheel's notch by VOLUME_NOTCH,
+// a trackpad in proportion to the fingers.
+volume_wheel :: proc(s: ^State, sig: ui.Signal) {
+	if sig.scroll.y == 0 {
+		return
+	}
+	lines := (sig.scroll.y - sig.scroll_precise.y) / ui.SCROLL_LINE
+	turn := lines / WHEEL_NOTCH_LINES * VOLUME_NOTCH + sig.scroll_precise.y * VOLUME_PER_POINT
+	playback_set_volume(s, clamp(s.settings.volume + turn, 0, 1), false)
+	s.playback.volume_save_at = s.ui.time + VOLUME_SCROLL_SAVE
+	ui.data_changed()
 }
 
 play :: proc(s: ^State, i: int) {

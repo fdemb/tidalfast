@@ -58,7 +58,7 @@ At sign-in the file is read right after the cached sidebar. If nothing plays yet
 
 ## ReplayGain and volume
 
-In bit-perfect mode neither applies (see below). Otherwise a track gets album gain when it plays as part of its album in order: the queue entry before or after it is from the same album, with the track number one away. Otherwise it gets track gain, so a playlist of singles plays at an even level. The factor is `10^(gain/20)`, lowered to `1/peak` if it would push the peak over full scale. The decode thread applies it. The volume slider applies after it, in the callback, as the cube of the slider's position, so half way is about -18 dB.
+In bit-perfect mode neither applies (see below). Otherwise a track gets album gain when it plays as part of its album in order: the queue entry before or after it is from the same album, with the track number one away. Otherwise it gets track gain, so a playlist of singles plays at an even level. The factor is `10^(gain/20)`, lowered to `1/peak` if it would push the peak over full scale. The decode thread applies it. The volume slider applies after it, in the callback, as the cube of the slider's position, so half way is about -18 dB. A mute sends the player a volume of 0 and keeps the slider's level in the settings to unmute at (see [UI](ui.md#volume)). In bit-perfect mode the slider and the mute button still work and are saved, but play nothing different until the output goes back to the mixer.
 
 ## Seeking
 
