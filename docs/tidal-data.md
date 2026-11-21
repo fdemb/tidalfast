@@ -41,6 +41,8 @@ The PKCE scope is `r_usr+w_usr+w_sub`, as tidalapi sends it. mare-player found T
 
 ## Keychain
 
+This section is about macOS. On Linux the login goes in the Secret Service and on Windows in the Credential Manager ([Linux](linux.md), [Windows](windows.md)).
+
 The tokens go in the login Keychain as one generic password item: service `tidalfast`, account `auth`, label `TIDALfast`. Its data is JSON: token type, access and refresh tokens, expiry, session id, country code and user id. Nothing goes in a file.
 
 `src/os_services/os_services_darwin.odin` calls Security's `SecItemAdd`, `SecItemUpdate`, `SecItemCopyMatching` and `SecItemDelete` directly from Odin with hand-written foreign declarations, along with the CoreFoundation calls to build their dictionaries. These are plain C functions, so they don't hit the compiler's Obj-C bug, and going through the shell would have meant changing the shared ABI for no gain. They're thread safe, which matters because the tokens are saved from workers.
