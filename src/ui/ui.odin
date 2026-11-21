@@ -1225,6 +1225,7 @@ finish :: proc(u: ^State, b: ^Box, clip: render.Rect, focus_parent, click_parent
 		if b.built_size != {b.rect.w, b.rect.h} {
 			mismatch^ = true
 		}
+		thumb_fit(u, b)
 	}
 	// A menu closed while it was built takes no input, though its boxes
 	// were built to.
@@ -1256,6 +1257,21 @@ finish :: proc(u: ^State, b: ^Box, clip: render.Rect, focus_parent, click_parent
 	cp := b.key if .Clickable in b.flags && b.key != 0 else click_parent
 	for c := b.first; c != nil; c = c.next {
 		finish(u, c, inner, fp, cp, floating, in_menu, mismatch)
+	}
+}
+
+// thumb_fit sizes and places view's scrollbar thumb for the content just
+// laid out. It was built from the last layout's, which is a frame behind
+// when rows come or go, as a new row in a list does.
+@(private)
+thumb_fit :: proc(u: ^State, view: ^Box) {
+	bar := box_lookup(u, key_from_string(view.key, "###scrollbar"))
+	if bar == nil || bar.last_frame != u.frame || bar.parent != view || bar.first == nil {
+		return
+	}
+	if t, ok := thumb_of(view); ok {
+		bar.first.rect.y = bar.rect.y + t.y
+		bar.first.rect.h = t.h
 	}
 }
 

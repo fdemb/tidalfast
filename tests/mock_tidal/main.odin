@@ -72,6 +72,14 @@
 // followed artists. Any track id from the mock can be added, and it's
 // listed as it is elsewhere.
 //
+// Playlists can be made, renamed and deleted as TIDAL's API does it: PUT
+// /v2/my-collection/playlists/folders/create-playlist?name=... makes an
+// empty one, listed first in playlistsAndFavoritePlaylists, POST
+// /playlists/<uuid> with a title renames one and moves its lastUpdated on,
+// and DELETE /playlists/<uuid> deletes one, after which it answers 404.
+// Deep Focus and Lo-fi Beats are TIDAL's own (type EDITORIAL, creator 0),
+// so the app offers neither, and the mock refuses both with 403.
+//
 // It never prints tokens or Authorization headers.
 package mock_tidal
 
@@ -144,6 +152,7 @@ Server :: struct {
 	liked_removed: [dynamic]int, // track ids unliked with a DELETE, oldest first; heap
 	followed:      [dynamic]int, // artist ids followed with a POST, oldest first; heap
 	added:         [len(PLAYLISTS)][dynamic]Added_Item, // tracks added by a POST; heap
+	playlist_count: int, // of PLAYLISTS, the made ones included
 }
 
 Added_Item :: struct {
@@ -154,23 +163,31 @@ Added_Item :: struct {
 server: Server
 
 Playlist :: struct {
-	name:   string,
-	tracks: int,
+	name:      string,
+	tracks:    int,
+	editorial: bool, // made by TIDAL, so the user can't change it
+	gone:      bool, // deleted with DELETE /playlists/<uuid>
 }
 
-PLAYLISTS := [?]Playlist {
-	{"Mock Long Playlist", 0}, // config.tracks
-	{"Road Trip", 120},
-	{"Late Night Jazz", 64},
-	{"Polskie hity", 85},
-	{"夜のドライブ", 42},
-	{"أغاني عربية", 30},
-	{"Deep Focus", 210},
-	{"Workout Bangers", 75},
-	{"Lo-fi Beats", 160},
-	{"Classical Essentials", 99},
-	{"Empty", 0},
-	{"Synthwave Nights", 55},
+MAX_PLAYLISTS :: 64
+
+// PLAYLISTS are the user's playlists: BASE_PLAYLISTS, then the ones made
+// with create-playlist, server.playlist_count in all.
+PLAYLISTS: [MAX_PLAYLISTS]Playlist
+
+BASE_PLAYLISTS := [?]Playlist {
+	{name = "Mock Long Playlist", tracks = 0}, // config.tracks
+	{name = "Road Trip", tracks = 120},
+	{name = "Late Night Jazz", tracks = 64},
+	{name = "Polskie hity", tracks = 85},
+	{name = "夜のドライブ", tracks = 42},
+	{name = "أغاني عربية", tracks = 30},
+	{name = "Deep Focus", tracks = 210, editorial = true},
+	{name = "Workout Bangers", tracks = 75},
+	{name = "Lo-fi Beats", tracks = 160, editorial = true},
+	{name = "Classical Essentials", tracks = 99},
+	{name = "Empty", tracks = 0},
+	{name = "Synthwave Nights", tracks = 55},
 }
 
 TITLES := [?]string{"Blue in Green", "Teardrop", "Hyperballad", "Pyramid Song", "Avril 14th", "Jóga", "夜に駆ける", "밤편지", "عيونك", "Wszystko czego dziś chcę", "Midnight City", "Dreams", "Windowlicker", "So What", "Lose Yourself 🔥"}
@@ -237,6 +254,8 @@ main :: proc() {
 			os.exit(2)
 		}
 	}
+	copy(PLAYLISTS[:], BASE_PLAYLISTS[:])
+	server.playlist_count = len(BASE_PLAYLISTS)
 	PLAYLISTS[0].tracks = c.tracks
 	server.config = c
 	server.token = 1
@@ -465,7 +484,7 @@ route :: proc(req: ^Request) -> Response {
 		return {status = 200, content_type = "text/html", body = transmute([]u8)string("<html><body><h1>Oops</h1><p>Copy this page's address into TIDALfast.</p></body></html>")}
 	case path == "/mock/change":
 		sync.guard(&server.mutex)
-		if p, ok := parse_i(req.query["playlist"] or_else ""); ok && p >= 0 && p < len(PLAYLISTS) {
+		if p, ok := parse_i(req.query["playlist"] or_else ""); ok && p >= 0 && p < server.playlist_count {
 			PLAYLISTS[p].tracks += 1
 			server.changes[p] += 1
 			fmt.printfln("mock: playlist %d changed, %d tracks", p, PLAYLISTS[p].tracks)
@@ -652,14 +671,15 @@ route :: proc(req: ^Request) -> Response {
 		strings.write_string(&b, "]}")
 		return json_response(200, strings.to_string(b))
 	case path == fmt.tprintf("/users/%d/playlistsAndFavoritePlaylists", USER_ID):
-		b := list_begin(len(PLAYLISTS), offset, limit)
 		sync.guard(&server.mutex)
-		for i in offset ..< min(offset + limit, len(PLAYLISTS)) {
+		listed := listed_playlists()
+		b := list_begin(len(listed), offset, limit)
+		for i in offset ..< min(offset + limit, len(listed)) {
 			if i > offset {
 				strings.write_byte(&b, ',')
 			}
-			fmt.sbprintf(&b, `{{"type":"USER_CREATED","created":"%s","playlist":`, date(i))
-			write_playlist(&b, i)
+			fmt.sbprintf(&b, `{{"type":"USER_CREATED","created":"%s","playlist":`, date(listed[i]))
+			write_playlist(&b, listed[i])
 			strings.write_byte(&b, '}')
 		}
 		strings.write_string(&b, "]}")
@@ -682,6 +702,10 @@ route :: proc(req: ^Request) -> Response {
 			return json_response(404, `{"status":404,"userMessage":"Playlist not found"}`)
 		}
 		return add_items(p, req)
+	case path == "/v2/my-collection/playlists/folders/create-playlist" && req.method == "PUT":
+		return create_playlist(req)
+	case strings.has_prefix(path, "/playlists/") && strings.count(path, "/") == 2 && (req.method == "POST" || req.method == "DELETE"):
+		return edit_playlist(playlist_index(strings.trim_prefix(path, "/playlists/")), req)
 	case strings.has_prefix(path, "/playlists/") && strings.count(path, "/") == 2:
 		p := playlist_index(strings.trim_prefix(path, "/playlists/"))
 		if p < 0 {
@@ -793,20 +817,82 @@ token_response :: proc(req: ^Request) -> Response {
 }
 
 playlist_index :: proc(id: string) -> int {
-	for i in 0 ..< len(PLAYLISTS) {
-		if playlist_id(i) == id {
+	sync.guard(&server.mutex)
+	for i in 0 ..< server.playlist_count {
+		if playlist_id(i) == id && !PLAYLISTS[i].gone {
 			return i
 		}
 	}
 	return -1
 }
 
+// listed_playlists are the playlists not deleted, as
+// playlistsAndFavoritePlaylists lists them: the made ones first, newest
+// first. Hold the mutex.
+listed_playlists :: proc() -> []int {
+	out := make([dynamic]int, context.temp_allocator)
+	for i := server.playlist_count - 1; i >= len(BASE_PLAYLISTS); i -= 1 {
+		if !PLAYLISTS[i].gone {
+			append(&out, i)
+		}
+	}
+	for i in 0 ..< len(BASE_PLAYLISTS) {
+		if !PLAYLISTS[i].gone {
+			append(&out, i)
+		}
+	}
+	return out[:]
+}
+
+// create_playlist makes an empty playlist named the request's name, as PUT
+// my-collection/playlists/folders/create-playlist does on api.tidal.com/v2.
+create_playlist :: proc(req: ^Request) -> Response {
+	sync.guard(&server.mutex)
+	name := req.query["name"] or_else ""
+	if name == "" || server.playlist_count == MAX_PLAYLISTS {
+		return json_response(400, `{"status":400,"userMessage":"Can't make that playlist"}`)
+	}
+	p := server.playlist_count
+	PLAYLISTS[p] = {name = strings.clone(name, runtime.heap_allocator())}
+	server.playlist_count += 1
+	b := strings.builder_make(context.temp_allocator)
+	fmt.sbprintf(&b, `{{"trn":"trn:playlist:%s","itemType":"PLAYLIST","addedAt":"%s","parent":null,"data":`, playlist_id(p), date(p))
+	write_playlist(&b, p)
+	strings.write_byte(&b, '}')
+	fmt.printfln("mock: made playlist %d", p)
+	return json_response(200, strings.to_string(b))
+}
+
+// edit_playlist renames playlist p with POST /playlists/<uuid>, which moves
+// its lastUpdated on, or deletes it with DELETE. TIDAL's own playlists
+// can't be changed.
+edit_playlist :: proc(p: int, req: ^Request) -> Response {
+	if p < 0 {
+		return json_response(404, `{"status":404,"userMessage":"Playlist not found"}`)
+	}
+	sync.guard(&server.mutex)
+	if PLAYLISTS[p].editorial {
+		return json_response(403, `{"status":403,"userMessage":"Not your playlist"}`)
+	}
+	if req.method == "DELETE" {
+		PLAYLISTS[p].gone = true
+		fmt.printfln("mock: deleted playlist %d", p)
+		return {status = 204}
+	}
+	if title := req.form["title"] or_else ""; title != "" {
+		PLAYLISTS[p].name = strings.clone(title, runtime.heap_allocator())
+		server.changes[p] += 1
+		fmt.printfln("mock: renamed playlist %d", p)
+	}
+	return json_response(200, "{}")
+}
+
 // write_playlist writes playlist p as TIDAL's playlist object. Hold the
 // mutex.
 write_playlist :: proc(b: ^strings.Builder, p: int) {
 	pl := PLAYLISTS[p]
-	fmt.sbprintf(b, `{{"uuid":"%s","title":%q,"numberOfTracks":%d,"numberOfVideos":0,"type":"USER","creator":{{"id":%d}},"squareImage":"%s","image":"%s","lastUpdated":"%s"}}`,
-		playlist_id(p), pl.name, pl.tracks, USER_ID, image_id(1000 + p), image_id(2000 + p), last_updated(p, server.changes[p]))
+	fmt.sbprintf(b, `{{"uuid":"%s","title":%q,"numberOfTracks":%d,"numberOfVideos":0,"type":"%s","creator":{{"id":%d}},"squareImage":"%s","image":"%s","lastUpdated":"%s"}}`,
+		playlist_id(p), pl.name, pl.tracks, "EDITORIAL" if pl.editorial else "USER", 0 if pl.editorial else USER_ID, image_id(1000 + p), image_id(2000 + p), last_updated(p, server.changes[p]))
 }
 
 // playlist_etag changes with every change to playlist p. Hold the mutex.
@@ -1083,8 +1169,9 @@ search_response :: proc(query, types: string, offset, limit: int) -> Response {
 	if want(types, "PLAYLISTS") {
 		strings.write_string(&b, `"playlists":{"items":[`)
 		count := 0
-		for pl, i in PLAYLISTS {
-			if !strings.contains(strings.to_lower(pl.name, context.temp_allocator), needle) {
+		sync.guard(&server.mutex)
+		for pl, i in PLAYLISTS[:server.playlist_count] {
+			if pl.gone || !strings.contains(strings.to_lower(pl.name, context.temp_allocator), needle) {
 				continue
 			}
 			if count > 0 {
@@ -1221,10 +1308,15 @@ home_response :: proc() -> Response {
 	module(&b, false, "PLAYLIST_LIST", "Playlists for you")
 	{
 		sync.guard(&server.mutex)
-		for p in 1 ..< len(PLAYLISTS) {
-			if p > 1 {
+		first := true
+		for p in 1 ..< server.playlist_count {
+			if PLAYLISTS[p].gone {
+				continue
+			}
+			if !first {
 				strings.write_byte(&b, ',')
 			}
+			first = false
 			write_playlist(&b, p)
 		}
 	}
