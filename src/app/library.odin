@@ -103,8 +103,9 @@ NAV_H :: NAV_BUTTON_H + 2 * NAV_PAD // the room kept for them at the top without
 NAV_SHADOW_FADE :: 16 // points of scrolling over which their shadow fades in
 
 Library :: struct {
-	sidebar_w:     f32,
+	sidebar_w:     f32, // this frame's, Settings.sidebar_w as the window allows (sidebar_width)
 	drag_from_w:   f32, // sidebar width when the handle was pressed
+	drag_pref:     f32, // Settings.sidebar_w when the handle was pressed
 	playlist:      int,
 	selected:      int, // track row, -1 for none
 	playing:       int, // the row playing in this list, -1 for none
@@ -229,6 +230,22 @@ sidebar_limit :: proc(window_w: f32) -> f32 {
 	return clamp(window_w - HANDLE_W - MAIN_MIN, SIDEBAR_MIN, SIDEBAR_MAX)
 }
 
+// sidebar_width is the sidebar's width in a window window_w wide, for the
+// width the user chose (Settings.sidebar_w).
+sidebar_width :: proc(pref, window_w: f32) -> f32 {
+	w := sidebar_pref_clean(pref)
+	return clamp(w if w != 0 else SIDEBAR_DEFAULT, SIDEBAR_MIN, sidebar_limit(window_w))
+}
+
+// sidebar_pref_clean is a width from the settings file in range, or 0 for
+// the default when it is no width at all.
+sidebar_pref_clean :: proc(pref: f32) -> f32 {
+	if math.is_nan(pref) || pref <= 0 {
+		return 0
+	}
+	return clamp(pref, SIDEBAR_MIN, SIDEBAR_MAX)
+}
+
 library_init :: proc(lib: ^Library) {
 	lib^ = {
 		sidebar_w   = SIDEBAR_DEFAULT,
@@ -243,7 +260,7 @@ library_init :: proc(lib: ^Library) {
 draw_library :: proc(s: ^State, w, h: f32) {
 	lib := &s.library
 	ui.text_style(.Regular, 13, TEXT)
-	lib.sidebar_w = clamp(lib.sidebar_w, SIDEBAR_MIN, sidebar_limit(w))
+	lib.sidebar_w = sidebar_width(s.settings.sidebar_w, w)
 	lib.drop_target = -1
 
 	ui.set_next_background(WINDOW_BG)
@@ -498,11 +515,24 @@ draw_sidebar_handle :: proc(s: ^State, window_w: f32) {
 	handle := ui.row("sidebar_handle", {.Clickable}, ui.px(HANDLE_W), ui.fill())
 	sig := ui.signal(handle)
 	if sig.pressed {
+		if sig.double_clicked && s.settings.sidebar_w != 0 {
+			s.settings.sidebar_w = 0
+			lib.sidebar_w = sidebar_width(0, window_w)
+			settings_queue(&s.data, settings_to_save(s))
+		}
 		lib.drag_from_w = lib.sidebar_w
+		lib.drag_pref = s.settings.sidebar_w
 	}
 	if sig.held || sig.released {
 		lib.sidebar_w = clamp(lib.drag_from_w + sig.drag_delta.x, SIDEBAR_MIN, sidebar_limit(window_w))
+		// Back where it started, the handle keeps the width chosen before,
+		// which a narrow window may be drawing narrower.
+		s.settings.sidebar_w = lib.drag_pref if lib.sidebar_w == lib.drag_from_w else lib.sidebar_w
 	}
+	if sig.released && s.settings.sidebar_w != lib.drag_pref {
+		settings_queue(&s.data, settings_to_save(s))
+	}
+	ui.accessible(handle, .Slider, "Sidebar width", cat(num(int(math.round(lib.sidebar_w))), " pt"))
 	// The sidebar's background runs up to the line.
 	ui.set_next_background(PANEL)
 	ui.box_make("", {.Draw_Background}, ui.px(2), ui.fill())
