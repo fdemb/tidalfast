@@ -40,10 +40,16 @@ jobs:
           cat > "$out/drive.sh" <<'EOF'
           set -eu
           TIDALFAST_FAKE=1 TIDALFAST_AUDIO_NULL=1 TIDALFAST_NOW_PLAYING_LOG=1 \
-            TIDALFAST_SHELL_TEST="25:quit" ./build/tidalfast > "$1/app.log" 2>&1 &
+            TIDALFAST_SHELL_TEST="45:quit" ./build/tidalfast > "$1/app.log" 2>&1 &
           app=$!
-          sleep 5
           p="playerctl -p tidalfast"
+          # Software Vulkan takes from 1 to over 5 s to start on a runner,
+          # and MPRIS starts after the first frame.
+          i=0
+          until $p status > /dev/null 2>&1; do
+            i=$((i + 1)); [ $i -le 200 ] || { echo "no MPRIS player after 20 s"; exit 1; }
+            sleep 0.1
+          done
           test "$($p status)" = Stopped
           $p play; sleep 2
           test "$($p status)" = Playing
