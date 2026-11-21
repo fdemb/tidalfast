@@ -96,9 +96,26 @@ draw_settings :: proc(s: ^State, main_w, view_h: f32) {
 		}
 	}
 
-	when audio.BIT_PERFECT {
+	{
+		settings_card("Playback")
 		{
-			settings_card("Playback")
+			// Bit-perfect output passes the samples unchanged, so the
+			// choice waits until it's off.
+			about := "Applies from the next track. Albums in order get album gain"
+			if output_on(s) {
+				about = "Not applied in bit-perfect mode"
+			}
+			settings_row("ReplayGain", about)
+			settings_choices("replay_gain")
+			for mode in audio.Gain_Setting {
+				name := fmt.tprint(mode)
+				if settings_choice(name, fmt.tprintf("ReplayGain %s", name), s.settings.replay_gain == mode) {
+					playback_set_replay_gain(s, mode)
+				}
+			}
+		}
+		when audio.BIT_PERFECT {
+			settings_separator()
 			settings_row("Bit-perfect output", "Each track at its own sample rate and bit depth, past the volume")
 			if settings_switch("Bit-perfect output", s.settings.bit_perfect) {
 				st := s.settings

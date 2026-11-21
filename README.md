@@ -32,7 +32,7 @@ TIDALfast is a TIDAL player written from scratch in Odin.
 - **Lossless and hi-res.** TIDAL's FLAC streams, from CD quality up to 24-bit 192 kHz.
 - **Gapless playback.** The next track downloads before the current one ends and plays straight after it, so live albums and DJ mixes play without a break.
 - **Bit-perfect output.** On macOS the app can switch your DAC to each track's sample rate and bit depth and send it the samples unchanged. When a track can't play bit-perfect, the app tells you why.
-- **ReplayGain.** Albums played in order get album gain, and everything else gets track gain, so a playlist of singles plays at one level.
+- **ReplayGain.** By default albums played in order get album gain, and everything else gets track gain, so a playlist of singles plays at one level. The settings page can make it always track gain, always album gain, or off.
 - **Your library.** Playlists, Liked Songs and followed artists from your account. Drag a song onto a playlist to add it, or click its heart to like it.
 - **Search and artist pages.** Results for songs, albums, artists and playlists show as you type. Artist pages have top tracks, albums, EPs and singles, appearances and similar artists.
 - **Media keys and Now Playing.** On macOS the keyboard's media keys and Control Center control playback.

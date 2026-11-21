@@ -62,6 +62,7 @@ Track_Source :: struct {
 	timescale: i64, // DASH: units of the segments' starts per second
 	dash_end:  i64, // DASH: where the last segment ends, in those units
 	gain:      f32,
+	rg:        audio.Replay_Gain, // what gain came from
 	rate:      int,
 	at:        i64, // where to start, in samples, once resolved
 	retried:   bool, // re-resolved once after the stream URL stopped working
@@ -545,7 +546,7 @@ stream_result :: proc(s: ^State, res: ^Result, job: Stream_Job) {
 	stream, _ := res.payload.(Stream_Result)
 	info := stream.info
 	mode := audio.queue_gain_mode(pb.entries, pb.order, t.item)
-	rg := audio.Replay_Gain{info.track_gain, info.track_peak, info.album_gain, info.album_peak}
+	t.rg = audio.Replay_Gain{info.track_gain, info.track_peak, info.album_gain, info.album_peak}
 	heap := runtime.heap_allocator()
 	source_forget_url(t)
 	t.url = strings.clone(info.url, heap)
@@ -558,18 +559,36 @@ stream_result :: proc(s: ^State, res: ^Result, job: Stream_Job) {
 		t.timescale = i64(info.timescale)
 		t.dash_end = last.start + last.length
 	}
-	t.gain = audio.replay_gain_linear(rg, mode)
+	t.gain = audio.setting_gain(t.rg, s.settings.replay_gain, mode)
 	// A restored position is in the rate it was saved at.
 	if t.rate > 0 && info.sample_rate > 0 && t.rate != info.sample_rate {
 		t.at = t.at * i64(info.sample_rate) / i64(t.rate)
 	}
 	t.rate = info.sample_rate
 	t.resolved = true
-	log.infof("app: track %d resolved: %s %s%s, %d-bit %d Hz, %s gain %.2f dB -> x%.3f", info.track_id, tidal.quality_name(info.quality), tidal.codec_name(info.codec), fmt.tprintf(" in DASH, %d segments", len(info.segments)) if info.dash else "", info.bit_depth, info.sample_rate, mode, 20 * math.log10(f64(t.gain)), t.gain)
+	log.infof("app: track %d resolved: %s %s%s, %d-bit %d Hz, %s gain (%s) %.2f dB -> x%.3f", info.track_id, tidal.quality_name(info.quality), tidal.codec_name(info.codec), fmt.tprintf(" in DASH, %d segments", len(info.segments)) if info.dash else "", info.bit_depth, info.sample_rate, mode, s.settings.replay_gain, 20 * math.log10(f64(t.gain)), t.gain)
 	if t == &pb.cur {
 		audio.play(pb.player, source_of(pb, t), t.at, pb.paused)
 	} else {
 		audio.set_next(pb.player, source_of(pb, t))
+	}
+}
+
+// playback_set_replay_gain changes how ReplayGain is applied. The playing
+// track keeps its gain: its next seconds are already in the player's ring
+// at it, and changing it there would step the level. The next track gets
+// the new one, also when it's already resolved and waiting.
+playback_set_replay_gain :: proc(s: ^State, g: audio.Gain_Setting) {
+	pb := &s.playback
+	s.settings.replay_gain = g
+	settings_queue(&s.data, settings_to_save(s))
+	t := &pb.next
+	if t.serial == 0 || !t.resolved || pb.fake {
+		return
+	}
+	t.gain = audio.setting_gain(t.rg, g, audio.queue_gain_mode(pb.entries, pb.order, t.item))
+	if pb.player != nil {
+		audio.set_next_gain(pb.player, t.serial, t.gain)
 	}
 }
 
