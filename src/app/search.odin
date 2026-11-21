@@ -125,16 +125,12 @@ found_free :: proc(sr: ^Search) {
 	sr.found = {}
 }
 
-// SEARCH_HINT is the shortcut that opens search, shown at the end of the
-// sidebar's Search row.
-SEARCH_HINT :: "⌘F" when ODIN_OS == .Darwin else "Ctrl+F"
-
 // draw_search_entry is the Search row under Home in the sidebar, lit while
 // the search page shows.
 draw_search_entry :: proc(s: ^State) {
 	current := search_page_showing(s)
 	icon := text.ICON_MAGNIFYING_GLASS_FILL if current else text.ICON_MAGNIFYING_GLASS
-	if sidebar_nav_row("##search_entry", "Search", icon, current, SEARCH_HINT) {
+	if sidebar_nav_row("##search_entry", "Search", icon, current, shortcut_keys(.Search)) {
 		pending_set(s, Search_Place{})
 	}
 }
@@ -201,8 +197,9 @@ draw_search_bar :: proc(s: ^State, main_w: f32) {
 		icon.label = text.ICON_MAGNIFYING_GLASS
 		icon.fixed_pos = {2, 0}
 	}
-	ui.focus_shortcut(sig.box, .F, {ui.PRIMARY})
-	ui.focus_shortcut(sig.box, .L, {ui.PRIMARY})
+	shortcuts := SHORTCUTS
+	ui.focus_shortcut(sig.box, shortcuts[.Search].code, shortcuts[.Search].modifiers)
+	ui.focus_shortcut(sig.box, SEARCH_KEY_ALT, {ui.PRIMARY})
 	// Return searches for the text it was pressed on. An edit after it that
 	// empties the field closes the search instead, since the last Pending
 	// wins.
