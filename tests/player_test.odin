@@ -325,3 +325,60 @@ failed_track_stops_the_player :: proc(t: ^testing.T) {
 		free(s)
 	}
 }
+
+@(private = "file")
+controls_seen: platform.Player_Controls
+@(private = "file")
+controls_calls: int
+
+@(private = "file")
+record_controls :: proc "c" (c: ^platform.Player_Controls) {
+	controls_seen = c^
+	controls_calls += 1
+}
+
+// MPRIS sets the volume, shuffle and repeat with media commands. The app
+// takes them as the player bar's controls would, saves the volume as the
+// slider's release does, ignores values out of range, and tells the shell
+// each change once.
+@(test)
+media_sets_the_controls :: proc(t: ^testing.T) {
+	s := fake_player_state({{title = "One", seconds = 30}, {title = "Two", seconds = 30}})
+	defer free(s)
+	defer app.playback_shutdown(s)
+	controls_calls = 0
+	s.playback.set_controls = record_controls
+	s.settings.volume = 1
+	s.volume_before_override = 0.9 // TIDALFAST_VOLUME, which a save replaces
+
+	media(s, .None)
+	testing.expect_value(t, controls_calls, 1)
+	testing.expect_value(t, controls_seen, platform.Player_Controls{volume = 1, shuffle = false, repeat = .Off})
+	media(s, .None)
+	testing.expect_value(t, controls_calls, 1)
+
+	media(s, .Volume, 0.25)
+	testing.expect_value(t, s.settings.volume, 0.25)
+	testing.expect(t, s.volume_before_override == nil, "the volume wasn't saved")
+	media(s, .Volume, -2)
+	testing.expect_value(t, s.settings.volume, 0)
+	media(s, .Volume, 3)
+	testing.expect_value(t, s.settings.volume, 1)
+	nan := f32(0)
+	media(s, .Volume, nan / nan)
+	testing.expect_value(t, s.settings.volume, 1)
+
+	media(s, .Shuffle, 1)
+	testing.expect(t, s.settings.shuffle)
+	media(s, .Repeat, f32(platform.Player_Repeat.One))
+	testing.expect_value(t, s.settings.repeat, audio.Repeat.One)
+	media(s, .Repeat, f32(platform.Player_Repeat.All))
+	testing.expect_value(t, s.settings.repeat, audio.Repeat.All)
+	media(s, .Repeat, 3)
+	media(s, .Repeat, -1)
+	testing.expect_value(t, s.settings.repeat, audio.Repeat.All)
+	testing.expect_value(t, controls_seen, platform.Player_Controls{volume = 1, shuffle = true, repeat = .All})
+	media(s, .Shuffle, 0)
+	testing.expect(t, !s.settings.shuffle)
+	testing.expect_value(t, controls_seen.shuffle, false)
+}

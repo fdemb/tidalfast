@@ -57,12 +57,17 @@ jobs:
           $p position 12; sleep 1
           $p next; sleep 1
           $p previous; sleep 1
+          $p volume 0.25; $p shuffle On; $p loop Track; sleep 1
+          test "$($p volume)" = 0.250000
+          test "$($p shuffle)" = On
+          test "$($p loop)" = Track
           wait $app
           EOF
           dbus-run-session -- sh "$out/drive.sh" "$out"
           kill %1 || true
           cat "$out/app.log"
-          for want in "remote command 1 " "remote command 2 " "remote command 6 (12.000)" "remote command 4 " "remote command 5 "; do
+          for want in "remote command 1 " "remote command 2 " "remote command 6 (12.000)" "remote command 4 " "remote command 5 " \
+            "remote command 7 (0.250)" "remote command 8 (1.000)" "remote command 9 (2.000)" "controls: volume 0.250, shuffle 1, repeat 2"; do
             grep -q "shell: $want" "$out/app.log" || { echo "missing: $want"; exit 1; }
           done
       - uses: actions/upload-artifact@v4

@@ -15,7 +15,7 @@ typedef enum {
   EVENT_KEY_UP,
   EVENT_MODIFIERS_CHANGED,
   EVENT_RESIZE,
-  EVENT_MEDIA, // media is a Media_Command, dx the position for MEDIA_SEEK
+  EVENT_MEDIA, // media is a Media_Command, dx its value: see Media_Command
   EVENT_TEXT, // text for the focused text field; see platform.odin
   EVENT_MARKED_TEXT, // the input method's composition
   EVENT_UNMARK_TEXT,
@@ -32,7 +32,11 @@ typedef enum {
   MEDIA_TOGGLE,
   MEDIA_NEXT,
   MEDIA_PREVIOUS,
-  MEDIA_SEEK,
+  MEDIA_SEEK, // dx is the position in seconds
+  // MPRIS on Linux sets these too.
+  MEDIA_VOLUME, // dx is the volume slider's position, 0 to 1
+  MEDIA_SHUFFLE, // dx is 1 for on, 0 for off
+  MEDIA_REPEAT, // dx is a Player_Repeat
 } Media_Command;
 
 typedef enum {
@@ -189,6 +193,21 @@ typedef struct {
 } Now_Playing;
 _Static_assert(sizeof(Now_Playing) == 72, "Now_Playing size must match platform.odin");
 
+typedef enum {
+  PLAYER_REPEAT_OFF,
+  PLAYER_REPEAT_ALL,
+  PLAYER_REPEAT_ONE,
+} Player_Repeat;
+
+// The player bar's volume, shuffle and repeat, for the desktop's media
+// controls to show and set (MPRIS on Linux).
+typedef struct {
+  double volume; // the slider's position, 0 to 1
+  uint32_t shuffle; // 1 for on
+  uint32_t repeat; // Player_Repeat
+} Player_Controls;
+_Static_assert(sizeof(Player_Controls) == 16, "Player_Controls size must match platform.odin");
+
 // The focused text field, for the input method. text is NULL when no text
 // field has the focus.
 typedef struct {
@@ -271,8 +290,10 @@ typedef struct {
   // Linux, with WINDOW_FLAG_DECORATIONS: 1 asks the compositor to leave the
   // title bar to the app, 0 for its own. NULL elsewhere.
   void (*set_decorations)(uint32_t own);
+  // Linux: the player bar's controls, sent when they change. NULL elsewhere.
+  void (*set_player_controls)(const Player_Controls *controls);
 } Shell;
-_Static_assert(sizeof(Shell) == 88, "Shell size must match platform.odin");
+_Static_assert(sizeof(Shell) == 96, "Shell size must match platform.odin");
 
 // Frame_Input.window
 enum {
