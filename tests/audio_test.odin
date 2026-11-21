@@ -549,9 +549,14 @@ listener_outlives_the_player :: proc(t: ^testing.T) {
 		time.sleep(time.Millisecond)
 	}
 	audio.destroy(p)
+	// Wait for runs after the teardown, as long as a loaded machine or a
+	// sanitizer build needs to schedule the thread again.
 	after := sync.atomic_load(&l.runs)
-	time.sleep(20 * time.Millisecond)
-	testing.expect(t, sync.atomic_load(&l.runs) > after, "the listener ran on after the teardown")
+	start := time.tick_now()
+	for sync.atomic_load(&l.runs) <= after + 10 && time.tick_since(start) < 5 * time.Second {
+		time.sleep(time.Millisecond)
+	}
+	testing.expect(t, sync.atomic_load(&l.runs) > after + 10, "the listener ran on after the teardown")
 	sync.atomic_store(&l.stop, true)
 	thread.join(th)
 	thread.destroy(th)
