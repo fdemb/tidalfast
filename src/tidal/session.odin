@@ -29,7 +29,6 @@ Session :: struct {
 	expiry_time:          Maybe(time.Time),
 	session_id:           string,
 	country_code:         string,
-	locale:               string,
 	is_pkce:              bool,
 	user:                 Maybe(User),
 
@@ -84,6 +83,7 @@ session_create :: proc(
 	item_limit := 1000,
 	alac := true,
 	backoff := true,
+	locale := "",
 	allocator := context.allocator,
 ) -> ^Session {
 	s := new(Session, allocator)
@@ -93,6 +93,9 @@ session_create :: proc(
 	}
 	arena := vmem.arena_allocator(&s.arena)
 	s.config = config_make(quality, video_quality, item_limit, alac, backoff, arena)
+	if locale != "" {
+		s.config.locale = strings.clone(locale, arena)
+	}
 	// More Android User-Agents here: https://user-agents.net/browsers/android
 	s.user_agent = "Mozilla/5.0 (Linux; Android 12; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/91.0.4472.114 Safari/537.36"
 	s.client_version = "2025.7.16"
@@ -105,7 +108,7 @@ session_destroy :: proc(s: ^Session) {
 		return
 	}
 	curl_pool_destroy(s)
-	for str in ([]string{s.token_type, s.access_token, s.refresh_token, s.session_id, s.country_code, s.locale, s.backoff_reason}) {
+	for str in ([]string{s.token_type, s.access_token, s.refresh_token, s.session_id, s.country_code, s.backoff_reason}) {
 		delete(str, s.allocator)
 	}
 	vmem.arena_destroy(&s.arena)
@@ -120,7 +123,6 @@ Auth :: struct {
 	expiry_time:   Maybe(time.Time),
 	session_id:    string,
 	country_code:  string,
-	locale:        string,
 	is_pkce:       bool,
 	client_id:     string, // the OAuth client the tokens are for, which refreshes them
 	user_id:       i64, // 0 when no user is loaded
@@ -138,7 +140,6 @@ session_auth :: proc(s: ^Session, allocator := context.allocator) -> Auth {
 		expiry_time   = s.expiry_time,
 		session_id    = strings.clone(s.session_id, allocator),
 		country_code  = strings.clone(s.country_code, allocator),
-		locale        = strings.clone(s.locale, allocator),
 		is_pkce       = s.is_pkce,
 		epoch         = s.auth_epoch,
 	}
@@ -166,7 +167,6 @@ session_restore :: proc(s: ^Session, a: Auth) {
 	set_owned(s, &s.refresh_token, a.refresh_token)
 	set_owned(s, &s.session_id, a.session_id)
 	set_owned(s, &s.country_code, a.country_code)
-	set_owned(s, &s.locale, a.locale)
 	s.expiry_time = a.expiry_time
 	s.is_pkce = a.is_pkce
 	s.user = nil
@@ -181,7 +181,7 @@ session_restore :: proc(s: ^Session, a: Auth) {
 // store its tokens. Safe from any thread.
 session_clear_auth :: proc(s: ^Session) {
 	sync.guard(&s.mutex)
-	for f in ([]^string{&s.token_type, &s.access_token, &s.refresh_token, &s.session_id, &s.country_code, &s.locale}) {
+	for f in ([]^string{&s.token_type, &s.access_token, &s.refresh_token, &s.session_id, &s.country_code}) {
 		delete(f^, s.allocator)
 		f^ = ""
 	}
