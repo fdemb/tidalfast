@@ -81,6 +81,9 @@ ICON_CHECK :: "\ue182" // Icon
 ICON_HOUSE :: "\ue2c2" // Icon
 ICON_HOUSE_FILL :: "\ue2c2" // Icon_Fill
 ICON_SPEAKER_HIFI :: "\uea08" // Icon
+ICON_SPEAKER_HIGH :: "\ue44a" // Icon
+ICON_SPEAKER_LOW :: "\ue44c" // Icon
+ICON_SPEAKER_X :: "\ue45c" // Icon
 ICON_MAGNIFYING_GLASS :: "\ue30c" // Icon
 ICON_MAGNIFYING_GLASS_FILL :: "\ue30c" // Icon_Fill
 ICON_GEAR :: "\ue270" // Icon
