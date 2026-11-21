@@ -16,8 +16,10 @@ import "core:time"
 // one, token refresh, the device login and the parts of an artist page,
 // and records every request line.
 
+// A "gone" item is a track TIDAL can't play: counted, but left out of the
+// pages, as TIDAL does.
 Mock_Item :: struct {
-	kind: string, // "track" or "video"
+	kind: string, // "track", "video" or "gone"
 	id:   i64,
 }
 
@@ -133,6 +135,13 @@ mock_stop :: proc(m: ^Mock) {
 	delete(m.playback)
 	delete(m.answers)
 	delete(m.base_url, m.allocator)
+}
+
+// mock_set_items replaces the playlist's items, as an edit elsewhere would.
+mock_set_items :: proc(m: ^Mock, items: []Mock_Item) {
+	sync.guard(&m.mutex)
+	clear(&m.items)
+	append(&m.items, ..items)
 }
 
 @(private = "file")
@@ -496,14 +505,16 @@ mock_route :: proc(m: ^Mock, req: Mock_Request, target: string) -> (status: int,
 		b := strings.builder_make(context.temp_allocator)
 		fmt.sbprintf(&b, `{{"totalNumberOfItems":%d,"items":[`, tracks)
 		n := 0
+		first := true
 		for it in m.items {
-			if it.kind != "track" {
+			if it.kind == "video" {
 				continue
 			}
-			if n >= offset && n < offset + limit {
-				if n > offset {
+			if n >= offset && n < offset + limit && it.kind == "track" {
+				if !first {
 					strings.write_byte(&b, ',')
 				}
+				first = false
 				fmt.sbprintf(&b, `{{"id":%d,"title":"t%d","duration":200,"dateAdded":"2026-02-03T10:00:00.000+0000","artist":{{"id":1,"name":"A"}},"artists":[{{"id":1,"name":"A"}}],"album":{{"id":2,"title":"B","cover":""}}}}`, it.id, it.id)
 			}
 			n += 1
@@ -515,11 +526,16 @@ mock_route :: proc(m: ^Mock, req: Mock_Request, target: string) -> (status: int,
 		limit, _ := strconv.parse_int(req.query["limit"] or_else "1000")
 		b := strings.builder_make(context.temp_allocator)
 		fmt.sbprintf(&b, `{{"totalNumberOfItems":%d,"items":[`, len(m.items))
+		first := true
 		for i in offset ..< min(offset + limit, len(m.items)) {
-			if i > offset {
+			it := m.items[i]
+			if it.kind == "gone" {
+				continue
+			}
+			if !first {
 				strings.write_byte(&b, ',')
 			}
-			it := m.items[i]
+			first = false
 			fmt.sbprintf(&b, `{{"type":"%s","item":{{"id":%d,"title":"t%d"}}}}`, it.kind, it.id, it.id)
 		}
 		strings.write_string(&b, "]}")

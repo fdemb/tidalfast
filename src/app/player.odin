@@ -1140,6 +1140,10 @@ playback_update :: proc(s: ^State, events: []platform.Event) {
 		pb.cur.item = pb.index
 		if pb.next.serial != 0 {
 			pb.next.item = queue_place(pb, {pb.next.item, pb.next.track}, old_n)
+			// A preloaded track taken off the list is no longer next.
+			if pb.next.item < 0 || pb.entries[pb.next.item].id != pb.next.track {
+				next_drop(pb)
+			}
 		}
 		if pb.next_failed.serial != 0 {
 			pb.next_failed.item = queue_place(pb, {pb.next_failed.item, pb.next_failed.track}, old_n)

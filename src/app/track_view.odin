@@ -111,11 +111,14 @@ view_error :: proc(v: ^Track_View) -> string {
 	return ""
 }
 
-// Gap is where a page came back short before the end of its list: TIDAL
-// leaves out tracks that can't be played but still counts them. The rows
-// after it move up, so row i is at TIDAL's offset i plus the gaps before it.
+// Gap is where a page came back short: TIDAL leaves out tracks that can't
+// be played but still counts them. The rows after it move up, so row i is
+// at TIDAL's offset i plus the gaps before it. Which of the page's tracks
+// were left out TIDAL doesn't say, so a row in the page could be at any of
+// missing + 1 offsets (see view_item_index).
 Gap :: struct {
 	offset:  int, // the page's
+	limit:   int, // the offsets it spans
 	missing: int,
 }
 
@@ -360,6 +363,9 @@ view_add_rows :: proc(v: ^Track_View, offset, limit: int, rows: []Row, total := 
 	start := view_row_at(v, offset)
 	if !last && len(rows) < limit {
 		view_close_gap(v, offset, start, limit, len(rows))
+	} else if span := min(limit, total - offset); last && total >= 0 && len(rows) < span {
+		// The last page short of the total: nothing after it moves.
+		view_gap_add(v, offset, span, span - len(rows))
 	}
 	end := start + len(rows)
 	loading := view_loading(v)
@@ -424,6 +430,14 @@ view_close_gap :: proc(v: ^Track_View, offset, row, limit, got: int) {
 	for l in v.loaded[:min(v.count, len(v.loaded))] {
 		v.loaded_rows += int(l)
 	}
+	view_gap_add(v, offset, limit, missing)
+}
+
+// view_gap_add records the gap of the page at offset, in offset order.
+// Past GAPS_MAX it records nothing, and view_item_index no longer knows
+// where the rows are.
+@(private = "file")
+view_gap_add :: proc(v: ^Track_View, offset, limit, missing: int) {
 	if !v.has_arena || len(v.gaps) == GAPS_MAX {
 		return
 	}
@@ -434,7 +448,64 @@ view_close_gap :: proc(v: ^Track_View, offset, row, limit, got: int) {
 	n := len(v.gaps)
 	v.gaps = ([^]Gap)(&v.space[GAPS_AT])[:n + 1]
 	copy(v.gaps[i + 1:], v.gaps[i:n])
-	v.gaps[i] = {offset, missing}
+	v.gaps[i] = {offset, limit, missing}
+}
+
+// view_item_index is where row i of a done list sits among TIDAL's items,
+// as removing it by index needs: from lo to hi, which are the same unless
+// the row's page came back short. ok is false when the gaps aren't known,
+// as for a list read from its file or kept in memory, whose gaps went.
+view_item_index :: proc(v: ^Track_View, i: int) -> (lo, hi: int, ok: bool) {
+	missing := v.hint - v.count
+	if missing == 0 {
+		return i, i, true
+	}
+	known := 0
+	for g in v.gaps {
+		known += g.missing
+	}
+	if known != missing {
+		return
+	}
+	lo = i
+	extra, before := 0, 0
+	for g in v.gaps {
+		start := g.offset - before // the page's first row
+		if i >= start + g.limit - g.missing {
+			lo += g.missing
+		} else if i >= start {
+			extra = g.missing
+		}
+		before += g.missing
+	}
+	return lo, lo + extra, true
+}
+
+// view_remove_at takes row at out of a done list. index is where TIDAL had
+// it, so the gaps after it move up with the rows; -1 when that isn't known
+// forgets the gaps.
+view_remove_at :: proc(v: ^Track_View, at, index: int) -> bool {
+	n := min(v.count, len(v.rows))
+	if !v.has_arena || at < 0 || at >= n {
+		return false
+	}
+	copy(v.rows[at:], v.rows[at + 1:n])
+	v.loaded[n - 1] = false
+	v.count = n - 1
+	v.loaded_rows -= 1
+	v.moved += 1
+	v.hint = max(v.hint - 1, 0)
+	if index < 0 {
+		v.gaps = nil
+	}
+	for &g in v.gaps {
+		if g.offset > index {
+			g.offset -= 1
+		} else if index < g.offset + g.limit {
+			g.limit -= 1
+		}
+	}
+	return true
 }
 
 // view_request_pages keeps PAGES_IN_FLIGHT pages loading, for the open list

@@ -33,7 +33,7 @@ TIDALfast is a TIDAL player written from scratch in Odin.
 - **Gapless playback.** The next track downloads before the current one ends and plays straight after it, so live albums and DJ mixes play without a break.
 - **Bit-perfect output.** The app can play each track at its own sample rate and send your DAC the samples unchanged: through the CoreAudio HAL on macOS, PipeWire on Linux and WASAPI's exclusive mode on Windows. When a track can't play bit-perfect, the app tells you why.
 - **ReplayGain.** Albums played in order get album gain, and everything else gets track gain, so a playlist of singles plays at one level.
-- **Your library.** Playlists, Liked Songs and followed artists from your account. Drag a song onto a playlist to add it, or click its heart to like it.
+- **Your library.** Playlists, Liked Songs and followed artists from your account. Like a song with its heart or its menu, add it to one of your playlists by dragging it onto the playlist or from its menu, and take it off one of your playlists from its menu.
 - **Search and artist pages.** Results for songs, albums, artists and playlists show as you type. Artist pages have top tracks, albums, EPs and singles, appearances and similar artists.
 - **Media keys and Now Playing.** The keyboard's media keys and the system's media controls show the track and control playback: Control Center on macOS, MPRIS on Linux and the media overlay on Windows.
 - **Keyboard and VoiceOver.** Tab, the arrow keys and Enter reach every control, and VoiceOver reads them on macOS. Screen readers on Linux and Windows don't see them yet.

@@ -949,6 +949,9 @@ focus_arrow :: proc(u: ^State, axis: Axis, dir: int) -> bool {
 	if h, at := find_hit(u, u.focus); at >= 0 && .Focusable in h.flags {
 		group = h.group
 	}
+	if u.menu_open && axis == .Y {
+		return menu_arrow(u, dir)
+	}
 	if u.menu_open && group != u.menu {
 		for i := 0 if dir > 0 else u.hit_count - 1; i >= 0 && i < u.hit_count; i += dir {
 			h := u.hits[i]
@@ -1003,6 +1006,26 @@ focus_arrow :: proc(u: ^State, axis: Axis, dir: int) -> bool {
 	move_focus(u, best, true)
 	u.focus_reveal = true
 	return true
+}
+
+// menu_arrow moves the open menu's highlight to its next or previous item
+// in drawing order, which runs down the menu, into and out of a list that
+// scrolls inside it. With no item lit it lights the first or the last.
+@(private)
+menu_arrow :: proc(u: ^State, dir: int) -> bool {
+	_, at := find_hit(u, u.focus)
+	if at < 0 || !u.hits[at].in_menu {
+		at = -1 if dir > 0 else u.hit_count
+	}
+	for i := at + dir; i >= 0 && i < u.hit_count; i += dir {
+		h := u.hits[i]
+		if .Focusable in h.flags && h.in_menu {
+			move_focus(u, h.key, true)
+			u.focus_reveal = true
+			return true
+		}
+	}
+	return false
 }
 
 // find_hit is key's hit from the last frame and where it is in u.hits,

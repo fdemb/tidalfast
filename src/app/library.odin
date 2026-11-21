@@ -111,12 +111,16 @@ Library :: struct {
 	menu_row:      int, // the row the context menu is for
 	menu_track:    i64, // row_key of menu_row when the menu opened
 	menu_list:     u64, // list_gen when the menu opened
+	menu_page:     Track_Menu_Page,
 	list_gen:      u32, // goes up when a sidebar entry or another list opens
 	scrolled_gen:  u32, // the list_gen the track list's scroll offset is for
 	drop_target:   int, // the playlist under a dragged row this frame, -1 for none
 	status:        Status,
 	status_track:  int,
 	status_list:   int,
+	status_title:  Small, // a removal's track and playlist, whose row goes
+	status_name:   Small,
+	remove_serial: u32, // goes up with each removal, see remove_result
 	top_row:       int, // the first row in view, last frame
 	top_offset:    f32, // how far it was scrolled past
 	anchor_row:    int, // scroll this row to the top, -1 for none; see rows_moved
@@ -145,6 +149,16 @@ Status :: enum u8 {
 	Add_Failed,
 	Playing_Next,
 	Queued,
+	Removing,
+	Removed,
+	Remove_Failed,
+}
+
+// Track_Menu_Page is what the track menu shows: its actions, or the
+// playlists Add to playlist can add to.
+Track_Menu_Page :: enum u8 {
+	Actions,
+	Playlists,
 }
 
 PLAYLISTS := [?]string {
@@ -268,7 +282,7 @@ draw_library :: proc(s: ^State, w, h: f32) {
 		draw_status_bar(s)
 	}
 	draw_toast(s, w, h - status_bar_h(s) - (0 if s.blur_reference else PLAYER_BAR_H))
-	draw_track_menu(s)
+	draw_track_menu(s, h)
 	draw_drag_ghost(s)
 	library_shortcuts(s)
 }
@@ -430,12 +444,16 @@ draw_playlist_row :: proc(s: ^State, i: int) {
 	sidebar_selected(current)
 	item := ui.row(cat("##playlist", num(i)), {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects, .Draw_Border, .Instant_Hover}, ui.fill(), ui.px(PLAYLIST_ROW_H - PLAYLIST_GAP))
 	ui.accessible(item, .Row, cat(entry.name, ", ", entry.subtitle), selected = current)
-	if ui.drop_hover(item) {
-		item.border_color = ACCENT
-		lib.drop_target = i
-	}
-	if track, ok := ui.dropped(item); ok {
-		add_to_list(s, int(track), i)
+	// Liked Songs likes a dropped row; only the user's own playlists take
+	// one.
+	if i == 0 || playlist_editable(s, i) {
+		if ui.drop_hover(item) {
+			item.border_color = ACCENT
+			lib.drop_target = i
+		}
+		if track, ok := ui.dropped(item); ok {
+			add_to_list(s, int(track), i)
+		}
 	}
 	sig := ui.signal(item)
 	if sig.clicked {
@@ -975,6 +993,7 @@ open_track_menu :: proc(s: ^State, i: int, pos: [2]f32) {
 	lib.menu_row = i
 	lib.menu_track = row_key(s, i)
 	lib.menu_list = list_gen(s)
+	lib.menu_page = .Actions
 	ui.open_menu("track_menu", pos)
 }
 
@@ -989,55 +1008,130 @@ track_menu_row :: proc(s: ^State) -> int {
 }
 
 // draw_track_menu offers what the row's data allows: the album and artist
-// need their ids (the fake data goes by name), the link a TIDAL track id.
-// Its actions wait for the end of the frame (see Pending): the player bar
+// need their ids (the fake data goes by name), the link a TIDAL track id,
+// the heart and the playlists that or a fake row. Its actions wait for the
+// end of the frame
+// (see Pending) where they free what the frame borrows: the player bar
 // built above it shows the queue that Play replaces. It closes once its
-// row is gone, and does nothing while it fades out.
-draw_track_menu :: proc(s: ^State) {
+// row is gone, and does nothing while it fades out. Add to playlist shows
+// the playlists in the menu's place (draw_playlist_chooser), since menus
+// have no submenus; h is the window's height, which the chooser stays in.
+draw_track_menu :: proc(s: ^State, h: f32) {
+	lib := &s.library
 	i := track_menu_row(s)
 	if i < 0 && ui.menu_is_open("track_menu") {
 		ui.close_menu()
 	}
 	row := view_row(s, i)
+	page := lib.menu_page
+	turned: ui.Signal
 	if ui.menu("track_menu") {
 		ui.text_style(.Regular, 13, TEXT)
-		if ui.menu_item("Play").clicked && i >= 0 {
-			pending_set(s, Play_Row{index = i})
+		if page == .Playlists {
+			turned = draw_playlist_chooser(s, i, h)
+		} else {
+			turned = draw_track_actions(s, i, row)
 		}
-		if row_playable(s, i) {
-			if ui.menu_item("Play next").clicked {
-				pending_set(s, Queue_Row{index = i, next = true})
-			}
-			if ui.menu_item("Add to queue").clicked {
-				pending_set(s, Queue_Row{index = i})
-			}
+	}
+	if turned.clicked {
+		lib.menu_page = .Actions if page == .Playlists else .Playlists
+		ui.menu_replaced(turned.keyboard)
+	}
+}
+
+// draw_track_actions is the track menu's first page. It returns the signal
+// of Add to playlist, which turns to the chooser.
+@(private = "file")
+draw_track_actions :: proc(s: ^State, i: int, row: ^Row) -> (turn: ui.Signal) {
+	if ui.menu_item("Play").clicked && i >= 0 {
+		pending_set(s, Play_Row{index = i})
+	}
+	if row_playable(s, i) {
+		if ui.menu_item("Play next").clicked {
+			pending_set(s, Queue_Row{index = i, next = true})
 		}
-		fake := s.data.fake
-		if row != nil && (fake || row.album_id != 0 || first_artist(row.artists) != 0) {
-			ui.menu_separator()
+		if ui.menu_item("Add to queue").clicked {
+			pending_set(s, Queue_Row{index = i})
 		}
-		if row != nil && (fake || row.album_id != 0) && ui.menu_item("Go to album").clicked {
-			go_to_album(s, i)
+	}
+	fake := s.data.fake
+	if row != nil && (fake || row.id > 0) {
+		ui.menu_separator()
+		// The heart's own path and words, so the row's heart, the player
+		// bar's and Liked Songs change as for a click on it.
+		key := row_key(s, i)
+		liked := liked_has(&s.data, key)
+		if ui.menu_item("Remove from Liked Songs###like" if liked else "Save to Liked Songs###like").clicked {
+			liked_toggle(s, key)
+			ui.data_changed() // the rows above drew the old heart
 		}
-		if row != nil && (fake || len(row.artists) == 1) && ui.menu_item("Go to artist").clicked {
-			go_to_artist(s, i)
+		if editable_count(s) > 0 {
+			turn = ui.menu_item("Add to playlist", keep_open = true)
 		}
-		// A song by several artists offers each of them.
-		if row != nil && len(row.artists) > 1 {
-			for a, k in row.artists {
-				if a.id != 0 && ui.menu_item(fmt.tprintf("Go to %s###artist%d", artist_name(row.artist, a), k)).clicked {
-					go_to_artist(s, i, k)
-				}
-			}
+		if _, _, ok := remove_place(s, i); ok && ui.menu_item("Remove from this playlist").clicked {
+			remove_from_list(s, i)
 		}
-		if row != nil && row.id > 0 {
-			ui.menu_separator()
-			if ui.menu_item("Copy song link").clicked {
-				ui.copy_to_clipboard(track_link(row.id))
-				set_status(s, .Copied, i)
+	}
+	if row != nil && (fake || row.album_id != 0 || first_artist(row.artists) != 0) {
+		ui.menu_separator()
+	}
+	if row != nil && (fake || row.album_id != 0) && ui.menu_item("Go to album").clicked {
+		go_to_album(s, i)
+	}
+	if row != nil && (fake || len(row.artists) == 1) && ui.menu_item("Go to artist").clicked {
+		go_to_artist(s, i)
+	}
+	// A song by several artists offers each of them.
+	if row != nil && len(row.artists) > 1 {
+		for a, k in row.artists {
+			if a.id != 0 && ui.menu_item(fmt.tprintf("Go to %s###artist%d", artist_name(row.artist, a), k)).clicked {
+				go_to_artist(s, i, k)
 			}
 		}
 	}
+	if row != nil && row.id > 0 {
+		ui.menu_separator()
+		if ui.menu_item("Copy song link").clicked {
+			ui.copy_to_clipboard(track_link(row.id))
+			set_status(s, .Copied, i)
+		}
+	}
+	return
+}
+
+// draw_playlist_chooser is the track menu's second page: Back, then the
+// user's own playlists in the sidebar's order. When they don't fit in the
+// window they scroll inside the menu, which the keyboard follows. A click
+// adds row i to one as a drop on it does. It returns Back's signal.
+@(private = "file")
+draw_playlist_chooser :: proc(s: ^State, i: int, h: f32) -> ui.Signal {
+	back := ui.menu_item("Back###chooser_back", keep_open = true)
+	ui.menu_separator()
+	// At most CHOOSER_ROWS show, fewer where the window is shorter, since
+	// the menu keeps MENU_MARGIN from its edges.
+	room := h - 2 * MENU_MARGIN - 2 * ui.MENU_PAD - ui.MENU_ITEM_H - ui.MENU_SEPARATOR_H
+	list_h := max(min(f32(min(editable_count(s), CHOOSER_ROWS)) * ui.MENU_ITEM_H, room), ui.MENU_ITEM_H)
+	{
+		ui.scroll_view("track_menu_playlists", ui.fill(), ui.px(list_h))
+		for e in 1 ..< sidebar_count(s) {
+			if playlist_editable(s, e) && ui.menu_item(cat(sidebar_entry(s, e).name, "###add", num(e))).clicked && i >= 0 {
+				add_to_list(s, i, e)
+			}
+		}
+	}
+	return back
+}
+
+MENU_MARGIN :: 8 // fit_floating's
+CHOOSER_ROWS :: 12
+
+// editable_count is how many of the sidebar's playlists the user can add to.
+editable_count :: proc(s: ^State) -> int {
+	n := 0
+	for e in 1 ..< sidebar_count(s) {
+		n += int(playlist_editable(s, e))
+	}
+	return n
 }
 
 // draw_drag_ghost follows the mouse with the dragged row's title.
@@ -1395,6 +1489,9 @@ status_text :: proc(s: ^State) -> string {
 	if lib.status == .Copied_Page {
 		return fmt.tprintf("Copied the link to %s", view_title(s))
 	}
+	if lib.status in REMOVE_STATUSES {
+		return remove_text(s)
+	}
 	t := view_row(s, lib.status_track)
 	if lib.status == .None || t == nil {
 		return ""
@@ -1415,7 +1512,22 @@ status_text :: proc(s: ^State) -> string {
 		return fmt.tprintf("Playing %s next", t.title)
 	case .Queued:
 		return fmt.tprintf("Added %s to the queue", t.title)
-	case .Copied_Page:
+	case .Copied_Page, .Removing, .Removed, .Remove_Failed:
+	}
+	return ""
+}
+
+// remove_text is the status line for a removal, from the names it kept.
+remove_text :: proc(s: ^State) -> string {
+	lib := &s.library
+	title, name := small_str(&lib.status_title), small_str(&lib.status_name)
+	#partial switch lib.status {
+	case .Removing:
+		return fmt.tprintf("Removing %s from %s…", title, name)
+	case .Removed:
+		return fmt.tprintf("Removed %s from %s", title, name)
+	case .Remove_Failed:
+		return fmt.tprintf("Couldn't remove %s from %s", title, name)
 	}
 	return ""
 }

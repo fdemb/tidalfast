@@ -104,6 +104,7 @@ Data :: struct {
 	queue_view:     u32,
 	next_gen:       u32, // the last Track_View.gen handed out
 	lists:          Lists, // closed lists and the disk cache, see lists.odin
+	removing:       bool, // a Remove_Track job is out, see remove_from_list
 	liked:          Liked_Set, // the liked track ids the hearts show, see liked.odin
 	followed:       Followed_Set, // the followed artist ids the Follow buttons show, see followed.odin
 	artists:        Artist_Cache, // artist pages, see artist_data.odin
@@ -482,6 +483,7 @@ account_end :: proc(s: ^State) {
 	artist_clear(d)
 	home_clear(d)
 	d.profile = {}
+	d.removing = false
 	view_close(d)
 	queued_drop(d)
 	lists_clear(d)
@@ -583,6 +585,8 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 		disk_result(s, res, p)
 	case Add_Track_Job:
 		add_result(s, res, p)
+	case Remove_Track_Job:
+		remove_result(s, res, p)
 	case Liked_Ids_Job:
 		liked_ids_result(d, res, failed)
 		followed_ids_result(d, res, failed)
