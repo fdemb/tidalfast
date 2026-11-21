@@ -383,6 +383,56 @@ media_sets_the_controls :: proc(t: ^testing.T) {
 	testing.expect_value(t, controls_seen.shuffle, false)
 }
 
+@(private = "file")
+mute_controls_seen: platform.Player_Controls
+@(private = "file")
+mute_controls_calls: int
+
+@(private = "file")
+record_mute_controls :: proc "c" (c: ^platform.Player_Controls) {
+	mute_controls_seen = c^
+	mute_controls_calls += 1
+}
+
+// The desktop's controls get the volume the app plays at: 0 while muted,
+// the level again after. Muting changes only what they show, not the
+// level, and a volume from the desktop while muted unmutes at it, as the
+// slider does.
+@(test)
+media_controls_follow_the_mute :: proc(t: ^testing.T) {
+	s := fake_player_state({{title = "One", seconds = 30}})
+	defer free(s)
+	defer app.playback_shutdown(s)
+	s.playback.set_controls = record_mute_controls
+	s.settings.volume = 0.7
+
+	media(s, .None)
+	testing.expect_value(t, mute_controls_seen.volume, f64(f32(0.7)))
+	calls := mute_controls_calls
+	app.playback_toggle_mute(s)
+	media(s, .None)
+	testing.expect_value(t, mute_controls_seen.volume, 0)
+	testing.expect_value(t, mute_controls_calls, calls + 1)
+	testing.expect_value(t, s.settings.volume, 0.7)
+	app.playback_toggle_mute(s)
+	media(s, .None)
+	testing.expect_value(t, mute_controls_seen.volume, f64(f32(0.7)))
+	testing.expect_value(t, mute_controls_calls, calls + 2)
+	testing.expect(t, !s.settings.muted)
+
+	app.playback_toggle_mute(s)
+	media(s, .Volume, 0.4)
+	testing.expect(t, !s.settings.muted, "a volume from the desktop unmutes")
+	testing.expectf(t, abs(s.settings.volume - 0.4) < 1e-6, "volume %v", s.settings.volume)
+	testing.expectf(t, abs(mute_controls_seen.volume - 0.4) < 1e-6, "reported %v", mute_controls_seen.volume)
+
+	// 0 from the desktop sets the level to 0, as dragging there does.
+	media(s, .Volume, 0)
+	testing.expect(t, !s.settings.muted)
+	testing.expect_value(t, s.settings.volume, 0)
+	testing.expect_value(t, mute_controls_seen.volume, 0)
+}
+
 // titles plays the queue on with next n times from where it is, and gives
 // the title of each track that plays, starting with the current one.
 @(private = "file")
