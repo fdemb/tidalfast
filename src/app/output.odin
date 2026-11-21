@@ -109,6 +109,9 @@ signal_path :: proc(s: ^State) -> [4]Path_Step {
 	path[1] = {"TIDALfast", "No volume or ReplayGain", .Exact if open else .None}
 	if !on {
 		path[1] = {"TIDALfast", "Applies volume and ReplayGain", .Expected if open else .None}
+		if s.settings.replay_gain == .Off {
+			path[1].detail = "Applies volume"
+		}
 	}
 
 	path[2] = {audio.MIXER_NAME, "Not open yet", .None}

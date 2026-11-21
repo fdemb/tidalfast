@@ -467,7 +467,16 @@ ci_check_file :: proc(t: ^testing.T, kind: Ci_File, data: []u8, allocator: mem.A
 	case .List:
 		_, rows, err = app.list_decode(data, .Playlist, "uuid-1", allocator)
 	case .Queue:
-		_, rows, err = app.queue_decode(data, allocator)
+		after: []i64
+		_, rows, after, err = app.queue_decode(data, allocator)
+		if err == .None {
+			// Each extra plays after an earlier row, or at the end.
+			first := len(rows) - len(after)
+			testing.expect(t, first >= 0)
+			for a, j in after {
+				testing.expect(t, a >= -1 && a < i64(first + j))
+			}
+		}
 	case .Sidebar:
 		items: []app.Sidebar_Item
 		_, items, err = app.sidebar_decode(data, allocator)
@@ -488,10 +497,17 @@ ci_check_file :: proc(t: ^testing.T, kind: Ci_File, data: []u8, allocator: mem.A
 	return err
 }
 
+// Where the list starts in the queue file below: the header, the extras'
+// count and their two anchors padded to 16 bytes.
+@(private = "file")
+CI_QUEUE_PREFIX :: size_of(app.Queue_Header) + size_of(app.Queue_Extras) + 16
+
 @(private = "file")
 ci_seal :: proc(kind: Ci_File, data: []u8) {
 	if kind == .Queue {
-		app.queue_seal(data)
+		// queue_seal trusts the extras count it wrote, so the sum goes over
+		// the list where the good file has it, whatever the count now says.
+		app.file_seal(data[CI_QUEUE_PREFIX:])
 	} else {
 		app.file_seal(data)
 	}
@@ -515,7 +531,7 @@ corrupt_list_files :: proc(t: ^testing.T) {
 	files := [Ci_File][]u8 {
 		.List    = app.rows_encode(.Playlist, "uuid-1", rows, 1760000000, {}, 3, context.temp_allocator),
 		.Sidebar = app.sidebar_encode(&sb, 5, context.temp_allocator),
-		.Queue   = app.queue_encode({index = 1, sample = 441000, rate = 44100}, rows, context.temp_allocator),
+		.Queue   = app.queue_encode({index = 1, sample = 441000, rate = 44100}, rows, context.temp_allocator, []i64{0, 1}),
 	}
 	rng := Ci_Rng{0x0F11_E5ED}
 	for file, kind in files {
@@ -558,12 +574,13 @@ corrupt_list_files :: proc(t: ^testing.T) {
 
 @(test)
 corrupt_settings :: proc(t: ^testing.T) {
-	good := `{"bit_perfect": true, "scrollbars": "Docked", "bar": "Solid", "device_change": {"uid": "BuiltInSpeakerDevice", "orig_rate": 48000, "orig_format": {"sample_rate": 48000, "format_id": 1819304813, "format_flags": 9, "bytes_per_packet": 8, "frames_per_packet": 1, "bytes_per_frame": 8, "channels": 2, "bits": 32, "reserved": 0}, "rate": 96000}, "volume": 0.5, "shuffle": true, "repeat": "One", "title_bar": "Own", "still_covers": true, "button_layout": "close,minimize:maximize"}`
+	good := `{"bit_perfect": true, "scrollbars": "Docked", "bar": "Solid", "device_change": {"uid": "BuiltInSpeakerDevice", "orig_rate": 48000, "orig_format": {"sample_rate": 48000, "format_id": 1819304813, "format_flags": 9, "bytes_per_packet": 8, "frames_per_packet": 1, "bytes_per_frame": 8, "channels": 2, "bits": 32, "reserved": 0}, "rate": 96000}, "volume": 0.5, "shuffle": true, "repeat": "One", "replay_gain": "Album", "title_bar": "Own", "still_covers": true, "button_layout": "close,minimize:maximize"}`
 	check :: proc(t: ^testing.T, data: []u8) -> app.Settings {
 		st, _ := app.settings_decode_json(data)
 		testing.expectf(t, st.scrollbars >= min(type_of(st.scrollbars)) && st.scrollbars <= max(type_of(st.scrollbars)), "scrollbars %d", int(st.scrollbars))
 		testing.expectf(t, st.bar >= min(app.Player_Bar) && st.bar <= max(app.Player_Bar), "bar %d", int(st.bar))
 		testing.expectf(t, st.repeat >= min(audio.Repeat) && st.repeat <= max(audio.Repeat), "repeat %d", int(st.repeat))
+		testing.expectf(t, st.replay_gain >= min(audio.Gain_Setting) && st.replay_gain <= max(audio.Gain_Setting), "replay gain %d", int(st.replay_gain))
 		testing.expectf(t, st.title_bar >= min(app.Title_Bar) && st.title_bar <= max(app.Title_Bar), "title bar %d", int(st.title_bar))
 		testing.expectf(t, st.volume >= 0 && st.volume <= 1, "volume %v", st.volume)
 		testing.expectf(t, st.device.rate == 0 || (st.device.rate > 0 && st.device.orig_rate > 0), "device rates %v %v", st.device.rate, st.device.orig_rate)
@@ -572,6 +589,7 @@ corrupt_settings :: proc(t: ^testing.T) {
 	}
 	st := check(t, transmute([]u8)good)
 	testing.expect_value(t, st.repeat, audio.Repeat.One)
+	testing.expect_value(t, st.replay_gain, audio.Gain_Setting.Album)
 	testing.expect_value(t, st.device.rate, 96000)
 	for n in 0 ..< len(good) {
 		check(t, transmute([]u8)good[:n])
@@ -592,6 +610,13 @@ corrupt_settings :: proc(t: ^testing.T) {
 		`{"scrollbars": 200}`,
 		`{"bar": 2}`,
 		`{"title_bar": 3}`,
+		`{"replay_gain": 9}`,
+		`{"replay_gain": -1}`,
+		`{"replay_gain": 255}`,
+		`{"replay_gain": "Loud"}`,
+		`{"replay_gain": true}`,
+		`{"replay_gain": [1]}`,
+		`{"replay_gain": {"name": "Album"}}`,
 		`{"volume": NaN}`,
 		`{"volume": Infinity}`,
 		`{"volume": 1e999}`,
@@ -608,7 +633,7 @@ corrupt_settings :: proc(t: ^testing.T) {
 	}
 	for src in hostile {
 		st = check(t, transmute([]u8)src)
-		testing.expectf(t, st.repeat == .Off && st.scrollbars == .Floating && st.bar == .Blurred && st.title_bar == .Automatic && st.device.rate == 0, "%s: %v", src, st)
+		testing.expectf(t, st.repeat == .Off && st.replay_gain == .Automatic && st.scrollbars == .Floating && st.bar == .Blurred && st.title_bar == .Automatic && st.device.rate == 0, "%s: %v", src, st)
 	}
 }
 
