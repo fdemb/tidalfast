@@ -41,6 +41,8 @@ The PKCE scope is `r_usr+w_usr+w_sub`, as tidalapi sends it. mare-player found T
 
 ## Keychain
 
+This section is about macOS. On Linux the login goes in the Secret Service and on Windows in the Credential Manager ([Linux](linux.md), [Windows](windows.md)).
+
 The tokens go in the login Keychain as one generic password item: service `tidalfast`, account `auth`, label `TIDALfast`. Its data is JSON: token type, access and refresh tokens, expiry, session id, country code and user id. Nothing goes in a file.
 
 `src/os_services/os_services_darwin.odin` calls Security's `SecItemAdd`, `SecItemUpdate`, `SecItemCopyMatching` and `SecItemDelete` directly from Odin with hand-written foreign declarations, along with the CoreFoundation calls to build their dictionaries. These are plain C functions, so they don't hit the compiler's Obj-C bug, and going through the shell would have meant changing the shared ABI for no gain. They're thread safe, which matters because the tokens are saved from workers.
@@ -67,6 +69,14 @@ Everything goes through TIDAL's v1 API at `api.tidal.com/v1` using what `src/tid
 - `pages/home` for the Home page, see The home feed.
 
 The plan said v2 (`openapi.tidal.com`). The reference clients show v1 still works with a device-code token: lumitide logs in the same way and reads `users/{id}/favorites/tracks`, `users/{id}/playlists` and `playlists/{id}/items` from v1, and tidalapi (behind high-tide) has all three endpoints above. riptide moved to v2 and says it works, but riptide still needs v1 for playback, so v1 isn't going away for us either. v2 is JSON:API, where a playlist's tracks come back as references that need `include` and a second lookup per page, and `src/tidal` has none of that yet. v1 returns whole tracks with their album covers in one response. If TIDAL turns these endpoints off, `user_playlist_and_favorite_playlists`, `favorites_tracks` and `playlist_tracks` are the three calls to replace.
+
+## Language
+
+TIDAL writes its editorial text (page and shelf titles, genre and mood names, mix descriptions) in the language of the `locale` parameter, an `ll_CC` tag such as `pl_PL`. `src/tidal` sends `Config.locale` with every v1 request, as TIDAL's web player does, and not to v2 or to absolute URLs; a request's own `locale` wins. The caller gives it to `tidal.session_create(locale = ...)`, and it's `en_US` when that's empty. It isn't login state, so the Keychain item doesn't hold it and a sign-out keeps it.
+
+The app picks it once, in `data_start` (`session_locale` in `data.odin`), and logs it at info level: `TIDALFAST_LOCALE` if set, `en_US` against the mock, so mock runs, the tests and `measure` don't depend on the machine, and otherwise `sys.locale()`. The fake data sends no requests and never asks. `sys.locale()` reads `LC_ALL`, then `LC_MESSAGES`, then `LANG` on Linux, the first preferred language in System Settings on macOS (CoreFoundation's `CFLocaleCopyPreferredLanguages`, or the current locale's identifier when there's none), and `GetUserDefaultLocaleName` on Windows. `sys.locale_normalize` turns what they give into `ll_CC`: it drops the encoding and modifier (`pl_PL.UTF-8@euro` is `pl_PL`), takes `-` for `_`, and skips a script (`zh-Hans-CN` is `zh_CN`). A language with no region gets the one CLDR's likely subtags pair it with, for about thirty languages (`en` is `en_US`, `de` is `de_DE`, `pt` is `pt_BR`), since a guessed region is closer to what the user reads than English. Anything else, `C`, `POSIX`, a three-letter language or an empty value included, is `en_US`.
+
+A new locale takes effect at the next start. The home feed lives in memory only, so it's in the new language from then on. The list cache keeps track lists, whose titles TIDAL doesn't translate, and it isn't keyed by locale.
 
 ## Jobs and threads
 

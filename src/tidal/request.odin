@@ -203,7 +203,7 @@ basic_request :: proc(s: ^Session, r: Request, allocator := context.allocator) -
 
 	refresh_since := sync.atomic_load(&s.refresh_count)
 	auth := session_auth(s, tmp)
-	params := make([dynamic]Param, 0, len(r.params) + 3, tmp)
+	params := make([dynamic]Param, 0, len(r.params) + 4, tmp)
 	if auth.session_id != "" {
 		append(&params, Param{"sessionId", auth.session_id})
 	}
@@ -211,6 +211,10 @@ basic_request :: proc(s: ^Session, r: Request, allocator := context.allocator) -
 		append(&params, Param{"countryCode", auth.country_code})
 	}
 	append(&params, Param{"limit", fmt.tprint(s.config.item_limit)})
+	base := r.base_url if r.base_url != "" else s.config.api_v1_location
+	if base == s.config.api_v1_location && !strings.contains(r.path, "://") && s.config.locale != "" {
+		append(&params, Param{"locale", s.config.locale})
+	}
 
 	// A path may carry its own query (page links do). Its values override the
 	// defaults, and r.params override both.
@@ -242,7 +246,6 @@ basic_request :: proc(s: ^Session, r: Request, allocator := context.allocator) -
 		}
 	}
 
-	base := r.base_url if r.base_url != "" else s.config.api_v1_location
 	url := join_url(base, path, tmp)
 	url = fmt.tprintf("%s?%s", url, encode_params(params[:], tmp))
 	body := encode_params(r.data, tmp)

@@ -86,7 +86,6 @@ Stored_Auth :: struct {
 	expiry:        i64, // unix seconds, 0 for none
 	session_id:    string,
 	country_code:  string,
-	locale:        string,
 	user_id:       i64,
 	is_pkce:       bool,
 	client_id:     string, // the client the tokens belong to; refreshes must use it
@@ -99,7 +98,6 @@ auth_marshal :: proc(a: tidal.Auth, allocator: runtime.Allocator) -> []u8 {
 		refresh_token = a.refresh_token,
 		session_id    = a.session_id,
 		country_code  = a.country_code,
-		locale        = a.locale,
 		user_id       = a.user_id,
 		is_pkce       = a.is_pkce,
 		client_id     = a.client_id,
@@ -140,7 +138,6 @@ auth_restore :: proc(s: ^tidal.Session, data: []u8) -> bool {
 		refresh_token = st.refresh_token,
 		session_id    = st.session_id,
 		country_code  = st.country_code,
-		locale        = st.locale,
 		is_pkce       = st.is_pkce,
 		user_id       = st.user_id,
 		user_kind     = .Logged_In_User,

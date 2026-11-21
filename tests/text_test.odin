@@ -438,6 +438,55 @@ test_shape_direction :: proc(t: ^testing.T) {
 	testing.expect_value(t, run.glyphs[0].cluster, 0)
 }
 
+// Brackets pair by rule N0 around text of either direction, nested or
+// not, and a bracket without a pair, or one BidiBrackets.txt doesn't pair,
+// is an ordinary neutral. Each case lists the codepoint each glyph draws,
+// from left to right.
+@(test)
+test_shape_brackets :: proc(t: ^testing.T) {
+	s: Shaper
+	context.allocator = shaper_init(&s)
+	defer shaper_destroy(&s)
+
+	Case :: struct {
+		s:     string,
+		rtl:   bool,
+		order: []u32,
+	}
+	cases := []Case{
+		{"abc (שלום) def", false, {0, 1, 2, 3, 4, 8, 7, 6, 5, 9, 10, 11, 12, 13}},
+		{"שלום (abc) עולם", true, {14, 13, 12, 11, 10, 9, 6, 7, 8, 5, 4, 3, 2, 1, 0}},
+		{"a (ש [ב] ג) z", false, {0, 1, 2, 9, 8, 7, 6, 5, 4, 3, 10, 11, 12}},
+		{"abc (שלום", false, {0, 1, 2, 3, 4, 8, 7, 6, 5}},
+		{"שלום (abc", true, {6, 7, 8, 5, 4, 3, 2, 1, 0}},
+		{"Song (Remix) [Live] {x}", false, {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22}},
+		{"שלום （Remix） 2024", true, {13, 14, 15, 16, 12, 11, 6, 7, 8, 9, 10, 5, 4, 3, 2, 1, 0}},
+		{"שלום 「Remix」 2024", true, {13, 14, 15, 16, 12, 11, 6, 7, 8, 9, 10, 5, 4, 3, 2, 1, 0}},
+		{"שלום 【Live】 2024", true, {12, 13, 14, 15, 11, 10, 6, 7, 8, 9, 5, 4, 3, 2, 1, 0}},
+		{"abc שלום <עולם> def", false, {0, 1, 2, 3, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 14, 15, 16, 17, 18}},
+	}
+	for c in cases {
+		run := shape_loaded(&s, .Regular, 13, c.s)
+		got := make([]u32, len(run.glyphs), context.temp_allocator)
+		for g, i in run.glyphs {
+			got[i] = g.cluster
+		}
+		testing.expectf(t, run.rtl == c.rtl && slice_equal(got, c.order), "%q: rtl %v, order %v", c.s, run.rtl, got)
+	}
+	// The fullwidth pair goes right to left, so each bracket draws as the
+	// other.
+	run := shape_loaded(&s, .Regular, 13, "שלום （Remix） 2024")
+	if testing.expect_value(t, len(run.glyphs), 17) {
+		for c in ([]struct {
+				at:   int,
+				draw: rune,
+			}{{5, 0xff08}, {11, 0xff09}}) {
+			g := run.glyphs[c.at]
+			testing.expect_value(t, g.id, u16(kbts.CodepointToGlyphId(&s.state.faces[g.face].kb, c.draw)))
+		}
+	}
+}
+
 // Truncating at every width keeps or drops whole clusters, in both
 // directions and from both shapers (Hebrew, Latin marks and, under SF Pro,
 // Arabic with harakat through kb_text_shape; emoji sequences through
