@@ -144,6 +144,8 @@ Status :: enum u8 {
 	Adding,
 	Already_In,
 	Add_Failed,
+	Playing_Next,
+	Queued,
 }
 
 PLAYLISTS := [?]string {
@@ -1032,6 +1034,14 @@ draw_track_menu :: proc(s: ^State) {
 		if ui.menu_item("Play").clicked && i >= 0 {
 			pending_set(s, Play_Row{index = i})
 		}
+		if row_playable(s, i) {
+			if ui.menu_item("Play next").clicked {
+				pending_set(s, Queue_Row{index = i, next = true})
+			}
+			if ui.menu_item("Add to queue").clicked {
+				pending_set(s, Queue_Row{index = i})
+			}
+		}
 		fake := s.data.fake
 		if row != nil && (fake || row.album_id != 0 || first_artist(row.artists) != 0) {
 			ui.menu_separator()
@@ -1431,6 +1441,10 @@ status_text :: proc(s: ^State) -> string {
 		return fmt.tprintf("Couldn't add %s to %s", t.title, sidebar_entry(s, lib.status_list).name)
 	case .Copied:
 		return fmt.tprintf("Copied the link to %s", t.title)
+	case .Playing_Next:
+		return fmt.tprintf("Playing %s next", t.title)
+	case .Queued:
+		return fmt.tprintf("Added %s to the queue", t.title)
 	case .Copied_Page:
 	}
 	return ""
@@ -1453,6 +1467,7 @@ Pending :: union {
 	Search_Now,
 	Close_Search,
 	Play_Row,
+	Queue_Row,
 	Go_Back,
 	Go_Forward,
 	Log_Out,
@@ -1476,6 +1491,13 @@ Search_Now :: struct {
 Play_Row :: struct {
 	index: int,
 	order: Play_Order,
+}
+
+// Queue_Row is Play next (next set) or Add to queue on row index of the
+// open list. It waits like Play: a queue it starts replaces the old one.
+Queue_Row :: struct {
+	index: int,
+	next:  bool,
 }
 
 Go_Back :: struct {}
@@ -1607,6 +1629,11 @@ apply_pending :: proc(s: ^State) -> bool {
 		if !play_ordered(s, p) {
 			return false
 		}
+	case Queue_Row:
+		if !playback_queue_row(s, p.index, p.next) {
+			return false
+		}
+		set_status(s, .Playing_Next if p.next else .Queued, p.index)
 	case Go_Back:
 		if !history_step(s, -1) {
 			return false

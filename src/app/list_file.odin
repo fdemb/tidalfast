@@ -343,13 +343,15 @@ file_read :: proc(path: string, allocator: runtime.Allocator) -> ([]u8, bool) {
 	return buf, true
 }
 
-// The queue's file (see player.odin) is a Queue_Header, then the queue as
-// a list file of source .Search and id "queue". The header is a multiple
-// of 16 bytes, so the list file after it is as aligned as file_read's
-// buffer.
+// The queue's file (see player.odin) is a Queue_Header, then a
+// Queue_Extras with the anchors of the queue's extras (its Play next and
+// Add to queue tracks), then the queue as a list file of source .Search
+// and id "queue", with the extras last. Format 1 had no Queue_Extras. The
+// header and the anchors are padded to 16 bytes, so the list file after
+// them is as aligned as file_read's buffer.
 
 QUEUE_MAGIC :: 0x5551_4654 // "TFQU"
-QUEUE_FORMAT :: 1
+QUEUE_FORMAT :: 2
 
 Queue_Header :: struct {
 	magic:    u32,
@@ -362,6 +364,15 @@ Queue_Header :: struct {
 }
 
 #assert(size_of(Queue_Header) % 16 == 0)
+
+// Queue_Extras is how many of the rows are extras. An i64 for each follows
+// it: the row the extra plays after, or -1 for the end of the play order.
+Queue_Extras :: struct {
+	count: i64,
+	_:     i64,
+}
+
+#assert(size_of(Queue_Extras) % 16 == 0)
 
 QUEUE_POSITION_MAGIC :: 0x5051_4654 // "TFQP"
 
@@ -377,19 +388,30 @@ Queue_Position :: struct {
 	rate:   i64,
 }
 
+// queue_prefix is where the list file starts in a queue file of the
+// current format with extras extras.
+@(private = "file")
+queue_prefix :: proc(extras: int) -> int {
+	return size_of(Queue_Header) + size_of(Queue_Extras) + (extras * size_of(i64) + 15) &~ 15
+}
+
 // queue_encode is a queue file of rows, without its sum (see queue_seal).
-queue_encode :: proc(head: Queue_Header, rows: []Row, allocator: runtime.Allocator) -> []u8 {
-	buf := rows_encode(.Search, "queue", rows, 0, {}, i64(len(rows)), allocator, size_of(Queue_Header))
+// after is the anchors of the extras, which are the last len(after) rows.
+queue_encode :: proc(head: Queue_Header, rows: []Row, allocator: runtime.Allocator, after: []i64 = nil) -> []u8 {
+	buf := rows_encode(.Search, "queue", rows, 0, {}, i64(len(rows)), allocator, queue_prefix(len(after)))
 	h := (^Queue_Header)(raw_data(buf))
 	h^ = head
 	h.magic = QUEUE_MAGIC
 	h.format = QUEUE_FORMAT
+	(^Queue_Extras)(&buf[size_of(Queue_Header)]).count = i64(len(after))
+	copy(([^]i64)(&buf[size_of(Queue_Header) + size_of(Queue_Extras)])[:len(after)], after)
 	return buf
 }
 
 // queue_seal fills in a queue file's sum, which queue_encode leaves out.
 queue_seal :: proc(file: []u8) {
-	file_seal(file[size_of(Queue_Header):])
+	extras := (^Queue_Extras)(&file[size_of(Queue_Header)]).count
+	file_seal(file[queue_prefix(int(extras)):])
 }
 
 // queue_place_ok says whether a place read from a queue file or its
@@ -400,25 +422,56 @@ queue_place_ok :: proc(sample, rate: i64) -> bool {
 }
 
 // queue_decode reads a queue file read whole into data, 16-byte aligned.
-// The rows' strings point into data.
-queue_decode :: proc(data: []u8, allocator: runtime.Allocator) -> (head: Queue_Header, rows: []Row, err: File_Error) {
+// The rows' strings point into data. after is the extras' anchors, each a
+// row before its own, so they can't go round in a loop.
+queue_decode :: proc(data: []u8, allocator: runtime.Allocator) -> (head: Queue_Header, rows: []Row, after: []i64, err: File_Error) {
 	if len(data) < size_of(Queue_Header) {
-		return {}, nil, .Short
+		return {}, nil, nil, .Short
 	}
 	head = (^Queue_Header)(raw_data(data))^
 	if head.magic != QUEUE_MAGIC {
-		return {}, nil, .Magic
+		return {}, nil, nil, .Magic
 	}
-	if head.format != QUEUE_FORMAT {
-		return {}, nil, .Format
+	if head.format != 1 && head.format != QUEUE_FORMAT {
+		return {}, nil, nil, .Format
 	}
 	if !queue_place_ok(head.sample, head.rate) {
-		return {}, nil, .Damaged
+		return {}, nil, nil, .Damaged
 	}
 	// Without a rate the position can't be placed, so the track starts over.
 	if head.rate == 0 {
 		head.sample = 0
 	}
-	_, rows, err = list_decode(data[size_of(Queue_Header):], .Search, "queue", allocator)
+	prefix, extras := size_of(Queue_Header), 0
+	if head.format == QUEUE_FORMAT {
+		if len(data) < size_of(Queue_Header) + size_of(Queue_Extras) {
+			return {}, nil, nil, .Short
+		}
+		count := (^Queue_Extras)(&data[size_of(Queue_Header)]).count
+		if count < 0 || count > ROWS_MAX {
+			return {}, nil, nil, .Damaged
+		}
+		extras = int(count)
+		prefix = queue_prefix(extras)
+		if len(data) < prefix {
+			return {}, nil, nil, .Short
+		}
+	}
+	if _, rows, err = list_decode(data[prefix:], .Search, "queue", allocator); err != .None {
+		return {}, nil, nil, err
+	}
+	if extras > len(rows) {
+		return {}, nil, nil, .Damaged
+	}
+	after = make([]i64, extras, allocator)
+	if extras > 0 {
+		copy(after, ([^]i64)(&data[size_of(Queue_Header) + size_of(Queue_Extras)])[:extras])
+	}
+	first := len(rows) - extras
+	for a, j in after {
+		if a < -1 || a >= i64(first + j) {
+			return {}, nil, nil, .Damaged
+		}
+	}
 	return
 }

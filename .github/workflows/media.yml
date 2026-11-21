@@ -1,8 +1,9 @@
 # Checks media keys and Now Playing on Linux and Windows the way the
 # desktop reaches them. Runs the app with fake data and drives it from
-# outside: playerctl over MPRIS on Linux, under a headless Weston, and the
-# System Media Transport Controls' session manager on Windows. Then checks
-# the app's log for the commands, and uploads the logs.
+# outside: playerctl over MPRIS on Linux, under a headless Weston
+# (tools/headless.sh), and the System Media Transport Controls' session
+# manager on Windows. Then checks the app's log for the commands, and
+# uploads the logs.
 name: media
 
 on:
@@ -34,15 +35,11 @@ jobs:
       - run: python3 build.py
       - name: Drive MPRIS
         run: |
-          export XDG_RUNTIME_DIR="$RUNNER_TEMP/xdg"
-          mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
           out="$RUNNER_TEMP/media"
           mkdir -p "$out"
-          weston --backend=headless --socket=wl-test --width=1600 --height=1000 &
-          sleep 3
           cat > "$out/drive.sh" <<'EOF'
           set -eu
-          WAYLAND_DISPLAY=wl-test TIDALFAST_FAKE=1 TIDALFAST_AUDIO_NULL=1 TIDALFAST_NOW_PLAYING_LOG=1 \
+          TIDALFAST_FAKE=1 TIDALFAST_AUDIO_NULL=1 TIDALFAST_NOW_PLAYING_LOG=1 \
             TIDALFAST_SHELL_TEST="25:quit" ./build/tidalfast > "$1/app.log" 2>&1 &
           app=$!
           sleep 5
@@ -59,8 +56,7 @@ jobs:
           $p previous; sleep 1
           wait $app
           EOF
-          dbus-run-session -- sh "$out/drive.sh" "$out"
-          kill %1 || true
+          tools/headless.sh -t 120 sh "$out/drive.sh" "$out"
           cat "$out/app.log"
           for want in "remote command 1 " "remote command 2 " "remote command 6 (12.000)" "remote command 4 " "remote command 5 "; do
             grep -q "shell: $want" "$out/app.log" || { echo "missing: $want"; exit 1; }

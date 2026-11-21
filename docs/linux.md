@@ -64,3 +64,17 @@ env HOME="$t" XDG_DATA_HOME="$t/data" XDG_CONFIG_HOME="$t/config" XDG_CACHE_HOME
     dbus-run-session -- sh -c 'echo x | gnome-keyring-daemon --unlock --components=secrets > /dev/null; ./build.py test'
 rm -rf "$t"
 ```
+
+## Running without a display
+
+`tools/headless.sh` runs a command, `build/tidalfast` by default, where there is no compositor, as in a container or CI. It starts a private headless Weston, points Vulkan at Mesa's software driver (lavapipe) and runs the command in its own D-Bus session with a throwaway `HOME`, `XDG_DATA_HOME`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `XDG_RUNTIME_DIR`, for the keyring's sake as above. The `TIDALFAST_*` variables pass through, so captures and shell test steps work as on a desktop. It stops Weston and everything the command started and removes the temp folders when the command ends, and exits with its code, or 124 past the time limit (`-t`, 120 s by default). On Debian and Ubuntu it needs `weston` and `mesa-vulkan-drivers`, and converting the captures needs `imagemagick`:
+
+```
+TIDALFAST_FAKE=1 TIDALFAST_AUDIO_NULL=1 TIDALFAST_CAPTURE=/tmp/x.tga \
+    TIDALFAST_SHELL_TEST="2:size=1100,700;3:key=ctrl+f;3.5:commit=Kino;5:capture=/tmp/a.tga;5.5:ax-dump;6:quit" \
+    tools/headless.sh > /tmp/app.log 2>&1
+convert /tmp/a.tga /tmp/a.png
+tools/headless.sh sh -c 'build/tidalfast & sleep 5; playerctl -p tidalfast play; wait'
+```
+
+`tools/idle_check.sh` checks that an idle window uses no CPU. It runs the app with fake data through `tools/headless.sh`, waits for a second with no CPU time, then reads the process's CPU time from `/proc/<pid>/stat` over 10 s and fails if it moved more than 5 ticks (50 ms). An idle window takes 0 ticks, and one that draws every frame on lavapipe 800 or more. CI runs it on every push.
