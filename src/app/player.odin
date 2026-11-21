@@ -86,6 +86,8 @@ Artwork :: struct {
 Playback :: struct {
 	player:          ^audio.Player,
 	set_now_playing: proc "c" (info: ^platform.Now_Playing), // the shell's
+	set_controls:    proc "c" (controls: ^platform.Player_Controls), // the shell's, or nil
+	controls_sent:   Maybe(platform.Player_Controls),
 	capture:         Small, // TIDALFAST_AUDIO_CAPTURE
 	window:          int, // TIDALFAST_AUDIO_WINDOW_KB, in bytes
 	null_output:     bool, // TIDALFAST_AUDIO_NULL: play to the silent null device
@@ -145,6 +147,7 @@ playback_start :: proc(s: ^State, shell: ^platform.Shell) {
 	pb := &s.playback
 	pb.index = -1
 	pb.set_now_playing = shell.set_now_playing
+	pb.set_controls = shell.set_player_controls
 	pb.capture = small(os.get_env("TIDALFAST_AUDIO_CAPTURE", context.temp_allocator))
 	pb.window = audio.STREAM_WINDOW
 	if kb, ok := strconv.parse_int(os.get_env("TIDALFAST_AUDIO_WINDOW_KB", context.temp_allocator)); ok {
@@ -608,6 +611,8 @@ playback_stop :: proc(s: ^State) {
 	pb^ = {
 		player          = pb.player,
 		set_now_playing = pb.set_now_playing,
+		set_controls    = pb.set_controls,
+		controls_sent   = pb.controls_sent,
 		capture         = pb.capture,
 		window          = pb.window,
 		null_output     = pb.null_output,
@@ -1068,6 +1073,26 @@ playback_media :: proc(s: ^State, events: []platform.Event) {
 			playback_previous(s)
 		case .Seek:
 			playback_seek(s, f64(e.dx))
+		case .Volume:
+			// Saved at once, as when the slider is let go.
+			if !math.is_nan(e.dx) {
+				playback_set_volume(s, clamp(e.dx, 0, 1), true)
+			}
+		case .Shuffle:
+			if on := e.dx != 0; on != s.settings.shuffle {
+				playback_set_shuffle(s, on)
+			}
+		case .Repeat:
+			REPEATS := [platform.Player_Repeat]audio.Repeat {
+				.Off = .Off,
+				.All = .All,
+				.One = .One,
+			}
+			if e.dx >= 0 && e.dx <= f32(max(platform.Player_Repeat)) {
+				if r := REPEATS[platform.Player_Repeat(e.dx)]; r != s.settings.repeat {
+					playback_set_repeat(s, r)
+				}
+			}
 		}
 	}
 }
@@ -1174,6 +1199,7 @@ playback_update :: proc(s: ^State, events: []platform.Event) {
 	}
 	s.library.playing = playing_row(s)
 	update_now_playing(s)
+	update_controls(s)
 	queue_save(s)
 }
 
@@ -1374,6 +1400,31 @@ update_now_playing :: proc(s: ^State) {
 		np.artwork_height = u32(pb.art.h)
 	}
 	pb.set_now_playing(&np)
+}
+
+// update_controls tells the shell the player bar's volume, shuffle and
+// repeat when they change, so the desktop's media controls show them.
+@(private = "file")
+update_controls :: proc(s: ^State) {
+	pb := &s.playback
+	if pb.set_controls == nil {
+		return
+	}
+	REPEATS := [audio.Repeat]platform.Player_Repeat {
+		.Off = .Off,
+		.All = .All,
+		.One = .One,
+	}
+	c := platform.Player_Controls {
+		volume  = f64(s.settings.volume),
+		shuffle = b32(s.settings.shuffle),
+		repeat  = REPEATS[s.settings.repeat],
+	}
+	if sent, ok := pb.controls_sent.?; ok && sent == c {
+		return
+	}
+	pb.controls_sent = c
+	pb.set_controls(&c)
 }
 
 // queue_save writes the queue's file when its rows change, and its

@@ -83,6 +83,12 @@ static struct {
   char art_path[PATH_MAX]; // "" without a file
 } g_np;
 
+// The player bar's controls as the app last sent them, or as a client set
+// them since.
+static Player_Controls g_controls = {.volume = 1};
+
+static const char *const g_loop_names[] = {[PLAYER_REPEAT_OFF] = "None", [PLAYER_REPEAT_ALL] = "Playlist", [PLAYER_REPEAT_ONE] = "Track"};
+
 static double mono_seconds(void) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -156,7 +162,53 @@ static int get_player(sd_bus *bus, const char *path, const char *interface, cons
   // CanPlay: with nothing loaded, play starts the selected row.
   if (!strcmp(property, "CanPlay") || !strcmp(property, "CanControl")) return g_sd.message_append(reply, "b", 1);
   if (property[0] == 'C') return g_sd.message_append(reply, "b", has); // CanGoNext, CanGoPrevious, CanPause
-  return g_sd.message_append(reply, "d", 1.0); // Rate, MinimumRate, MaximumRate, Volume
+  if (!strcmp(property, "Volume")) return g_sd.message_append(reply, "d", g_controls.volume);
+  if (!strcmp(property, "Shuffle")) return g_sd.message_append(reply, "b", g_controls.shuffle != 0);
+  if (!strcmp(property, "LoopStatus")) return g_sd.message_append(reply, "s", g_loop_names[g_controls.repeat <= PLAYER_REPEAT_ONE ? g_controls.repeat : 0]);
+  return g_sd.message_append(reply, "d", 1.0); // Rate, MinimumRate, MaximumRate
+}
+
+static void properties_changed(char **names);
+
+static void control_changed(const char *name) {
+  char *names[] = {(char *)name, NULL};
+  properties_changed(names);
+}
+
+// A client's write takes effect here at once, so a read right after it
+// gets the new value, and goes to the app as a command. The app's next
+// controls then match it, unless the app changed them again meanwhile.
+static int set_player(sd_bus *bus, const char *path, const char *interface, const char *property, sd_bus_message *value, void *userdata,
+                      sd_bus_error *error) {
+  if (!strcmp(property, "Volume")) {
+    double v;
+    int r = g_sd.message_read(value, "d", &v);
+    if (r < 0) return r;
+    if (isnan(v)) return g_sd.error_set_const(error, SD_BUS_ERROR_INVALID_ARGS, "Volume is not a number");
+    // MPRIS: below 0 is 0. The app's slider stops at 1. Kept as a float, as
+    // the app keeps it, so its answer doesn't change it again.
+    v = (float)(v < 0 ? 0 : v > 1 ? 1 : v);
+    if (v != g_controls.volume) g_controls.volume = v, control_changed("Volume");
+    g_command(MEDIA_VOLUME, v);
+    return 0;
+  }
+  if (!strcmp(property, "Shuffle")) {
+    int on;
+    int r = g_sd.message_read(value, "b", &on);
+    if (r < 0) return r;
+    if ((uint32_t)(on != 0) != g_controls.shuffle) g_controls.shuffle = on != 0, control_changed("Shuffle");
+    g_command(MEDIA_SHUFFLE, on != 0);
+    return 0;
+  }
+  const char *loop;
+  int r = g_sd.message_read(value, "s", &loop);
+  if (r < 0) return r;
+  uint32_t repeat = 0;
+  while (repeat <= PLAYER_REPEAT_ONE && strcmp(loop, g_loop_names[repeat])) repeat++;
+  if (repeat > PLAYER_REPEAT_ONE) return g_sd.error_set_const(error, SD_BUS_ERROR_INVALID_ARGS, "LoopStatus is None, Track or Playlist");
+  if (repeat != g_controls.repeat) g_controls.repeat = repeat, control_changed("LoopStatus");
+  g_command(MEDIA_REPEAT, repeat);
+  return 0;
 }
 
 // Methods
@@ -208,6 +260,7 @@ static int method_open_uri(sd_bus_message *m, void *userdata, sd_bus_error *e) {
 
 #define CONST_PROPERTY(name, sig, get) SD_BUS_PROPERTY(name, sig, get, 0, SD_BUS_VTABLE_PROPERTY_CONST)
 #define CHANGING_PROPERTY(name, sig) SD_BUS_PROPERTY(name, sig, get_player, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE)
+#define WRITABLE_PROPERTY(name, sig) SD_BUS_WRITABLE_PROPERTY(name, sig, get_player, set_player, 0, SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE)
 
 static const sd_bus_vtable g_root_vtable[] = {
     SD_BUS_VTABLE_START(0),
@@ -242,6 +295,9 @@ static const sd_bus_vtable g_player_vtable[] = {
     CHANGING_PROPERTY("CanGoPrevious", "b"),
     CHANGING_PROPERTY("CanPause", "b"),
     CHANGING_PROPERTY("CanSeek", "b"),
+    WRITABLE_PROPERTY("Volume", "d"),
+    WRITABLE_PROPERTY("Shuffle", "b"),
+    WRITABLE_PROPERTY("LoopStatus", "s"),
     // MPRIS: Position never sends PropertiesChanged.
     SD_BUS_PROPERTY("Position", "x", get_player, 0, 0),
     CONST_PROPERTY("CanPlay", "b", get_player),
@@ -249,7 +305,6 @@ static const sd_bus_vtable g_player_vtable[] = {
     CONST_PROPERTY("Rate", "d", get_player),
     CONST_PROPERTY("MinimumRate", "d", get_player),
     CONST_PROPERTY("MaximumRate", "d", get_player),
-    CONST_PROPERTY("Volume", "d", get_player),
     SD_BUS_VTABLE_END,
 };
 
@@ -308,10 +363,13 @@ static void request_name(const char *name) {
 
 static int name_reply(sd_bus_message *m, void *userdata, sd_bus_error *e) {
   uint32_t result = 0;
-  if (!g_sd.message_is_method_error(m, NULL)) g_sd.message_read(m, "u", &result);
+  bool refused = g_sd.message_is_method_error(m, NULL);
+  if (!refused) g_sd.message_read(m, "u", &result);
   if (result == NAME_PRIMARY_OWNER || result == NAME_ALREADY_OWNER) {
     snprintf(g_name, sizeof g_name, "%s", g_request_name);
+    fprintf(stderr, "shell: mpris: took %s\n", g_name);
   } else if (!g_tried_instance) {
+    fprintf(stderr, "shell: mpris: %s %s\n", refused ? "the bus refused" : "someone else has", g_request_name);
     // MPRIS: a second instance adds .instance<pid> to the name.
     g_tried_instance = true;
     char name[128];
@@ -335,11 +393,16 @@ static void close_bus(void) {
 static void connect_bus(void) {
   g_next_try = INFINITY;
   if (!load_sd_bus()) return;
+  const char *step = "connect to the session bus";
   int r = g_sd.open_user(&g_bus);
-  if (r >= 0) r = g_sd.add_object_vtable(g_bus, NULL, OBJECT_PATH, "org.mpris.MediaPlayer2", g_root_vtable, NULL);
-  if (r >= 0) r = g_sd.add_object_vtable(g_bus, NULL, OBJECT_PATH, PLAYER_INTERFACE, g_player_vtable, NULL);
+  if (r >= 0) step = "add the root interface", r = g_sd.add_object_vtable(g_bus, NULL, OBJECT_PATH, "org.mpris.MediaPlayer2", g_root_vtable, NULL);
+  if (r >= 0) step = "add the player interface", r = g_sd.add_object_vtable(g_bus, NULL, OBJECT_PATH, PLAYER_INTERFACE, g_player_vtable, NULL);
   if (r < 0) {
-    fprintf(stderr, "shell: mpris: can't connect to the session bus: %s\n", strerror(-r));
+    // Where sd-bus looked: the session bus's address without its guid, or
+    // $XDG_RUNTIME_DIR/bus without one.
+    const char *address = getenv("DBUS_SESSION_BUS_ADDRESS");
+    fprintf(stderr, "shell: mpris: can't %s (%.*s): %s\n", step, address ? (int)strcspn(address, ",") : 30,
+            address ? address : "no DBUS_SESSION_BUS_ADDRESS", strerror(-r));
     close_bus();
     g_next_try = mono_seconds() + 10;
     return;
@@ -468,6 +531,17 @@ void mpris_set(const Now_Playing *np) {
   if (same_track && fabs(np->elapsed - predicted) > 1 && g_bus) {
     g_sd.emit_signal(g_bus, OBJECT_PATH, PLAYER_INTERFACE, "Seeked", "x", (int64_t)(position_now() * 1e6));
   }
+}
+
+void mpris_set_controls(const Player_Controls *c) {
+  char *changed[4];
+  int n = 0;
+  if (c->volume != g_controls.volume) changed[n++] = "Volume";
+  if (c->shuffle != g_controls.shuffle) changed[n++] = "Shuffle";
+  if (c->repeat != g_controls.repeat) changed[n++] = "LoopStatus";
+  changed[n] = NULL;
+  g_controls = *c;
+  if (n) properties_changed(changed);
 }
 
 void mpris_close(void) {

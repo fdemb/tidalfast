@@ -1713,6 +1713,11 @@ static void set_now_playing(const Now_Playing *np) {
   mpris_set(np);
 }
 
+static void set_player_controls(const Player_Controls *c) {
+  print_player_controls(c);
+  mpris_set_controls(c);
+}
+
 static void main_loop(void) {
   enum { FD_WAYLAND, FD_REDRAW, FD_WAKE, FD_REPEAT, FD_TEST, FD_SIGNAL, FD_RECEIVE, FD_MPRIS, FD_SEND, FD_COUNT = FD_SEND + CLIP_SENDS };
   struct pollfd fds[FD_COUNT];
@@ -1829,6 +1834,7 @@ int shell_main(int argc, char **argv) {
       .set_drag_regions = set_drag_regions,
       .window_command = window_command,
       .set_decorations = set_decorations,
+      .set_player_controls = set_player_controls,
   };
 
   mpris_init(remote_command);
