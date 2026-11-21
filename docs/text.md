@@ -65,21 +65,21 @@ What it doesn't do:
 
 - Its bidi class table leaves out the ranges UnicodeData.txt lists as First/Last pairs (Han, Hangul syllables, Tangut) and calls them neutral. So it got the paragraph direction wrong whenever such a character came first: "晴天 عيونك 🔥" and "밤편지 عيونك end" came out right to left. CJK runs next to Arabic could also come back right to left.
 - No embedding levels and no reordering of runs: placing the runs left to right is up to the caller.
-- Incomplete neutral resolution. Neutrals at the end of the text after right-to-left text come back right to left even in a left-to-right paragraph ("晴天 عيونك 🔥" put the emoji left of the Arabic). The bracket pair rule (N0) is missing: in "عيونك (Remix) 2024" the opening bracket comes back right to left and "Remix) 2024" as one left-to-right run.
+- Incomplete neutral resolution, which steps 2 to 4 below redo. Neutrals at the end of the text after right-to-left text come back right to left even in a left-to-right paragraph ("晴天 عيونك 🔥" would put the emoji left of the Arabic). The bracket pair rule (N0) is missing: in "عيونك (Remix) 2024" the opening bracket comes back right to left and "Remix) 2024" as one left-to-right run.
 - It reads OpenType only, not `morx` (see above).
 
 What `shape_uncached` adds on top:
 
 1. The paragraph direction comes from rules P2 and P3: the first strong character (L, R or AL), skipping text inside isolates, decides it, and left to right if there is none. `bidi_class` reads kb_text_shape's table and treats letters it calls neutral from U+3400 up as L. The direction goes to kb_text_shape's `ShapeBegin` and is used for run order and truncation.
-2. Brackets, and spaces at either logical end of a run, are split into one-glyph runs, so they can be placed on their own. A bracket inside a run splits it in three, as long as it's a glyph to itself.
+2. Brackets, and spaces at either logical end of a run, are split into one-glyph runs, so they can be placed on their own. A bracket inside a run splits it in three, as long as it's a glyph to itself. Brackets here are the pairs BidiBrackets.txt lists that titles use (ASCII `()`, `[]`, `{}`, the CJK brackets U+3008 to U+3011 and U+3014 to U+301B, and the fullwidth and halfwidth forms) and the mirrored `<>` and `«»`.
 3. Each run is classed as strong (has an L, R or AL character), number (EN or AN but nothing strong) or neutral. A strong run's direction is its first strong character's, not kb_text_shape's.
-4. `resolve_levels` applies W7 (numbers after left-to-right text are left to right), N0 (bracket pairs), N1/N2 (other neutrals take the direction on both sides if it agrees, else the paragraph's) and I1/I2 (levels 0, 1, 2).
+4. `resolve_levels` applies W7 (numbers after left-to-right text are left to right), N0 (bracket pairs, matched with a stack as rule BD16 does, `<>` and `«»` not among them), N1/N2 (other neutrals take the direction on both sides if it agrees, else the paragraph's) and I1/I2 (levels 0, 1, 2).
 5. A run whose direction changed is reversed, and its brackets are swapped for the mirrored glyph or back.
 6. `visual_order` applies L2: from the highest level down, reverse every stretch at that level or above.
 
-With that, the specimen lines read as the Unicode algorithm says: "abc ابجد 123 هوز def", "Song שיר לשלום 2024 end" (the number lands left of the Hebrew), "2024 (Remix) عيونك", "abc (שלום) def", and the emoji stays at the end of "晴天 عيونك 🔥". Tests check the glyph order of these and a few more.
+With that, the specimen lines read as the Unicode algorithm says: "abc ابجد 123 هوز def", "Song שיר לשלום 2024 end" (the number lands left of the Hebrew), "2024 (Remix) عيونك", "abc (שלום) def", "2024 （Remix） שלום" with fullwidth brackets, and the emoji stays at the end of "晴天 عيونك 🔥". Tests check the glyph order of these and a few more.
 
-Limits: this works on whole runs, so it can't separate a number glued to letters inside one kb_text_shape run. Apart from the paragraph direction skipping isolates, it ignores explicit embeddings and isolates (LRE, RLI and the rest) and Arabic-Indic digits' special rules (AN). There's no line breaking yet, so L1 (trailing whitespace) doesn't apply. `Glyph.cluster` gives hit testing and cursor movement a codepoint index per glyph.
+Limits: this works on whole runs, so it can't separate a number glued to letters inside one kb_text_shape run. A bracket that isn't a glyph to itself (one with a combining mark, or in a run CoreText shapes) stays in its run and isn't paired. The other pairs in BidiBrackets.txt (Tibetan, Ogham, small forms, the mathematical and ornamental ones) are ordinary neutrals. Apart from the paragraph direction skipping isolates, it ignores explicit embeddings and isolates (LRE, RLI and the rest) and Arabic-Indic digits' special rules (AN). There's no line breaking yet, so L1 (trailing whitespace) doesn't apply. `Glyph.cluster` gives hit testing and cursor movement a codepoint index per glyph.
 
 ## Weight
 

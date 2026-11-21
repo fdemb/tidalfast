@@ -17,8 +17,9 @@ package app
 // which the portal reports, on GNOME and the desktops that keep that
 // setting (gnome_desktop), and all three on the right elsewhere. GNOME's
 // default is close alone; Ubuntu's has all three. Buttons on the left go in the sidebar's top, which keeps room
-// for them as it does on macOS. The layout is read once a launch, off the
-// UI thread, and kept in the settings, so the next launch starts with it.
+// for them as it does on macOS. The layout is read off the UI thread, which
+// then waits for the portal to say it changed, and kept in the settings, so
+// the next launch starts with it.
 //
 // The glyphs are drawn on whole pixels from a coverage texture made for
 // the display's scale, so their lines stay sharp at any scale, as the
@@ -28,6 +29,7 @@ import "core:hash"
 import "core:math"
 import "core:mem"
 import "core:strings"
+import "core:sync"
 
 import "../platform"
 import "../render"
@@ -198,16 +200,45 @@ Window_Buttons :: struct {
 	glyph_style: Window_Style,
 }
 
-// Layout_Read is the thread that reads GNOME's button layout.
+// Layout_Read is the thread that reads GNOME's button layout and then
+// waits for changes to it.
 Layout_Read :: struct {
 	thread:   sys.Thread,
 	started:  bool,
-	taken:    bool,
-	done:     b32, // atomic, set by the thread when it's finished
-	ok:       bool,
+	lock:     sync.Mutex,
+	given:    u32, // atomic, the values the thread has given
+	taken:    u32, // of those, how many the UI thread has taken
 	text:     [128]u8,
 	text_len: int,
 	wake:     proc "c" (),
+}
+
+// layout_read_give hands the UI thread a new layout from the portal and
+// wakes it. A value too long for any real layout is dropped.
+layout_read_give :: proc(rd: ^Layout_Read, value: string) {
+	if len(value) > len(rd.text) {
+		return
+	}
+	sync.mutex_lock(&rd.lock)
+	rd.text_len = copy(rd.text[:], value)
+	sync.atomic_add(&rd.given, 1)
+	sync.mutex_unlock(&rd.lock)
+	if rd.wake != nil {
+		rd.wake()
+	}
+}
+
+// layout_read_take is the latest layout given since the last take, in
+// buf.
+layout_read_take :: proc(rd: ^Layout_Read, buf: []u8) -> (text: string, ok: bool) {
+	if sync.atomic_load(&rd.given) == rd.taken {
+		return "", false
+	}
+	sync.mutex_lock(&rd.lock)
+	n := copy(buf, rd.text[:rd.text_len])
+	rd.taken = rd.given
+	sync.mutex_unlock(&rd.lock)
+	return string(buf[:n]), true
 }
 
 // window_frame takes the window's state from the frame's input.
