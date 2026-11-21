@@ -45,6 +45,8 @@ draw_text_screen :: proc(s: ^State, w, h: f32) {
 	line(s, x, &y, .Regular, 15, "Mixed: Song שיר לשלום 2024 end")
 	line(s, x, &y, .Regular, 15, "عيونك (Remix) 2024")
 	line(s, x, &y, .Regular, 15, "abc (שלום) def, שלום (abc) עולם")
+	line(s, x, &y, .Regular, 15, "a (ש [ב] ג) z, abc שלום <עולם> def")
+	line(s, x, &y, .Regular, 15, "שלום （Remix） 「Live」 2024")
 	line(s, x, &y, .Regular, 15, "Emoji: 😀 🎵 👨‍👩‍👧 🇵🇱 🏳️‍🌈 ❤️ 1️⃣")
 	line(s, x, &y, .Bold, 15, "Bold fallback: 晴天 عيونك 🔥")
 

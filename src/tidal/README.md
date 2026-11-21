@@ -2,7 +2,7 @@
 
 An unofficial TIDAL API client in Odin, package `tidal`. Its tests live in `tests/` at the repository root, and `examples/cli/` is a small CLI built on it.
 
-It needs only Odin's core library and `vendor:curl`, which links the system libcurl on macOS and Linux.
+It needs only Odin's core library and `vendor:curl`, which links the system libcurl on macOS and Linux, and the static libcurl that comes with Odin on Windows.
 
 ## Using it from an app
 
