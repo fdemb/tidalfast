@@ -1119,6 +1119,12 @@ end_frame :: proc() -> bool {
 	if hot != u.hot && u.active[.Left] == 0 {
 		u.animating = true
 	}
+	// A keyboard or accessibility click can change state that boxes built
+	// before it already read, such as a search tab choosing the list it sits
+	// in. An assistive app's press comes with no release to draw again.
+	if u.key_click != 0 {
+		u.animating = true
+	}
 	return u.animating
 }
 
