@@ -5,8 +5,11 @@
 // declares the one function this project adds to kb_text_shape.c.
 package kbts
 
+// build.py points C_BUILD at another folder for a sanitizer build.
 @(private)
-LIB_PATH :: "../../build/windows/kbts/kb_text_shape.lib" when ODIN_OS == .Windows else "../../build/kbts/kb_text_shape.a"
+C_BUILD :: #config(TIDALFAST_C_BUILD, "build")
+@(private)
+LIB_PATH :: "../../build/windows/kbts/kb_text_shape.lib" when ODIN_OS == .Windows else "../../" + C_BUILD + "/kbts/kb_text_shape.a"
 
 when !#exists(LIB_PATH) {
 	#panic(LIB_PATH + " is missing: run ./build.py first")

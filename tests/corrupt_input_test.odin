@@ -26,6 +26,11 @@ import "../src/cover"
 import tidal "../src/tidal"
 import "dashgen"
 
+// The time budgets stretch under a sanitizer, which runs this code about
+// ten times slower (./build.py test --sanitize=address).
+@(private = "file")
+CI_SLOWDOWN :: 20 when ODIN_SANITIZER_FLAGS != {} else 1
+
 @(private = "file")
 Ci_Rng :: struct {
 	s: u64,
@@ -408,7 +413,7 @@ corrupt_mpd :: proc(t: ^testing.T) {
 		} else {
 			testing.expectf(t, err != nil, "case %d parsed", i)
 		}
-		testing.expectf(t, time.tick_since(start) < time.Second, "case %d took %v", i, time.tick_since(start))
+		testing.expectf(t, time.tick_since(start) < time.Second * CI_SLOWDOWN, "case %d took %v", i, time.tick_since(start))
 		free_all(allocator)
 	}
 
@@ -772,7 +777,7 @@ corrupt_tidal_json :: proc(t: ^testing.T) {
 		}
 	}
 	testing.expect(t, c.runs > 1000)
-	testing.expectf(t, time.tick_since(start) < 3 * time.Second, "took %v", time.tick_since(start))
+	testing.expectf(t, time.tick_since(start) < 3 * time.Second * CI_SLOWDOWN, "took %v", time.tick_since(start))
 }
 
 @(private = "file")

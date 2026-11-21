@@ -1083,6 +1083,7 @@ dash_explicit_base_plays :: proc(t: ^testing.T) {
 		}
 		time.sleep(20 * time.Millisecond)
 	}
+	underruns := audio.status(p).underruns
 	audio.destroy(p)
 	testing.expect(t, ended, "the track didn't play to the end")
 
@@ -1102,7 +1103,7 @@ dash_explicit_base_plays :: proc(t: ^testing.T) {
 			differ += 1
 		}
 	}
-	testing.expectf(t, differ == 0, "%d of %d samples differ", differ, len(want))
+	testing.expectf(t, differ == 0, "%d of %d samples differ, after %d underruns", differ, len(want), underruns)
 }
 
 // Fake_List is an AudioBufferList with room for four buffers.
