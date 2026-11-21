@@ -31,17 +31,30 @@ TIDALfast is a TIDAL player written from scratch in Odin.
 
 - **Lossless and hi-res.** TIDAL's FLAC streams, from CD quality up to 24-bit 192 kHz.
 - **Gapless playback.** The next track downloads before the current one ends and plays straight after it, so live albums and DJ mixes play without a break.
-- **Bit-perfect output.** On macOS the app can switch your DAC to each track's sample rate and bit depth and send it the samples unchanged. When a track can't play bit-perfect, the app tells you why.
+- **Bit-perfect output.** The app can play each track at its own sample rate and send your DAC the samples unchanged: through the CoreAudio HAL on macOS, PipeWire on Linux and WASAPI's exclusive mode on Windows. When a track can't play bit-perfect, the app tells you why.
 - **ReplayGain.** Albums played in order get album gain, and everything else gets track gain, so a playlist of singles plays at one level.
 - **Your library.** Playlists, Liked Songs and followed artists from your account. Drag a song onto a playlist to add it, or click its heart to like it.
 - **Search and artist pages.** Results for songs, albums, artists and playlists show as you type. Artist pages have top tracks, albums, EPs and singles, appearances and similar artists.
-- **Media keys and Now Playing.** On macOS the keyboard's media keys and Control Center control playback.
-- **Keyboard and VoiceOver.** Tab, the arrow keys and Enter reach every control, and VoiceOver reads them on macOS.
+- **Media keys and Now Playing.** The keyboard's media keys and the system's media controls show the track and control playback: Control Center on macOS, MPRIS on Linux and the media overlay on Windows.
+- **Keyboard and VoiceOver.** Tab, the arrow keys and Enter reach every control, and VoiceOver reads them on macOS. Screen readers on Linux and Windows don't see them yet.
 - **Every script.** Right-to-left text, emoji, and input methods for Japanese, Chinese and Korean in the search field.
+
+## Keyboard shortcuts
+
+On macOS, Cmd in place of Ctrl and Option in place of Alt. The settings page lists them too.
+
+- **Space**: play or pause
+- **Ctrl+Left / Ctrl+Right**: previous and next track
+- **Shift+Left / Shift+Right**: back and forward 5 seconds
+- **Ctrl+Up / Ctrl+Down**: volume up and down
+- **Ctrl+S**: shuffle on or off
+- **Ctrl+R**: repeat all, one or off
+- **Alt+Left / Alt+Right**: back and forward through the pages you visited, as the mouse's Back and Forward buttons do
+- **Ctrl+F**: search
 
 ## Download
 
-Get it from [Releases](https://github.com/fdemb/tidalfast/releases). You need a TIDAL subscription.
+Get it from [Releases](https://github.com/fdemb/tidalfast/releases): a .dmg for macOS, an AppImage for Linux and a .zip for Windows. You need a TIDAL subscription.
 
 The macOS app isn't notarized yet, so Gatekeeper blocks it the first time. Allow it in System Settings > Privacy & Security, or run:
 

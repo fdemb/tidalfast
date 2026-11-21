@@ -113,5 +113,119 @@ mouse_back_and_forward_go_through_history :: proc(t: ^testing.T) {
 	testing.expect_value(t, s.library.playlist, 3)
 }
 
+// Shift and the arrows seek by 5 s, held too, between the track's start
+// and its end, and do nothing with nothing loaded. The shuffle and repeat
+// keys turn them as the buttons do, once per press, and Alt and the arrows
+// go through the History. A text field keeps all these keys.
+@(test)
+library_shortcuts_seek_and_toggle :: proc(t: ^testing.T) {
+	arena: mem.Dynamic_Arena
+	mem.dynamic_arena_init(&arena)
+	defer mem.dynamic_arena_destroy(&arena)
+	context.allocator = mem.dynamic_arena_allocator(&arena)
+	s := library_state(true)
+	defer library_state_free(s)
+	s.playback.player = audio.create(no_redraw_shortcuts, 0, null_output = true)
+	defer app.playback_shutdown(s)
+	pb := &s.playback
+	f: Frame
+	for _ in 0 ..< 3 {
+		library_frame(t, s, &f)
+	}
+
+	library_frame(t, s, &f, key(.Right, {.Shift}), key(.Left, {.Shift}))
+	testing.expect_value(t, pb.cur.serial, 0)
+	testing.expect_value(t, pb.seek_id, 0)
+
+	row := app.view_row(s, 2)
+	down, up := left_click(s, fmt.tprintf("%s, %s, %s", row.title, row.artist, row.album))
+	library_frame(t, s, &f, down, up)
+	library_frame(t, s, &f, key(.Space))
+	library_frame(t, s, &f, key(.Space))
+	testing.expect(t, !app.playback_playing(s), "paused, so the position stays put")
+	testing.expect_value(t, pb.index, 2)
+	start := app.playback_position(s)
+	library_frame(t, s, &f, key(.Right, {.Shift}))
+	expect_near(t, app.playback_position(s), start + 5)
+	library_frame(t, s, &f, {kind = .Key_Down, key = .Right, modifiers = {.Shift}, repeat = true})
+	expect_near(t, app.playback_position(s), start + 10)
+	library_frame(t, s, &f, key(.Left, {.Shift}))
+	expect_near(t, app.playback_position(s), start + 5)
+	library_frame(t, s, &f, key(.Left, {.Shift}), key(.Left, {.Shift}), key(.Left, {.Shift}))
+	expect_near(t, app.playback_position(s), 0)
+	duration := app.playback_duration(s)
+	testing.expect(t, duration > 10, "the track has a length")
+	for _ in 0 ..< int(duration / 5) + 3 {
+		library_frame(t, s, &f, key(.Right, {.Shift}))
+	}
+	expect_near(t, app.playback_position(s), duration)
+	library_frame(t, s, &f, key(.Left, {.Shift}))
+	expect_near(t, app.playback_position(s), duration - 5)
+	testing.expect_value(t, pb.index, 2)
+
+	testing.expect(t, !s.settings.shuffle)
+	library_frame(t, s, &f, key(.S, {ui.PRIMARY}))
+	testing.expect(t, s.settings.shuffle, "the shuffle key turns shuffle on")
+	library_frame(t, s, &f, {kind = .Key_Down, key = .S, modifiers = {ui.PRIMARY}, repeat = true})
+	testing.expect(t, s.settings.shuffle, "a held key doesn't turn it again")
+	library_frame(t, s, &f, key(.S, {ui.PRIMARY}))
+	testing.expect(t, !s.settings.shuffle, "and off")
+
+	testing.expect_value(t, s.settings.repeat, audio.Repeat.Off)
+	library_frame(t, s, &f, key(.R, {ui.PRIMARY}))
+	testing.expect_value(t, s.settings.repeat, audio.Repeat.All)
+	library_frame(t, s, &f, {kind = .Key_Down, key = .R, modifiers = {ui.PRIMARY}, repeat = true})
+	testing.expect_value(t, s.settings.repeat, audio.Repeat.All)
+	library_frame(t, s, &f, key(.R, {ui.PRIMARY}))
+	testing.expect_value(t, s.settings.repeat, audio.Repeat.One)
+	library_frame(t, s, &f, key(.R, {ui.PRIMARY}))
+	testing.expect_value(t, s.settings.repeat, audio.Repeat.Off)
+
+	first := s.library.playlist
+	library_frame(t, s, &f, press(s, app.PLAYLISTS[3]))
+	library_frame(t, s, &f)
+	testing.expect_value(t, s.library.playlist, 3)
+	library_frame(t, s, &f, key(.Left, {.Alt}))
+	library_frame(t, s, &f)
+	testing.expect_value(t, s.library.playlist, first)
+	library_frame(t, s, &f, {kind = .Key_Down, key = .Left, modifiers = {.Alt}, repeat = true})
+	library_frame(t, s, &f)
+	testing.expect_value(t, s.library.playlist, first)
+	library_frame(t, s, &f, key(.Right, {.Alt}))
+	library_frame(t, s, &f)
+	testing.expect_value(t, s.library.playlist, 3)
+
+	open_search(t, s, &f)
+	testing.expect(t, ui.text_focused())
+	at := app.playback_position(s)
+	library_frame(t, s, &f, key(.Right, {.Shift}), key(.Left, {.Shift}), key(.Left, {.Shift}))
+	library_frame(t, s, &f, key(.S, {ui.PRIMARY}), key(.R, {ui.PRIMARY}), key(.Left, {.Alt}))
+	library_frame(t, s, &f)
+	expect_near(t, app.playback_position(s), at)
+	testing.expect(t, !s.settings.shuffle, "the search field keeps the shuffle key")
+	testing.expect_value(t, s.settings.repeat, audio.Repeat.Off)
+	testing.expect(t, app.search_page_showing(s), "the search field keeps Alt-Left")
+}
+
+// The tooltips' hints and the settings page come from SHORTCUTS, so no
+// two of its entries may share a key.
+@(test)
+shortcuts_have_their_own_keys :: proc(t: ^testing.T) {
+	shortcuts := app.SHORTCUTS
+	for a, i in shortcuts {
+		testing.expect(t, a.keys != "" && a.does != "", "every shortcut has keys and says what it does")
+		for b, j in shortcuts {
+			if i < j {
+				testing.expectf(t, a.code != b.code || a.modifiers != b.modifiers, "%v and %v share a key", i, j)
+			}
+		}
+	}
+}
+
+@(private = "file")
+expect_near :: proc(t: ^testing.T, got, want: f64, loc := #caller_location) {
+	testing.expectf(t, abs(got - want) < 0.01, "at %.3f s, want %.3f s", got, want, loc = loc)
+}
+
 @(private = "file")
 no_redraw_shortcuts :: proc "c" () {}

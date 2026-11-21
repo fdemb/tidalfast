@@ -50,6 +50,7 @@ Data :: struct {
 	fake:           bool,
 	mock:           bool, // api is set
 	api:            Small, // TIDALFAST_API once checked, "" for TIDAL
+	locale:         Small, // for the session, see session_locale; "" is en_US
 	keychain:       Keychain, // where the login goes
 	account:        Account,
 	// Goes up with every sign_out. Jobs carry the one they were queued in,
@@ -160,6 +161,8 @@ data_start :: proc(s: ^State, shell: ^platform.Shell) {
 	d.bench.running = bench == "covers"
 	d.api = small(api)
 	d.keychain = Os_Keychain{small(run.keychain)}
+	d.locale = small(session_locale(os.get_env("TIDALFAST_LOCALE", context.temp_allocator), d.mock, context.temp_allocator))
+	log.infof("app: TIDAL locale %s", small_str(&d.locale))
 	session_open(d)
 	d.account = .Restoring
 	push_job(d, {payload = Restore_Job{}})
@@ -318,9 +321,22 @@ is_loopback_url :: proc(url: string) -> bool {
 	return host == "127.0.0.1" || host == "::1" || strings.equal_fold(host, "localhost")
 }
 
-// session_open makes the session, pointed at d.api if set.
+// session_locale is the locale the session asks TIDAL's text in:
+// TIDALFAST_LOCALE if set, en_US against the mock, so runs there don't
+// depend on the machine, and otherwise the system's.
+session_locale :: proc(override: string, mock: bool, allocator := context.allocator) -> string {
+	if override != "" {
+		return sys.locale_normalize(override, allocator)
+	}
+	if mock {
+		return strings.clone(sys.DEFAULT_LOCALE, allocator)
+	}
+	return sys.locale(allocator)
+}
+
+// session_open makes the session, pointed at d.api if set, in d.locale.
 session_open :: proc(d: ^Data) {
-	s := tidal.session_create(allocator = runtime.heap_allocator())
+	s := tidal.session_create(locale = small_str(&d.locale), allocator = runtime.heap_allocator())
 	if api := small_str(&d.api); api != "" {
 		a := vmem.arena_allocator(&s.arena)
 		base := strings.concatenate({strings.trim_right(api, "/"), "/"}, a)
