@@ -2,9 +2,11 @@ package tidal_tests
 
 import "core:mem"
 import vmem "core:mem/virtual"
+import "core:fmt"
 import "core:testing"
 
 import app "../src/app"
+import "../src/audio"
 import "../src/platform"
 import "../src/ui"
 
@@ -92,6 +94,52 @@ settings_page_has_the_title_bar :: proc(t: ^testing.T) {
 	testing.expect(t, .Selected in own.flags, "TIDALfast shows as chosen")
 }
 
+// The ReplayGain row starts on Automatic, its choices change the setting
+// and the output menu's path, and with bit-perfect output on it says the
+// gain isn't applied.
+@(test)
+settings_page_has_replay_gain :: proc(t: ^testing.T) {
+	arena: vmem.Arena
+	_ = vmem.arena_init_growing(&arena)
+	defer vmem.arena_destroy(&arena)
+	context.allocator = vmem.arena_allocator(&arena)
+	s := library_state(true)
+	defer library_state_free(s)
+	f: Frame
+	library_frame(t, s, &f)
+	library_frame(t, s, &f)
+	open_settings(t, s, &f, "Fake data")
+	_, row := access_node(s, "ReplayGain")
+	testing.expect(t, row, "the ReplayGain row")
+	_, about := access_node(s, "Applies from the next track. Albums in order get album gain")
+	testing.expect(t, about, "what it does and when")
+	automatic, _ := settings_button(s, "ReplayGain Automatic")
+	testing.expect(t, .Selected in automatic.flags, "Automatic is the default")
+	testing.expect_value(t, app.signal_path(s)[1].detail, "Applies volume and ReplayGain")
+
+	for g in audio.Gain_Setting {
+		b, ok := settings_button(s, fmt.tprintf("ReplayGain %v", g))
+		if !testing.expectf(t, ok, "the %v choice", g) {
+			return
+		}
+		library_frame(t, s, &f, {kind = .Access_Press, target = b.id})
+		library_frame(t, s, &f)
+		testing.expect_value(t, s.settings.replay_gain, g)
+		b, _ = settings_button(s, fmt.tprintf("ReplayGain %v", g))
+		testing.expectf(t, .Selected in b.flags, "%v shows as chosen", g)
+	}
+	testing.expect_value(t, s.settings.replay_gain, audio.Gain_Setting.Off)
+	testing.expect_value(t, app.signal_path(s)[1].detail, "Applies volume")
+
+	when audio.BIT_PERFECT {
+		s.settings.bit_perfect = true
+		library_frame(t, s, &f)
+		_, note := access_node(s, "Not applied in bit-perfect mode")
+		testing.expect(t, note, "bit-perfect output says the gain is skipped")
+		testing.expect_value(t, app.signal_path(s)[1].detail, "No volume or ReplayGain")
+	}
+}
+
 // At the bottom of the page every shortcut has a row, with what it does
 // and its keys as static text.
 @(test)
@@ -131,7 +179,7 @@ settings_page_logs_out :: proc(t: ^testing.T) {
 		payload = app.Profile_Result{name = app.small("Ada Lovelace")},
 	}
 	app.handle_result(s, &res, 0)
-	f: Frame
+	f := Frame{size = {1000, 800}} // tall enough for the account's card
 	library_frame(t, s, &f)
 	library_frame(t, s, &f)
 	open_settings(t, s, &f, "Ada Lovelace")

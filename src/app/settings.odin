@@ -1,6 +1,7 @@
 package app
 
-// Settings: the volume, shuffle and repeat, bit-perfect output, how lists
+// Settings: the volume, shuffle and repeat, how ReplayGain applies,
+// bit-perfect output, how lists
 // show their scrollbars, whether the player bar blurs them, whether covers
 // lean under the pointer, whether the bar shows a track's length or the
 // time left and, on Linux,
@@ -42,6 +43,7 @@ Settings :: struct {
 	volume:      f32, // 0 to 1
 	shuffle:     bool,
 	repeat:      audio.Repeat,
+	replay_gain: audio.Gain_Setting,
 	title_bar:   Title_Bar,
 	// Covers stay flat under the pointer. Named for the off state, so a
 	// file from before it has the effect on.
@@ -140,6 +142,7 @@ Settings_File :: struct {
 	volume:        Maybe(f32) `json:"volume,omitempty"`, // missing in files from before it was saved
 	shuffle:       bool,
 	repeat:        audio.Repeat,
+	replay_gain:   audio.Gain_Setting, // a name it doesn't know reads as Automatic
 	title_bar:     Title_Bar,
 	still_covers:  bool,
 	show_duration: bool,
@@ -176,7 +179,7 @@ settings_decode_json :: proc(data: []u8) -> (st: Settings, ok: bool) {
 	if json.unmarshal(data, &f, allocator = context.temp_allocator) != nil {
 		return {volume = VOLUME_DEFAULT}, false
 	}
-	st = {bit_perfect = f.bit_perfect, scrollbars = f.scrollbars, bar = f.bar, volume = clamp(f.volume.? or_else VOLUME_DEFAULT, 0, 1), shuffle = f.shuffle, repeat = f.repeat, title_bar = f.title_bar, still_covers = f.still_covers, show_duration = f.show_duration}
+	st = {bit_perfect = f.bit_perfect, scrollbars = f.scrollbars, bar = f.bar, volume = clamp(f.volume.? or_else VOLUME_DEFAULT, 0, 1), shuffle = f.shuffle, repeat = f.repeat, replay_gain = f.replay_gain, title_bar = f.title_bar, still_covers = f.still_covers, show_duration = f.show_duration}
 	if f.button_layout != "" {
 		st.button_layout = button_layout_parse(f.button_layout)
 	}
@@ -203,6 +206,7 @@ settings_save :: proc(path: string, st: Settings) -> bool {
 		volume      = st.volume,
 		shuffle     = st.shuffle,
 		repeat      = st.repeat,
+		replay_gain = st.replay_gain,
 		title_bar   = st.title_bar,
 		still_covers = st.still_covers,
 		show_duration = st.show_duration,

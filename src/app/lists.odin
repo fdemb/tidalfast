@@ -991,7 +991,7 @@ queue_read :: proc(res: ^Result, path, position_path: string) {
 	}
 	out: Queue_File_Result
 	err: File_Error
-	if out.header, out.rows, err = queue_decode(data, a); err != .None {
+	if out.header, out.rows, out.after, err = queue_decode(data, a); err != .None {
 		log.warnf("lists: dropping the play queue's file (%v)", err)
 		os.remove(path)
 		return
