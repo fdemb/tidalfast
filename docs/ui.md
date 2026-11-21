@@ -83,7 +83,7 @@ Box flags pick what's drawn, in this order: shadow, background (optionally a ver
 
 ### Shortcuts
 
-`library_shortcuts` runs at the end of `draw_library`, so a view that takes a key first keeps it, as the track table does with the arrows. Space plays and pauses, Cmd-Right and Cmd-Left go to the next and previous track, and Cmd-Up and Cmd-Down change the volume by 10%. They are Ctrl on Linux. A held Space doesn't repeat. None of them work while a text field has the focus, and the login screen has none. The Back and Forward buttons on a mouse do what Back and Forward in the main view do, with a text field focused too. The UI doesn't press, focus or drag anything with those two buttons; it keeps their presses for `ui.take_button`, and with a menu open they only close it.
+`library_shortcuts` runs at the end of `draw_library`, so a view that takes a key first keeps it, as the track table does with the arrows. Space plays and pauses, Cmd-Right and Cmd-Left go to the next and previous track, and Cmd-Up and Cmd-Down change the volume by 10%. They are Ctrl on Linux and Windows. A held Space doesn't repeat. None of them work while a text field has the focus, and the login screen has none. The Back and Forward buttons on a mouse do what Back and Forward in the main view do, with a text field focused too. The UI doesn't press, focus or drag anything with those two buttons; it keeps their presses for `ui.take_button`, and with a menu open they only close it.
 
 ### The status bar
 

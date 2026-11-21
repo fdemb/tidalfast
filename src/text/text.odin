@@ -966,18 +966,66 @@ flip :: proc(t: ^State, piece: ^Piece, sh: ^Shaping) {
 // mirror returns the bracket that faces the other way, or r.
 mirror :: proc(r: rune) -> rune {
 	switch r {
-	case '(': return ')'
-	case ')': return '('
-	case '[': return ']'
-	case ']': return '['
-	case '{': return '}'
-	case '}': return '{'
 	case '<': return '>'
 	case '>': return '<'
 	case '«': return '»'
 	case '»': return '«'
 	}
+	if open, ok := bracket_pair(r); ok {
+		return open
+	}
+	if close, ok := bracket_close(r); ok {
+		return close
+	}
 	return r
+}
+
+// bracket_close returns the closing bracket for an opening one of a pair
+// in BidiBrackets.txt: ASCII, the CJK brackets and their fullwidth and
+// halfwidth forms. U+2329 and U+232A pair as their canonical equivalents
+// U+3008 and U+3009 do.
+bracket_close :: proc(r: rune) -> (close: rune, ok: bool) {
+	switch r {
+	case '(': return ')', true
+	case '[', '{': return r + 2, true
+	case 0x2329, 0x3008, 0x300a, 0x300c, 0x300e, 0x3010, 0x3014, 0x3016, 0x3018, 0x301a, 0xff5f:
+		return r + 1, true
+	case 0xff08: return 0xff09, true
+	case 0xff3b: return 0xff3d, true
+	case 0xff5b: return 0xff5d, true
+	case 0xff62: return 0xff63, true
+	}
+	return 0, false
+}
+
+// bracket_pair returns the opening bracket for a closing one that
+// bracket_close knows.
+bracket_pair :: proc(r: rune) -> (open: rune, ok: bool) {
+	switch r {
+	case ')': return '(', true
+	case ']', '}': return r - 2, true
+	case 0x232a, 0x3009, 0x300b, 0x300d, 0x300f, 0x3011, 0x3015, 0x3017, 0x3019, 0x301b, 0xff60:
+		return r - 1, true
+	case 0xff09: return 0xff08, true
+	case 0xff3d: return 0xff3b, true
+	case 0xff5d: return 0xff5b, true
+	case 0xff63: return 0xff62, true
+	}
+	return 0, false
+}
+
+// same_bracket compares brackets as rule BD16 does, up to canonical
+// equivalence.
+@(private)
+same_bracket :: proc(a, b: rune) -> bool {
+	canonical :: proc(r: rune) -> rune {
+		switch r {
+		case 0x2329: return 0x3008
+		case 0x232a: return 0x3009
+		}
+		return r
+	}
+	return canonical(a) == canonical(b)
 }
 
 Bidi_Kind :: enum u8 {
@@ -1045,13 +1093,16 @@ resolve_levels :: proc(kinds: []Bidi_Kind, rtl: []bool, brackets: []rune, paragr
 	pairs := make([dynamic]Pair, context.temp_allocator)
 	stack := make([dynamic]int, context.temp_allocator)
 	for b, i in brackets {
-		switch b {
-		case '(', '[', '{', '<', '«':
+		if _, ok := bracket_close(b); ok {
+			// BD16 stops looking for pairs past 63 open brackets.
+			if len(stack) == 63 {
+				break
+			}
 			append(&stack, i)
-		case ')', ']', '}', '>', '»':
-			#reverse for open, depth in stack {
-				if mirror(brackets[open]) == b {
-					append(&pairs, Pair{open, i})
+		} else if open, closing := bracket_pair(b); closing {
+			#reverse for o, depth in stack {
+				if same_bracket(brackets[o], open) {
+					append(&pairs, Pair{o, i})
 					resize(&stack, depth)
 					break
 				}
