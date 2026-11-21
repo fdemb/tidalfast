@@ -1460,7 +1460,7 @@ update_controls :: proc(s: ^State) {
 		.One = .One,
 	}
 	c := platform.Player_Controls {
-		volume  = f64(s.settings.volume),
+		volume  = f64(volume_heard(s.settings)),
 		shuffle = b32(s.settings.shuffle),
 		repeat  = REPEATS[s.settings.repeat],
 	}
