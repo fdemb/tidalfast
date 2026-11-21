@@ -368,6 +368,11 @@ seek_bounds :: proc(h: ^Flac_Header, target: i64, file_size: i64) -> Seek_Bounds
 		hi_offset = file_size,
 	}
 	for sp in h.seekpoints[:h.seek_count] {
+		// A damaged table can point anywhere, and an offset before the file
+		// would make the stream read before its window.
+		if sp.offset < 0 || sp.offset > file_size - i64(h.audio_start) {
+			continue
+		}
 		off := i64(h.audio_start) + sp.offset
 		if sp.sample <= target && sp.sample >= b.lo_sample {
 			b.lo_sample, b.lo_offset = sp.sample, off

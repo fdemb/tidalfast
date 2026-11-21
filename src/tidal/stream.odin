@@ -166,9 +166,15 @@ manifest_hls :: proc(m: Stream_Manifest, allocator := context.allocator) -> (hls
 	return dash_hls(dash, allocator), nil
 }
 
-// Upper bound on generated segments, against malformed timelines.
+// Upper bounds on generated segments and on their URLs, against malformed
+// timelines and templates: a few bytes of MPD can ask for millions of
+// segments, or for URLs megabytes long.
 @(private = "file")
 MAX_DASH_SEGMENTS :: 200_000
+@(private = "file")
+MAX_DASH_URL :: 16 << 10
+@(private = "file")
+MAX_DASH_URL_BYTES :: 32 << 20 // all of them together
 
 // dash_info_from_mpd parses the MPD XML that TIDAL sends for DASH streams:
 // one period, adaptation set and representation with a SegmentTemplate.
@@ -178,7 +184,10 @@ dash_info_from_mpd :: proc(mpd_xml: string, allocator := context.allocator) -> (
 		return make_error(.Manifest_Decode, what, detail = what)
 	}
 
-	doc, xerr := xml.parse_string(mpd_xml, allocator = context.temp_allocator)
+	// core:encoding/xml prints its errors with the text around them, which
+	// can hold the stream's URLs.
+	quiet :: proc(pos: xml.Pos, msg: string, args: ..any) {}
+	doc, xerr := xml.parse_string(mpd_xml, error_handler = quiet, allocator = context.temp_allocator)
 	if xerr != nil || doc == nil || doc.element_count == 0 {
 		log.debugf("MPD is not XML: %v, %d bytes, first byte 0x%02x", xerr, len(mpd_xml), mpd_xml[0] if len(mpd_xml) > 0 else 0)
 		return {}, decode_error("MPD: not XML")
@@ -262,8 +271,12 @@ dash_info_from_mpd :: proc(mpd_xml: string, allocator := context.allocator) -> (
 		bandwidth         = inherited(doc, {representation}, "bandwidth"),
 	}
 	if init_template, has_init := attr(doc, template, "initialization"); has_init && init_template != "" {
-		info.init_url = expand_template(init_template, vars, allocator)
+		ok: bool
+		if info.init_url, ok = expand_template(init_template, vars, MAX_DASH_URL, allocator); !ok {
+			return {}, decode_error("MPD: initialization URL too long")
+		}
 	}
+	url_bytes := len(info.init_url)
 
 	timescale := f64(info.timescale)
 	period_end := i64(time.duration_seconds(duration) * timescale + 0.5) if has_duration else -1
@@ -310,13 +323,19 @@ dash_info_from_mpd :: proc(mpd_xml: string, allocator := context.allocator) -> (
 				}
 				count = max((end - t + d - 1) / d, 1)
 			}
-			if i64(len(segments)) + count > MAX_DASH_SEGMENTS {
+			// r near max(int) wraps count around.
+			if count <= 0 || count > MAX_DASH_SEGMENTS - i64(len(segments)) {
 				return {}, decode_error("MPD: too many segments")
 			}
 			for _ in 0 ..< count {
 				vars.number = number
 				vars.time = t
-				append(&segments, Dash_Segment{url = expand_template(media_template, vars, allocator), duration = f64(d) / timescale, start = t, length = d})
+				url, ok := expand_template(media_template, vars, min(MAX_DASH_URL, MAX_DASH_URL_BYTES - url_bytes), allocator)
+				if !ok {
+					return {}, decode_error("MPD: segment URLs too long")
+				}
+				url_bytes += len(url)
+				append(&segments, Dash_Segment{url = url, duration = f64(d) / timescale, start = t, length = d})
 				t += d
 				number += 1
 			}
@@ -339,7 +358,12 @@ dash_info_from_mpd :: proc(mpd_xml: string, allocator := context.allocator) -> (
 			vars.number = info.start_number + int(k)
 			vars.time = k * d
 			remaining := period_end - k * d
-			append(&segments, Dash_Segment{url = expand_template(media_template, vars, allocator), duration = f64(min(d, remaining)) / timescale, start = k * d, length = min(d, remaining)})
+			url, ok := expand_template(media_template, vars, min(MAX_DASH_URL, MAX_DASH_URL_BYTES - url_bytes), allocator)
+			if !ok {
+				return {}, decode_error("MPD: segment URLs too long")
+			}
+			url_bytes += len(url)
+			append(&segments, Dash_Segment{url = url, duration = f64(min(d, remaining)) / timescale, start = k * d, length = min(d, remaining)})
 		}
 	}
 	info.segments = segments[:]
@@ -371,10 +395,15 @@ Template_Vars :: struct {
 
 // Expands DASH URL template identifiers: $$, $RepresentationID$, $Number$,
 // $Bandwidth$ and $Time$, the numeric ones with an optional %0Nd width.
+// Refuses a URL longer than limit; what it makes before it finds out is
+// bounded by limit and the template's own text.
 @(private = "file")
-expand_template :: proc(template: string, vars: Template_Vars, allocator: mem.Allocator) -> string {
+expand_template :: proc(template: string, vars: Template_Vars, limit: int, allocator: mem.Allocator) -> (string, bool) {
 	if strings.index_byte(template, '$') < 0 {
-		return strings.clone(template, allocator)
+		if len(template) > limit {
+			return "", false
+		}
+		return strings.clone(template, allocator), true
 	}
 	b := strings.builder_make(allocator)
 	rest := template
@@ -404,6 +433,9 @@ expand_template :: proc(template: string, vars: Template_Vars, allocator: mem.Al
 		if strings.has_prefix(format, "%0") && strings.has_suffix(format, "d") {
 			width, _ = strconv.parse_int(format[2:len(format) - 1], 10)
 		}
+		if width < 0 || width > limit {
+			return "", false
+		}
 		write_number :: proc(b: ^strings.Builder, v: i64, width: int) {
 			buf: [32]u8
 			digits := strconv.write_int(buf[:], v, 10)
@@ -429,8 +461,14 @@ expand_template :: proc(template: string, vars: Template_Vars, allocator: mem.Al
 			strings.write_string(&b, ident)
 			strings.write_byte(&b, '$')
 		}
+		if strings.builder_len(b) > limit {
+			return "", false
+		}
 	}
-	return strings.to_string(b)
+	if strings.builder_len(b) > limit {
+		return "", false
+	}
+	return strings.to_string(b), true
 }
 
 // dash_hls renders the DASH segments as an HLS media playlist. The
