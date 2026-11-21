@@ -4,7 +4,15 @@ package app
 // the workers, handing tracks to src/audio, media commands, and Now Playing.
 //
 // Double-clicking a row snapshots the open list into the queue and plays
-// from that row. Each track gets a serial. Its stream is resolved by a
+// from that row. Play next and Add to queue in the track menu add a row
+// from any list as an extra: a copy of the row kept after the list's items,
+// with an anchor, the item it plays after in play order (the current one
+// for Play next), or none for the end of the order (Add to queue). The play
+// order is the list's order, shuffled or not, with each extra spliced in
+// right after its anchor, the newest first, and the anchorless ones at the
+// end (queue_reorder). The extras stay while the list's pages arrive and
+// are saved with the queue. With nothing queued, an extra starts a queue
+// of its own and plays. Each track gets a serial. Its stream is resolved by a
 // Stream job; the result goes to audio.play, or to audio.set_next when the
 // player asks for the following track ahead of time, which is how gapless
 // works. The player's status says which serial is audible, and when that is
@@ -48,6 +56,7 @@ Queue_Item :: struct {
 	album_id:                    i64,
 	artists:                     []Artist_Ref,
 	row:                         int, // with the fake data, its row in State.rows
+	after:                       int, // an extra's anchor: the item it plays after, always an earlier one, or -1 for the end
 }
 
 // Track_Source is a queue entry the player knows or is about to.
@@ -80,12 +89,13 @@ Playback :: struct {
 	window:          int, // TIDALFAST_AUDIO_WINDOW_KB, in bytes
 	null_output:     bool, // TIDALFAST_AUDIO_NULL: play to the silent null device
 
-	// The queue: a snapshot of a list, strings in arena.
+	// The queue: a snapshot of a list, then the extras, strings in arena.
 	arena:           vmem.Arena,
 	has_arena:       bool,
 	items:           []Queue_Item,
 	entries:         []audio.Queue_Entry,
 	order:           []int, // the items in play order, see queue_reorder
+	list_n:          int, // the items from the list; the extras come after them
 	capacity:        int, // items, entries and order have room for this many
 	loaded:          int, // rows loaded when the snapshot was taken
 	moved:           u32, // the list's moved then
@@ -258,25 +268,22 @@ queue_snapshot :: proc(s: ^State, v: ^Track_View) {
 
 // queue_follow brings the queue up to date with v, the list it was
 // snapshot from, as its pages arrive: the rows that came since are copied
-// in. Rows that moved take a new snapshot.
+// in. Rows that moved take a new snapshot. The extras are put back after
+// the list's items, their anchors moved with the items they name.
 @(private = "file")
 queue_follow :: proc(s: ^State, v: ^Track_View) {
 	pb := &s.playback
-	if v.moved != pb.moved || !pb.has_arena {
+	old_n := pb.list_n
+	moved := v.moved != pb.moved || !pb.has_arena
+	extras := queue_extras_take(pb, deep = moved)
+	if moved {
 		queue_snapshot(s, v)
+		queue_extras_put(pb, extras, old_n, clone = true)
 		return
 	}
 	a := vmem.arena_allocator(&pb.arena)
 	if n, old := v.count, len(pb.items); n != old {
-		if n > pb.capacity {
-			pb.capacity = max(n, 2 * pb.capacity)
-			items := make([]Queue_Item, pb.capacity, a)
-			entries := make([]audio.Queue_Entry, pb.capacity, a)
-			copy(items, pb.items)
-			copy(entries, pb.entries)
-			pb.items, pb.entries = items, entries
-			pb.order = make([]int, pb.capacity, a)
-		}
+		queue_grow(pb, n)
 		pb.items = queue_len(pb.items, n)
 		pb.entries = queue_len(pb.entries, n)
 		pb.order = queue_len(pb.order, n)
@@ -284,6 +291,7 @@ queue_follow :: proc(s: ^State, v: ^Track_View) {
 			slice.zero(pb.items[old:])
 			slice.zero(pb.entries[old:])
 		}
+		pb.list_n = n
 	}
 	pb.loaded = v.loaded_rows
 	for &e, i in pb.entries {
@@ -294,6 +302,108 @@ queue_follow :: proc(s: ^State, v: ^Track_View) {
 			queue_fill(pb, i, row, a)
 		}
 	}
+	queue_extras_put(pb, extras, old_n, clone = false)
+}
+
+// Queue_Extra is an extra taken out of the queue while its list part
+// changes, with its anchor by item and track.
+@(private = "file")
+Queue_Extra :: struct {
+	item:  Queue_Item,
+	entry: audio.Queue_Entry,
+	after: Queue_Place,
+}
+
+// queue_extras_take takes the extras out of the queue, leaving the list's
+// items. deep copies their strings, for when the arena goes.
+@(private = "file")
+queue_extras_take :: proc(pb: ^Playback, deep: bool) -> []Queue_Extra {
+	out := make([]Queue_Extra, len(pb.items) - pb.list_n, context.temp_allocator)
+	for &x, j in out {
+		i := pb.list_n + j
+		x.item = pb.items[i]
+		if deep {
+			x.item = item_clone(x.item, context.temp_allocator)
+		}
+		x.entry = pb.entries[i]
+		a := x.item.after
+		x.after = {a, pb.entries[a].id if a >= 0 else 0}
+	}
+	pb.items = pb.items[:pb.list_n]
+	pb.entries = pb.entries[:pb.list_n]
+	pb.order = pb.order[:pb.list_n]
+	return out
+}
+
+// queue_extras_put puts extras taken from a queue whose list had old_n
+// items back after the list's items now. clone copies their strings into
+// the queue's arena. The order needs a queue_reorder after it.
+@(private = "file")
+queue_extras_put :: proc(pb: ^Playback, extras: []Queue_Extra, old_n: int, clone: bool) {
+	for &x in extras {
+		i := queue_append(pb)
+		pb.items[i] = item_clone(x.item, vmem.arena_allocator(&pb.arena)) if clone else x.item
+		pb.entries[i] = x.entry
+		pb.items[i].after = queue_place(pb, x.after, old_n)
+	}
+}
+
+@(private = "file")
+item_clone :: proc(it: Queue_Item, a: runtime.Allocator) -> Queue_Item {
+	out := it
+	out.title = strings.clone(it.title, a)
+	out.artist = strings.clone(it.artist, a)
+	out.album = strings.clone(it.album, a)
+	out.cover = strings.clone(it.cover, a)
+	out.artists = slice.clone(it.artists, a)
+	return out
+}
+
+// queue_grow makes room for n items, keeping the items, entries and order.
+@(private = "file")
+queue_grow :: proc(pb: ^Playback, n: int) {
+	if n <= pb.capacity {
+		return
+	}
+	a := vmem.arena_allocator(&pb.arena)
+	pb.capacity = max(n, 2 * pb.capacity)
+	items := make([]Queue_Item, pb.capacity, a)
+	entries := make([]audio.Queue_Entry, pb.capacity, a)
+	order := make([]int, pb.capacity, a)
+	copy(items, pb.items)
+	copy(entries, pb.entries)
+	copy(order, pb.order)
+	pb.items = items[:len(pb.items)]
+	pb.entries = entries[:len(pb.entries)]
+	pb.order = order[:len(pb.order)]
+}
+
+// queue_append adds an empty item at the end, and returns it. Its place in
+// the order is left to the caller.
+@(private = "file")
+queue_append :: proc(pb: ^Playback) -> int {
+	i := len(pb.items)
+	queue_grow(pb, i + 1)
+	pb.items = queue_len(pb.items, i + 1)
+	pb.entries = queue_len(pb.entries, i + 1)
+	pb.order = queue_len(pb.order, i + 1)
+	pb.items[i] = {}
+	pb.entries[i] = {}
+	return i
+}
+
+// queue_place is where an item of the queue before its list changed from
+// old_n items is now: an extra keeps its place after the list, and the
+// list's item is found by its track (queue_find).
+@(private = "file")
+queue_place :: proc(pb: ^Playback, p: Queue_Place, old_n: int) -> int {
+	if p.item < 0 {
+		return -1
+	}
+	if p.item >= old_n {
+		return p.item - old_n + pb.list_n
+	}
+	return queue_find(pb, p.track, p.item)
 }
 
 // queue_len is s at length n, which can be up to the queue's capacity.
@@ -315,16 +425,70 @@ queue_reset :: proc(pb: ^Playback, n: int) -> runtime.Allocator {
 	pb.entries = make([]audio.Queue_Entry, n, a)
 	pb.order = make([]int, n, a)
 	pb.capacity = n
+	pb.list_n = n
 	audio.queue_order(pb.order, nil, false)
 	return a
 }
 
-// queue_reorder puts the queue in list order, or with shuffle on, the
-// items in head and then the rest shuffled.
+// queue_reorder puts the list's items in list order, or with shuffle on,
+// the items in head and then the rest shuffled, and splices the extras in:
+// each right after its anchor, with what was spliced after it, the newest
+// first, and those without one at the end in the order they came. An
+// extra in head stands for the list item it hangs from.
 @(private = "file")
 queue_reorder :: proc(s: ^State, head: []int) {
+	pb := &s.playback
 	shuffle := s.settings.shuffle
-	audio.queue_order(s.playback.order, head if shuffle else nil, shuffle)
+	roots := make([]int, len(head) if shuffle else 0, context.temp_allocator)
+	for &r, k in roots {
+		r = queue_root(pb, head[k])
+	}
+	base := make([]int, pb.list_n, context.temp_allocator)
+	audio.queue_order(base, roots, shuffle)
+
+	n := len(pb.items)
+	first := make([]int, n, context.temp_allocator)
+	sibling := make([]int, n, context.temp_allocator)
+	slice.fill(first, -1)
+	ends := make([dynamic]int, context.temp_allocator)
+	for i in pb.list_n ..< n {
+		if a := pb.items[i].after; a >= 0 {
+			sibling[i] = first[a]
+			first[a] = i
+		} else {
+			append(&ends, i)
+		}
+	}
+	p := 0
+	for i in base {
+		p = splice(pb.order, first, sibling, i, p)
+	}
+	for i in ends {
+		p = splice(pb.order, first, sibling, i, p)
+	}
+}
+
+// splice puts item i in order at p, then what hangs from it, and returns
+// the place after them.
+@(private = "file")
+splice :: proc(order, first, sibling: []int, i, at: int) -> int {
+	order[at] = i
+	p := at + 1
+	for c := first[i]; c >= 0; c = sibling[c] {
+		p = splice(order, first, sibling, c, p)
+	}
+	return p
+}
+
+// queue_root is the list item that item i hangs from, itself for a list
+// item, or -1 for an extra at the end of the order.
+@(private = "file")
+queue_root :: proc(pb: ^Playback, item: int) -> int {
+	i := item
+	for i >= pb.list_n && i < len(pb.items) {
+		i = pb.items[i].after
+	}
+	return i if i < len(pb.items) else -1
 }
 
 // queue_fill makes queue item i row, its strings copied with a.
@@ -354,6 +518,76 @@ playback_play_row :: proc(s: ^State, i: int) {
 	queue_reorder(s, {i})
 	s.playback.queue_gen += 1
 	start_item(s, i)
+}
+
+// playback_queue_row adds row i of the open list to the queue as an extra:
+// with next set right after the current track in play order (Play next),
+// else at the end of the order (Add to queue). With nothing queued it
+// starts a queue of that track and plays it, as it does when the current
+// track stopped on a failure. A queue that played out goes on to it by
+// itself (playback_observe). A preloaded next track that's no longer next
+// is dropped.
+playback_queue_row :: proc(s: ^State, i: int, next: bool) -> bool {
+	if !row_playable(s, i) {
+		return false
+	}
+	pb := &s.playback
+	row := view_row(s, i)
+	if pb.index < 0 || !pb.has_arena {
+		queue_reset(pb, 0)
+		pb.fake = s.data.fake
+		pb.list_key = 0
+		pb.loaded = 0
+		pb.moved = 0
+		// A gen no view is given, as for a restored queue: no list follows.
+		s.data.queue_view = view_gen(&s.data)
+		item := queue_extra(s, i, row, -1)
+		pb.order[0] = item
+		pb.queue_gen += 1
+		start_item(s, item)
+		return true
+	}
+	after := -1
+	if next {
+		after = pb.index
+		// The player already went on to the preloaded track.
+		if pb.next.serial != 0 && pb.status.serial == pb.next.serial {
+			after = pb.next.item
+		}
+	}
+	item := queue_extra(s, i, row, after)
+	// In place, as queue_reorder would put it, so the rest keeps its order.
+	last := len(pb.order) - 1
+	if p, found := slice.linear_search(pb.order[:last], after); found {
+		copy(pb.order[p + 2:], pb.order[p + 1:last])
+		pb.order[p + 1] = item
+	} else {
+		pb.order[last] = item
+	}
+	if pb.cur.serial == 0 {
+		start_item(s, item)
+		return true
+	}
+	if pb.next.serial != 0 && audio.queue_after(pb.entries, pb.order, pb.index, s.settings.repeat, user = false) != pb.next.item {
+		next_drop(pb)
+	}
+	return true
+}
+
+// queue_extra appends row, row i of the open list, to the queue as an
+// extra anchored after item after, and returns its item. Its place in the
+// order is left to the caller.
+@(private = "file")
+queue_extra :: proc(s: ^State, i: int, row: ^Row, after: int) -> int {
+	pb := &s.playback
+	item := queue_append(pb)
+	queue_fill(pb, item, row, vmem.arena_allocator(&pb.arena))
+	pb.items[item].row = fake_row_index(s, i)
+	pb.items[item].after = after
+	if pb.fake {
+		pb.entries[item].id = -i64(pb.items[item].row + 1)
+	}
+	return item
 }
 
 // playback_stop stops the player and forgets the queue and Now Playing,
@@ -881,20 +1115,20 @@ playback_update :: proc(s: ^State, events: []platform.Event) {
 	// rows after it up, and the queue's tracks with them.
 	d := &s.data
 	if v := queue_list(d); !pb.fake && pb.index >= 0 && v != nil && (pb.loaded != v.loaded_rows || pb.moved != v.moved) {
-		index := pb.index
+		index, old_n := pb.index, pb.list_n
 		played := order_played(s)
 		queue_follow(s, v)
-		pb.index = queue_find(pb, pb.cur.track, index)
+		pb.index = queue_place(pb, {index, pb.cur.track}, old_n)
 		pb.cur.item = pb.index
 		if pb.next.serial != 0 {
-			pb.next.item = queue_find(pb, pb.next.track, pb.next.item)
+			pb.next.item = queue_place(pb, {pb.next.item, pb.next.track}, old_n)
 		}
 		if pb.next_failed.serial != 0 {
-			pb.next_failed.item = queue_find(pb, pb.next_failed.track, pb.next_failed.item)
+			pb.next_failed.item = queue_place(pb, {pb.next_failed.item, pb.next_failed.track}, old_n)
 		}
 		head := make([]int, len(played), context.temp_allocator)
 		for p, i in played {
-			head[i] = queue_find(pb, p.track, p.item)
+			head[i] = queue_place(pb, p, old_n)
 		}
 		queue_reorder(s, head)
 	}
@@ -942,19 +1176,20 @@ next_failed :: proc(pb: ^Playback, i: int) -> bool {
 	return f.serial != 0 && f.queue == pb.queue_gen && f.item == i && i < len(pb.entries) && f.track == pb.entries[i].id
 }
 
-// queue_find is the queue entry holding track: at, if it does, or else the
-// nearest one before it, where a gap closing in the list moved it.
+// queue_find is the list's item holding track: at, if it does, or else the
+// nearest one before it, where a gap closing in the list moved it. It's
+// never an extra.
 @(private = "file")
 queue_find :: proc(pb: ^Playback, track: i64, at: int) -> int {
-	if at >= 0 && at < len(pb.entries) && pb.entries[at].id == track {
+	if at >= 0 && at < pb.list_n && pb.entries[at].id == track {
 		return at
 	}
-	for i := min(at, len(pb.entries) - 1); i >= 0; i -= 1 {
+	for i := min(at, pb.list_n - 1); i >= 0; i -= 1 {
 		if pb.entries[i].id == track {
 			return i
 		}
 	}
-	return at
+	return min(at, pb.list_n - 1)
 }
 
 // list_key names the open list: its kind and TIDAL id, or the search's
@@ -1025,10 +1260,11 @@ sidebar_queued :: proc(s: ^State, i: int) -> bool {
 // the queue came from has one, so the same track in another list isn't
 // lit. It's the queue's index while that row holds the track. After the
 // list was opened again its rows may differ, so it's the first row with
-// the track's id, looked for once each time the rows change.
+// the track's id, looked for once each time the rows change. An extra
+// isn't one of the list's rows, so none is lit while one plays.
 playing_row :: proc(s: ^State) -> int {
 	pb := &s.playback
-	if pb.index < 0 || pb.index >= len(pb.entries) || pb.list_key != list_key(s) {
+	if pb.index < 0 || pb.index >= pb.list_n || pb.list_key != list_key(s) {
 		return -1
 	}
 	if pb.fake {
@@ -1129,7 +1365,7 @@ queue_save :: proc(s: ^State) {
 	if v := queue_list(d); v != nil && view_filling(v) {
 		count, loaded = 0, floor_pow2(loaded)
 	}
-	rows := fnv_u64({u64(pb.queue_gen), count, loaded})
+	rows := fnv_u64({u64(pb.queue_gen), count, loaded, u64(len(pb.items) - pb.list_n)})
 	place := fnv_u64({u64(pb.index), u64(pb.cur.track), u64(pb.paused), u64(pb.status.seek_id), u64(ended)})
 	if rows != pb.save_key {
 		pb.save_key, pb.place_key = rows, place
@@ -1179,7 +1415,11 @@ queue_file :: proc(pb: ^Playback, allocator: runtime.Allocator) -> []u8 {
 			track    = e.track_num,
 		}
 	}
-	return queue_encode(head, rows, allocator)
+	after := make([]i64, len(pb.items) - pb.list_n, context.temp_allocator)
+	for &a, j in after {
+		a = i64(pb.items[pb.list_n + j].after)
+	}
+	return queue_encode(head, rows, allocator, after)
 }
 
 // queue_head is the queue's file header, at the current position.
@@ -1221,12 +1461,17 @@ playback_restore :: proc(s: ^State, file: Queue_File_Result) {
 	for &row, i in file.rows {
 		queue_fill(pb, i, &row, a)
 	}
+	// queue_decode checked each anchor is an earlier row.
+	pb.list_n = len(file.rows) - len(file.after)
+	for after, j in file.after {
+		pb.items[pb.list_n + j].after = int(after)
+	}
 	pb.fake = false
 	pb.list_key = head.list_key
 	// A gen no view is given, so playback_update never takes the queue
 	// for a snapshot of the open list.
 	s.data.queue_view = view_gen(&s.data)
-	pb.loaded = len(file.rows)
+	pb.loaded = pb.list_n
 	pb.queue_gen += 1
 	i := int(head.index)
 	at := head.sample
