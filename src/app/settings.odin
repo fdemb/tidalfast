@@ -1,9 +1,10 @@
 package app
 
-// Settings: the volume and whether it's muted, shuffle and repeat, bit-perfect output, how lists
-// show their scrollbars, whether the player bar blurs them, whether covers
-// lean under the pointer and, on Linux,
-// whose title bar the window has and GNOME's button layout. They live in
+// Settings: the volume and whether it's muted, shuffle and repeat, how
+// ReplayGain applies, bit-perfect output, how lists show their scrollbars,
+// whether the player bar blurs them, whether covers lean under the
+// pointer, the sidebar's width and, on Linux, whose title bar the window
+// has and GNOME's button layout. They live in
 // a small JSON file, ~/Library/Application Support/tidalfast/settings.json,
 // or wherever TIDALFAST_SETTINGS points. The fake data has none unless
 // TIDALFAST_SETTINGS points to one, and a mock run without a mock URL has
@@ -42,6 +43,7 @@ Settings :: struct {
 	muted:       bool,
 	shuffle:     bool,
 	repeat:      audio.Repeat,
+	replay_gain: audio.Gain_Setting,
 	title_bar:   Title_Bar,
 	// Covers stay flat under the pointer. Named for the off state, so a
 	// file from before it has the effect on.
@@ -49,6 +51,10 @@ Settings :: struct {
 	// GNOME's window button layout as the portal last gave it, for the
 	// window's first frame. nil until it has.
 	button_layout: Maybe(Button_Layout),
+	// The width the sidebar was dragged to, 0 for SIDEBAR_DEFAULT. A narrow
+	// window draws it narrower for as long as it is narrow
+	// (sidebar_width), which leaves this alone.
+	sidebar_w:     f32,
 }
 
 VOLUME_DEFAULT :: 0.7
@@ -137,9 +143,11 @@ Settings_File :: struct {
 	muted:         bool,
 	shuffle:       bool,
 	repeat:        audio.Repeat,
+	replay_gain:   audio.Gain_Setting, // a name it doesn't know reads as Automatic
 	title_bar:     Title_Bar,
 	still_covers:  bool,
 	button_layout: string `json:"button_layout,omitempty"`,
+	sidebar_width: Maybe(f32) `json:"sidebar_width,omitempty"`,
 }
 
 @(private = "file")
@@ -172,10 +180,11 @@ settings_decode_json :: proc(data: []u8) -> (st: Settings, ok: bool) {
 	if json.unmarshal(data, &f, allocator = context.temp_allocator) != nil {
 		return {volume = VOLUME_DEFAULT}, false
 	}
-	st = {bit_perfect = f.bit_perfect, scrollbars = f.scrollbars, bar = f.bar, volume = clamp(f.volume.? or_else VOLUME_DEFAULT, 0, 1), muted = f.muted, shuffle = f.shuffle, repeat = f.repeat, title_bar = f.title_bar, still_covers = f.still_covers}
+	st = {bit_perfect = f.bit_perfect, scrollbars = f.scrollbars, bar = f.bar, volume = clamp(f.volume.? or_else VOLUME_DEFAULT, 0, 1), muted = f.muted, shuffle = f.shuffle, repeat = f.repeat, replay_gain = f.replay_gain, title_bar = f.title_bar, still_covers = f.still_covers}
 	if f.button_layout != "" {
 		st.button_layout = button_layout_parse(f.button_layout)
 	}
+	st.sidebar_w = sidebar_pref_clean(f.sidebar_width.? or_else 0)
 	if c, has := f.device_change.?; has && c.rate != 0 && len(c.uid) <= len(st.device.uid) {
 		st.device = {orig_rate = c.orig_rate, orig_format = c.orig_format, rate = c.rate}
 		st.device.uid_len = copy(st.device.uid[:], c.uid)
@@ -200,11 +209,15 @@ settings_save :: proc(path: string, st: Settings) -> bool {
 		muted       = st.muted,
 		shuffle     = st.shuffle,
 		repeat      = st.repeat,
+		replay_gain = st.replay_gain,
 		title_bar   = st.title_bar,
 		still_covers = st.still_covers,
 	}
 	if l, ok := st.button_layout.?; ok {
 		f.button_layout = button_layout_string(l)
+	}
+	if st.sidebar_w != 0 {
+		f.sidebar_width = st.sidebar_w
 	}
 	if st.device.rate != 0 {
 		c := st.device

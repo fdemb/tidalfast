@@ -408,6 +408,25 @@ settings_persistence :: proc(t: ^testing.T) {
 	st, _ = app.settings_load(path)
 	testing.expect_value(t, st, app.Settings{shuffle = true, repeat = .One})
 
+	// ReplayGain too, by name. A file from before it, or with a name it
+	// doesn't know, has it Automatic, and the rest of the file still loads.
+	for g in audio.Gain_Setting {
+		testing.expect(t, app.settings_save(path, {replay_gain = g, volume = 0.5}))
+		st, ok = app.settings_load(path)
+		testing.expect(t, ok)
+		testing.expect_value(t, st, app.Settings{replay_gain = g, volume = 0.5})
+	}
+	data, _ = os.read_entire_file(path, context.temp_allocator)
+	testing.expect(t, strings.contains(string(data), `"replay_gain": "Off"`))
+	_ = os.write_entire_file(path, transmute([]u8)string(`{"shuffle": true}`))
+	st, ok = app.settings_load(path)
+	testing.expect(t, ok)
+	testing.expect_value(t, st.replay_gain, audio.Gain_Setting.Automatic)
+	_ = os.write_entire_file(path, transmute([]u8)string(`{"replay_gain": "Loud", "shuffle": true}`))
+	st, ok = app.settings_load(path)
+	testing.expect(t, ok)
+	testing.expect_value(t, st, app.Settings{shuffle = true, volume = 0.7})
+
 	_ = os.write_entire_file(path, transmute([]u8)string("{not json"))
 	st, ok = app.settings_load(path)
 	testing.expect(t, !ok)
