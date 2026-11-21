@@ -9,7 +9,7 @@ w := text.measure(&s.text, .Regular, 13, duration).width
 run := text.shape(&s.text, .Regular, 13, label)               // keep and draw with draw_run
 ```
 
-`pos` is the top left of the line box. `draw` returns the width actually drawn, the line height and ascent, and whether it truncated. `line_height` gives the box height without shaping anything.
+`pos` is the top left of the line box. `draw` returns the width actually drawn, the line height and ascent, and whether it truncated. `line_height` gives the box height without shaping anything. `cut_off(run, max_width)` says whether `draw_run` would cut a run at a width, so the UI can tell a cut label without drawing it twice.
 
 The pipeline:
 

@@ -35,6 +35,7 @@ MAX_SHORTCUTS :: 8
 STACK_DEPTH :: 64
 TOOLTIP_DELAY :: 1 // seconds of hovering before a tooltip shows
 TOOLTIP_WARM :: 1 // seconds after a tooltip that the next one shows without the delay
+CUT_TEXT_MAX :: 1024 // bytes of a cut label's text that its tooltip keeps
 DRAG_THRESHOLD :: 4 // points the mouse moves before a press becomes a drag
 FADE_IN :: 0.08 // seconds hot_fade, active_t and focus_t take from 0 to 1
 FADE_OUT :: 0.16 // seconds they take from 1 to 0
@@ -144,8 +145,11 @@ Build :: struct {
 	flip_y:                    f32, // with keep_in_window, where its bottom goes when it doesn't fit below
 	above:                     bool, // with keep_in_window, its bottom goes at flip_y even when it fits below
 	anchor:                    ^Box, // a floating box centred under this one, or above it when there's no room below, see fit_floating
+	anchor_rect:               render.Rect, // without an anchor, a rect it's placed by the same way, when its width isn't 0
 	id:                        string, // as given; must live until end_frame
 	label:                     string, // the part of id before "##"
+	tip_around:                bool, // a label cut off inside this box puts its tooltip under or over the whole box, as an Instant_Hover box does
+	full_text:                 string, // what the tooltip of a label cut off inside this box shows, in place of the label; must live until end_frame, see cut_label
 	using style:               Style,
 	backdrop:                  Backdrop, // with Draw_Backdrop, background tints it
 	gradient:                  render.Color, // bottom colour of the background, when its alpha isn't 0
@@ -185,6 +189,19 @@ Signal :: struct {
 	drag_delta:     [2]f32, // mouse movement since the press, up to the release if released
 	mouse:          [2]f32, // while held the mouse, when released where the button came up
 	scroll:         [2]f32, // points scrolled over the box this frame
+}
+
+// Cut_Label is a label cut off with an ellipsis that was under the mouse
+// in the last frame drawn. Its tooltip shows the full text.
+Cut_Label :: struct {
+	id:        u64, // hash of the text and the rect, 0 for none
+	rect:      render.Rect, // the label's, clipped, or its full_text box's: where the mouse shows it
+	anchor:    render.Rect, // what the tooltip goes under: rect, as tall as the list row or card it's in (see note_cut)
+	since:     f64, // when it came under the mouse
+	by_mouse:  bool, // the mouse moving brought it there, not the boxes moving
+	dismissed: bool, // a press or a scroll since it came under the mouse
+	text_len:  int,
+	text:      [CUT_TEXT_MAX]u8,
 }
 
 // One interactive box from the last layout, in drawing order.
@@ -274,6 +291,7 @@ State :: struct {
 	hot_parent:     Key, // the hot box's clickable parent, which counts as hovered
 	hot_since:      f64,
 	hot_by_mouse:   bool, // the mouse moving made hot what it is, not boxes moving under it
+	mouse_moved:    bool, // this frame
 	active:         [platform.Mouse_Button]Key,
 	pressed:        [platform.Mouse_Button]Key, // this frame
 	released:       [platform.Mouse_Button]Key,
@@ -327,6 +345,17 @@ State :: struct {
 	menu_lit:       Key, // the item highlighted when the menu closed, lit while it fades out
 	tooltip_seen:   f64, // when a tooltip was last built
 	tooltip_dismissed: Key, // the box clicked, which shows no tooltip until the mouse leaves it
+	tooltip_asked:  bool, // a box under the mouse called tooltip this frame, so a cut label shows none
+	tooltip_box:    ^Box, // this frame's tooltip, if one was built
+	cut:            Cut_Label,
+	// What this frame's draw finds under the mouse, see note_cut.
+	cut_scan:       bool, // look for a cut label: drawing the main tree with the mouse free
+	cut_owner:      ^Box, // the innermost box being drawn with full_text
+	cut_row:        ^Box, // the innermost Instant_Hover or tip_around box being drawn, such as a list row or a card
+	cut_found:      bool,
+	cut_text:       string,
+	cut_rect:       render.Rect,
+	cut_anchor:     render.Rect,
 
 	drag_active:    bool,
 	drag_payload:   u64,
@@ -485,6 +514,8 @@ begin_frame :: proc(u: ^State, events: []platform.Event, r: ^render.Renderer, t:
 	u.texts = t
 	u.animating = false
 	u.menu_built = false
+	u.tooltip_asked = false
+	u.tooltip_box = nil
 	u.pool_misses = 0
 	u.wake = 0
 	u.text_claimed = false
@@ -639,6 +670,7 @@ process_events :: proc(u: ^State, events: []platform.Event, text_bytes: []u8) {
 			} else {
 				mouse_pressed(u, e)
 			}
+			u.cut.dismissed = true
 		case .Mouse_Up:
 			hover := hit_at(u, u.input.mouse)
 			if k := u.active[e.button]; k != 0 {
@@ -677,6 +709,7 @@ process_events :: proc(u: ^State, events: []platform.Event, text_bytes: []u8) {
 			if e.precise {
 				u.scroll_precise += d
 			}
+			u.cut.dismissed = true
 		case .Key_Down:
 			key_down(u, e)
 		case .Text, .Marked_Text, .Unmark_Text:
@@ -694,6 +727,7 @@ process_events :: proc(u: ^State, events: []platform.Event, text_bytes: []u8) {
 		}
 	}
 
+	u.mouse_moved = moved
 	hot := hit_at(u, u.input.mouse) if u.input.mouse_inside else 0
 	if active := u.active[.Left]; active != 0 && hot != active {
 		hot = 0
@@ -1059,6 +1093,7 @@ end_frame :: proc() -> bool {
 			log.error("ui: a frame left a parent pushed, or popped one it didn't push")
 		}
 	}
+	cut_tooltip(u)
 	layout(u.root, u.texts, ui_scale(u))
 	layout(u.floating_root, u.texts, ui_scale(u))
 	fit_floating(u)
@@ -1105,8 +1140,20 @@ end_frame :: proc() -> bool {
 		u.pool_miss_last = u.frame
 	}
 	access_build(u)
+	u.cut_found = false
+	u.cut_owner = nil
+	u.cut_row = nil
+	u.cut_scan = u.input.mouse_inside && u.input.buttons == {} && !u.menu_open && !u.drag_active
 	draw_box(u, u.root, 1)
+	scanned := u.cut_scan
+	u.cut_scan = false
 	draw_box(u, u.floating_root, 1)
+	// While a button is held or a menu is open the label under the mouse
+	// stays what it was, so a click on it still hides its tooltip after
+	// the release.
+	if scanned || !u.input.mouse_inside {
+		cut_commit(u)
+	}
 	if u.debug {
 		draw_debug(u)
 	}
@@ -1120,6 +1167,77 @@ end_frame :: proc() -> bool {
 		u.animating = true
 	}
 	return u.animating
+}
+
+// note_cut records that a label inside owner, or owner's own, was cut off
+// under the mouse. A box drawn over it later takes it back (see draw_box),
+// so what's found is what the mouse is on. In a list row, a card or another
+// tip_around box the tooltip goes under or over the whole box, so it covers
+// none of the box's other text.
+@(private)
+note_cut :: proc(u: ^State, owner: ^Box) {
+	u.cut_found = true
+	u.cut_text = owner.full_text if owner.full_text != "" else owner.label
+	u.cut_rect = owner.clip
+	u.cut_anchor = owner.clip
+	if row := u.cut_row; row != nil {
+		u.cut_anchor.y = row.clip.y
+		u.cut_anchor.h = row.clip.h
+	}
+}
+
+// cut_commit keeps the cut label this frame's draw found for the next
+// frame's tooltip. A new one, or one in a new place, starts the delay
+// again, so rows scrolling under a still mouse don't show their text.
+@(private)
+cut_commit :: proc(u: ^State) {
+	if !u.cut_found {
+		u.cut.id = 0
+		return
+	}
+	rect := u.cut_rect
+	id := hash.fnv64a(transmute([]u8)u.cut_text)
+	id = hash.fnv64a(([^]u8)(&rect)[:size_of(rect)], id) | 1
+	if id == u.cut.id {
+		return
+	}
+	shown := u.tooltip_box != nil && u.cut.id != 0 && !u.tooltip_asked
+	n := min(len(u.cut_text), CUT_TEXT_MAX)
+	for n < len(u.cut_text) && n > 0 && u.cut_text[n] & 0xc0 == 0x80 {
+		n -= 1
+	}
+	copy(u.cut.text[:], u.cut_text[:n])
+	u.cut.text_len = n
+	u.cut.id = id
+	u.cut.rect = rect
+	u.cut.anchor = u.cut_anchor
+	u.cut.since = u.time
+	u.cut.by_mouse = u.mouse_moved
+	u.cut.dismissed = false
+	// This frame showed the old label's text over the new one.
+	if shown {
+		u.animating = true
+	}
+}
+
+// cut_tooltip shows the full text of the cut label the last frame found
+// under the mouse, as tooltip would for a box, unless something under the
+// mouse has a tooltip of its own.
+@(private)
+cut_tooltip :: proc(u: ^State) {
+	c := &u.cut
+	if c.id == 0 || c.dismissed || u.tooltip_asked || !u.input.mouse_inside || u.input.buttons != {} || u.menu_open || u.drag_active {
+		return
+	}
+	if !rect_contains(c.rect, u.input.mouse) {
+		return
+	}
+	warm := c.by_mouse && u.time - u.tooltip_seen < TOOLTIP_WARM
+	if shows := c.since + TOOLTIP_DELAY; u.time < shows && !warm {
+		wake_at(shows)
+		return
+	}
+	tooltip_box(nil, c.anchor, string(c.text[:c.text_len]), "", warm)
 }
 
 // relight lights or darkens key's box at once, if it's an Instant_Hover
@@ -1158,22 +1276,22 @@ drawn_opacity :: proc(b: ^Box) -> f32 {
 // would go by last frame's sizes, which a new box doesn't have.
 @(private)
 fit_floating :: proc(u: ^State) {
-	MARGIN :: 8
 	for b := u.floating_root.first; b != nil; b = b.next {
 		pos := [2]f32{b.rect.x, b.rect.y}
-		if a := b.anchor; a != nil {
-			pos.x = a.rect.x + (a.rect.w - b.rect.w) / 2
-			pos.y = a.rect.y + a.rect.h + TOOLTIP_GAP
-			if pos.y + b.rect.h > u.height - MARGIN {
-				pos.y = a.rect.y - TOOLTIP_GAP - b.rect.h
+		if b.anchor != nil || b.anchor_rect.w > 0 {
+			a := b.anchor.rect if b.anchor != nil else b.anchor_rect
+			pos.x = a.x + (a.w - b.rect.w) / 2
+			pos.y = a.y + a.h + TOOLTIP_GAP
+			if pos.y + b.rect.h > u.height - FLOATING_MARGIN {
+				pos.y = a.y - TOOLTIP_GAP - b.rect.h
 			}
 		} else if !b.keep_in_window {
 			continue
-		} else if b.above || pos.y + b.rect.h > u.height - MARGIN {
+		} else if b.above || pos.y + b.rect.h > u.height - FLOATING_MARGIN {
 			pos.y = b.flip_y - b.rect.h
 		}
-		pos.x = max(min(pos.x, u.width - b.rect.w - MARGIN), MARGIN)
-		pos.y = max(pos.y, MARGIN)
+		pos.x = max(min(pos.x, u.width - b.rect.w - FLOATING_MARGIN), FLOATING_MARGIN)
+		pos.y = max(pos.y, FLOATING_MARGIN)
 		shift_box(b, pos - {b.rect.x, b.rect.y})
 	}
 }
