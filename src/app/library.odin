@@ -103,8 +103,9 @@ NAV_H :: NAV_BUTTON_H + 2 * NAV_PAD // the room kept for them at the top without
 NAV_SHADOW_FADE :: 16 // points of scrolling over which their shadow fades in
 
 Library :: struct {
-	sidebar_w:     f32,
+	sidebar_w:     f32, // this frame's, Settings.sidebar_w as the window allows (sidebar_width)
 	drag_from_w:   f32, // sidebar width when the handle was pressed
+	drag_pref:     f32, // Settings.sidebar_w when the handle was pressed
 	playlist:      int,
 	selected:      int, // track row, -1 for none
 	playing:       int, // the row playing in this list, -1 for none
@@ -146,6 +147,8 @@ Status :: enum u8 {
 	Adding,
 	Already_In,
 	Add_Failed,
+	Playing_Next,
+	Queued,
 }
 
 PLAYLISTS := [?]string {
@@ -232,6 +235,22 @@ sidebar_limit :: proc(window_w: f32) -> f32 {
 	return clamp(window_w - HANDLE_W - MAIN_MIN, SIDEBAR_MIN, SIDEBAR_MAX)
 }
 
+// sidebar_width is the sidebar's width in a window window_w wide, for the
+// width the user chose (Settings.sidebar_w).
+sidebar_width :: proc(pref, window_w: f32) -> f32 {
+	w := sidebar_pref_clean(pref)
+	return clamp(w if w != 0 else SIDEBAR_DEFAULT, SIDEBAR_MIN, sidebar_limit(window_w))
+}
+
+// sidebar_pref_clean is a width from the settings file in range, or 0 for
+// the default when it is no width at all.
+sidebar_pref_clean :: proc(pref: f32) -> f32 {
+	if math.is_nan(pref) || pref <= 0 {
+		return 0
+	}
+	return clamp(pref, SIDEBAR_MIN, SIDEBAR_MAX)
+}
+
 library_init :: proc(lib: ^Library) {
 	lib^ = {
 		sidebar_w   = SIDEBAR_DEFAULT,
@@ -246,7 +265,7 @@ library_init :: proc(lib: ^Library) {
 draw_library :: proc(s: ^State, w, h: f32) {
 	lib := &s.library
 	ui.text_style(.Regular, 13, TEXT)
-	lib.sidebar_w = clamp(lib.sidebar_w, SIDEBAR_MIN, sidebar_limit(w))
+	lib.sidebar_w = sidebar_width(s.settings.sidebar_w, w)
 	lib.drop_target = -1
 
 	ui.set_next_background(WINDOW_BG)
@@ -272,53 +291,6 @@ draw_library :: proc(s: ^State, w, h: f32) {
 	draw_track_menu(s)
 	draw_drag_ghost(s)
 	library_shortcuts(s)
-}
-
-VOLUME_STEP :: 0.1
-
-// The keys library_shortcuts takes for the player bar's buttons, shown in
-// their tooltips.
-PLAY_HINT :: "Space"
-NEXT_HINT :: "⌘→" when ODIN_OS == .Darwin else "Ctrl+→"
-PREVIOUS_HINT :: "⌘←" when ODIN_OS == .Darwin else "Ctrl+←"
-
-// library_shortcuts runs the shortcuts that work anywhere in the library,
-// with the keys the views didn't take, and the mouse's Back and Forward. A
-// text field keeps its own keys.
-library_shortcuts :: proc(s: ^State) {
-	if ui.take_button(.Back) {
-		pending_set(s, Go_Back{})
-	}
-	if ui.take_button(.Forward) {
-		pending_set(s, Go_Forward{})
-	}
-	// On the search page the field takes these itself (focus_shortcut).
-	for ui.take_key(.F, {ui.PRIMARY}) || ui.take_key(.L, {ui.PRIMARY}) {
-		pending_set(s, Search_Place{})
-	}
-	if ui.text_focused() {
-		return
-	}
-	for ui.take_key(.Space, repeats = false) {
-		playback_toggle(s)
-		ui.data_changed()
-	}
-	for ui.take_key(.Right, {ui.PRIMARY}) {
-		playback_next(s)
-		ui.data_changed()
-	}
-	for ui.take_key(.Left, {ui.PRIMARY}) {
-		playback_previous(s)
-		ui.data_changed()
-	}
-	for ui.take_key(.Up, {ui.PRIMARY}) {
-		playback_set_volume(s, min(s.settings.volume + VOLUME_STEP, 1), true)
-		ui.data_changed()
-	}
-	for ui.take_key(.Down, {ui.PRIMARY}) {
-		playback_set_volume(s, max(s.settings.volume - VOLUME_STEP, 0), true)
-		ui.data_changed()
-	}
 }
 
 // draw_history_buttons is Back and Forward through the places visited
@@ -572,11 +544,24 @@ draw_sidebar_handle :: proc(s: ^State, window_w: f32) {
 	handle := ui.row("sidebar_handle", {.Clickable}, ui.px(HANDLE_W), ui.fill())
 	sig := ui.signal(handle)
 	if sig.pressed {
+		if sig.double_clicked && s.settings.sidebar_w != 0 {
+			s.settings.sidebar_w = 0
+			lib.sidebar_w = sidebar_width(0, window_w)
+			settings_queue(&s.data, settings_to_save(s))
+		}
 		lib.drag_from_w = lib.sidebar_w
+		lib.drag_pref = s.settings.sidebar_w
 	}
 	if sig.held || sig.released {
 		lib.sidebar_w = clamp(lib.drag_from_w + sig.drag_delta.x, SIDEBAR_MIN, sidebar_limit(window_w))
+		// Back where it started, the handle keeps the width chosen before,
+		// which a narrow window may be drawing narrower.
+		s.settings.sidebar_w = lib.drag_pref if lib.sidebar_w == lib.drag_from_w else lib.sidebar_w
 	}
+	if sig.released && s.settings.sidebar_w != lib.drag_pref {
+		settings_queue(&s.data, settings_to_save(s))
+	}
+	ui.accessible(handle, .Slider, "Sidebar width", cat(num(int(math.round(lib.sidebar_w))), " pt"))
 	// The sidebar's background runs up to the line.
 	ui.set_next_background(PANEL)
 	ui.box_make("", {.Draw_Background}, ui.px(2), ui.fill())
@@ -1076,6 +1061,14 @@ draw_track_menu :: proc(s: ^State) {
 		if ui.menu_item("Play").clicked && i >= 0 {
 			pending_set(s, Play_Row{index = i})
 		}
+		if row_playable(s, i) {
+			if ui.menu_item("Play next").clicked {
+				pending_set(s, Queue_Row{index = i, next = true})
+			}
+			if ui.menu_item("Add to queue").clicked {
+				pending_set(s, Queue_Row{index = i})
+			}
+		}
 		fake := s.data.fake
 		if row != nil && (fake || row.album_id != 0 || first_artist(row.artists) != 0) {
 			ui.menu_separator()
@@ -1221,26 +1214,26 @@ draw_player_bar :: proc(s: ^State, w, h: f32) {
 				playback_set_shuffle(s, !shuffle)
 				ui.data_changed() // this frame drew the old state
 			}
-			ui.tooltip(shuffle_sig, "Shuffle")
+			ui.tooltip(shuffle_sig, "Shuffle", shortcut_keys(.Shuffle))
 			ui.spacer(ui.px(16))
 			prev := skip_button("prev", false)
 			if prev.clicked {
 				playback_previous(s)
 			}
-			ui.tooltip(prev, "Previous", PREVIOUS_HINT)
+			ui.tooltip(prev, "Previous", shortcut_keys(.Previous))
 			ui.spacer(ui.px(16))
 			playing := playback_playing(s)
 			sig := play_button(playing)
 			if sig.clicked {
 				playback_toggle(s)
 			}
-			ui.tooltip(sig, "Pause" if playing else "Play", PLAY_HINT)
+			ui.tooltip(sig, "Pause" if playing else "Play", shortcut_keys(.Play))
 			ui.spacer(ui.px(16))
 			next := skip_button("next", true)
 			if next.clicked {
 				playback_next(s)
 			}
-			ui.tooltip(next, "Next", NEXT_HINT)
+			ui.tooltip(next, "Next", shortcut_keys(.Next))
 			ui.spacer(ui.px(16))
 			repeat := s.settings.repeat
 			REPEAT_NAMES := [audio.Repeat]string {
@@ -1250,17 +1243,18 @@ draw_player_bar :: proc(s: ^State, w, h: f32) {
 			}
 			repeat_sig := toggle_button("repeat", text.ICON_REPEAT_ONCE if repeat == .One else text.ICON_REPEAT, "Repeat", REPEAT_NAMES[repeat], repeat != .Off)
 			if repeat_sig.clicked {
-				playback_set_repeat(s, audio.Repeat((int(repeat) + 1) % len(audio.Repeat)))
+				playback_set_repeat(s, repeat_after(repeat))
 				ui.data_changed()
 			}
-			ui.tooltip(repeat_sig, "Repeat one" if repeat == .One else "Repeat")
+			ui.tooltip(repeat_sig, "Repeat one" if repeat == .One else "Repeat", shortcut_keys(.Repeat))
 			ui.spacer(ui.fill())
 		}
 		ui.spacer(ui.px(6))
 		{
 			// The times keep the width of the longest value the track can
 			// show, so they never cut off or push the bar around; the bar
-			// takes what's left.
+			// takes what's left. The right one is as wide as the time left
+			// with its minus sign in either form, so switching keeps it.
 			ui.row("", {}, ui.fill(), ui.px(16))
 			ui.text_style(.Regular, 11, DIM)
 			ui.text_pad(TIME_PAD)
@@ -1270,11 +1264,16 @@ draw_player_bar :: proc(s: ^State, w, h: f32) {
 			ui.set_next_text_align(.Right)
 			ui.label(clock(position), ui.px(ui.counter_width(.Regular, 11, longest) + 2 * TIME_PAD), ui.fill())
 			draw_progress(s, position, duration, item != nil)
-			left := "0:00"
-			if item != nil {
-				left = cat("-", clock(max(duration - position, 0)))
+			remaining := !s.settings.show_duration
+			t := ui.box_make("###bar_time", {.Clickable, .Focusable, .Draw_Text, .Draw_Hot_Underline}, ui.px(ui.counter_width(.Regular, 11, cat("-", longest)) + 2 * TIME_PAD), ui.fill())
+			t.label = bar_time(position, duration, item != nil, remaining)
+			t.text_color += (SECONDARY - t.text_color) * t.hot_t
+			ui.accessible(t, .Button, "Time remaining" if remaining else "Duration", strings.trim_prefix(t.label, "-"))
+			if ui.signal(t).clicked {
+				s.settings.show_duration = remaining
+				settings_queue(&s.data, settings_to_save(s))
+				ui.data_changed() // this frame drew the old form
 			}
-			ui.label(left, ui.px(ui.counter_width(.Regular, 11, cat("-", longest)) + 2 * TIME_PAD), ui.fill())
 		}
 	}
 
@@ -1306,6 +1305,22 @@ clock :: proc(seconds: f64) -> string {
 		return cat(num(t / 3600), ":", string(mins[:]), ":", string(sec[:]))
 	}
 	return cat(num(t / 60), ":", string(sec[:]))
+}
+
+// bar_time is the time right of the progress bar: the track's length, or
+// with remaining the time left as -m:ss. The time left goes by the whole
+// seconds clock shows, so it and the elapsed time left of the bar add up
+// to the length, and it stays at -0:00 past the end. With nothing loaded
+// it's 0:00.
+bar_time :: proc(position, duration: f64, loaded, remaining: bool) -> string {
+	if !loaded {
+		return "0:00"
+	}
+	if !remaining {
+		return clock(duration)
+	}
+	whole :: proc(seconds: f64) -> int {return int(max(seconds, 0))}
+	return cat("-", clock(f64(max(whole(duration) - whole(position), 0))))
 }
 
 // progress_fraction is how much of the bar is filled: position over
@@ -1475,6 +1490,10 @@ status_text :: proc(s: ^State) -> string {
 		return fmt.tprintf("Couldn't add %s to %s", t.title, sidebar_entry(s, lib.status_list).name)
 	case .Copied:
 		return fmt.tprintf("Copied the link to %s", t.title)
+	case .Playing_Next:
+		return fmt.tprintf("Playing %s next", t.title)
+	case .Queued:
+		return fmt.tprintf("Added %s to the queue", t.title)
 	case .Copied_Page:
 	}
 	return ""
@@ -1497,6 +1516,7 @@ Pending :: union {
 	Search_Now,
 	Close_Search,
 	Play_Row,
+	Queue_Row,
 	Go_Back,
 	Go_Forward,
 	Log_Out,
@@ -1521,6 +1541,13 @@ Search_Now :: struct {
 Play_Row :: struct {
 	index: int,
 	order: Play_Order,
+}
+
+// Queue_Row is Play next (next set) or Add to queue on row index of the
+// open list. It waits like Play: a queue it starts replaces the old one.
+Queue_Row :: struct {
+	index: int,
+	next:  bool,
 }
 
 Go_Back :: struct {}
@@ -1652,6 +1679,11 @@ apply_pending :: proc(s: ^State) -> bool {
 		if !play_ordered(s, p) {
 			return false
 		}
+	case Queue_Row:
+		if !playback_queue_row(s, p.index, p.next) {
+			return false
+		}
+		set_status(s, .Playing_Next if p.next else .Queued, p.index)
 	case Go_Back:
 		if !history_step(s, -1) {
 			return false

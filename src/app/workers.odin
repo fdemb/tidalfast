@@ -319,6 +319,7 @@ List_File_Result :: struct {
 Queue_File_Result :: struct {
 	header: Queue_Header, // the queue's place
 	rows:   []Row, // in arena
+	after:  []i64, // in arena: the anchors of the extras, the last len(after) rows
 }
 
 // Add_Track_Result is what an add, like or unlike changed. version and row

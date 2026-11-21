@@ -337,3 +337,40 @@ title_bar_follows_the_setting_and_the_desktop :: proc(t: ^testing.T) {
 		testing.expectf(t, app.title_bar_own(.Own, c.desktop), "TIDALfast on %q", c.desktop)
 	}
 }
+
+@(private = "file")
+layout_wakes: int
+
+// The thread that waits on the portal hands each new layout to the UI
+// thread and wakes it; the UI thread takes each once, the latest when
+// two came between frames. One too long for a layout is dropped.
+@(test)
+layout_changes_reach_the_ui_thread :: proc(t: ^testing.T) {
+	rd: app.Layout_Read
+	rd.wake = proc "c" () {layout_wakes += 1}
+	layout_wakes = 0
+	buf: [128]u8
+	_, ok := app.layout_read_take(&rd, buf[:])
+	testing.expect(t, !ok, "nothing before the first read")
+	app.layout_read_give(&rd, "appmenu:minimize,maximize,close")
+	text: string
+	text, ok = app.layout_read_take(&rd, buf[:])
+	testing.expect(t, ok)
+	testing.expect_value(t, text, "appmenu:minimize,maximize,close")
+	_, ok = app.layout_read_take(&rd, buf[:])
+	testing.expect(t, !ok, "taken once")
+	app.layout_read_give(&rd, "close:")
+	app.layout_read_give(&rd, "close,minimize,maximize:")
+	text, ok = app.layout_read_take(&rd, buf[:])
+	testing.expect(t, ok)
+	testing.expect_value(t, text, "close,minimize,maximize:")
+	testing.expect_value(t, layout_wakes, 3)
+	long: [200]u8
+	for &c in long {
+		c = 'a'
+	}
+	app.layout_read_give(&rd, string(long[:]))
+	_, ok = app.layout_read_take(&rd, buf[:])
+	testing.expect(t, !ok, "too long for a layout")
+	testing.expect_value(t, layout_wakes, 3)
+}

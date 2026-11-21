@@ -1126,7 +1126,7 @@ queue_file_round_trip :: proc(t: ^testing.T) {
 	aligned, _ := mem.alloc_bytes_non_zeroed(len(data), 16, context.temp_allocator)
 	copy(aligned, data)
 
-	head, got, err := app.queue_decode(aligned, context.temp_allocator)
+	head, got, _, err := app.queue_decode(aligned, context.temp_allocator)
 	testing.expect_value(t, err, app.File_Error.None)
 	testing.expect_value(t, head.index, 1)
 	testing.expect_value(t, head.sample, 441000)
@@ -1150,12 +1150,12 @@ queue_file_round_trip :: proc(t: ^testing.T) {
 	testing.expect_value(t, got[2].album_id, 12)
 	testing.expect(t, slice.equal(got[1].artists, []app.Artist_Ref{{id = 9, start = 0, end = 6}}))
 
-	_, _, err = app.queue_decode(aligned[:len(aligned) - 1], context.temp_allocator)
+	_, _, _, err = app.queue_decode(aligned[:len(aligned) - 1], context.temp_allocator)
 	testing.expect_value(t, err, app.File_Error.Short)
-	_, _, err = app.queue_decode(aligned[:20], context.temp_allocator)
+	_, _, _, err = app.queue_decode(aligned[:20], context.temp_allocator)
 	testing.expect_value(t, err, app.File_Error.Short)
 	aligned[0] = 'X'
-	_, _, err = app.queue_decode(aligned, context.temp_allocator)
+	_, _, _, err = app.queue_decode(aligned, context.temp_allocator)
 	testing.expect_value(t, err, app.File_Error.Magic)
 
 	bad := []app.Queue_Header{{index = 1, sample = -1, rate = 44100}, {index = 1, sample = 441000, rate = 10_000_000}, {index = 1, sample = 44100 * 86400 + 1, rate = 44100}}
@@ -1164,16 +1164,191 @@ queue_file_round_trip :: proc(t: ^testing.T) {
 		app.queue_seal(data)
 		aligned, _ = mem.alloc_bytes_non_zeroed(len(data), 16, context.temp_allocator)
 		copy(aligned, data)
-		_, _, err = app.queue_decode(aligned, context.temp_allocator)
+		_, _, _, err = app.queue_decode(aligned, context.temp_allocator)
 		testing.expect_value(t, err, app.File_Error.Damaged)
 	}
 	data = app.queue_encode({index = 1, sample = 441000}, rows, context.temp_allocator)
 	app.queue_seal(data)
 	aligned, _ = mem.alloc_bytes_non_zeroed(len(data), 16, context.temp_allocator)
 	copy(aligned, data)
-	head, _, err = app.queue_decode(aligned, context.temp_allocator)
+	head, _, _, err = app.queue_decode(aligned, context.temp_allocator)
 	testing.expect_value(t, err, app.File_Error.None)
 	testing.expect_value(t, head.sample, 0)
+}
+
+// queue_bytes is a queue file of rows with the extras' anchors after,
+// sealed and 16-byte aligned as file_read gives it.
+@(private = "file")
+queue_bytes :: proc(head: app.Queue_Header, rows: []app.Row, after: []i64) -> []u8 {
+	data := app.queue_encode(head, rows, context.temp_allocator, after)
+	app.queue_seal(data)
+	aligned, _ := mem.alloc_bytes_non_zeroed(len(data), 16, context.temp_allocator)
+	copy(aligned, data)
+	return aligned
+}
+
+// The queue's file keeps its extras' anchors, refuses anchors that aren't
+// an earlier row, and still reads a file from before extras.
+@(test)
+queue_file_extras :: proc(t: ^testing.T) {
+	rows := rows_of({101, 102, 103})
+	head, got, after, err := app.queue_decode(queue_bytes({index = 2}, rows, {0, 1}), context.temp_allocator)
+	testing.expect_value(t, err, app.File_Error.None)
+	testing.expect_value(t, head.index, 2)
+	testing.expect_value(t, len(got), 3)
+	testing.expect(t, slice.equal(after, []i64{0, 1}), "the anchors read back")
+	_, _, after, err = app.queue_decode(queue_bytes({}, rows, {-1}), context.temp_allocator)
+	testing.expect_value(t, err, app.File_Error.None)
+	testing.expect(t, slice.equal(after, []i64{-1}))
+
+	bad := [][]i64{{1, -1}, {0, 2}, {0, -2}, {5}}
+	for b in bad {
+		_, _, _, err = app.queue_decode(queue_bytes({}, rows, b), context.temp_allocator)
+		testing.expectf(t, err == .Damaged, "anchors %v read as %v", b, err)
+	}
+	data := queue_bytes({}, rows, {0, 1})
+	(^app.Queue_Extras)(&data[size_of(app.Queue_Header)]).count = 4
+	_, _, _, err = app.queue_decode(data, context.temp_allocator)
+	testing.expect(t, err != .None, "more extras than rows")
+	(^app.Queue_Extras)(&data[size_of(app.Queue_Header)]).count = -1
+	_, _, _, err = app.queue_decode(data, context.temp_allocator)
+	testing.expect_value(t, err, app.File_Error.Damaged)
+	_, _, _, err = app.queue_decode(data[:size_of(app.Queue_Header) + 8], context.temp_allocator)
+	testing.expect_value(t, err, app.File_Error.Short)
+
+	// Format 1: the header, then the list file.
+	v2 := queue_bytes({index = 1}, rows, nil)
+	v1, _ := mem.alloc_bytes_non_zeroed(len(v2) - size_of(app.Queue_Extras), 16, context.temp_allocator)
+	copy(v1, v2[:size_of(app.Queue_Header)])
+	copy(v1[size_of(app.Queue_Header):], v2[size_of(app.Queue_Header) + size_of(app.Queue_Extras):])
+	(^app.Queue_Header)(raw_data(v1)).format = 1
+	head, got, after, err = app.queue_decode(v1, context.temp_allocator)
+	testing.expect_value(t, err, app.File_Error.None)
+	testing.expect_value(t, head.index, 1)
+	testing.expect_value(t, len(got), 3)
+	testing.expect_value(t, len(after), 0)
+	(^app.Queue_Header)(raw_data(v1)).format = 3
+	_, _, _, err = app.queue_decode(v1, context.temp_allocator)
+	testing.expect_value(t, err, app.File_Error.Format)
+}
+
+// serve_first answers the first page of the open list only.
+@(private = "file")
+serve_first :: proc(s: ^app.State, rows: []app.Row) {
+	for {
+		job, ok := jobs.try_pop(&s.data.queue)
+		if !ok {
+			return
+		}
+		p, tracks := job.payload.(app.Tracks_Job)
+		if !tracks || p.offset != 0 {
+			continue
+		}
+		res := app.Result{job = job, payload = app.Tracks_Result{rows = rows[:p.limit], total = len(rows)}}
+		app.handle_result(s, &res, 0)
+		return
+	}
+}
+
+// Play next and Add to queue while the list still loads: the extras keep
+// their places as its pages arrive and when an edit moves its rows, and no
+// row of the list is lit while one plays.
+@(test)
+extras_survive_queue_follow :: proc(t: ^testing.T) {
+	s := cache_state()
+	defer cache_state_free(s)
+	s.playback.player = audio.create(no_wake, 0, null_output = true)
+	defer app.playback_shutdown(s)
+	pb := &s.playback
+	sidebar(s, updated = 1, count = 300)
+	serve(s, rows_of(LIKED_IDS))
+	app.select_playlist(s, 2)
+	rows := rows_of(ids_from(1000, 1300))
+	serve_first(s, rows)
+	app.playback_play_row(s, 0)
+	testing.expect(t, app.playback_queue_row(s, 10, next = true))
+	testing.expect(t, app.playback_queue_row(s, 20, next = false))
+
+	serve(s, rows)
+	app.playback_update(s, nil)
+	testing.expect_value(t, pb.list_n, 300)
+	if !testing.expect_value(t, len(pb.entries), 302) {
+		return
+	}
+	testing.expect_value(t, pb.entries[300].id, 1010)
+	testing.expect_value(t, pb.entries[301].id, 1020)
+	testing.expect_value(t, pb.order[1], 300)
+	testing.expect_value(t, pb.order[301], 301)
+	app.playback_next(s)
+	app.playback_update(s, nil)
+	testing.expect_value(t, pb.entries[pb.index].id, 1010)
+	testing.expect_value(t, s.library.playing, -1)
+
+	app.list_edited(s, .Playlist, "pl", false, {id = 1005}, {updated = 2, count = 299})
+	app.playback_update(s, nil)
+	testing.expect_value(t, pb.list_n, 299)
+	if !testing.expect_value(t, len(pb.entries), 301) {
+		return
+	}
+	testing.expect_value(t, pb.index, 299)
+	testing.expect_value(t, pb.entries[pb.index].id, 1010)
+	testing.expect_value(t, app.playback_item(s).title, rows[10].title)
+	testing.expect_value(t, s.library.playing, -1)
+	app.playback_next(s)
+	testing.expect_value(t, pb.entries[pb.index].id, 1001)
+	testing.expect_value(t, pb.entries[pb.order[len(pb.order) - 1]].id, 1020)
+}
+
+// The queue's extras are saved with it, and a restart restores them in
+// their places, the current one too.
+@(test)
+extras_are_saved_and_restored :: proc(t: ^testing.T) {
+	dir := cache_dir("queue-extras")
+	defer delete(dir, runtime.heap_allocator())
+	defer os.remove_all(dir)
+	s := cache_state(dir)
+	defer cache_state_free(s)
+	s.playback.player = audio.create(no_wake, 0, null_output = true)
+	sidebar(s, updated = 1, count = 10)
+	serve(s, rows_of(LIKED_IDS))
+	app.select_playlist(s, 2)
+	run_disk(s)
+	rows := rows_of(ids_from(1000, 1010))
+	serve(s, rows)
+	app.playback_play_row(s, 2)
+	app.playback_queue_row(s, 7, next = true)
+	app.playback_queue_row(s, 0, next = false)
+	app.playback_next(s)
+	app.playback_update(s, nil)
+	jobs.remove_if(&s.data.lists.queue, proc(job: ^app.Job, _: rawptr) -> bool {
+		app.job_free(job)
+		return true
+	}, nil)
+	app.playback_shutdown(s)
+
+	res, _ := app.disk_run(&s.data, {payload = app.Disk_Job{op = .Read_Queue, user = 7}})
+	defer app.result_free(&res)
+	queue, hit := res.payload.(app.Queue_File_Result)
+	if !testing.expect(t, hit, "the queue's file reads back") {
+		return
+	}
+	testing.expect_value(t, len(queue.rows), 12)
+	testing.expect_value(t, queue.header.index, 10)
+	testing.expect(t, slice.equal(queue.after, []i64{2, -1}), "the anchors are saved")
+
+	r := new(app.State)
+	defer free(r)
+	r.playback.index = -1
+	r.playback.player = audio.create(no_wake, 0, null_output = true)
+	defer app.playback_shutdown(r)
+	app.playback_restore(r, queue)
+	testing.expect_value(t, r.playback.index, 10)
+	testing.expect_value(t, app.playback_item(r).title, rows[7].title)
+	want := []i64{1007, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1000, 1000}
+	for id, k in want {
+		testing.expectf(t, r.playback.entries[r.playback.index].id == id, "track %d of the restored queue is %d, want %d", k, r.playback.entries[r.playback.index].id, id)
+		app.playback_next(r)
+	}
 }
 
 // Liking a row by dropping it on Liked Songs while the liked set is being

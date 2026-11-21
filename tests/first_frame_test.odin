@@ -93,6 +93,23 @@ first_frames_match_the_next :: proc(t: ^testing.T) {
 		library_frame(t, s, &f, key(.Left, {ui.PRIMARY}))
 		library_frame(t, s, &f)
 		expect_next_frame_same(t, s, &f, at, "back to Home")
+		settle_frames(t, s, &f)
+
+		// A track an hour long, with the player bar's time switched from
+		// the time left to the length and back.
+		items := []app.Queue_Item{{title = "Song", artist = "Someone", seconds = 3723}}
+		s.playback.items = items
+		s.playback.index = 0
+		library_frame(t, s, &f)
+		expect_next_frame_same(t, s, &f, at, "a track playing")
+		settle_frames(t, s, &f)
+		library_frame(t, s, &f, press(s, "Time remaining"))
+		expect_next_frame_same(t, s, &f, at, "the track's length")
+		settle_frames(t, s, &f)
+		library_frame(t, s, &f, press(s, "Duration"))
+		expect_next_frame_same(t, s, &f, at, "the time left")
+		s.playback.items = nil
+		s.playback.index = -1
 	}
 }
 
@@ -203,4 +220,31 @@ placed_boxes :: proc(u: ^ui.State, a: mem.Allocator) -> []Placed {
 @(private = "file")
 rect_close :: proc(a, b: render.Rect) -> bool {
 	return abs(a.x - b.x) < 0.5 && abs(a.y - b.y) < 0.5 && abs(a.w - b.w) < 0.5 && abs(a.h - b.h) < 0.5
+}
+
+// A width saved in the settings is the sidebar's from the first frame, as
+// far as the window allows.
+@(test)
+first_frame_has_the_saved_sidebar_width :: proc(t: ^testing.T) {
+	fonts: Fonts
+	if !testing.expect(t, fonts_init(&fonts)) {
+		return
+	}
+	defer fonts_destroy(&fonts)
+	context.allocator = mem.arena_allocator(&fonts.arena)
+
+	for size in ([][2]f32{{820, 600}, {1100, 760}, {1600, 900}}) {
+		s := library_state(true)
+		defer library_state_free(s)
+		s.settings.sidebar_w = 500
+		f := Frame{fonts = &fonts, size = size, now = 100}
+		at := fmt.aprintf("%vx%v", size.x, size.y)
+
+		library_frame(t, s, &f)
+		handle, ok := access_node(s, "Sidebar width")
+		testing.expectf(t, ok, "%s: no sidebar handle", at)
+		testing.expectf(t, abs(handle.frame[0] - app.sidebar_width(500, size.x)) < 0.5, "%s: the handle is at %v in the first frame", at, handle.frame[0])
+		testing.expect_value(t, s.library.sidebar_w, min(500, size.x - app.HANDLE_W - app.MAIN_MIN))
+		expect_next_frame_same(t, s, &f, at, "the saved sidebar width")
+	}
 }

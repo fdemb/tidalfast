@@ -325,3 +325,360 @@ failed_track_stops_the_player :: proc(t: ^testing.T) {
 		free(s)
 	}
 }
+
+@(private = "file")
+controls_seen: platform.Player_Controls
+@(private = "file")
+controls_calls: int
+
+@(private = "file")
+record_controls :: proc "c" (c: ^platform.Player_Controls) {
+	controls_seen = c^
+	controls_calls += 1
+}
+
+// MPRIS sets the volume, shuffle and repeat with media commands. The app
+// takes them as the player bar's controls would, saves the volume as the
+// slider's release does, ignores values out of range, and tells the shell
+// each change once.
+@(test)
+media_sets_the_controls :: proc(t: ^testing.T) {
+	s := fake_player_state({{title = "One", seconds = 30}, {title = "Two", seconds = 30}})
+	defer free(s)
+	defer app.playback_shutdown(s)
+	controls_calls = 0
+	s.playback.set_controls = record_controls
+	s.settings.volume = 1
+	s.volume_before_override = 0.9 // TIDALFAST_VOLUME, which a save replaces
+
+	media(s, .None)
+	testing.expect_value(t, controls_calls, 1)
+	testing.expect_value(t, controls_seen, platform.Player_Controls{volume = 1, shuffle = false, repeat = .Off})
+	media(s, .None)
+	testing.expect_value(t, controls_calls, 1)
+
+	media(s, .Volume, 0.25)
+	testing.expect_value(t, s.settings.volume, 0.25)
+	testing.expect(t, s.volume_before_override == nil, "the volume wasn't saved")
+	media(s, .Volume, -2)
+	testing.expect_value(t, s.settings.volume, 0)
+	media(s, .Volume, 3)
+	testing.expect_value(t, s.settings.volume, 1)
+	nan := f32(0)
+	media(s, .Volume, nan / nan)
+	testing.expect_value(t, s.settings.volume, 1)
+
+	media(s, .Shuffle, 1)
+	testing.expect(t, s.settings.shuffle)
+	media(s, .Repeat, f32(platform.Player_Repeat.One))
+	testing.expect_value(t, s.settings.repeat, audio.Repeat.One)
+	media(s, .Repeat, f32(platform.Player_Repeat.All))
+	testing.expect_value(t, s.settings.repeat, audio.Repeat.All)
+	media(s, .Repeat, 3)
+	media(s, .Repeat, -1)
+	testing.expect_value(t, s.settings.repeat, audio.Repeat.All)
+	testing.expect_value(t, controls_seen, platform.Player_Controls{volume = 1, shuffle = true, repeat = .All})
+	media(s, .Shuffle, 0)
+	testing.expect(t, !s.settings.shuffle)
+	testing.expect_value(t, controls_seen.shuffle, false)
+}
+
+// titles plays the queue on with next n times from where it is, and gives
+// the title of each track that plays, starting with the current one.
+@(private = "file")
+titles :: proc(s: ^app.State, n: int) -> []string {
+	out := make([dynamic]string, context.temp_allocator)
+	append(&out, app.playback_item(s).title)
+	for _ in 0 ..< n {
+		app.playback_next(s)
+		append(&out, app.playback_item(s).title)
+	}
+	return out[:]
+}
+
+@(private = "file")
+expect_titles :: proc(t: ^testing.T, got: []string, want: []string, loc := #caller_location) {
+	same := len(got) == len(want)
+	for i in 0 ..< min(len(got), len(want)) {
+		same &&= got[i] == want[i]
+	}
+	testing.expectf(t, same, "played %v, want %v", got, want, loc = loc)
+}
+
+@(private = "file")
+five_rows := []app.Row {
+	{title = "One", seconds = 30},
+	{title = "Two", seconds = 30},
+	{title = "Three", seconds = 30},
+	{title = "Four", seconds = 30},
+	{title = "Five", seconds = 30},
+}
+
+// Play next puts a row of the list right after the current track, and the
+// list goes on after it. While it plays, no row of the list is lit.
+@(test)
+play_next_then_advance :: proc(t: ^testing.T) {
+	s := fake_player_state(five_rows)
+	defer free(s)
+	defer app.playback_shutdown(s)
+	app.playback_play_row(s, 0)
+	testing.expect(t, app.playback_queue_row(s, 3, next = true))
+	testing.expect_value(t, app.playback_item(s).title, "One")
+	app.playback_next(s)
+	testing.expect_value(t, app.playback_item(s).title, "Four")
+	testing.expect_value(t, app.playing_row(s), -1)
+	expect_titles(t, titles(s, 5), {"Four", "Two", "Three", "Four", "Five", "Five"})
+	testing.expect_value(t, app.playing_row(s), 4)
+}
+
+// Add to queue goes after the last track in play order, in the order they
+// were added, and the queue ends after them.
+@(test)
+add_to_queue_then_advance_to_the_end :: proc(t: ^testing.T) {
+	s := fake_player_state(five_rows[:3])
+	defer free(s)
+	defer app.playback_shutdown(s)
+	app.playback_play_row(s, 0)
+	app.playback_queue_row(s, 1, next = false)
+	app.playback_queue_row(s, 0, next = false)
+	expect_titles(t, titles(s, 5), {"One", "Two", "Three", "Two", "One", "One"})
+	pb := &s.playback
+	end := i64(app.FAKE_TONE_SECONDS * 44100)
+	app.playback_observe(s, {serial = pb.cur.serial, sample = end, total = end, rate = 44100, state = .Ended})
+	testing.expect(t, !app.playback_playing(s))
+	testing.expect_value(t, pb.index, pb.list_n + 1)
+}
+
+// The second Play next goes right after the current track, before the
+// first.
+@(test)
+play_next_twice :: proc(t: ^testing.T) {
+	s := fake_player_state(five_rows)
+	defer free(s)
+	defer app.playback_shutdown(s)
+	app.playback_play_row(s, 0)
+	app.playback_queue_row(s, 4, next = true)
+	app.playback_queue_row(s, 2, next = true)
+	expect_titles(t, titles(s, 7), {"One", "Three", "Five", "Two", "Three", "Four", "Five", "Five"})
+}
+
+// With nothing queued, either one starts a queue of that one track, and
+// plays it.
+@(test)
+queue_row_with_nothing_queued_plays_it :: proc(t: ^testing.T) {
+	for next in ([]bool{true, false}) {
+		s := fake_player_state(five_rows)
+		app.playback_queue_row(s, 2, next)
+		testing.expect_value(t, app.playback_item(s).title, "Three")
+		testing.expect(t, app.playback_playing(s))
+		testing.expect(t, s.playback.cur.resolved)
+		testing.expect_value(t, app.playing_row(s), -1)
+		app.playback_queue_row(s, 4, next = false)
+		expect_titles(t, titles(s, 2), {"Three", "Five", "Five"})
+		app.playback_shutdown(s)
+		free(s)
+	}
+}
+
+// A queue that played out goes on to a track added after it.
+@(test)
+queue_row_after_the_end_plays_it :: proc(t: ^testing.T) {
+	s := fake_player_state(five_rows[:2])
+	defer free(s)
+	defer app.playback_shutdown(s)
+	pb := &s.playback
+	app.playback_play_row(s, 1)
+	end := i64(app.FAKE_TONE_SECONDS * 44100)
+	ended := audio.Status{serial = pb.cur.serial, sample = end, total = end, rate = 44100, state = .Ended}
+	app.playback_observe(s, ended)
+	testing.expect(t, !app.playback_playing(s))
+	app.playback_queue_row(s, 0, next = false)
+	app.playback_observe(s, ended)
+	testing.expect_value(t, app.playback_item(s).title, "One")
+	testing.expect_value(t, pb.index, pb.list_n)
+	testing.expect(t, app.playback_playing(s))
+}
+
+// order_titles is the queue's titles in play order.
+@(private = "file")
+order_titles :: proc(s: ^app.State) -> []string {
+	pb := &s.playback
+	out := make([]string, len(pb.order), context.temp_allocator)
+	for i, k in pb.order {
+		out[k] = pb.items[i].title
+	}
+	return out
+}
+
+// expect_one_pass checks that the order holds every item once.
+@(private = "file")
+expect_one_pass :: proc(t: ^testing.T, s: ^app.State, loc := #caller_location) {
+	pb := &s.playback
+	testing.expect_value(t, len(pb.order), len(pb.items), loc = loc)
+	seen := make([]int, len(pb.items), context.temp_allocator)
+	for i in pb.order {
+		seen[i] += 1
+	}
+	for n, i in seen {
+		testing.expectf(t, n == 1, "item %d is %d times in the order %v", i, n, order_titles(s), loc = loc)
+	}
+}
+
+@(private = "file")
+eight_rows := []app.Row {
+	{title = "One", seconds = 30},
+	{title = "Two", seconds = 30},
+	{title = "Three", seconds = 30},
+	{title = "Four", seconds = 30},
+	{title = "Five", seconds = 30},
+	{title = "Six", seconds = 30},
+	{title = "Seven", seconds = 30},
+	{title = "Eight", seconds = 30},
+}
+
+// With shuffle on, Play next still plays next and Add to queue last, and
+// a pass plays every track once, the extras too.
+@(test)
+queue_row_with_shuffle :: proc(t: ^testing.T) {
+	s := fake_player_state(eight_rows)
+	defer free(s)
+	defer app.playback_shutdown(s)
+	s.settings.shuffle = true
+	app.playback_play_row(s, 0)
+	app.playback_queue_row(s, 5, next = true)
+	app.playback_queue_row(s, 2, next = false)
+	expect_one_pass(t, s)
+	got := titles(s, 10)
+	testing.expect_value(t, got[1], "Six")
+	testing.expect_value(t, got[9], "Three")
+	testing.expect_value(t, got[10], "Three")
+	counts := make(map[string]int, context.temp_allocator)
+	for title in got[:10] {
+		counts[title] += 1
+	}
+	for row in eight_rows {
+		want := 2 if row.title == "Six" || row.title == "Three" else 1
+		testing.expectf(t, counts[row.title] == want, "%s played %d times in %v", row.title, counts[row.title], got)
+	}
+}
+
+// Repeat all goes round with the extras in their places.
+@(test)
+queue_row_with_repeat_all :: proc(t: ^testing.T) {
+	s := fake_player_state(five_rows[:2])
+	defer free(s)
+	defer app.playback_shutdown(s)
+	app.playback_play_row(s, 0)
+	app.playback_queue_row(s, 1, next = true)
+	app.playback_queue_row(s, 0, next = false)
+	app.playback_set_repeat(s, .All)
+	expect_titles(t, titles(s, 8), {"One", "Two", "Two", "One", "One", "Two", "Two", "One", "One"})
+	// And as the player asks for the next track by itself.
+	pb := &s.playback
+	app.playback_observe(s, {serial = pb.cur.serial, rate = 44100, state = .Playing, want_next = true})
+	testing.expect_value(t, pb.next.item, pb.list_n)
+}
+
+// Turning shuffle on or off after an insert neither loses nor repeats the
+// extras: Play next stays right after its track, Add to queue last.
+@(test)
+toggle_shuffle_after_inserting :: proc(t: ^testing.T) {
+	s := fake_player_state(eight_rows)
+	defer free(s)
+	defer app.playback_shutdown(s)
+	app.playback_play_row(s, 0)
+	app.playback_queue_row(s, 6, next = true)
+	app.playback_queue_row(s, 3, next = false)
+	app.playback_set_shuffle(s, true)
+	expect_one_pass(t, s)
+	order := order_titles(s)
+	testing.expect_value(t, order[0], "One")
+	testing.expect_value(t, order[1], "Seven")
+	testing.expect_value(t, order[len(order) - 1], "Four")
+
+	// Off again while the extra plays: the list goes on after its track.
+	app.playback_next(s)
+	testing.expect_value(t, app.playback_item(s).title, "Seven")
+	app.playback_set_shuffle(s, false)
+	expect_one_pass(t, s)
+	expect_titles(t, titles(s, 8), {"Seven", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Four"})
+
+	// On while it plays: the track it hangs from stays before it.
+	app.playback_play_row(s, 0)
+	app.playback_queue_row(s, 6, next = true)
+	app.playback_next(s)
+	app.playback_set_shuffle(s, true)
+	expect_one_pass(t, s)
+	order = order_titles(s)
+	testing.expect_value(t, order[0], "One")
+	testing.expect_value(t, order[1], "Seven")
+	testing.expect_value(t, app.playback_item(s).title, "Seven")
+}
+
+// A Play next while the next track is already resolved and handed to the
+// player drops it, and the player gets the inserted track instead. Add to
+// queue doesn't change what's next, so it keeps it.
+@(test)
+play_next_drops_the_preloaded_track :: proc(t: ^testing.T) {
+	s := fake_player_state(five_rows)
+	defer free(s)
+	defer app.playback_shutdown(s)
+	pb := &s.playback
+	app.playback_play_row(s, 0)
+	app.playback_observe(s, {serial = pb.cur.serial, rate = 44100, state = .Playing, want_next = true})
+	testing.expect(t, pb.next.resolved)
+	testing.expect_value(t, pb.next.item, 1)
+	preloaded := pb.next.serial
+
+	app.playback_queue_row(s, 4, next = false)
+	testing.expect_value(t, pb.next.serial, preloaded)
+
+	app.playback_queue_row(s, 3, next = true)
+	testing.expect_value(t, pb.next.serial, u64(0))
+	app.playback_observe(s, {serial = pb.cur.serial, rate = 44100, state = .Playing, want_next = true})
+	testing.expect(t, pb.next.resolved)
+	testing.expect_value(t, pb.next.item, pb.list_n + 1)
+	// The player goes on to it gaplessly.
+	app.playback_observe(s, {serial = pb.next.serial, sample = 4410, rate = 44100, state = .Playing})
+	testing.expect_value(t, app.playback_item(s).title, "Four")
+	testing.expect_value(t, pb.index, pb.list_n + 1)
+	expect_titles(t, titles(s, 5), {"Four", "Two", "Three", "Four", "Five", "Five"})
+}
+
+// Once the player is audibly on the preloaded track, before the app saw
+// it, Play next goes after that one.
+@(test)
+play_next_after_the_audible_preload :: proc(t: ^testing.T) {
+	s := fake_player_state(five_rows)
+	defer free(s)
+	defer app.playback_shutdown(s)
+	pb := &s.playback
+	app.playback_play_row(s, 0)
+	app.playback_observe(s, {serial = pb.cur.serial, rate = 44100, state = .Playing, want_next = true})
+	two := pb.next.serial
+	pb.status.serial = two
+	app.playback_queue_row(s, 4, next = true)
+	testing.expect_value(t, pb.next.serial, two)
+	app.playback_observe(s, {serial = two, sample = 4410, rate = 44100, state = .Playing})
+	expect_titles(t, titles(s, 2), {"Two", "Five", "Three"})
+}
+
+// Album gain goes by the neighbours in play order: the album's next track
+// played next gets album gain, a track added at the end track gain.
+@(test)
+queue_row_gain_mode :: proc(t: ^testing.T) {
+	rows := []app.Row {
+		{title = "A1", seconds = 30, album_id = 7, track = 1},
+		{title = "B", seconds = 30, album_id = 8, track = 4},
+		{title = "A2", seconds = 30, album_id = 7, track = 2},
+	}
+	s := fake_player_state(rows)
+	defer free(s)
+	defer app.playback_shutdown(s)
+	pb := &s.playback
+	app.playback_play_row(s, 0)
+	app.playback_queue_row(s, 2, next = true)
+	app.playback_queue_row(s, 0, next = false)
+	testing.expect_value(t, audio.queue_gain_mode(pb.entries, pb.order, pb.list_n), audio.Gain_Mode.Album)
+	testing.expect_value(t, audio.queue_gain_mode(pb.entries, pb.order, pb.list_n + 1), audio.Gain_Mode.Track)
+}

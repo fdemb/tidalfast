@@ -64,3 +64,55 @@ dbus_call_has_the_spec_layout :: proc(t: ^testing.T) {
 	n, _ := endian.get_u32(m[20:24], .Little)
 	testing.expect_value(t, string(m[24:24 + n]), "/org/freedesktop/portal/desktop")
 }
+
+// The portal's SettingChanged signal gives the setting's namespace, key
+// and new value. Any other message, a value that isn't a string, or a
+// signal cut short is not a change, and is read without going past its
+// end.
+@(test)
+setting_changed_signal_gives_the_value :: proc(t: ^testing.T) {
+	m := os_services.dbus_setting_changed(9, "org.gnome.desktop.wm.preferences", "button-layout", "close,minimize,maximize:")
+	ns, key, value, ok := os_services.setting_changed(m)
+	testing.expect(t, ok)
+	testing.expect_value(t, ns, "org.gnome.desktop.wm.preferences")
+	testing.expect_value(t, key, "button-layout")
+	testing.expect_value(t, value, "close,minimize,maximize:")
+	for n in 0 ..< len(m) {
+		_, _, _, cut_ok := os_services.setting_changed(m[:n])
+		testing.expectf(t, !cut_ok, "a signal cut to %d bytes", n)
+	}
+
+	body_len, _ := endian.get_u32(m[4:8], .Little)
+	body := len(m) - int(body_len)
+	// The body: the namespace's 32 bytes at 0, the key's 13 at 40, the
+	// variant's signature at 58, the value's length at 64.
+	testing.expect_value(t, string(m[body + 58:body + 61]), "\x01s\x00")
+
+	// A method call with the same members is not the signal.
+	call := os_services.dbus_call(3, "x.y", "/org/freedesktop/portal/desktop", "org.freedesktop.portal.Settings", "SettingChanged", "ssv", m[body:])
+	_, _, _, ok = os_services.setting_changed(call)
+	testing.expect(t, !ok, "a method call")
+
+	bad := make([]u8, len(m), context.temp_allocator)
+	// A value that isn't a string, as color-scheme's u.
+	copy(bad, m)
+	bad[body + 59] = 'u'
+	_, _, _, ok = os_services.setting_changed(bad)
+	testing.expect(t, !ok, "a value that isn't a string")
+	// A value whose length runs past the end.
+	copy(bad, m)
+	endian.put_u32(bad[body + 64:body + 68], .Little, 1 << 30)
+	_, _, _, ok = os_services.setting_changed(bad)
+	testing.expect(t, !ok, "a length past the end")
+	// A string without its closing nul.
+	copy(bad, m)
+	bad[len(bad) - 1] = 'x'
+	_, _, _, ok = os_services.setting_changed(bad)
+	testing.expect(t, !ok, "no nul")
+
+	// A header whose fields' length runs past the message.
+	junk: [32]u8
+	copy(junk[:], []u8{'l', 4, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0xff, 0xff, 0xff, 0x7f})
+	_, _, _, ok = os_services.setting_changed(junk[:])
+	testing.expect(t, !ok, "junk")
+}
