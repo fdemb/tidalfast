@@ -7,6 +7,7 @@ import "core:log"
 import "core:math"
 import "core:math/rand"
 import "core:net"
+import "core:os"
 import "core:slice"
 import "core:sync"
 import "core:testing"
@@ -442,6 +443,99 @@ wait_audible :: proc(p: ^audio.Player, serial: u64) -> bool {
 		time.sleep(5 * time.Millisecond)
 	}
 	return false
+}
+
+// Each ReplayGain setting's factor for a playbackinfo answer with both
+// gains, with only the track's, and with neither. Album without an album
+// gain is the track's, and both keep the peak at or under full scale.
+@(test)
+replay_gain_settings :: proc(t: ^testing.T) {
+	near :: proc(a, b: f32) -> bool {return abs(a - b) < 1e-4}
+	gains_of :: proc(t: ^testing.T, fields: string) -> audio.Replay_Gain {
+		bts := `{"mimeType":"audio/flac","codecs":"flac","encryptionType":"NONE","urls":["https://sp.example/track.flac"]}`
+		src := fmt.tprintf(
+			`{{"trackId":1,"audioQuality":"LOSSLESS","manifestMimeType":"application/vnd.tidal.bts","manifest":"%s"%s}}`,
+			base64.encode(transmute([]u8)string(bts), allocator = context.temp_allocator),
+			fields,
+		)
+		v, perr := json.parse_string(src, .JSON, true, context.temp_allocator)
+		testing.expect_value(t, perr, json.Error.None)
+		info, err := tidal.parse_playback_info(v.(json.Object), context.temp_allocator)
+		testing.expect_value(t, err, nil)
+		return {info.track_gain, info.track_peak, info.album_gain, info.album_peak}
+	}
+	Case :: struct {
+		fields:                                         string,
+		automatic_album, automatic_track, track, album: f32,
+	}
+	cases := []Case {
+		// -6.02 dB is x0.5, -12.04 dB x0.25.
+		{`,"trackReplayGain":-6.0206,"trackPeakAmplitude":0.5,"albumReplayGain":-12.0412,"albumPeakAmplitude":0.4`, 0.25, 0.5, 0.5, 0.25},
+		{`,"trackReplayGain":-6.0206,"trackPeakAmplitude":0.5`, 0.5, 0.5, 0.5, 0.5},
+		// +6.02 dB would be x2, but the peak of 0.8 limits it to x1.25.
+		{`,"trackReplayGain":6.0206,"trackPeakAmplitude":0.8`, 1.25, 1.25, 1.25, 1.25},
+		{``, 1, 1, 1, 1},
+	}
+	for c in cases {
+		rg := gains_of(t, c.fields)
+		testing.expectf(t, near(audio.setting_gain(rg, .Automatic, .Album), c.automatic_album), "Automatic in an album %v", c.fields)
+		testing.expectf(t, near(audio.setting_gain(rg, .Automatic, .Track), c.automatic_track), "Automatic alone %v", c.fields)
+		for auto in audio.Gain_Mode {
+			testing.expectf(t, near(audio.setting_gain(rg, .Track, auto), c.track), "Track %v", c.fields)
+			testing.expectf(t, near(audio.setting_gain(rg, .Album, auto), c.album), "Album %v", c.fields)
+			testing.expect_value(t, audio.setting_gain(rg, .Off, auto), f32(1))
+		}
+	}
+}
+
+// set_next_gain changes the gain of a next track that's waiting, so a
+// setting changed after it resolved still reaches it. Tone 2 is set at
+// x1, changed to x0.25 and then reached through a seek near tone 1's end.
+@(test)
+set_next_gain_reaches_the_waiting_track :: proc(t: ^testing.T) {
+	capture := fmt.tprintf("%s/tidalfast-next-gain-%d.wav", temp_base(), time.now()._nsec)
+	defer os.remove(capture)
+	p := audio.create(no_wake, 1, capture, null_output = true)
+	audio.play(p, tone(1))
+	testing.expect(t, wait_audible(p, 1))
+	audio.set_next(p, {kind = .Tone, serial = 2, gain = 1, seconds = 1, tone_hz = 440})
+	audio.set_next_gain(p, 2, 0.25)
+	audio.seek(p, 1, 29 * 44100 + 22050)
+	start := time.tick_now()
+	for time.tick_since(start) < 5 * time.Second {
+		st := audio.status(p)
+		if st.serial == 2 && st.state == .Ended {
+			break
+		}
+		time.sleep(20 * time.Millisecond)
+	}
+	audio.destroy(p)
+
+	data, err := os.read_entire_file(capture, context.temp_allocator)
+	if !testing.expect(t, err == nil && len(data) > 44, "a capture") {
+		return
+	}
+	channels := int(data[22]) | int(data[23]) << 8
+	rate := int(data[24]) | int(data[25]) << 8 | int(data[26]) << 16 | int(data[27]) << 24
+	samples := ([^]f32)(raw_data(data[44:]))[:(len(data) - 44) / 4]
+	last := len(samples) - 1
+	for last >= 0 && samples[last] == 0 {
+		last -= 1
+	}
+	half := rate / 2 * channels
+	if !testing.expect(t, last > 2 * half, "tone 2 in the capture") {
+		return
+	}
+	loud: f32
+	for v in samples[:last - 2 * half] {
+		loud = max(loud, abs(v))
+	}
+	quiet: f32
+	for v in samples[last - half:last] {
+		quiet = max(quiet, abs(v))
+	}
+	testing.expectf(t, abs(loud - 0.2) < 0.01, "tone 1 peaks at %v, not 0.2", loud)
+	testing.expectf(t, abs(quiet - 0.05) < 0.003, "tone 2 peaks at %v, not 0.25 of 0.2", quiet)
 }
 
 // A seek for A that the decode thread hasn't applied yet when B replaces A

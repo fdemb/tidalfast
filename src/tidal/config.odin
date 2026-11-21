@@ -83,6 +83,9 @@ Config :: struct {
 	alac:                bool,
 	// Per-request timeout in seconds, 0 for none.
 	timeout_seconds:     int,
+	// The language of TIDAL's editorial text (page titles, shelves, genre
+	// names), as ll_CC. Sent as the locale parameter of api_v1 requests.
+	locale:              string,
 }
 
 // config_make builds a Config with TIDAL's endpoints, the OAuth clients and
@@ -115,6 +118,7 @@ config_make :: proc(
 		backoff             = backoff,
 		item_limit          = item_limit,
 		timeout_seconds     = 30,
+		locale              = "en_US",
 	}
 
 	if item_limit > 10000 {

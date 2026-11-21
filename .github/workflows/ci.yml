@@ -1,6 +1,7 @@
 # Builds the app and the measure tools and runs the tests on macOS, Linux
 # and Windows, for every pull request and every push to main. This is where
-# shared code is checked on the systems a change wasn't made on.
+# shared code is checked on the systems a change wasn't made on. On Linux it
+# also checks that an idle window uses no CPU, under a headless Weston.
 name: ci
 
 on:
@@ -35,7 +36,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential clang pkg-config libwayland-dev wayland-protocols libxkbcommon-dev \
             libvulkan-dev glslang-tools libfreetype-dev libfontconfig-dev libcurl4-openssl-dev libsystemd-dev dbus gnome-keyring \
-            fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji
+            fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji weston mesa-vulkan-drivers
       - uses: ./.github/actions/install-odin
       - uses: ilammy/msvc-dev-cmd@v1
         if: runner.os == 'Windows'
@@ -43,6 +44,9 @@ jobs:
           arch: x64
       - name: Build
         run: ${{ matrix.python }} build.py
+      - name: Check an idle window uses no CPU
+        if: runner.os == 'Linux'
+        run: tools/idle_check.sh
       - name: Build measure
         run: ${{ matrix.python }} build.py measure
       - name: Test

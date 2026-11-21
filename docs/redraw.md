@@ -1,5 +1,7 @@
 # Redraw policy
 
+This is the macOS shell's. [Linux](linux.md) and [Windows](windows.md) describe how their shells wait and pace frames.
+
 The shell draws only when something asks for a frame: input, a resize, or `request_redraw` from any thread. `request_redraw` sets a flag and calls `CFRunLoopWakeUp`. A run loop observer draws just before the main thread sleeps, so a burst of events becomes one frame.
 
 A frame can also ask for a frame later without animating: `Frame_Result.wake_after` is how many seconds from now, and the shell arms a one-shot run loop timer that calls `request_redraw`. The caret's blink and the search's debounce use it, through `ui.wake_at`, so a focused text field draws twice a second instead of every vsync. Moving a timer in the run loop's common modes costs 13,000 to 20,000 instructions, so a frame that asks for no wake leaves the timer alone unless it is armed.
