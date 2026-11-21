@@ -665,6 +665,11 @@ playback_set_repeat :: proc(s: ^State, repeat: audio.Repeat) {
 	next_drop(pb)
 }
 
+// repeat_after is the repeat mode the repeat button goes to from r.
+repeat_after :: proc(r: audio.Repeat) -> audio.Repeat {
+	return audio.Repeat((int(r) + 1) % len(audio.Repeat))
+}
+
 // next_drop forgets the preloaded next track after what comes next has
 // changed. The player then asks for the next one again.
 @(private = "file")
@@ -733,6 +738,19 @@ playback_seek :: proc(s: ^State, seconds: f64) {
 	pb.seek_serial = pb.cur.serial
 	pb.seek_sample = sample
 	pb.seek_seconds = at
+}
+
+// playback_seek_by moves the current track's position by seconds, kept
+// between its start and its end. With nothing loaded it does nothing.
+playback_seek_by :: proc(s: ^State, seconds: f64) {
+	if s.playback.cur.serial == 0 {
+		return
+	}
+	at := max(playback_position(s) + seconds, 0)
+	if d := playback_duration(s); d > 0 {
+		at = min(at, d)
+	}
+	playback_seek(s, at)
 }
 
 // playback_set_volume sets the volume, and saves it when save is set, as

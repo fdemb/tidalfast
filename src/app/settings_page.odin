@@ -15,6 +15,8 @@ SETTINGS_MAX :: 720 // the column, centred in wider windows
 SETTINGS_ROW_H :: 60
 SETTINGS_ROW_PAD :: 16
 SETTINGS_CONTROL_H :: 30
+SHORTCUT_ROW_H :: 40
+SHORTCUT_KEYCAP_H :: 22
 SWITCH_W :: 36
 SWITCH_H :: 20
 SWITCH_KNOB :: 14
@@ -133,6 +135,16 @@ draw_settings :: proc(s: ^State, main_w, view_h: f32) {
 			pending_set(s, Log_Out{})
 		}
 	}
+
+	{
+		settings_card("Keyboard shortcuts")
+		for sc, k in SHORTCUTS {
+			if k != min(Shortcut_Kind) {
+				settings_separator()
+			}
+			shortcut_row(sc)
+		}
+	}
 	ui.spacer(ui.px(48))
 }
 
@@ -180,6 +192,32 @@ settings_row :: proc(name, about: string) {
 settings_row_end :: proc() {
 	ui.spacer(ui.px(SETTINGS_ROW_PAD))
 	ui.pop_parent()
+}
+
+// shortcut_row is a row of the shortcuts' card: what the shortcut does on
+// the left, and its keys in a keycap on the right.
+@(private = "file")
+shortcut_row :: proc(sc: Shortcut) {
+	ui.row("", {}, ui.fill(), ui.px(SHORTCUT_ROW_H))
+	ui.spacer(ui.px(SETTINGS_ROW_PAD))
+	{
+		ui.text_style(.Regular, 13, TEXT)
+		ui.accessible(ui.label(sc.does, ui.fill(), ui.fill()), .Static_Text, sc.does)
+	}
+	{
+		ui.column("", {}, ui.children_sum(), ui.fill())
+		ui.spacer(ui.fill())
+		ui.text_style(.Medium, 12, SECONDARY)
+		ui.set_next_text_pad(7)
+		ui.set_next_radius(6)
+		ui.set_next_background(SURFACE)
+		ui.set_next_border_color(OUTLINE)
+		keycap := ui.box_make("", {.Draw_Text, .Draw_Background, .Draw_Border}, ui.text_size(), ui.px(SHORTCUT_KEYCAP_H))
+		keycap.label = sc.keys
+		ui.accessible(keycap, .Static_Text, sc.keys)
+		ui.spacer(ui.fill())
+	}
+	ui.spacer(ui.px(SETTINGS_ROW_PAD))
 }
 
 // settings_separator is the line between two rows of a card.

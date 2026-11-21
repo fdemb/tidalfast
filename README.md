@@ -39,6 +39,19 @@ TIDALfast is a TIDAL player written from scratch in Odin.
 - **Keyboard and VoiceOver.** Tab, the arrow keys and Enter reach every control, and VoiceOver reads them on macOS. Screen readers on Linux and Windows don't see them yet.
 - **Every script.** Right-to-left text, emoji, and input methods for Japanese, Chinese and Korean in the search field.
 
+## Keyboard shortcuts
+
+On macOS, Cmd in place of Ctrl and Option in place of Alt. The settings page lists them too.
+
+- **Space**: play or pause
+- **Ctrl+Left / Ctrl+Right**: previous and next track
+- **Shift+Left / Shift+Right**: back and forward 5 seconds
+- **Ctrl+Up / Ctrl+Down**: volume up and down
+- **Ctrl+S**: shuffle on or off
+- **Ctrl+R**: repeat all, one or off
+- **Alt+Left / Alt+Right**: back and forward through the pages you visited, as the mouse's Back and Forward buttons do
+- **Ctrl+F**: search
+
 ## Download
 
 Get it from [Releases](https://github.com/fdemb/tidalfast/releases): a .dmg for macOS, an AppImage for Linux and a .zip for Windows. You need a TIDAL subscription.

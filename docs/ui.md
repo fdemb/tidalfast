@@ -83,7 +83,20 @@ Box flags pick what's drawn, in this order: shadow, background (optionally a ver
 
 ### Shortcuts
 
-`library_shortcuts` runs at the end of `draw_library`, so a view that takes a key first keeps it, as the track table does with the arrows. Space plays and pauses, Cmd-Right and Cmd-Left go to the next and previous track, and Cmd-Up and Cmd-Down change the volume by 10%. They are Ctrl on Linux and Windows. A held Space doesn't repeat. None of them work while a text field has the focus, and the login screen has none. The Back and Forward buttons on a mouse do what Back and Forward in the main view do, with a text field focused too. The UI doesn't press, focus or drag anything with those two buttons; it keeps their presses for `ui.take_button`, and with a menu open they only close it.
+`library_shortcuts` (`src/app/shortcuts.odin`) runs at the end of `draw_library`, so a view that takes a key first keeps it, as the track table does with the arrows. `SHORTCUTS` there is the one list of the shortcuts: each has its key and modifiers, the keys as the OS writes them and what it does. `library_shortcuts` takes the keys from it, the tooltips of the player bar's buttons and the sidebar's Search row show its keys, and the settings page lists it. Ctrl is Cmd on macOS, and Alt is Option.
+
+| Keys | Does |
+| --- | --- |
+| Space | Play or pause |
+| Ctrl+Left, Ctrl+Right | Previous and next track |
+| Shift+Left, Shift+Right | Back and forward 5 seconds |
+| Ctrl+Up, Ctrl+Down | Volume up and down by 10% |
+| Ctrl+S | Shuffle on or off |
+| Ctrl+R | Repeat all, one or off, as the button goes round |
+| Alt+Left, Alt+Right | Back and forward through the places visited |
+| Ctrl+F, Ctrl+L | Search |
+
+Space, shuffle, repeat and Back and Forward don't repeat while held; the rest do. A seek stays between the track's start and its end, where the track ends as it would playing, and does nothing with no track loaded. The plain arrows move through rows and controls, so seeking takes Shift. Back and Forward are Alt and the arrows on macOS too, since no shell sends the bracket keys of the usual Cmd-[ and Cmd-]. Opening the settings has no key for the same reason: no shell sends the comma. None of the shortcuts but search work while a text field has the focus, where Shift and the arrows select, and the login screen has none. The Back and Forward buttons on a mouse do what Back and Forward in the main view do, with a text field focused too. The UI doesn't press, focus or drag anything with those two buttons; it keeps their presses for `ui.take_button`, and with a menu open they only close it.
 
 ### The status bar
 
@@ -140,6 +153,7 @@ Settings in the user menu, at the bottom of the sidebar, shows the settings page
 - Appearance has the scrollbars' mode, where the renderer has backdrops, the player bar's (see [Scrollbars](playback.md#scrollbars)), and, on Linux where the compositor offers decorations, the title bar (see `docs/linux.md`, The title bar). A setting with a few choices shows them side by side in one control, with the chosen one raised.
 - Playback has ReplayGain, with Automatic, Track, Album and Off side by side (see [ReplayGain and volume](playback.md#replaygain-and-volume)). Its line says the choice applies from the next track, and while bit-perfect output is on it says ReplayGain isn't applied in that mode. Then bit-perfect output, which the output menu also has (see [Output settings](playback.md#output-settings)), as a switch. The knob slides across in the accent (`ui.slide`, which keeps the position in the box's `open_t`) and asks for no frames once it's there. A switch built for the first time starts where it belongs, so the page's first frame shows it settled.
 - Account, when signed in, has the user's name and Log out.
+- Keyboard shortcuts lists `SHORTCUTS` (see [Shortcuts](#shortcuts)) in 40 pt rows: what each does on the left and its keys in a keycap on the right, both static text for assistive apps.
 
 Assistive apps get each choice as a button named for what it chooses, such as "Docked scrollbars", selected when chosen, and the switch as a button with the value On or Off.
 
