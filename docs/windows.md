@@ -1,6 +1,6 @@
 # Windows
 
-The Windows build is a first pass. It runs the same app as macOS and Linux: a Win32 shell in C (`shell/shell_win32.c`), a Direct3D 11 renderer, DirectWrite text, playback through WASAPI's shared mode, bit-perfect output through its exclusive mode, and the login in the Credential Manager. It is built for x86-64 Windows 10 and 11, on Windows itself with `build.py`, and CI builds and tests it on every push.
+The Windows build is a first pass. It runs the same app as macOS and Linux: a Win32 shell in C (`shell/shell_win32.c`), a Direct3D 11 renderer, DirectWrite text, playback through WASAPI's shared mode, bit-perfect output through its exclusive mode, and the login in the Credential Manager. It is built for x86-64 Windows 10 and 11, on Windows itself with `build.py`, and CI builds and tests it on every pull request and every push to main.
 
 ## Building on Windows
 
@@ -19,7 +19,7 @@ The C code is compiled as C11 (`/std:c11 /experimental:c11atomics`). Odin links 
 
 Some things about Odin on Windows that the tools work around: `os.process_wait` reports `success` whatever the exit code, so check `exit_code`; `os.create` makes handles a child process doesn't inherit, so a log handed to a child is opened with `.Inheritable`; and `os.process_terminate` sends a console Ctrl-C, which reaches every process on the console, the one that started it too, so `tools/measure` closes the app's window instead (`stop_windows`).
 
-The C libraries are compiled with `cl` into `build/windows`, apart from the macOS and Linux ones in `build`. `third_party`'s bindings pick `build/windows/<name>/<name>.lib` on Windows. Everything else the app links is part of Windows.
+The C libraries are compiled with `cl` into `build/windows`, apart from the macOS and Linux ones in `build`. `third_party`'s bindings pick `build/windows/<name>/<name>.lib` on Windows. Everything else the app links is part of Windows, apart from the static libcurl that comes with Odin's `vendor:curl`.
 
 `packaging/windows` has the icon, the version resource and the manifest, which `rc` compiles into the executable. The manifest asks for per-monitor DPI awareness (v2) and UTF-8 as the process's code page.
 
