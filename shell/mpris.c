@@ -398,7 +398,11 @@ static void connect_bus(void) {
   if (r >= 0) step = "add the root interface", r = g_sd.add_object_vtable(g_bus, NULL, OBJECT_PATH, "org.mpris.MediaPlayer2", g_root_vtable, NULL);
   if (r >= 0) step = "add the player interface", r = g_sd.add_object_vtable(g_bus, NULL, OBJECT_PATH, PLAYER_INTERFACE, g_player_vtable, NULL);
   if (r < 0) {
-    fprintf(stderr, "shell: mpris: can't %s: %s\n", step, strerror(-r));
+    // Where sd-bus looked: the session bus's address without its guid, or
+    // $XDG_RUNTIME_DIR/bus without one.
+    const char *address = getenv("DBUS_SESSION_BUS_ADDRESS");
+    fprintf(stderr, "shell: mpris: can't %s (%.*s): %s\n", step, address ? (int)strcspn(address, ",") : 30,
+            address ? address : "no DBUS_SESSION_BUS_ADDRESS", strerror(-r));
     close_bus();
     g_next_try = mono_seconds() + 10;
     return;
