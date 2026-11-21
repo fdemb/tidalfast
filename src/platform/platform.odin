@@ -14,7 +14,7 @@ Event_Kind :: enum u32 {
 	Key_Up,
 	Modifiers_Changed,
 	Resize,
-	Media, // media is the command, dx the position for .Seek
+	Media, // media is the command, dx its value: see Media_Command
 	// Text from the keyboard or an input method, for the focused text field.
 	// It replaces the marked text if there is any, else the selection, or
 	// the replace range when replace is set.
@@ -37,7 +37,11 @@ Media_Command :: enum u8 {
 	Toggle,
 	Next,
 	Previous,
-	Seek,
+	Seek, // dx is the position in seconds
+	// MPRIS on Linux sets these too.
+	Volume, // dx is the volume slider's position, 0 to 1
+	Shuffle, // dx is 1 for on, 0 for off
+	Repeat, // dx is a Player_Repeat
 }
 
 Mouse_Button :: enum u32 {
@@ -163,6 +167,21 @@ Now_Playing :: struct {
 }
 #assert(size_of(Now_Playing) == 72)
 
+Player_Repeat :: enum u32 {
+	Off,
+	All,
+	One,
+}
+
+// The player bar's volume, shuffle and repeat, for the desktop's media
+// controls to show and set (MPRIS on Linux).
+Player_Controls :: struct {
+	volume:  f64, // the slider's position, 0 to 1
+	shuffle: b32,
+	repeat:  Player_Repeat,
+}
+#assert(size_of(Player_Controls) == 16)
+
 // The focused text field, for the input method. The shell answers
 // NSTextInputClient's questions from it, and puts the candidate window
 // under caret.
@@ -263,8 +282,11 @@ Shell :: struct {
 	// compositor to leave the title bar to the app, false for its own. nil
 	// elsewhere.
 	set_decorations:   proc "c" (own: b32),
+	// Linux: the player bar's volume, shuffle and repeat, sent when they
+	// change. nil elsewhere.
+	set_player_controls: proc "c" (controls: ^Player_Controls),
 }
-#assert(size_of(Shell) == 88)
+#assert(size_of(Shell) == 96)
 
 Window_Flag :: enum u32 {
 	// The window has no titlebar of its own: the app draws minimise,
