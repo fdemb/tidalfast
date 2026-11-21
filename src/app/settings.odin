@@ -2,7 +2,8 @@ package app
 
 // Settings: the volume, shuffle and repeat, bit-perfect output, how lists
 // show their scrollbars, whether the player bar blurs them, whether covers
-// lean under the pointer and, on Linux,
+// lean under the pointer, whether the bar shows a track's length or the
+// time left and, on Linux,
 // whose title bar the window has and GNOME's button layout. They live in
 // a small JSON file, ~/Library/Application Support/tidalfast/settings.json,
 // or wherever TIDALFAST_SETTINGS points. The fake data has none unless
@@ -45,6 +46,10 @@ Settings :: struct {
 	// Covers stay flat under the pointer. Named for the off state, so a
 	// file from before it has the effect on.
 	still_covers: bool,
+	// The time right of the progress bar is the track's length, not the
+	// time left. Named for that, so a file from before it shows the time
+	// left, as the bar always did.
+	show_duration: bool,
 	// GNOME's window button layout as the portal last gave it, for the
 	// window's first frame. nil until it has.
 	button_layout: Maybe(Button_Layout),
@@ -137,6 +142,7 @@ Settings_File :: struct {
 	repeat:        audio.Repeat,
 	title_bar:     Title_Bar,
 	still_covers:  bool,
+	show_duration: bool,
 	button_layout: string `json:"button_layout,omitempty"`,
 }
 
@@ -170,7 +176,7 @@ settings_decode_json :: proc(data: []u8) -> (st: Settings, ok: bool) {
 	if json.unmarshal(data, &f, allocator = context.temp_allocator) != nil {
 		return {volume = VOLUME_DEFAULT}, false
 	}
-	st = {bit_perfect = f.bit_perfect, scrollbars = f.scrollbars, bar = f.bar, volume = clamp(f.volume.? or_else VOLUME_DEFAULT, 0, 1), shuffle = f.shuffle, repeat = f.repeat, title_bar = f.title_bar, still_covers = f.still_covers}
+	st = {bit_perfect = f.bit_perfect, scrollbars = f.scrollbars, bar = f.bar, volume = clamp(f.volume.? or_else VOLUME_DEFAULT, 0, 1), shuffle = f.shuffle, repeat = f.repeat, title_bar = f.title_bar, still_covers = f.still_covers, show_duration = f.show_duration}
 	if f.button_layout != "" {
 		st.button_layout = button_layout_parse(f.button_layout)
 	}
@@ -199,6 +205,7 @@ settings_save :: proc(path: string, st: Settings) -> bool {
 		repeat      = st.repeat,
 		title_bar   = st.title_bar,
 		still_covers = st.still_covers,
+		show_duration = st.show_duration,
 	}
 	if l, ok := st.button_layout.?; ok {
 		f.button_layout = button_layout_string(l)

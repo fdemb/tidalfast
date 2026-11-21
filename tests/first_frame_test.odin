@@ -87,6 +87,23 @@ first_frames_match_the_next :: proc(t: ^testing.T) {
 		library_frame(t, s, &f, key(.Left, {ui.PRIMARY}))
 		library_frame(t, s, &f)
 		expect_next_frame_same(t, s, &f, at, "back to Home")
+		settle_frames(t, s, &f)
+
+		// A track an hour long, with the player bar's time switched from
+		// the time left to the length and back.
+		items := []app.Queue_Item{{title = "Song", artist = "Someone", seconds = 3723}}
+		s.playback.items = items
+		s.playback.index = 0
+		library_frame(t, s, &f)
+		expect_next_frame_same(t, s, &f, at, "a track playing")
+		settle_frames(t, s, &f)
+		library_frame(t, s, &f, press(s, "Time remaining"))
+		expect_next_frame_same(t, s, &f, at, "the track's length")
+		settle_frames(t, s, &f)
+		library_frame(t, s, &f, press(s, "Duration"))
+		expect_next_frame_same(t, s, &f, at, "the time left")
+		s.playback.items = nil
+		s.playback.index = -1
 	}
 }
 
