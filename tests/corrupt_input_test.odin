@@ -579,7 +579,7 @@ corrupt_list_files :: proc(t: ^testing.T) {
 
 @(test)
 corrupt_settings :: proc(t: ^testing.T) {
-	good := `{"bit_perfect": true, "scrollbars": "Docked", "bar": "Solid", "device_change": {"uid": "BuiltInSpeakerDevice", "orig_rate": 48000, "orig_format": {"sample_rate": 48000, "format_id": 1819304813, "format_flags": 9, "bytes_per_packet": 8, "frames_per_packet": 1, "bytes_per_frame": 8, "channels": 2, "bits": 32, "reserved": 0}, "rate": 96000}, "volume": 0.5, "shuffle": true, "repeat": "One", "replay_gain": "Album", "title_bar": "Own", "still_covers": true, "button_layout": "close,minimize:maximize"}`
+	good := `{"bit_perfect": true, "scrollbars": "Docked", "bar": "Solid", "device_change": {"uid": "BuiltInSpeakerDevice", "orig_rate": 48000, "orig_format": {"sample_rate": 48000, "format_id": 1819304813, "format_flags": 9, "bytes_per_packet": 8, "frames_per_packet": 1, "bytes_per_frame": 8, "channels": 2, "bits": 32, "reserved": 0}, "rate": 96000}, "volume": 0.5, "muted": true, "shuffle": true, "repeat": "One", "replay_gain": "Album", "title_bar": "Own", "still_covers": true, "button_layout": "close,minimize:maximize"}`
 	check :: proc(t: ^testing.T, data: []u8) -> app.Settings {
 		st, _ := app.settings_decode_json(data)
 		testing.expectf(t, st.scrollbars >= min(type_of(st.scrollbars)) && st.scrollbars <= max(type_of(st.scrollbars)), "scrollbars %d", int(st.scrollbars))
@@ -596,6 +596,7 @@ corrupt_settings :: proc(t: ^testing.T) {
 	testing.expect_value(t, st.repeat, audio.Repeat.One)
 	testing.expect_value(t, st.replay_gain, audio.Gain_Setting.Album)
 	testing.expect_value(t, st.device.rate, 96000)
+	testing.expect(t, st.muted)
 	for n in 0 ..< len(good) {
 		check(t, transmute([]u8)good[:n])
 	}
@@ -626,6 +627,9 @@ corrupt_settings :: proc(t: ^testing.T) {
 		`{"volume": Infinity}`,
 		`{"volume": 1e999}`,
 		`{"volume": "loud"}`,
+		`{"muted": 1}`,
+		`{"muted": "yes"}`,
+		`{"muted": null}`,
 		`{"device_change": {"uid": "x", "rate": NaN, "orig_rate": 48000}}`,
 		`{"device_change": {"uid": "x", "rate": 96000, "orig_rate": -48000}}`,
 		`{"device_change": {"uid": "x", "rate": -1, "orig_rate": 48000}}`,
@@ -638,7 +642,7 @@ corrupt_settings :: proc(t: ^testing.T) {
 	}
 	for src in hostile {
 		st = check(t, transmute([]u8)src)
-		testing.expectf(t, st.repeat == .Off && st.replay_gain == .Automatic && st.scrollbars == .Floating && st.bar == .Blurred && st.title_bar == .Automatic && st.device.rate == 0, "%s: %v", src, st)
+		testing.expectf(t, st.repeat == .Off && st.replay_gain == .Automatic && st.scrollbars == .Floating && st.bar == .Blurred && st.title_bar == .Automatic && st.device.rate == 0 && !st.muted, "%s: %v", src, st)
 	}
 }
 

@@ -277,7 +277,17 @@ check_controls :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(get(t, "Volume"), "double 0.75"))
 	testing.expect(t, strings.contains(get(t, "Shuffle"), "boolean false"))
 	testing.expect(t, strings.contains(get(t, "LoopStatus"), `"Track"`))
+
+	// A mute reports 0 and the unmute the level again, as one signal each,
+	// with no command back to the app.
+	commands_before := command_count
+	controls.volume = 0
+	mpris_set_controls(&controls)
+	controls.volume = 0.75
+	mpris_set_controls(&controls)
 	pump(0.5)
+	testing.expect_value(t, command_count, commands_before)
+	testing.expect(t, strings.contains(get(t, "Volume"), "double 0.75"))
 	_ = os.process_kill(monitor)
 	_, _ = os.process_wait(monitor)
 
@@ -289,7 +299,8 @@ check_controls :: proc(t: ^testing.T) {
 			append(&signals, m)
 		}
 	}
-	// Each write that changed something, then the app's three changes in one.
+	// Each write that changed something, then the app's three changes in
+	// one, then the mute and the unmute.
 	changes := [][]string {
 		{"Volume", "double 0.25"},
 		{"Volume", "double 0"},
@@ -298,6 +309,8 @@ check_controls :: proc(t: ^testing.T) {
 		{"LoopStatus", `"Track"`},
 		{"LoopStatus", `"None"`},
 		{"Volume", "double 0.75", "Shuffle", "boolean false", "LoopStatus", `"Track"`},
+		{"Volume", "double 0\n"},
+		{"Volume", "double 0.75"},
 	}
 	if !testing.expectf(t, len(signals) == len(changes), "%d PropertiesChanged, want %d:\n%s", len(signals), len(changes), string(data)) {
 		return
