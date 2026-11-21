@@ -1,7 +1,8 @@
 # Builds the app and the measure tools and runs the tests on macOS, Linux
 # and Windows, for every pull request and every push to main. This is where
 # shared code is checked on the systems a change wasn't made on. On Linux it
-# also checks that an idle window uses no CPU, under a headless Weston.
+# also checks that an idle window uses no CPU and runs the app through its
+# main flows (tools/smoke.sh), under a headless Weston.
 name: ci
 
 on:
@@ -58,3 +59,13 @@ jobs:
           # The inner sh expands these, in a private D-Bus session and keyring.
           # shellcheck disable=SC2016
           dbus-run-session -- sh -c 'export HOME=$(mktemp -d); eval "$(echo x | gnome-keyring-daemon --unlock --components=secrets)"; python3 build.py test'
+      - name: Smoke test
+        if: runner.os == 'Linux'
+        run: tools/smoke.sh -o "$RUNNER_TEMP/smoke"
+      - name: Upload the smoke test's logs
+        if: failure() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-logs
+          path: ${{ runner.temp }}/smoke
+          if-no-files-found: ignore
