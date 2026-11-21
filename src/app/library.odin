@@ -1226,7 +1226,8 @@ draw_player_bar :: proc(s: ^State, w, h: f32) {
 		{
 			// The times keep the width of the longest value the track can
 			// show, so they never cut off or push the bar around; the bar
-			// takes what's left.
+			// takes what's left. The right one is as wide as the time left
+			// with its minus sign in either form, so switching keeps it.
 			ui.row("", {}, ui.fill(), ui.px(16))
 			ui.text_style(.Regular, 11, DIM)
 			ui.text_pad(TIME_PAD)
@@ -1236,11 +1237,16 @@ draw_player_bar :: proc(s: ^State, w, h: f32) {
 			ui.set_next_text_align(.Right)
 			ui.label(clock(position), ui.px(ui.counter_width(.Regular, 11, longest) + 2 * TIME_PAD), ui.fill())
 			draw_progress(s, position, duration, item != nil)
-			left := "0:00"
-			if item != nil {
-				left = cat("-", clock(max(duration - position, 0)))
+			remaining := !s.settings.show_duration
+			t := ui.box_make("###bar_time", {.Clickable, .Focusable, .Draw_Text, .Draw_Hot_Underline}, ui.px(ui.counter_width(.Regular, 11, cat("-", longest)) + 2 * TIME_PAD), ui.fill())
+			t.label = bar_time(position, duration, item != nil, remaining)
+			t.text_color += (SECONDARY - t.text_color) * t.hot_t
+			ui.accessible(t, .Button, "Time remaining" if remaining else "Duration", strings.trim_prefix(t.label, "-"))
+			if ui.signal(t).clicked {
+				s.settings.show_duration = remaining
+				settings_queue(&s.data, settings_to_save(s))
+				ui.data_changed() // this frame drew the old form
 			}
-			ui.label(left, ui.px(ui.counter_width(.Regular, 11, cat("-", longest)) + 2 * TIME_PAD), ui.fill())
 		}
 	}
 
@@ -1281,6 +1287,22 @@ clock :: proc(seconds: f64) -> string {
 		return cat(num(t / 3600), ":", string(mins[:]), ":", string(sec[:]))
 	}
 	return cat(num(t / 60), ":", string(sec[:]))
+}
+
+// bar_time is the time right of the progress bar: the track's length, or
+// with remaining the time left as -m:ss. The time left goes by the whole
+// seconds clock shows, so it and the elapsed time left of the bar add up
+// to the length, and it stays at -0:00 past the end. With nothing loaded
+// it's 0:00.
+bar_time :: proc(position, duration: f64, loaded, remaining: bool) -> string {
+	if !loaded {
+		return "0:00"
+	}
+	if !remaining {
+		return clock(duration)
+	}
+	whole :: proc(seconds: f64) -> int {return int(max(seconds, 0))}
+	return cat("-", clock(f64(max(whole(duration) - whole(position), 0))))
 }
 
 // progress_fraction is how much of the bar is filled: position over
