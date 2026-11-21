@@ -112,7 +112,8 @@ void queue_take(Event **events, uint32_t *count, const uint8_t **text, uint32_t 
 // (smtc_win32.c). Each turns the commands those send into remote_command.
 // TIDALFAST_NOW_PLAYING_LOG=1 prints what the app sets, and
 // TIDALFAST_REMOTE_TEST="3:pause,5:play,7:seek=42,9:next" sends media
-// commands as the media keys do.
+// commands as the media keys do; volume=0.5, shuffle=1 and repeat=2 (a
+// Player_Repeat) as MPRIS does.
 
 void remote_command(uint32_t command, double position) {
   push_event((Event){.kind = EVENT_MEDIA, .media = (uint8_t)command, .dx = (float)position, .time = now_seconds()});
@@ -129,6 +130,10 @@ void print_now_playing(const Now_Playing *np) {
   fprintf(stderr, "shell: now playing: state %u, title \"%s\", artist \"%s\", album \"%s\", duration %.3f, elapsed %.3f, artwork %ux%u\n",
           np->state, np->title, np->artist ? np->artist : "", np->album ? np->album : "", np->duration, np->elapsed,
           np->artwork ? np->artwork_width : 0, np->artwork ? np->artwork_height : 0);
+}
+
+void print_player_controls(const Player_Controls *c) {
+  if (g_now_playing_log) fprintf(stderr, "shell: controls: volume %.3f, shuffle %u, repeat %u\n", c->volume, c->shuffle, c->repeat);
 }
 
 typedef struct {
@@ -735,7 +740,8 @@ void setup_shell_test(void) {
     static const struct {
       const char *name;
       uint32_t command;
-    } names[] = {{"play", MEDIA_PLAY}, {"pause", MEDIA_PAUSE}, {"toggle", MEDIA_TOGGLE}, {"next", MEDIA_NEXT}, {"previous", MEDIA_PREVIOUS}, {"seek", MEDIA_SEEK}};
+    } names[] = {{"play", MEDIA_PLAY}, {"pause", MEDIA_PAUSE}, {"toggle", MEDIA_TOGGLE}, {"next", MEDIA_NEXT}, {"previous", MEDIA_PREVIOUS},
+                 {"seek", MEDIA_SEEK}, {"volume", MEDIA_VOLUME}, {"shuffle", MEDIA_SHUFFLE}, {"repeat", MEDIA_REPEAT}};
     char *copy = strdup(remote), *save;
     for (char *step = strtok_r(copy, ",", &save); step; step = strtok_r(NULL, ",", &save)) {
       char *colon = strchr(step, ':');

@@ -246,6 +246,12 @@ Dash_Demux :: struct {
 }
 
 @(private)
+Next_Gain :: struct {
+	serial: u64,
+	gain:   f32,
+}
+
+@(private)
 Commands :: struct {
 	play:         Maybe(Source_Copy),
 	play_at:      i64,
@@ -254,6 +260,7 @@ Commands :: struct {
 	seek_serial:  u64, // the source the seek is for; it's dropped if that isn't playing
 	seek_id:      u32,
 	next:         Maybe(Source_Copy), // kind None clears it
+	next_gain:    Maybe(Next_Gain),
 	paused:       Maybe(bool),
 	output:       Maybe(Output),
 	quit:         bool,
@@ -475,6 +482,16 @@ set_next :: proc(p: ^Player, source: Source) {
 	post(p)
 }
 
+// set_next_gain changes the gain of the next track, the one set_next gave
+// with this serial, if it hasn't started decoding. Once it has, its frames
+// are in the ring at the old gain and it keeps that, so there's no step.
+set_next_gain :: proc(p: ^Player, serial: u64, gain: f32) {
+	sync.lock(&p.cmd_mutex)
+	p.cmd.next_gain = Next_Gain{serial, gain}
+	sync.unlock(&p.cmd_mutex)
+	post(p)
+}
+
 set_paused :: proc(p: ^Player, paused: bool) {
 	sync.lock(&p.cmd_mutex)
 	p.cmd.paused = paused
@@ -645,6 +662,7 @@ commands_free :: proc(c: ^Commands) {
 	}
 	c.play = nil
 	c.next = nil
+	c.next_gain = nil
 }
 
 // The decode thread.
@@ -732,9 +750,10 @@ run_commands :: proc(p: ^Player, mode: Command_Mode) -> Command_Outcome {
 	seek_to, has_seek := c.seek.?
 	seek_serial, seek_id, seek_tick := c.seek_serial, c.seek_id, c.seek_tick
 	next, has_next := c.next.?
+	next_gain, has_next_gain := c.next_gain.?
 	paused, has_paused := c.paused.?
 	output, has_output := c.output.?
-	c.play, c.seek, c.next, c.paused, c.output = nil, nil, nil, nil, nil
+	c.play, c.seek, c.next, c.next_gain, c.paused, c.output = nil, nil, nil, nil, nil, nil
 	sync.unlock(&p.cmd_mutex)
 
 	if quit {
@@ -752,6 +771,9 @@ run_commands :: proc(p: ^Player, mode: Command_Mode) -> Command_Outcome {
 	if has_next {
 		do_set_next(p, next)
 		source_free(&next)
+	}
+	if has_next_gain {
+		do_set_next_gain(p, next_gain)
 	}
 	if has_seek {
 		do_seek(p, seek_serial, seek_to, seek_id, seek_tick)
@@ -867,6 +889,24 @@ do_set_next :: proc(p: ^Player, src: Source) {
 	p.st.next_serial = src.serial
 	p.st.want_next = false
 	sync.unlock(&p.status_mutex)
+}
+
+// do_set_next_gain changes the waiting next track's gain. While the
+// previous track's tail plays, the other slot holds that track and the
+// next one waits in pending_next; otherwise the other slot holds it, not
+// yet decoded.
+@(private = "file")
+do_set_next_gain :: proc(p: ^Player, g: Next_Gain) {
+	if p.prev_alive {
+		if p.has_pending && p.pending_next.serial == g.serial {
+			p.pending_next.gain = g.gain
+		}
+		return
+	}
+	other := &p.slots[1 - p.cur]
+	if other.source.kind != .None && other.source.serial == g.serial {
+		other.source.gain = g.gain
+	}
 }
 
 // do_set_output closes the device, which puts it back as it was if bit-

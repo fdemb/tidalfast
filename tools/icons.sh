@@ -1,7 +1,8 @@
 #!/bin/sh
 # tools/icons.sh <dir>  cuts Phosphor's fonts down to the icons in ICONS and
 # writes them to assets/fonts. <dir> is the unpacked @phosphor-icons/web
-# package (npm pack @phosphor-icons/web). Needs fonttools (pyftsubset).
+# package (npm pack @phosphor-icons/web@2.1.2; 2.1.0 and 2.1.1 have the
+# same fonts). Needs fonttools (pyftsubset).
 # Each line is a weight, a name and its codepoint, which the ICON_
 # constant in src/text/text.odin has too.
 set -eu
@@ -26,6 +27,9 @@ bold plus e3d4
 bold check e182
 bold house e2c2
 bold speaker-hifi ea08
+bold speaker-high e44a
+bold speaker-low e44c
+bold speaker-x e45c
 fill house e2c2
 bold magnifying-glass e30c
 fill magnifying-glass e30c

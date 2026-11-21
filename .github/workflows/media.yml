@@ -40,10 +40,16 @@ jobs:
           cat > "$out/drive.sh" <<'EOF'
           set -eu
           TIDALFAST_FAKE=1 TIDALFAST_AUDIO_NULL=1 TIDALFAST_NOW_PLAYING_LOG=1 \
-            TIDALFAST_SHELL_TEST="25:quit" ./build/tidalfast > "$1/app.log" 2>&1 &
+            TIDALFAST_SHELL_TEST="45:quit" ./build/tidalfast > "$1/app.log" 2>&1 &
           app=$!
-          sleep 5
           p="playerctl -p tidalfast"
+          # Software Vulkan takes from 1 to over 5 s to start on a runner,
+          # and MPRIS starts after the first frame.
+          i=0
+          until $p status > /dev/null 2>&1; do
+            i=$((i + 1)); [ $i -le 200 ] || { echo "no MPRIS player after 20 s"; exit 1; }
+            sleep 0.1
+          done
           test "$($p status)" = Stopped
           $p play; sleep 2
           test "$($p status)" = Playing
@@ -54,11 +60,16 @@ jobs:
           $p position 12; sleep 1
           $p next; sleep 1
           $p previous; sleep 1
+          $p volume 0.25; $p shuffle On; $p loop Track; sleep 1
+          test "$($p volume)" = 0.250000
+          test "$($p shuffle)" = On
+          test "$($p loop)" = Track
           wait $app
           EOF
-          tools/headless.sh -t 120 sh "$out/drive.sh" "$out"
+          tools/headless.sh -t 120 sh "$out/drive.sh" "$out" || { cat "$out/app.log"; exit 1; }
           cat "$out/app.log"
-          for want in "remote command 1 " "remote command 2 " "remote command 6 (12.000)" "remote command 4 " "remote command 5 "; do
+          for want in "remote command 1 " "remote command 2 " "remote command 6 (12.000)" "remote command 4 " "remote command 5 " \
+            "remote command 7 (0.250)" "remote command 8 (1.000)" "remote command 9 (2.000)" "controls: volume 0.250, shuffle 1, repeat 2"; do
             grep -q "shell: $want" "$out/app.log" || { echo "missing: $want"; exit 1; }
           done
       - uses: actions/upload-artifact@v4

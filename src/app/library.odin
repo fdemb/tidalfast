@@ -103,8 +103,9 @@ NAV_H :: NAV_BUTTON_H + 2 * NAV_PAD // the room kept for them at the top without
 NAV_SHADOW_FADE :: 16 // points of scrolling over which their shadow fades in
 
 Library :: struct {
-	sidebar_w:     f32,
+	sidebar_w:     f32, // this frame's, Settings.sidebar_w as the window allows (sidebar_width)
 	drag_from_w:   f32, // sidebar width when the handle was pressed
+	drag_pref:     f32, // Settings.sidebar_w when the handle was pressed
 	playlist:      int,
 	selected:      int, // track row, -1 for none
 	playing:       int, // the row playing in this list, -1 for none
@@ -143,6 +144,8 @@ Status :: enum u8 {
 	Adding,
 	Already_In,
 	Add_Failed,
+	Playing_Next,
+	Queued,
 }
 
 PLAYLISTS := [?]string {
@@ -229,6 +232,22 @@ sidebar_limit :: proc(window_w: f32) -> f32 {
 	return clamp(window_w - HANDLE_W - MAIN_MIN, SIDEBAR_MIN, SIDEBAR_MAX)
 }
 
+// sidebar_width is the sidebar's width in a window window_w wide, for the
+// width the user chose (Settings.sidebar_w).
+sidebar_width :: proc(pref, window_w: f32) -> f32 {
+	w := sidebar_pref_clean(pref)
+	return clamp(w if w != 0 else SIDEBAR_DEFAULT, SIDEBAR_MIN, sidebar_limit(window_w))
+}
+
+// sidebar_pref_clean is a width from the settings file in range, or 0 for
+// the default when it is no width at all.
+sidebar_pref_clean :: proc(pref: f32) -> f32 {
+	if math.is_nan(pref) || pref <= 0 {
+		return 0
+	}
+	return clamp(pref, SIDEBAR_MIN, SIDEBAR_MAX)
+}
+
 library_init :: proc(lib: ^Library) {
 	lib^ = {
 		sidebar_w   = SIDEBAR_DEFAULT,
@@ -243,7 +262,7 @@ library_init :: proc(lib: ^Library) {
 draw_library :: proc(s: ^State, w, h: f32) {
 	lib := &s.library
 	ui.text_style(.Regular, 13, TEXT)
-	lib.sidebar_w = clamp(lib.sidebar_w, SIDEBAR_MIN, sidebar_limit(w))
+	lib.sidebar_w = sidebar_width(s.settings.sidebar_w, w)
 	lib.drop_target = -1
 
 	ui.set_next_background(WINDOW_BG)
@@ -498,11 +517,24 @@ draw_sidebar_handle :: proc(s: ^State, window_w: f32) {
 	handle := ui.row("sidebar_handle", {.Clickable}, ui.px(HANDLE_W), ui.fill())
 	sig := ui.signal(handle)
 	if sig.pressed {
+		if sig.double_clicked && s.settings.sidebar_w != 0 {
+			s.settings.sidebar_w = 0
+			lib.sidebar_w = sidebar_width(0, window_w)
+			settings_queue(&s.data, settings_to_save(s))
+		}
 		lib.drag_from_w = lib.sidebar_w
+		lib.drag_pref = s.settings.sidebar_w
 	}
 	if sig.held || sig.released {
 		lib.sidebar_w = clamp(lib.drag_from_w + sig.drag_delta.x, SIDEBAR_MIN, sidebar_limit(window_w))
+		// Back where it started, the handle keeps the width chosen before,
+		// which a narrow window may be drawing narrower.
+		s.settings.sidebar_w = lib.drag_pref if lib.sidebar_w == lib.drag_from_w else lib.sidebar_w
 	}
+	if sig.released && s.settings.sidebar_w != lib.drag_pref {
+		settings_queue(&s.data, settings_to_save(s))
+	}
+	ui.accessible(handle, .Slider, "Sidebar width", cat(num(int(math.round(lib.sidebar_w))), " pt"))
 	// The sidebar's background runs up to the line.
 	ui.set_next_background(PANEL)
 	ui.box_make("", {.Draw_Background}, ui.px(2), ui.fill())
@@ -1002,6 +1034,14 @@ draw_track_menu :: proc(s: ^State) {
 		if ui.menu_item("Play").clicked && i >= 0 {
 			pending_set(s, Play_Row{index = i})
 		}
+		if row_playable(s, i) {
+			if ui.menu_item("Play next").clicked {
+				pending_set(s, Queue_Row{index = i, next = true})
+			}
+			if ui.menu_item("Add to queue").clicked {
+				pending_set(s, Queue_Row{index = i})
+			}
+		}
 		fake := s.data.fake
 		if row != nil && (fake || row.album_id != 0 || first_artist(row.artists) != 0) {
 			ui.menu_separator()
@@ -1186,7 +1226,8 @@ draw_player_bar :: proc(s: ^State, w, h: f32) {
 		{
 			// The times keep the width of the longest value the track can
 			// show, so they never cut off or push the bar around; the bar
-			// takes what's left.
+			// takes what's left. The right one is as wide as the time left
+			// with its minus sign in either form, so switching keeps it.
 			ui.row("", {}, ui.fill(), ui.px(16))
 			ui.text_style(.Regular, 11, DIM)
 			ui.text_pad(TIME_PAD)
@@ -1196,21 +1237,27 @@ draw_player_bar :: proc(s: ^State, w, h: f32) {
 			ui.set_next_text_align(.Right)
 			ui.label(clock(position), ui.px(ui.counter_width(.Regular, 11, longest) + 2 * TIME_PAD), ui.fill())
 			draw_progress(s, position, duration, item != nil)
-			left := "0:00"
-			if item != nil {
-				left = cat("-", clock(max(duration - position, 0)))
+			remaining := !s.settings.show_duration
+			t := ui.box_make("###bar_time", {.Clickable, .Focusable, .Draw_Text, .Draw_Hot_Underline}, ui.px(ui.counter_width(.Regular, 11, cat("-", longest)) + 2 * TIME_PAD), ui.fill())
+			t.label = bar_time(position, duration, item != nil, remaining)
+			t.text_color += (SECONDARY - t.text_color) * t.hot_t
+			ui.accessible(t, .Button, "Time remaining" if remaining else "Duration", strings.trim_prefix(t.label, "-"))
+			if ui.signal(t).clicked {
+				s.settings.show_duration = remaining
+				settings_queue(&s.data, settings_to_save(s))
+				ui.data_changed() // this frame drew the old form
 			}
-			ui.label(left, ui.px(ui.counter_width(.Regular, 11, cat("-", longest)) + 2 * TIME_PAD), ui.fill())
 		}
 	}
 
 	{
 		// Laid out by hand so it fits in side at any window width: the volume
-		// slider gives up room before anything else does.
+		// slider gives up room before anything else does, and the speaker
+		// button none.
 		ui.row("extras", {}, ui.px(side), ui.fill())
-		output_w := min(output_width(s), side - OUTPUT_GAP)
-		slider_w := clamp(side - output_w - OUTPUT_GAP, 0, VOLUME_W)
-		ui.spacer(ui.px(side - output_w - OUTPUT_GAP - slider_w, 0))
+		output_w := min(output_width(s), side - OUTPUT_GAP - SPEAKER_W)
+		slider_w := clamp(side - output_w - OUTPUT_GAP - SPEAKER_W, 0, VOLUME_W)
+		ui.spacer(ui.px(side - output_w - OUTPUT_GAP - SPEAKER_W - slider_w, 0))
 		draw_output_button(s, output_w)
 		ui.spacer(ui.px(OUTPUT_GAP))
 		draw_volume(s, slider_w)
@@ -1222,6 +1269,14 @@ TIME_PAD :: 8 // between the times and the progress bar
 OUTPUT_GAP :: 12
 VOLUME_W :: 110
 VOLUME_H :: 28 // the slider takes presses this far around its bar
+SPEAKER_SIZE :: 28
+SPEAKER_W :: SPEAKER_SIZE + 4 // the speaker button and the gap after it
+VOLUME_NOTCH :: 0.05 // a mouse wheel's notch turns the volume this much
+// The lines a notch scrolls: macOS's one, and three in the Linux shell and
+// by default on Windows.
+WHEEL_NOTCH_LINES :: 1 when ODIN_OS == .Darwin else 3
+VOLUME_PER_POINT :: 1.0 / 400 // a trackpad's scroll, in proportion
+VOLUME_SCROLL_SAVE :: 0.5 // seconds after the wheel stops
 
 // clock formats seconds as m:ss, or h:mm:ss from an hour.
 clock :: proc(seconds: f64) -> string {
@@ -1232,6 +1287,22 @@ clock :: proc(seconds: f64) -> string {
 		return cat(num(t / 3600), ":", string(mins[:]), ":", string(sec[:]))
 	}
 	return cat(num(t / 60), ":", string(sec[:]))
+}
+
+// bar_time is the time right of the progress bar: the track's length, or
+// with remaining the time left as -m:ss. The time left goes by the whole
+// seconds clock shows, so it and the elapsed time left of the bar add up
+// to the length, and it stays at -0:00 past the end. With nothing loaded
+// it's 0:00.
+bar_time :: proc(position, duration: f64, loaded, remaining: bool) -> string {
+	if !loaded {
+		return "0:00"
+	}
+	if !remaining {
+		return clock(duration)
+	}
+	whole :: proc(seconds: f64) -> int {return int(max(seconds, 0))}
+	return cat("-", clock(f64(max(whole(duration) - whole(position), 0))))
 }
 
 // progress_fraction is how much of the bar is filled: position over
@@ -1302,29 +1373,80 @@ toggle_button :: proc(id, icon, name, value: string, on: bool) -> ui.Signal {
 	return ui.signal(b)
 }
 
-// draw_volume is a slider: press or drag along it to set the volume. A
-// press and release in one frame still counts, at the release.
+// draw_volume is the speaker button, which mutes and unmutes, and a slider:
+// press or drag along it to set the volume. A press and release in one
+// frame still counts, at the release. The wheel over either turns the
+// volume. While muted the slider shows none.
 draw_volume :: proc(s: ^State, width: f32) {
+	{
+		ui.column("", {.Center_Children}, ui.px(SPEAKER_SIZE), ui.fill())
+		silent := volume_silent(s.settings)
+		icon := text.ICON_SPEAKER_X
+		if !silent {
+			icon = text.ICON_SPEAKER_LOW if s.settings.volume < 0.5 else text.ICON_SPEAKER_HIGH
+		}
+		ui.text_style(.Icon, OUTPUT_ICON, SECONDARY)
+		ui.text_align(.Center)
+		ui.text_pad(0)
+		ui.set_next_background({})
+		ui.set_next_hover_color({1, 1, 1, 0.08})
+		ui.set_next_radius(SPEAKER_SIZE / 2)
+		b := ui.box_make("###speaker", {.Clickable, .Focusable, .Takes_Scroll, .Draw_Background, .Draw_Text, .Draw_Hot_Effects, .Draw_Active_Effects}, ui.px(SPEAKER_SIZE), ui.px(SPEAKER_SIZE))
+		b.label = icon
+		name := "Unmute" if silent else "Mute"
+		ui.accessible(b, .Button, name)
+		sig := ui.signal(b)
+		if sig.clicked {
+			playback_toggle_mute(s)
+			ui.data_changed()
+		}
+		volume_wheel(s, sig)
+		ui.tooltip(sig, name, shortcut_keys(.Mute))
+	}
+	ui.spacer(ui.px(SPEAKER_W - SPEAKER_SIZE))
 	ui.column("", {}, ui.px(width), ui.fill())
 	ui.spacer(ui.fill())
 	{
-		slider := ui.column("volume", {.Clickable}, ui.fill(), ui.px(VOLUME_H))
-		ui.accessible(slider, .Slider, "Volume", cat(num(int(math.round(s.settings.volume * 100))), "%"))
+		slider := ui.column("volume", {.Clickable, .Takes_Scroll}, ui.fill(), ui.px(VOLUME_H))
+		ui.accessible(slider, .Slider, "Volume", "Muted" if s.settings.muted else cat(num(int(math.round(s.settings.volume * 100))), "%"))
 		sig := ui.signal(slider)
 		if (sig.held || sig.released) && slider.rect.w > 0 {
 			playback_set_volume(s, clamp((sig.mouse.x - slider.rect.x) / slider.rect.w, 0, 1), sig.released)
 		}
+		volume_wheel(s, sig)
 		ui.spacer(ui.fill())
 		{
 			ui.radius(2)
 			ui.set_next_background(SURFACE_ACTIVE)
 			ui.row("", {.Draw_Background}, ui.fill(), ui.px(4))
 			ui.set_next_background(mix(SECONDARY, ACCENT, max(slider.hot_t, slider.active_t)))
-			ui.box_make("", {.Draw_Background}, ui.pct(s.settings.volume, 1), ui.fill())
+			ui.box_make("", {.Draw_Background}, ui.pct(volume_heard(s.settings), 1), ui.fill())
 		}
 		ui.spacer(ui.fill())
 	}
 	ui.spacer(ui.fill())
+	// The wheel's volume is saved once it stops turning, not every line.
+	if at := s.playback.volume_save_at; at != 0 {
+		if s.ui.time >= at {
+			volume_save(s)
+		} else {
+			ui.wake_at(at)
+		}
+	}
+}
+
+// volume_wheel turns the volume by a scroll over one of its controls, up
+// or down from the level before any mute: a wheel's notch by VOLUME_NOTCH,
+// a trackpad in proportion to the fingers.
+volume_wheel :: proc(s: ^State, sig: ui.Signal) {
+	if sig.scroll.y == 0 {
+		return
+	}
+	lines := (sig.scroll.y - sig.scroll_precise.y) / ui.SCROLL_LINE
+	turn := lines / WHEEL_NOTCH_LINES * VOLUME_NOTCH + sig.scroll_precise.y * VOLUME_PER_POINT
+	playback_set_volume(s, clamp(s.settings.volume + turn, 0, 1), false)
+	s.playback.volume_save_at = s.ui.time + VOLUME_SCROLL_SAVE
+	ui.data_changed()
 }
 
 play :: proc(s: ^State, i: int) {
@@ -1401,6 +1523,10 @@ status_text :: proc(s: ^State) -> string {
 		return fmt.tprintf("Couldn't add %s to %s", t.title, sidebar_entry(s, lib.status_list).name)
 	case .Copied:
 		return fmt.tprintf("Copied the link to %s", t.title)
+	case .Playing_Next:
+		return fmt.tprintf("Playing %s next", t.title)
+	case .Queued:
+		return fmt.tprintf("Added %s to the queue", t.title)
 	case .Copied_Page:
 	}
 	return ""
@@ -1423,6 +1549,7 @@ Pending :: union {
 	Search_Now,
 	Close_Search,
 	Play_Row,
+	Queue_Row,
 	Go_Back,
 	Go_Forward,
 	Log_Out,
@@ -1446,6 +1573,13 @@ Search_Now :: struct {
 Play_Row :: struct {
 	index: int,
 	order: Play_Order,
+}
+
+// Queue_Row is Play next (next set) or Add to queue on row index of the
+// open list. It waits like Play: a queue it starts replaces the old one.
+Queue_Row :: struct {
+	index: int,
+	next:  bool,
 }
 
 Go_Back :: struct {}
@@ -1577,6 +1711,11 @@ apply_pending :: proc(s: ^State) -> bool {
 		if !play_ordered(s, p) {
 			return false
 		}
+	case Queue_Row:
+		if !playback_queue_row(s, p.index, p.next) {
+			return false
+		}
+		set_status(s, .Playing_Next if p.next else .Queued, p.index)
 	case Go_Back:
 		if !history_step(s, -1) {
 			return false
