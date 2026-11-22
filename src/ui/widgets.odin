@@ -521,7 +521,8 @@ tooltip :: proc(sig: Signal, text: string, shortcut := "") {
 	tooltip_box(sig.box, {}, text, shortcut, warm)
 }
 
-// tooltip_box builds the tooltip, placed by anchor or else by anchor_rect.
+// tooltip_box builds the tooltip, placed by anchor or else by anchor_rect
+// (see fit_floating).
 // Text wider than the window less the margins is cut off.
 @(private)
 tooltip_box :: proc(anchor: ^Box, anchor_rect: render.Rect, text: string, shortcut: string, warm: bool) {
@@ -536,8 +537,8 @@ tooltip_box :: proc(anchor: ^Box, anchor_rect: render.Rect, text: string, shortc
 	b.pad.y = TOOLTIP_KEYCAP_INSET
 	// fit_floating places it once its size is known.
 	b.anchor = anchor
-	b.anchor_rect = anchor_rect
 	u.tooltip_box = b
+	u.tooltip_rect = anchor_rect
 	if warm && b.first_frame == u.frame {
 		b.open_t = 1
 	}

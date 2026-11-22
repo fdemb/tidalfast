@@ -97,6 +97,8 @@ Box_Flag :: enum u32 {
 	Shrink_From_End, // children that don't fit give up room from the end, not in proportion: the one crossing the edge is cut short and those after it get none
 	Center_Children, // children sit in the middle of the room along the child axis, as between two fill() spacers, for a box that's only there to centre something
 	Draw_Glass, // a lens of glass tinted by background, lit while hot and swelling while pressed, see render.push_glass
+	Tip_Around, // a label cut off inside this box puts its tooltip under or over the whole box, as an Instant_Hover box does
+	Tip_Text, // a label cut off inside this box shows this box's label in its tooltip, which the box doesn't draw itself
 	Instant_Hover, // hot_t jumps with no fade, for list rows and tiles: a fast mouse is on one for a few frames, and a fade would light neighbours unevenly. end_frame lights the one under the mouse in this frame's layout
 }
 Box_Flags :: bit_set[Box_Flag; u32]
@@ -145,11 +147,8 @@ Build :: struct {
 	flip_y:                    f32, // with keep_in_window, where its bottom goes when it doesn't fit below
 	above:                     bool, // with keep_in_window, its bottom goes at flip_y even when it fits below
 	anchor:                    ^Box, // a floating box centred under this one, or above it when there's no room below, see fit_floating
-	anchor_rect:               render.Rect, // without an anchor, a rect it's placed by the same way, when its width isn't 0
 	id:                        string, // as given; must live until end_frame
 	label:                     string, // the part of id before "##"
-	tip_around:                bool, // a label cut off inside this box puts its tooltip under or over the whole box, as an Instant_Hover box does
-	full_text:                 string, // what the tooltip of a label cut off inside this box shows, in place of the label; must live until end_frame, see cut_label
 	using style:               Style,
 	backdrop:                  Backdrop, // with Draw_Backdrop, background tints it
 	gradient:                  render.Color, // bottom colour of the background, when its alpha isn't 0
@@ -195,7 +194,7 @@ Signal :: struct {
 // in the last frame drawn. Its tooltip shows the full text.
 Cut_Label :: struct {
 	id:        u64, // hash of the text and the rect, 0 for none
-	rect:      render.Rect, // the label's, clipped, or its full_text box's: where the mouse shows it
+	rect:      render.Rect, // the label's, clipped, or its Tip_Text box's: where the mouse shows it
 	anchor:    render.Rect, // what the tooltip goes under: rect, as tall as the list row or card it's in (see note_cut)
 	since:     f64, // when it came under the mouse
 	by_mouse:  bool, // the mouse moving brought it there, not the boxes moving
@@ -347,11 +346,12 @@ State :: struct {
 	tooltip_dismissed: Key, // the box clicked, which shows no tooltip until the mouse leaves it
 	tooltip_asked:  bool, // a box under the mouse called tooltip this frame, so a cut label shows none
 	tooltip_box:    ^Box, // this frame's tooltip, if one was built
+	tooltip_rect:   render.Rect, // what tooltip_box is placed by when it has no anchor
 	cut:            Cut_Label,
 	// What this frame's draw finds under the mouse, see note_cut.
 	cut_scan:       bool, // look for a cut label: drawing the main tree with the mouse free
-	cut_owner:      ^Box, // the innermost box being drawn with full_text
-	cut_row:        ^Box, // the innermost Instant_Hover or tip_around box being drawn, such as a list row or a card
+	cut_owner:      ^Box, // the innermost Tip_Text box being drawn
+	cut_row:        ^Box, // the innermost Instant_Hover or Tip_Around box being drawn, such as a list row or a card
 	cut_found:      bool,
 	cut_text:       string,
 	cut_rect:       render.Rect,
@@ -1172,12 +1172,12 @@ end_frame :: proc() -> bool {
 // note_cut records that a label inside owner, or owner's own, was cut off
 // under the mouse. A box drawn over it later takes it back (see draw_box),
 // so what's found is what the mouse is on. In a list row, a card or another
-// tip_around box the tooltip goes under or over the whole box, so it covers
+// Tip_Around box the tooltip goes under or over the whole box, so it covers
 // none of the box's other text.
 @(private)
 note_cut :: proc(u: ^State, owner: ^Box) {
 	u.cut_found = true
-	u.cut_text = owner.full_text if owner.full_text != "" else owner.label
+	u.cut_text = owner.label
 	u.cut_rect = owner.clip
 	u.cut_anchor = owner.clip
 	if row := u.cut_row; row != nil {
@@ -1278,8 +1278,8 @@ drawn_opacity :: proc(b: ^Box) -> f32 {
 fit_floating :: proc(u: ^State) {
 	for b := u.floating_root.first; b != nil; b = b.next {
 		pos := [2]f32{b.rect.x, b.rect.y}
-		if b.anchor != nil || b.anchor_rect.w > 0 {
-			a := b.anchor.rect if b.anchor != nil else b.anchor_rect
+		if b.anchor != nil || (b == u.tooltip_box && u.tooltip_rect.w > 0) {
+			a := b.anchor.rect if b.anchor != nil else u.tooltip_rect
 			pos.x = a.x + (a.w - b.rect.w) / 2
 			pos.y = a.y + a.h + TOOLTIP_GAP
 			if pos.y + b.rect.h > u.height - FLOATING_MARGIN {

@@ -1797,20 +1797,23 @@ cut_shift: f32
 // In a 300 by 200 window, 80 pt wide labels from y = 20 + cut_shift, 20 pt
 // apart: a
 // title cut off, one that fits, a cut one under a box drawn over it, two
-// artists whose second is cut off in a box with full_text, a button with a
+// artists whose second is cut off in a Tip_Text box, a button with a
 // tooltip of its own whose label is cut off too, and a 30 pt list row with
 // a cut title at its top.
 @(private = "file")
 cut_frame :: proc(u: ^ui.State, f: ^Fonts, now: ^f64, events: ..platform.Event) -> (tip: ^ui.Box, animating: bool) {
+	// A renderer without a device draws nothing, but labels are cut and
+	// noted as they would be on screen.
 	text.begin_frame(f.state, &f.r)
-	ui.begin_frame(u, events, nil, f.state, 300, 200, now^)
+	render.begin_frame(&f.r, 300, 200, 1, {})
+	ui.begin_frame(u, events, &f.r, f.state, 300, 200, now^)
 	ui.spacer(ui.px(20 + cut_shift))
 	ui.label(CUT_TITLE, ui.px(80), ui.px(20))
 	ui.label("Fits", ui.px(80), ui.px(20))
 	ui.label(CUT_TITLE, ui.px(80), ui.px(20))
 	{
-		artists := ui.row("artists", {.Clip, .Shrink_From_End}, ui.px(80), ui.px(20))
-		artists.full_text = "Björk, Thom Yorke"
+		artists := ui.row("artists", {.Clip, .Shrink_From_End, .Tip_Text}, ui.px(80), ui.px(20))
+		artists.label = "Björk, Thom Yorke"
 		ui.label("Björk", ui.text_size(0, 0), ui.fill())
 		ui.label(", ", ui.text_size(0, 0), ui.fill())
 		ui.label("Thom Yorke", ui.text_size(0, 0), ui.fill())
@@ -1919,11 +1922,11 @@ test_ui_whole_label_no_tooltip :: proc(t: ^testing.T) {
 	testing.expect_value(t, ui.wake_after(&u), f32(0))
 }
 
-// Over a box with full_text, a name cut off inside it shows them all,
+// Over a Tip_Text box, a name cut off inside it shows the box's label,
 // wherever in the box the mouse is. A button's own tooltip beats its cut
 // label's. In a list row, the tooltip goes under the row.
 @(test)
-test_ui_cut_label_full_text :: proc(t: ^testing.T) {
+test_ui_cut_label_tip_text :: proc(t: ^testing.T) {
 	f: Fonts
 	if !testing.expect(t, fonts_init(&f)) {
 		return

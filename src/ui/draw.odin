@@ -16,14 +16,12 @@ fade :: proc(c: render.Color, a: f32) -> render.Color {
 // rim, hot and active overlays, border, focus ring, label, then the children
 // inside b's clip if it has one. A box clipped away entirely draws nothing
 // itself, but its children may lie outside it. A tilted box draws its
-// background or texture and its rim as one, see render.push_tilt. Without
-// a renderer it draws nothing but still finds the cut label under the
-// mouse, see note_cut.
+// background or texture and its rim as one, see render.push_tilt.
 @(private)
 draw_box :: proc(u: ^State, b: ^Box, alpha: f32) {
 	r := u.renderer
 	a := alpha * drawn_opacity(b)
-	if a <= 0 {
+	if r == nil || a <= 0 {
 		return
 	}
 	if b.clip.w <= 0 || b.clip.h <= 0 {
@@ -34,39 +32,6 @@ draw_box :: proc(u: ^State, b: ^Box, alpha: f32) {
 		}
 		return
 	}
-	if r != nil {
-		draw_fill(u, b, a)
-	}
-	if u.cut_found && b != u.tooltip_box && covers(b) && rect_contains(b.clip, u.input.mouse) {
-		u.cut_found = false
-	}
-	if .Draw_Text in b.flags && b.label != "" && u.texts != nil {
-		draw_label(u, b, a)
-	}
-	owner, row := u.cut_owner, u.cut_row
-	if b.full_text != "" {
-		u.cut_owner = b
-	}
-	if .Instant_Hover in b.flags || b.tip_around {
-		u.cut_row = b
-	}
-	if .Clip in b.flags && r != nil {
-		render.push_clip(r, b.rect)
-	}
-	for c := b.first; c != nil; c = c.next {
-		draw_box(u, c, a)
-	}
-	if .Clip in b.flags && r != nil {
-		render.pop_clip(r)
-	}
-	u.cut_owner, u.cut_row = owner, row
-}
-
-// draw_fill draws what's under b's label: shadow, background, texture, rim,
-// hot and active overlays, border and focus ring.
-@(private)
-draw_fill :: proc(u: ^State, b: ^Box, a: f32) {
-	r := u.renderer
 	rect := b.rect
 	tilt := b.tilt
 	tilt.pointer = u.input.mouse
@@ -109,6 +74,42 @@ draw_fill :: proc(u: ^State, b: ^Box, a: f32) {
 	if b.focus_t > 0 {
 		render.push_rect(r, rect, fade(ACCENT, a * b.focus_t), b.radius, 2)
 	}
+	if u.cut_found && b != u.tooltip_box && covers(b) && rect_contains(b.clip, u.input.mouse) {
+		u.cut_found = false
+	}
+	if .Draw_Text in b.flags && b.label != "" && u.texts != nil {
+		draw_label(u, b, a)
+	}
+	if .Clip in b.flags {
+		render.push_clip(r, rect)
+	}
+	if u.cut_scan && b.flags & {.Tip_Text, .Tip_Around, .Instant_Hover} != {} {
+		draw_children_owned(u, b, a)
+	} else {
+		for c := b.first; c != nil; c = c.next {
+			draw_box(u, c, a)
+		}
+	}
+	if .Clip in b.flags {
+		render.pop_clip(r)
+	}
+}
+
+// draw_children_owned draws b's children while it's the box a cut label
+// inside it reports, see note_cut.
+@(private)
+draw_children_owned :: proc(u: ^State, b: ^Box, a: f32) {
+	owner, row := u.cut_owner, u.cut_row
+	if .Tip_Text in b.flags {
+		u.cut_owner = b
+	}
+	if b.flags & {.Tip_Around, .Instant_Hover} != {} {
+		u.cut_row = b
+	}
+	for c := b.first; c != nil; c = c.next {
+		draw_box(u, c, a)
+	}
+	u.cut_owner, u.cut_row = owner, row
 }
 
 // covers says whether b paints over what was drawn before it, so a label
@@ -140,18 +141,10 @@ draw_glass :: proc(u: ^State, b: ^Box, a: f32) {
 }
 
 // draw_label centres the label vertically and truncates it with an
-// ellipsis to the box's width less its padding. Without a renderer it only
-// looks for a cut label under the mouse.
+// ellipsis to the box's width less its padding. A label cut off under the
+// mouse is noted for its tooltip.
 @(private)
 draw_label :: proc(u: ^State, b: ^Box, a: f32) {
-	owner := b
-	if b.full_text == "" && u.cut_owner != nil {
-		owner = u.cut_owner
-	}
-	under := u.cut_scan && rect_contains(owner.clip, u.input.mouse)
-	if u.renderer == nil && !under {
-		return
-	}
 	if b.run == nil {
 		b.run = text.shape(u.texts, b.font, b.font_size, b.label)
 	}
@@ -160,11 +153,14 @@ draw_label :: proc(u: ^State, b: ^Box, a: f32) {
 	if avail <= 0 {
 		return
 	}
-	if under && text.cut_off(run, avail) {
-		note_cut(u, owner)
-	}
-	if u.renderer == nil {
-		return
+	if u.cut_scan && text.cut_off(run, avail) {
+		owner := b
+		if .Tip_Text not_in b.flags && u.cut_owner != nil {
+			owner = u.cut_owner
+		}
+		if rect_contains(owner.clip, u.input.mouse) {
+			note_cut(u, owner)
+		}
 	}
 	w := min(run.width, avail)
 	x := b.rect.x + b.text_pad
