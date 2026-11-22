@@ -104,11 +104,16 @@ Data :: struct {
 	queue_view:     u32,
 	next_gen:       u32, // the last Track_View.gen handed out
 	lists:          Lists, // closed lists and the disk cache, see lists.odin
+	removing:       bool, // a Remove_Track job is out, see remove_from_list
 	liked:          Liked_Set, // the liked track ids the hearts show, see liked.odin
 	followed:       Followed_Set, // the followed artist ids the Follow buttons show, see followed.odin
 	artists:        Artist_Cache, // artist pages, see artist_data.odin
 	home:           Home, // the Home page's shelves, see home.odin
 	profile:        Profile, // the signed-in user's name and picture, see user_menu.odin
+	// The playlist being created, renamed or deleted on TIDAL, while its
+	// job is out; one at a time, see playlist_edit.odin.
+	playlist_out:   Maybe(Playlist_Job),
+	fake_sidebar:   Fake_Sidebar, // the fake data's playlists, see fake_sidebar
 	window_key:     bool, // the window had the keyboard last frame
 	// Debug builds and tests keep the last list freed (view_free) filled
 	// with POISON until the next one is, so a string or row still borrowed
@@ -482,6 +487,9 @@ account_end :: proc(s: ^State) {
 	artist_clear(d)
 	home_clear(d)
 	d.profile = {}
+	d.removing = false
+	d.playlist_out = nil
+	s.library.edit = {}
 	view_close(d)
 	queued_drop(d)
 	lists_clear(d)
@@ -583,6 +591,8 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 		disk_result(s, res, p)
 	case Add_Track_Job:
 		add_result(s, res, p)
+	case Remove_Track_Job:
+		remove_result(s, res, p)
 	case Liked_Ids_Job:
 		liked_ids_result(d, res, failed)
 		followed_ids_result(d, res, failed)
@@ -594,6 +604,8 @@ handle_result :: proc(s: ^State, res: ^Result, now: f64) {
 		home_result(d, res, failed)
 	case Profile_Job:
 		profile_result(d, res, failed)
+	case Playlist_Job:
+		playlist_result(s, res, p)
 	case Tracks_Job:
 		tracks_result(s, res, p)
 	case Stream_Job:
@@ -626,7 +638,7 @@ select_playlist :: proc(s: ^State, i: int) {
 	lib := &s.library
 	d := &s.data
 	i := i
-	if !d.fake && (i < 0 || i > len(d.sidebar.items)) {
+	if i < 0 || i >= (fake_sidebar(d).count if d.fake else 1 + len(d.sidebar.items)) {
 		i = 0
 	}
 	if search_leave(s) || lib.playlist != i {
@@ -658,7 +670,7 @@ Sidebar_Entry :: struct {
 sidebar_count :: proc(s: ^State) -> int {
 	d := &s.data
 	if d.fake {
-		return len(PLAYLISTS)
+		return fake_sidebar(d).count
 	}
 	if d.account != .Signed_In {
 		return 0
@@ -670,7 +682,8 @@ sidebar_entry :: proc(s: ^State, i: int) -> Sidebar_Entry {
 	d := &s.data
 	seed := u32(i) * 7919 + 13
 	if d.fake {
-		return {PLAYLISTS[i], songs(ROW_COUNT if i == 0 else 20 + i * 37 % 300), "", seed}
+		pl := &fake_sidebar(d).items[i]
+		return {small_str(&pl.name), songs(fake_tracks(pl)), "", u32(pl.key) * 7919 + 13}
 	}
 	if i == 0 {
 		return {"Liked Songs", songs(d.sidebar.liked_count) if d.sidebar.loaded else "", "", seed}
@@ -698,7 +711,7 @@ view_title :: proc(s: ^State) -> string {
 		return title
 	}
 	if d.fake {
-		return PLAYLISTS[s.library.playlist]
+		return sidebar_entry(s, s.library.playlist).name
 	}
 	if d.view.source == .None {
 		return "Your Library" if d.sidebar.loaded else "Loading your library…"
@@ -712,9 +725,7 @@ view_subtitle :: proc(s: ^State) -> string {
 		return subtitle
 	}
 	if d.fake {
-		lib := &s.library
-		count := ROW_COUNT if lib.playlist == 0 else 20 + lib.playlist * 37 % 300
-		return cat("Playlist · ", songs(count))
+		return cat("Playlist · ", songs(fake_tracks(&fake_sidebar(d).items[s.library.playlist])))
 	}
 	v := &d.view
 	if d.account == .Restoring {
@@ -742,7 +753,9 @@ view_count :: proc(s: ^State) -> int {
 		if n, listed := fake_count(s); listed {
 			return n
 		}
-		return ROW_COUNT
+		// The fake playlists all list the fake rows, but one made here is
+		// empty.
+		return 0 if fake_made(&fake_sidebar(&s.data).items[s.library.playlist]) else ROW_COUNT
 	}
 	return s.data.view.count
 }

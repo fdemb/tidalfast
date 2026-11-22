@@ -18,6 +18,7 @@ Field_Signal :: struct {
 	submitted:      bool, // Return
 	submitted_text: string, // the text when Return was pressed, this frame's
 	cancelled:      bool, // Escape in an empty field, which gave up the focus
+	escaped:        bool, // Escape, which empties the field or gives up the focus
 }
 
 // Field_Layout is where each grapheme cluster of a field's text is drawn.
@@ -335,6 +336,7 @@ field_key :: proc(u: ^State, f: ^Text_Field, k: Key_Press, sig: ^Field_Signal) -
 		if k.modifiers != {} {
 			return
 		}
+		sig.escaped = true
 		if f.len > 0 || f.marked {
 			field_clear(f)
 		} else {
