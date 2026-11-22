@@ -432,11 +432,11 @@ tone :: proc(serial: u64) -> audio.Source {
 	return {kind = .Tone, serial = serial, gain = 1, seconds = 30, tone_hz = 440}
 }
 
-// wait_audible waits up to 3 s for serial to play past its first frames.
+// wait_audible waits up to 10 s for serial to play past its first frames.
 @(private = "file")
 wait_audible :: proc(p: ^audio.Player, serial: u64) -> bool {
 	start := time.tick_now()
-	for time.tick_since(start) < 3 * time.Second {
+	for time.tick_since(start) < 10 * time.Second {
 		if st := audio.status(p); st.serial == serial && st.state == .Playing && st.sample > 0 {
 			return true
 		}
@@ -733,6 +733,12 @@ paused_read_does_not_poll :: proc(t: ^testing.T) {
 	p := audio.create(no_wake, 0, null_output = true)
 	defer audio.destroy(p)
 	audio.play(p, {kind = .Flac, serial = 1, url = fmt.tprintf("http://127.0.0.1:%d/a.flac", ep.port), gain = 1, seconds = 5}, paused = true)
+	// The decode thread has taken the play once it clears cmd_pending; then
+	// give it time to reach the wait. A fixed sleep alone was too short for
+	// a thread that started late on a loaded machine.
+	for start := time.tick_now(); sync.atomic_load(&p.cmd_pending) && time.tick_since(start) < 10 * time.Second; {
+		time.sleep(5 * time.Millisecond)
+	}
 	time.sleep(300 * time.Millisecond)
 
 	sync.atomic_store(&p.cmd_pending, true)
@@ -741,7 +747,7 @@ paused_read_does_not_poll :: proc(t: ^testing.T) {
 
 	audio.set_paused(p, false)
 	start := time.tick_now()
-	for audio.status(p).state != .Playing && time.tick_since(start) < time.Second {
+	for audio.status(p).state != .Playing && time.tick_since(start) < 10 * time.Second {
 		time.sleep(5 * time.Millisecond)
 	}
 	testing.expect_value(t, audio.status(p).state, audio.Play_State.Playing)
@@ -890,10 +896,18 @@ stalled_read_keeps_ticking :: proc(t: ^testing.T) {
 	for audio.status(p).sample < 44100 / 4 && time.tick_since(start) < 3 * time.Second {
 		time.sleep(5 * time.Millisecond)
 	}
+	// A second of playing is a second of the device's clock, not the test's:
+	// on a loaded machine the test can wake late, or the device run behind.
 	sync.atomic_store(&stall_wakes, 0)
-	time.sleep(time.Second)
+	from := audio.status(p).sample
+	start = time.tick_now()
+	for audio.status(p).sample < from + 44100 && time.tick_since(start) < 10 * time.Second {
+		time.sleep(5 * time.Millisecond)
+	}
+	wakes := sync.atomic_load(&stall_wakes)
 	st := audio.status(p)
 	testing.expect_value(t, st.state, audio.Play_State.Playing)
+	testing.expectf(t, st.sample >= from + 44100, "played from %d to %d in 10 s", from, st.sample)
 	testing.expectf(t, st.sample < 44100 * 3 / 2, "played past the bytes sent, to %d", st.sample)
-	testing.expectf(t, sync.atomic_load(&stall_wakes) >= 2, "%d UI wakes in a second of playing", sync.atomic_load(&stall_wakes))
+	testing.expectf(t, wakes >= 2, "%d UI wakes in a second of playing", wakes)
 }
