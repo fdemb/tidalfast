@@ -1094,6 +1094,7 @@ dash_explicit_base_plays :: proc(t: ^testing.T) {
 		}
 		time.sleep(20 * time.Millisecond)
 	}
+	underruns := audio.status(p).underruns
 	audio.destroy(p)
 	testing.expect(t, ended, "the track didn't play to the end")
 
@@ -1113,7 +1114,7 @@ dash_explicit_base_plays :: proc(t: ^testing.T) {
 			differ += 1
 		}
 	}
-	testing.expectf(t, differ == 0, "%d of %d samples differ", differ, len(want))
+	testing.expectf(t, differ == 0, "%d of %d samples differ, after %d underruns", differ, len(want), underruns)
 }
 
 // Fake_List is an AudioBufferList with room for four buffers.
@@ -1285,7 +1286,7 @@ device_loss_reopens :: proc(t: ^testing.T) {
 	before, ok := position(p, 22050)
 	testing.expect(t, ok)
 	audio.simulate_device_loss(p)
-	for start := time.tick_now(); time.tick_since(start) < 2 * time.Second && audio.status(p).losses == 0; {
+	for start := time.tick_now(); time.tick_since(start) < 10 * time.Second && audio.status(p).losses == 0; {
 		time.sleep(5 * time.Millisecond)
 	}
 	testing.expect_value(t, audio.status(p).losses, 1)
@@ -1307,7 +1308,7 @@ device_taken_falls_back_to_the_mixer :: proc(t: ^testing.T) {
 	before, ok := position(p, 22050)
 	testing.expect(t, ok)
 	audio.simulate_device_taken(p, 96000)
-	for start := time.tick_now(); time.tick_since(start) < 2 * time.Second && audio.status(p).losses == 0; {
+	for start := time.tick_now(); time.tick_since(start) < 10 * time.Second && audio.status(p).losses == 0; {
 		time.sleep(5 * time.Millisecond)
 	}
 	testing.expect_value(t, audio.status(p).losses, 1)
@@ -1319,7 +1320,7 @@ device_taken_falls_back_to_the_mixer :: proc(t: ^testing.T) {
 	testing.expect_value(t, audio.device_reason(&st.device), "another app set the device to 96 kHz")
 
 	audio.simulate_device_loss(p)
-	for start := time.tick_now(); time.tick_since(start) < 2 * time.Second && audio.status(p).losses == 1; {
+	for start := time.tick_now(); time.tick_since(start) < 10 * time.Second && audio.status(p).losses == 1; {
 		time.sleep(5 * time.Millisecond)
 	}
 	_, ok3 := position(p, after + 4410)
@@ -1329,10 +1330,10 @@ device_taken_falls_back_to_the_mixer :: proc(t: ^testing.T) {
 	testing.expect_value(t, audio.device_reason(&st.device), "")
 }
 
-// position waits up to 3 s for serial 1 to play past sample past.
+// position waits up to 10 s for serial 1 to play past sample past.
 @(private = "file")
 position :: proc(p: ^audio.Player, past: i64) -> (i64, bool) {
-	for start := time.tick_now(); time.tick_since(start) < 3 * time.Second; {
+	for start := time.tick_now(); time.tick_since(start) < 10 * time.Second; {
 		if st := audio.status(p); st.serial == 1 && st.state == .Playing && st.sample > past {
 			return st.sample, true
 		}

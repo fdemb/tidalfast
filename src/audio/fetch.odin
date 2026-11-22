@@ -43,7 +43,7 @@ Stream :: struct {
 	win_end:     i64, // one past the newest byte
 	read_pos:    i64, // the decoder's position; bytes before keep_from may go
 	length:      i64, // file size, -1 until a response says
-	gen:         u64, // bumped by stream_restart; a transfer for an older gen stops
+	gen:         u64, // bumped by stream_restart; a transfer for an older gen stops. Written atomically, like stop: progress_callback reads both unlocked
 	active:      bool, // has a URL; the fetch thread works on it
 	dash:        bool, // segments instead of url
 	seg_urls:    []string, // borrowed, like url
@@ -82,8 +82,8 @@ stream_init :: proc(st: ^Stream, wake: ^Wake, window := STREAM_WINDOW) {
 
 stream_destroy :: proc(st: ^Stream) {
 	sync.lock(&st.mutex)
-	st.stop = true
-	st.gen += 1
+	sync.atomic_store(&st.stop, true)
+	sync.atomic_add(&st.gen, 1)
 	sync.cond_broadcast(&st.cond)
 	sync.unlock(&st.mutex)
 	if st.running {
@@ -100,7 +100,7 @@ stream_open :: proc(st: ^Stream, url: string) {
 	stream_clear_locked(st)
 	st.url = url
 	st.active = true
-	st.gen += 1
+	sync.atomic_add(&st.gen, 1)
 	sync.cond_broadcast(&st.cond)
 }
 
@@ -121,7 +121,7 @@ stream_open_segments :: proc(st: ^Stream, urls: []string, starts: []i64) {
 	}
 	st.dash = true
 	st.active = true
-	st.gen += 1
+	sync.atomic_add(&st.gen, 1)
 	sync.cond_broadcast(&st.cond)
 }
 
@@ -143,7 +143,7 @@ stream_restart_segment :: proc(st: ^Stream, index: int) {
 		st.length = 0
 	}
 	st.failed = false
-	st.gen += 1
+	sync.atomic_add(&st.gen, 1)
 	sync.cond_broadcast(&st.cond)
 }
 
@@ -152,7 +152,7 @@ stream_restart_segment :: proc(st: ^Stream, index: int) {
 stream_clear :: proc(st: ^Stream) {
 	sync.guard(&st.mutex)
 	stream_clear_locked(st)
-	st.gen += 1
+	sync.atomic_add(&st.gen, 1)
 	sync.cond_broadcast(&st.cond)
 }
 
@@ -188,7 +188,7 @@ stream_restart :: proc(st: ^Stream, offset: i64) {
 	}
 	st.win_start, st.win_end, st.read_pos = offset, offset, offset
 	st.failed = false
-	st.gen += 1
+	sync.atomic_add(&st.gen, 1)
 	sync.cond_broadcast(&st.cond)
 }
 

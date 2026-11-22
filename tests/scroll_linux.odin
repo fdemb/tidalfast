@@ -7,7 +7,9 @@ import "core:math"
 import "core:testing"
 
 @(private = "file")
-SCROLL_OBJ :: "../build/shell/scroll.o"
+C_BUILD :: #config(TIDALFAST_C_BUILD, "build")
+@(private = "file")
+SCROLL_OBJ :: "../" + C_BUILD + "/shell/scroll.o"
 
 when !#exists(SCROLL_OBJ) {
 	#panic("build/shell/scroll.o is missing: run ./build.py first")
