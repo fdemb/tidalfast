@@ -130,6 +130,9 @@ Library :: struct {
 	nav_float:     f32, // this frame's shadow under Back and Forward, 0 to 1 (nav_float)
 	play_waiting:  bool, // a double-clicked playlist plays once it can
 	play_gen:      u32, // its list_gen
+	edit:          Playlist_Editor, // a playlist's name being typed, see playlist_edit.odin
+	list_menu_pos: [2]f32, // where the list's More menu opened, for the delete question in its place
+	delete_id:     Small, // the playlist the delete question is for, see sidebar_id
 }
 
 // Songs_Total is the open list's length in seconds, and the list_gen,
@@ -426,23 +429,38 @@ draw_sidebar :: proc(s: ^State, h: f32) {
 		ui.text_style(.Semibold, 11, DIM)
 		heading := ui.label("Your Library", ui.fill(), ui.fill())
 		ui.accessible(heading, .Static_Text, heading.label)
+		draw_new_playlist_button(s)
+		ui.spacer(ui.px(SIDEBAR_PAD + ROW_PAD - (NEW_PLAYLIST_W - 15) / 2))
 	}
 	ui.spacer(ui.px(SIDEBAR_LIST_TOP))
 	list_h := h - top - SIDEBAR_HEAD_H - SIDEBAR_LIST_TOP - LIST_PAD_Y - USER_ROW_H - bar_inset(s)
+	lib.edit.built = false
 	{
 		list := ui.scroll_view("playlists", ui.px(lib.sidebar_w), ui.px(list_h))
 		list.pad.x = SIDEBAR_PAD
 		ui.accessible(list, .List, "Playlists")
 		{
-			rows := ui.virtual_rows(list, sidebar_count(s), PLAYLIST_ROW_H)
-			for i in rows.first ..< rows.last {
-				draw_playlist_row(s, i)
+			// A playlist being made has a row under Liked Songs, where it
+			// goes once made, and the rest move down.
+			extra := 1 if new_playlist_row_shown(s) else 0
+			sidebar_edit_reveal(s, list, list_h, extra)
+			rows := ui.virtual_rows(list, sidebar_count(s) + extra, PLAYLIST_ROW_H)
+			for j in rows.first ..< rows.last {
+				if extra > 0 && j == 1 {
+					draw_new_playlist_row(s)
+				} else {
+					draw_playlist_row(s, j - extra if j > 1 else j)
+				}
 				ui.spacer(ui.px(PLAYLIST_GAP))
 			}
-			sidebar_prefetch(s, rows.first - COVER_PREFETCH_ROWS, rows.first)
-			sidebar_prefetch(s, rows.last, rows.last + COVER_PREFETCH_ROWS)
+			sidebar_prefetch(s, rows.first - COVER_PREFETCH_ROWS - extra, rows.first - extra)
+			sidebar_prefetch(s, rows.last - extra, rows.last - extra + COVER_PREFETCH_ROWS)
 		}
 		ui.spacer(ui.px(LIST_PAD_Y))
+	}
+	// A row scrolled out of view takes its field with it.
+	if lib.edit.mode != .None && !lib.edit.built {
+		lib.edit = {}
 	}
 	ui.spacer(ui.px(LIST_PAD_Y))
 	draw_user_row(s)
@@ -457,13 +475,25 @@ draw_playlist_row :: proc(s: ^State, i: int) {
 	entry := sidebar_entry(s, i)
 	current := playlist_showing(s, i)
 	queued := sidebar_queued(s, i)
+	// Its name being typed, or on its way to TIDAL.
+	editing := lib.edit.mode == .Rename && small_str(&lib.edit.id) == sidebar_id(s, i)
+	sending := false
+	if out, ok := s.data.playlist_out.?; ok && out.op != .Create && small_str(&out.id) == sidebar_id(s, i) {
+		sending = true
+		if out.op == .Rename {
+			entry.name = cat(small_str(&out.name))
+			entry.subtitle = "Renaming…"
+		} else {
+			entry.subtitle = "Deleting…"
+		}
+	}
 	ui.set_next_radius(10)
 	sidebar_selected(current)
 	item := ui.row(cat("##playlist", num(i)), {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects, .Draw_Border, .Instant_Hover}, ui.fill(), ui.px(PLAYLIST_ROW_H - PLAYLIST_GAP))
 	ui.accessible(item, .Row, cat(entry.name, ", ", entry.subtitle), selected = current)
 	// Liked Songs likes a dropped row; only the user's own playlists take
 	// one.
-	if i == 0 || playlist_editable(s, i) {
+	if i == 0 || playlist_owned(s, i) {
 		if ui.drop_hover(item) {
 			item.border_color = ACCENT
 			lib.drop_target = i
@@ -482,14 +512,11 @@ draw_playlist_row :: proc(s: ^State, i: int) {
 	ui.spacer(ui.px(8))
 	cover_art(s, .Playlist, entry.image, entry.seed, PLAYLIST_COVER, ui.px(PLAYLIST_COVER), radius = 6)
 	ui.spacer(ui.px(10))
-	{
-		// The two lines, 33 pt, centred in the row.
-		ui.column("", {}, ui.fill(), ui.fill()).pad.y = (PLAYLIST_ROW_H - PLAYLIST_GAP - 33) / 2
-		ui.text_style(.Medium, 13, ACCENT if queued else TEXT)
-		ui.label(entry.name, ui.fill(), ui.px(16))
-		ui.spacer(ui.px(2))
-		ui.text_style(.Regular, 12, QUIET)
-		ui.label(entry.subtitle, ui.fill(), ui.px(15))
+	if editing {
+		ui.column("", {}, ui.fill(), ui.fill()).pad.y = (PLAYLIST_ROW_H - PLAYLIST_GAP - EDIT_FIELD_H) / 2
+		edit_field(s)
+	} else {
+		playlist_lines(entry.name, entry.subtitle, DIM if sending else ACCENT if queued else TEXT)
 	}
 	if queued && playback_playing(s) {
 		draw_level_bars()
@@ -1144,7 +1171,7 @@ draw_playlist_chooser :: proc(s: ^State, i: int, h: f32) -> ui.Signal {
 	{
 		ui.scroll_view("track_menu_playlists", ui.fill(), ui.px(list_h))
 		for e in 1 ..< sidebar_count(s) {
-			if playlist_editable(s, e) && ui.menu_item(cat(sidebar_entry(s, e).name, "###add", num(e))).clicked && i >= 0 {
+			if playlist_owned(s, e) && ui.menu_item(cat(sidebar_entry(s, e).name, "###add", sidebar_id(s, e))).clicked && i >= 0 {
 				add_to_list(s, i, e)
 			}
 		}
@@ -1159,7 +1186,7 @@ CHOOSER_ROWS :: 12
 editable_count :: proc(s: ^State) -> int {
 	n := 0
 	for e in 1 ..< sidebar_count(s) {
-		n += int(playlist_editable(s, e))
+		n += int(playlist_owned(s, e))
 	}
 	return n
 }
@@ -1346,11 +1373,12 @@ draw_player_bar :: proc(s: ^State, w, h: f32) {
 
 	{
 		// Laid out by hand so it fits in side at any window width: the volume
-		// slider gives up room before anything else does.
+		// slider gives up room before anything else does, and the speaker
+		// button none.
 		ui.row("extras", {}, ui.px(side), ui.fill())
-		output_w := min(output_width(s), side - OUTPUT_GAP)
-		slider_w := clamp(side - output_w - OUTPUT_GAP, 0, VOLUME_W)
-		ui.spacer(ui.px(side - output_w - OUTPUT_GAP - slider_w, 0))
+		output_w := min(output_width(s), side - OUTPUT_GAP - SPEAKER_W)
+		slider_w := clamp(side - output_w - OUTPUT_GAP - SPEAKER_W, 0, VOLUME_W)
+		ui.spacer(ui.px(side - output_w - OUTPUT_GAP - SPEAKER_W - slider_w, 0))
 		draw_output_button(s, output_w)
 		ui.spacer(ui.px(OUTPUT_GAP))
 		draw_volume(s, slider_w)
@@ -1362,6 +1390,14 @@ TIME_PAD :: 8 // between the times and the progress bar
 OUTPUT_GAP :: 12
 VOLUME_W :: 110
 VOLUME_H :: 28 // the slider takes presses this far around its bar
+SPEAKER_SIZE :: 28
+SPEAKER_W :: SPEAKER_SIZE + 4 // the speaker button and the gap after it
+VOLUME_NOTCH :: 0.05 // a mouse wheel's notch turns the volume this much
+// The lines a notch scrolls: macOS's one, and three in the Linux shell and
+// by default on Windows.
+WHEEL_NOTCH_LINES :: 1 when ODIN_OS == .Darwin else 3
+VOLUME_PER_POINT :: 1.0 / 400 // a trackpad's scroll, in proportion
+VOLUME_SCROLL_SAVE :: 0.5 // seconds after the wheel stops
 
 // clock formats seconds as m:ss, or h:mm:ss from an hour.
 clock :: proc(seconds: f64) -> string {
@@ -1458,29 +1494,80 @@ toggle_button :: proc(id, icon, name, value: string, on: bool) -> ui.Signal {
 	return ui.signal(b)
 }
 
-// draw_volume is a slider: press or drag along it to set the volume. A
-// press and release in one frame still counts, at the release.
+// draw_volume is the speaker button, which mutes and unmutes, and a slider:
+// press or drag along it to set the volume. A press and release in one
+// frame still counts, at the release. The wheel over either turns the
+// volume. While muted the slider shows none.
 draw_volume :: proc(s: ^State, width: f32) {
+	{
+		ui.column("", {.Center_Children}, ui.px(SPEAKER_SIZE), ui.fill())
+		silent := volume_silent(s.settings)
+		icon := text.ICON_SPEAKER_X
+		if !silent {
+			icon = text.ICON_SPEAKER_LOW if s.settings.volume < 0.5 else text.ICON_SPEAKER_HIGH
+		}
+		ui.text_style(.Icon, OUTPUT_ICON, SECONDARY)
+		ui.text_align(.Center)
+		ui.text_pad(0)
+		ui.set_next_background({})
+		ui.set_next_hover_color({1, 1, 1, 0.08})
+		ui.set_next_radius(SPEAKER_SIZE / 2)
+		b := ui.box_make("###speaker", {.Clickable, .Focusable, .Takes_Scroll, .Draw_Background, .Draw_Text, .Draw_Hot_Effects, .Draw_Active_Effects}, ui.px(SPEAKER_SIZE), ui.px(SPEAKER_SIZE))
+		b.label = icon
+		name := "Unmute" if silent else "Mute"
+		ui.accessible(b, .Button, name)
+		sig := ui.signal(b)
+		if sig.clicked {
+			playback_toggle_mute(s)
+			ui.data_changed()
+		}
+		volume_wheel(s, sig)
+		ui.tooltip(sig, name, shortcut_keys(.Mute))
+	}
+	ui.spacer(ui.px(SPEAKER_W - SPEAKER_SIZE))
 	ui.column("", {}, ui.px(width), ui.fill())
 	ui.spacer(ui.fill())
 	{
-		slider := ui.column("volume", {.Clickable}, ui.fill(), ui.px(VOLUME_H))
-		ui.accessible(slider, .Slider, "Volume", cat(num(int(math.round(s.settings.volume * 100))), "%"))
+		slider := ui.column("volume", {.Clickable, .Takes_Scroll}, ui.fill(), ui.px(VOLUME_H))
+		ui.accessible(slider, .Slider, "Volume", "Muted" if s.settings.muted else cat(num(int(math.round(s.settings.volume * 100))), "%"))
 		sig := ui.signal(slider)
 		if (sig.held || sig.released) && slider.rect.w > 0 {
 			playback_set_volume(s, clamp((sig.mouse.x - slider.rect.x) / slider.rect.w, 0, 1), sig.released)
 		}
+		volume_wheel(s, sig)
 		ui.spacer(ui.fill())
 		{
 			ui.radius(2)
 			ui.set_next_background(SURFACE_ACTIVE)
 			ui.row("", {.Draw_Background}, ui.fill(), ui.px(4))
 			ui.set_next_background(mix(SECONDARY, ACCENT, max(slider.hot_t, slider.active_t)))
-			ui.box_make("", {.Draw_Background}, ui.pct(s.settings.volume, 1), ui.fill())
+			ui.box_make("", {.Draw_Background}, ui.pct(volume_heard(s.settings), 1), ui.fill())
 		}
 		ui.spacer(ui.fill())
 	}
 	ui.spacer(ui.fill())
+	// The wheel's volume is saved once it stops turning, not every line.
+	if at := s.playback.volume_save_at; at != 0 {
+		if s.ui.time >= at {
+			volume_save(s)
+		} else {
+			ui.wake_at(at)
+		}
+	}
+}
+
+// volume_wheel turns the volume by a scroll over one of its controls, up
+// or down from the level before any mute: a wheel's notch by VOLUME_NOTCH,
+// a trackpad in proportion to the fingers.
+volume_wheel :: proc(s: ^State, sig: ui.Signal) {
+	if sig.scroll.y == 0 {
+		return
+	}
+	lines := (sig.scroll.y - sig.scroll_precise.y) / ui.SCROLL_LINE
+	turn := lines / WHEEL_NOTCH_LINES * VOLUME_NOTCH + sig.scroll_precise.y * VOLUME_PER_POINT
+	playback_set_volume(s, clamp(s.settings.volume + turn, 0, 1), false)
+	s.playback.volume_save_at = s.ui.time + VOLUME_SCROLL_SAVE
+	ui.data_changed()
 }
 
 play :: proc(s: ^State, i: int) {
@@ -1605,6 +1692,7 @@ Pending :: union {
 	Go_Back,
 	Go_Forward,
 	Log_Out,
+	Playlist_Job, // make, rename or delete a playlist, see playlist_edit
 }
 
 Close_Search :: struct {}
@@ -1778,6 +1866,8 @@ apply_pending :: proc(s: ^State) -> bool {
 		}
 	case Log_Out:
 		sign_out(s, "")
+	case Playlist_Job:
+		playlist_edit(s, p)
 	}
 	ui.data_changed()
 	return true
@@ -1908,11 +1998,10 @@ same_place :: proc(a, b: Place) -> bool {
 // playlist_place is sidebar entry i as a place. A TIDAL playlist goes by
 // its id, since the sidebar can change order before Back returns to it.
 playlist_place :: proc(s: ^State, i: int) -> Playlist_Place {
-	items := s.data.sidebar.items
-	if s.data.fake || i < 1 || i > len(items) {
-		return {index = i}
+	if id := sidebar_id(s, i); id != "" {
+		return {id = small(id)}
 	}
-	return {id = small(items[i - 1].id)}
+	return {index = i}
 }
 
 // playlist_index is where a playlist place is in the sidebar now, -1 when
@@ -1921,12 +2010,7 @@ playlist_index :: proc(s: ^State, p: ^Playlist_Place) -> int {
 	if p.id.len == 0 {
 		return p.index
 	}
-	for it, i in s.data.sidebar.items {
-		if it.id == small_str(&p.id) {
-			return i + 1
-		}
-	}
-	return -1
+	return sidebar_find(s, small_str(&p.id))
 }
 
 // history_from is the place Back and Forward step from: the search they

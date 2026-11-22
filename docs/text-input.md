@@ -12,7 +12,7 @@ With the focus, the field takes:
 - Backspace and Delete by cluster, Option by word, Command to the end of the line.
 - Cmd-A, Cmd-C, Cmd-X, Cmd-V, Cmd-Z and Shift-Cmd-Z, Control-A and Control-E.
 - Clicks: one places the cursor (Shift extends), two select a word, three select everything, and dragging selects by cluster, or by word after a double-click.
-- Return reports `submitted`. Escape clears the text, and a second Escape gives up the focus.
+- Return reports `submitted`. Escape clears the text, and a second Escape gives up the focus. Either reports `escaped`, for a field that closes on Escape, such as a playlist's name.
 
 Undo keeps whole snapshots, 32 deep. Typing right after typing joins one step, and so do Backspaces in a row and Deletes in a row. Moving the cursor or clicking ends the step, and cut, paste and word or line deletes are steps of their own. A composition belongs to the step of the typing before it.
 

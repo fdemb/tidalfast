@@ -21,10 +21,10 @@ import "../src/ui"
 @(private = "file")
 menu_sidebar :: proc(s: ^app.State, tracks := 3, extra := 0) {
 	items := make([]app.Sidebar_Item, 2 + extra)
-	items[0] = {id = "pl", name = "Mine", tracks = tracks, updated = 1, own = true}
+	items[0] = {id = "pl", name = "Mine", tracks = tracks, updated = 1, owned = true}
 	items[1] = {id = "theirs", name = "Theirs", tracks = 2, updated = 1}
 	for k in 0 ..< extra {
-		items[2 + k] = {id = fmt.aprintf("x%d", k), name = fmt.aprintf("Mix %d", k), tracks = 1, own = true}
+		items[2 + k] = {id = fmt.aprintf("x%d", k), name = fmt.aprintf("Mix %d", k), tracks = 1, owned = true}
 	}
 	res := app.Result {
 		job     = {auth = s.data.auth_gen, payload = app.Playlists_Job{}},
@@ -43,7 +43,8 @@ drain :: proc(s: ^app.State) {
 	}
 }
 
-// menu_list opens three songs as a list of kind source with id, all there.
+// menu_list opens three songs as a list of kind source with id, all there,
+// as a sidebar entry when it's a playlist there.
 @(private = "file")
 menu_list :: proc(s: ^app.State, source: app.Source, id: string) {
 	rows := make([]app.Row, 3, context.temp_allocator)
@@ -58,6 +59,8 @@ menu_list :: proc(s: ^app.State, source: app.Source, id: string) {
 	s.data.view.in_flight = 0
 	s.data.view.fetched = 1
 	s.library.list_gen += 1
+	// A playlist opens from its sidebar entry.
+	s.library.playlist = app.sidebar_find(s, id) if source == .Playlist else -1
 }
 
 // menu_labels is the open menu's items in the last frame, in order.
@@ -158,7 +161,7 @@ track_menu_items_per_list :: proc(t: ^testing.T) {
 
 	// No playlist of the user's own: nothing to add to.
 	menu_list(s, .Album, "10")
-	s.data.sidebar.items[0].own = false
+	s.data.sidebar.items[0].owned = false
 	open_menu_on(t, s, &f, "Second song")
 	testing.expect(t, !has(menu_labels(s), "Add to playlist"))
 }
@@ -264,7 +267,7 @@ add_to_playlist_from_the_track_menu :: proc(t: ^testing.T) {
 		testing.expect_value(t, from_menu[0].source, app.Source.Playlist)
 		testing.expect_value(t, from_menu[0].track, 100)
 	}
-	testing.expect(t, !app.playlist_editable(s, 2), "someone else's playlist takes no drop")
+	testing.expect(t, !app.playlist_owned(s, 2), "someone else's playlist takes no drop")
 }
 
 // A hundred playlists scroll inside the menu, twelve at a time, and the
@@ -507,4 +510,115 @@ remove_from_the_queues_list :: proc(t: ^testing.T) {
 	testing.expect_value(t, pb.entries[pb.index].id, 55)
 	drain(s)
 	app.playback_shutdown(s)
+}
+
+// focused_label is the label of the box with the focus.
+@(private = "file")
+focused_label :: proc(s: ^app.State) -> string {
+	b := ui.box_lookup(&s.ui, s.ui.focus)
+	return b.label if b != nil else ""
+}
+
+// The arrow keys step through the items of every menu: the list's More
+// menu, the question before a delete, and the chooser. The chooser follows
+// the fake sidebar as playlists are renamed and deleted under it, and adds
+// to the playlist under the highlight, not to the one that had its place.
+@(test)
+menus_and_chooser_keep_the_keyboard :: proc(t: ^testing.T) {
+	arena: vmem.Arena
+	_ = vmem.arena_init_growing(&arena)
+	defer vmem.arena_destroy(&arena)
+	context.allocator = vmem.arena_allocator(&arena)
+	s := library_state(true)
+	defer library_state_free(s)
+	f: Frame
+	library_frame(t, s, &f)
+	library_frame(t, s, &f, press(s, "Polskie hity"))
+	library_frame(t, s, &f)
+
+	// The More menu, opened from the keyboard, lights Play; Down goes on.
+	library_frame(t, s, &f, press(s, "More options for Polskie hity"))
+	library_frame(t, s, &f)
+	testing.expect_value(t, focused_label(s), "Play")
+	library_frame(t, s, &f, key(.Down))
+	testing.expect_value(t, focused_label(s), "Shuffle")
+	library_frame(t, s, &f, key(.Down))
+	library_frame(t, s, &f, key(.Down))
+	testing.expect_value(t, focused_label(s), "Delete playlist")
+
+	// The question: Cancel first, Down to Delete, Up back, then Escape.
+	library_frame(t, s, &f, key(.Return))
+	library_frame(t, s, &f)
+	testing.expect_value(t, focused_label(s), "Cancel")
+	library_frame(t, s, &f, key(.Down))
+	testing.expect_value(t, focused_label(s), "Delete")
+	library_frame(t, s, &f, key(.Up))
+	testing.expect_value(t, focused_label(s), "Cancel")
+	library_frame(t, s, &f, key(.Escape))
+	for _ in 0 ..< 30 {
+		library_frame(t, s, &f)
+	}
+	_, kept := access_node(s, "Polskie hity, ")
+	testing.expect(t, kept, "Escape keeps it")
+
+	// The chooser lists the user's own fake playlists, not TIDAL's mixes.
+	row := strings.clone(app.view_row(s, 0).title)
+	open_menu_on(t, s, &f, row)
+	library_frame(t, s, &f, menu_press(s, "Add to playlist"))
+	library_frame(t, s, &f)
+	labels := menu_labels(s)
+	testing.expectf(t, len(labels) > 3 && labels[0] == "Back" && labels[1] == "Late Night Jazz" && !has(labels, "Discover Weekly"), "%v", labels)
+
+	// Renamed and deleted under the open chooser: Late Night Jazz and Deep
+	// Focus, which the open list isn't.
+	app.playlist_edit(s, {op = .Rename, id = app.small("5"), name = app.small("Night Jazz")})
+	app.playlist_edit(s, {op = .Delete, id = app.small("7")})
+	library_frame(t, s, &f)
+	testing.expect(t, ui.menu_is_open("track_menu"))
+	labels = menu_labels(s)
+	testing.expectf(t, labels[1] == "Night Jazz" && labels[2] == "Polskie hity" && !has(labels, "Deep Focus"), "%v", labels)
+	library_frame(t, s, &f, key(.Down))
+	library_frame(t, s, &f, key(.Down))
+	testing.expect_value(t, focused_label(s), labels[2])
+	library_frame(t, s, &f, key(.Return))
+	testing.expect_value(t, app.status_text(s), fmt.tprintf("Added %s to %s", row, labels[2]))
+}
+
+// A playlist made through the mock takes adds and removals like any other:
+// the jobs go through the same routes, with its own ETag.
+@(test)
+made_playlist_takes_adds_and_removals :: proc(t: ^testing.T) {
+	arena: vmem.Arena
+	_ = vmem.arena_init_growing(&arena)
+	defer vmem.arena_destroy(&arena)
+	context.allocator = vmem.arena_allocator(&arena)
+	m: Mock
+	mock_start(&m)
+	defer mock_stop(&m)
+	s := library_state(false, &m)
+	defer library_state_free(s)
+	d := &s.data
+	drain(s)
+
+	made := app.run_job(d, {auth = d.auth_gen, payload = app.Playlist_Job{op = .Create, name = app.small("Fresh")}})
+	testing.expect_value(t, made.err, nil)
+	app.result_free(&made)
+	for track in ([]i64{31, 32, 33}) {
+		res := app.run_job(d, {auth = d.auth_gen, payload = app.Add_Track_Job{track = track, source = .Playlist, id = app.small("made-1")}})
+		added := res.payload.(app.Add_Track_Result) or_else {}
+		testing.expectf(t, res.err == nil && added.added, "add %d: %v", track, res.err)
+		app.result_free(&res)
+	}
+	res := app.run_job(d, {auth = d.auth_gen, payload = app.Remove_Track_Job{track = 32, id = app.small("made-1"), row = 1, lo = 1, hi = 1}})
+	out := res.payload.(app.Remove_Track_Result) or_else {}
+	testing.expect_value(t, res.err, nil)
+	testing.expect(t, out.read && out.index == 1 && out.version.count == 2)
+	app.result_free(&res)
+	testing.expect(t, requested(&m, "DELETE /playlists/made-1/items/1?"))
+
+	// What's left lists as two tracks.
+	res = app.run_job(d, {auth = d.auth_gen, payload = app.Tracks_Job{source = .Playlist, id = app.small("made-1"), limit = 50}})
+	page := res.payload.(app.Tracks_Result) or_else {}
+	testing.expect(t, len(page.rows) == 2 && page.rows[0].id == 31 && page.rows[1].id == 33 && page.total == 2)
+	app.result_free(&res)
 }

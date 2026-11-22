@@ -2664,3 +2664,49 @@ test_ui_style_leak_is_reported :: proc(t: ^testing.T) {
 	testing.expect_value(t, u.style_leaks, 4)
 	testing.expect_value(t, errors, 1)
 }
+
+// A box that takes scrolls gets the scroll over it, wheel and trackpad,
+// and the view behind it doesn't move. The glide after a trackpad scroll
+// that started over it doesn't reach it, so a flick can't fling it. Over
+// the rest of the view the view scrolls as before.
+@(test)
+test_ui_box_takes_scroll :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	knob_frame :: proc(u: ^ui.State, now: ^f64, events: ..platform.Event) -> (list: ^ui.Box, knob: ui.Signal) {
+		now^ += 1.0 / 120
+		ui.begin_frame(u, events, nil, nil, 300, 200, now^)
+		list = ui.box_make("list", {.View_Scroll, .Allow_Overflow_Y, .Clip}, ui.px(300), ui.px(200))
+		list.child_axis = .Y
+		ui.push_parent(list)
+		knob = ui.signal(ui.box_make("knob", {.Clickable, .Takes_Scroll}, ui.px(100), ui.px(40)))
+		ui.box_make("", {}, ui.fill(), ui.px(1000))
+		ui.pop_parent()
+		ui.end_frame()
+		return
+	}
+	now := 0.0
+	knob_frame(&u, &now)
+	knob_frame(&u, &now)
+
+	list, knob := knob_frame(&u, &now, {kind = .Mouse_Move, x = 50, y = 20}, {kind = .Scroll, dy = -2})
+	testing.expect_value(t, knob.scroll, [2]f32{0, -2 * ui.SCROLL_LINE})
+	testing.expect_value(t, knob.scroll_precise, [2]f32{})
+	testing.expect_value(t, list.view_off_target.y, f32(0))
+
+	list, knob = knob_frame(&u, &now, {kind = .Scroll, dx = 3, dy = -30, precise = true, phase = .Began})
+	testing.expect_value(t, knob.scroll, [2]f32{3, -30})
+	testing.expect_value(t, knob.scroll_precise, [2]f32{3, -30})
+	list, knob = knob_frame(&u, &now, {kind = .Scroll, phase = .Ended})
+	list, knob = knob_frame(&u, &now, {kind = .Scroll, dy = -40, precise = true, momentum_phase = .Began})
+	testing.expect_value(t, knob.scroll, [2]f32{})
+	list, knob = knob_frame(&u, &now, {kind = .Scroll, dy = -40, precise = true, momentum_phase = .Changed})
+	testing.expect_value(t, knob.scroll, [2]f32{})
+	testing.expect_value(t, list.view_off, [2]f32{})
+	list, knob = knob_frame(&u, &now, {kind = .Scroll, precise = true, momentum_phase = .Ended})
+
+	list, knob = knob_frame(&u, &now, {kind = .Mouse_Move, x = 50, y = 120}, {kind = .Scroll, dy = -50, precise = true, phase = .Began})
+	testing.expect_value(t, knob.scroll, [2]f32{})
+	testing.expect_value(t, list.view_off.y, f32(50))
+}

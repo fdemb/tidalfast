@@ -33,7 +33,7 @@ TIDALfast is a TIDAL player written from scratch in Odin.
 - **Gapless playback.** The next track downloads before the current one ends and plays straight after it, so live albums and DJ mixes play without a break.
 - **Bit-perfect output.** The app can play each track at its own sample rate and send your DAC the samples unchanged: through the CoreAudio HAL on macOS, PipeWire on Linux and WASAPI's exclusive mode on Windows. When a track can't play bit-perfect, the app tells you why.
 - **ReplayGain.** By default albums played in order get album gain, and everything else gets track gain, so a playlist of singles plays at one level. The settings page can make it always track gain, always album gain, or off.
-- **Your library.** Playlists, Liked Songs and followed artists from your account. Like a song with its heart or its menu, add it to one of your playlists by dragging it onto the playlist or from its menu, and take it off one of your playlists from its menu.
+- **Your library.** Playlists, Liked Songs and followed artists from your account. Make a playlist with the + by Your Library and rename or delete your own from its More menu. Like a song with its heart or its menu, add it to one of your playlists by dragging it onto the playlist or from its menu, and take it off one of your playlists from its menu.
 - **Search and artist pages.** Results for songs, albums, artists and playlists show as you type. Artist pages have top tracks, albums, EPs and singles, appearances and similar artists.
 - **Media keys and Now Playing.** The keyboard's media keys and the system's media controls show the track and control playback: Control Center on macOS, MPRIS on Linux and the media overlay on Windows.
 - **Keyboard and VoiceOver.** Tab, the arrow keys and Enter reach every control, and VoiceOver reads them on macOS. Screen readers on Linux and Windows don't see them yet.
@@ -47,6 +47,7 @@ On macOS, Cmd in place of Ctrl and Option in place of Alt. The settings page lis
 - **Ctrl+Left / Ctrl+Right**: previous and next track
 - **Shift+Left / Shift+Right**: back and forward 5 seconds
 - **Ctrl+Up / Ctrl+Down**: volume up and down
+- **M**: mute or unmute
 - **Ctrl+S**: shuffle on or off
 - **Ctrl+R**: repeat all, one or off
 - **Alt+Left / Alt+Right**: back and forward through the pages you visited, as the mouse's Back and Forward buttons do

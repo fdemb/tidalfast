@@ -94,6 +94,7 @@ Job_Payload :: union {
 	Artist_Job,
 	Home_Job,
 	Profile_Job,
+	Playlist_Job,
 }
 
 // Profile_Job is the signed-in user's name and picture, for the sidebar's
@@ -204,6 +205,14 @@ Remove_Track_Job :: struct {
 	serial: u32, // the status line's, see remove_result
 }
 
+// Playlist_Job creates, renames or deletes one of the user's playlists,
+// see playlist_edit.odin.
+Playlist_Job :: struct {
+	op:   Playlist_Op,
+	id:   Small, // the playlist's, "" to create one
+	name: Small, // the new name, for Create and Rename
+}
+
 // Liked_Ids_Job reads every liked track's id for the hearts, and every
 // followed artist's for the Follow buttons, see liked.odin.
 Liked_Ids_Job :: struct {
@@ -226,7 +235,7 @@ Sidebar_Item :: struct {
 	image:   string, // square image id, "" for none
 	tracks:  int,
 	updated: i64, // lastUpdated, unix ms, 0 if TIDAL didn't say
-	own:     bool, // the user made it, so it takes adds and removals
+	owned:   bool, // the user made it: it can be renamed, deleted, added to and removed from
 }
 
 Login_Link :: struct {
@@ -266,6 +275,7 @@ Result_Payload :: union {
 	Artist_Result,
 	Home_Result,
 	Profile_Result,
+	Playlist_Result,
 }
 
 Profile_Result :: struct {
@@ -758,6 +768,8 @@ run_job :: proc(d: ^Data, job: Job) -> (res: Result) {
 		run_home(s, &res, alloc)
 	case Profile_Job:
 		run_profile(s, &res)
+	case Playlist_Job:
+		run_playlist(s, p, &res, alloc)
 	case Search_Job:
 		query := p.query
 		found, err := tidal.search(s, small_str(&query), {.Track, .Album, .Artist, .Playlist}, SEARCH_PAGE, 0, alloc)
@@ -895,11 +907,7 @@ run_playlists :: proc(s: ^tidal.Session, res: ^Result, alloc: mem.Allocator) {
 			first_id = page[0].id
 		}
 		for pl in page {
-			item := Sidebar_Item{id = pl.id, name = pl.name, image = pl.square_picture, tracks = pl.num_tracks, own = pl.is_user_playlist}
-			if t, ok := pl.last_updated.?; ok {
-				item.updated = time.to_unix_nanoseconds(t) / 1e6
-			}
-			append(&items, item)
+			append(&items, sidebar_item(pl))
 		}
 		if listed < PLAYLIST_PAGE || (total >= 0 && offset + listed >= total) {
 			break
@@ -907,6 +915,16 @@ run_playlists :: proc(s: ^tidal.Session, res: ^Result, alloc: mem.Allocator) {
 	}
 	sidebar.playlists = items[:]
 	res.payload = sidebar
+}
+
+// sidebar_item is a playlist as the sidebar keeps it. Its strings are
+// pl's.
+sidebar_item :: proc(pl: tidal.Playlist) -> Sidebar_Item {
+	item := Sidebar_Item{id = pl.id, name = pl.name, image = pl.square_picture, tracks = pl.num_tracks, owned = pl.is_user_playlist}
+	if t, ok := pl.last_updated.?; ok {
+		item.updated = time.to_unix_nanoseconds(t) / 1e6
+	}
+	return item
 }
 
 // liked_version asks for one liked track, which gives Liked Songs' count

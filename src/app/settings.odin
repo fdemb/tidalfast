@@ -1,11 +1,11 @@
 package app
 
-// Settings: the volume, shuffle and repeat, how ReplayGain applies,
-// bit-perfect output, how lists
-// show their scrollbars, whether the player bar blurs them, whether covers
-// lean under the pointer, whether the bar shows a track's length or the
-// time left, the sidebar's width and, on Linux,
-// whose title bar the window has and GNOME's button layout. They live in
+// Settings: the volume and whether it's muted, shuffle and repeat, how
+// ReplayGain applies, bit-perfect output, how lists show their scrollbars,
+// whether the player bar blurs them, whether covers lean under the
+// pointer, whether the bar shows a track's length or the time left, the
+// sidebar's width and, on Linux, whose title bar the window has and GNOME's
+// button layout. They live in
 // a small JSON file, ~/Library/Application Support/tidalfast/settings.json,
 // or wherever TIDALFAST_SETTINGS points. The fake data has none unless
 // TIDALFAST_SETTINGS points to one, and a mock run without a mock URL has
@@ -40,7 +40,8 @@ Settings :: struct {
 	device:      audio.Device_Change, // rate 0 when no device is changed
 	scrollbars:  ui.Scrollbars,
 	bar:         Player_Bar,
-	volume:      f32, // 0 to 1
+	volume:      f32, // 0 to 1; while muted, the level unmuting goes back to
+	muted:       bool,
 	shuffle:     bool,
 	repeat:      audio.Repeat,
 	replay_gain: audio.Gain_Setting,
@@ -144,6 +145,7 @@ Settings_File :: struct {
 	bar:           Player_Bar,
 	device_change: Maybe(Device_Change_File) `json:"device_change,omitempty"`,
 	volume:        Maybe(f32) `json:"volume,omitempty"`, // missing in files from before it was saved
+	muted:         bool,
 	shuffle:       bool,
 	repeat:        audio.Repeat,
 	replay_gain:   audio.Gain_Setting, // a name it doesn't know reads as Automatic
@@ -189,7 +191,7 @@ settings_decode_json :: proc(data: []u8) -> (st: Settings, ok: bool) {
 	known :: proc(v: $T) -> T {
 		return v if v >= min(T) && v <= max(T) else {}
 	}
-	st = {bit_perfect = f.bit_perfect, scrollbars = known(f.scrollbars), bar = known(f.bar), volume = clamp(f.volume.? or_else VOLUME_DEFAULT, 0, 1), shuffle = f.shuffle, repeat = known(f.repeat), replay_gain = known(f.replay_gain), title_bar = known(f.title_bar), still_covers = f.still_covers, show_duration = f.show_duration}
+	st = {bit_perfect = f.bit_perfect, scrollbars = known(f.scrollbars), bar = known(f.bar), volume = clamp(f.volume.? or_else VOLUME_DEFAULT, 0, 1), muted = f.muted, shuffle = f.shuffle, repeat = known(f.repeat), replay_gain = known(f.replay_gain), title_bar = known(f.title_bar), still_covers = f.still_covers, show_duration = f.show_duration}
 	if f.button_layout != "" {
 		st.button_layout = button_layout_parse(f.button_layout)
 	}
@@ -215,6 +217,7 @@ settings_save :: proc(path: string, st: Settings) -> bool {
 		scrollbars  = st.scrollbars,
 		bar         = st.bar,
 		volume      = st.volume,
+		muted       = st.muted,
 		shuffle     = st.shuffle,
 		repeat      = st.repeat,
 		replay_gain = st.replay_gain,

@@ -562,34 +562,6 @@ REMOVE_STATUSES :: bit_set[Status]{.Removing, .Removed, .Remove_Failed}
 // whose page came back short. A row that could be at more isn't offered.
 REMOVE_PROBES :: 8
 
-// playlist_editable says whether sidebar entry i is one of the user's own
-// playlists, which a drop and the track menu add to. With the fake data
-// every playlist is.
-playlist_editable :: proc(s: ^State, i: int) -> bool {
-	d := &s.data
-	if d.fake {
-		return i >= 1 && i < len(PLAYLISTS)
-	}
-	return i >= 1 && i <= len(d.sidebar.items) && d.sidebar.items[i - 1].own
-}
-
-// own_playlist_open says whether the open list is one of the user's own
-// playlists, however it was opened.
-own_playlist_open :: proc(s: ^State) -> bool {
-	d := &s.data
-	v := &d.view
-	if d.fake || v.source != .Playlist {
-		return false
-	}
-	id := small_str(&v.id)
-	for it in d.sidebar.items {
-		if it.id == id {
-			return it.own
-		}
-	}
-	return false
-}
-
 // remove_place is where TIDAL has row i of the open list, lo to hi, when
 // the track menu can offer to take it off: the list is one of the user's
 // own playlists and all there, no other removal is out, and the row's
@@ -598,7 +570,7 @@ own_playlist_open :: proc(s: ^State) -> bool {
 remove_place :: proc(s: ^State, i: int) -> (lo, hi: int, ok: bool) {
 	d := &s.data
 	v := &d.view
-	if d.removing || !own_playlist_open(s) || !view_complete(v) || v.fetched == 0 {
+	if d.fake || d.removing || open_owned_entry(s) < 1 || !view_complete(v) || v.fetched == 0 {
 		return
 	}
 	row := view_row(s, i)

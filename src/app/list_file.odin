@@ -49,17 +49,17 @@ File_Row :: struct {
 	album_id: i64,
 }
 
-// File_Item is a Sidebar_Item on disk. Files from before own was kept
-// have 0 in flags, so their playlists count as someone else's until
-// TIDAL's sidebar comes.
+// File_Item is a Sidebar_Item on disk. Files written before owned was kept
+// have 0 in flags, so their playlists can't be edited until TIDAL's
+// sidebar comes.
 File_Item :: struct {
 	text:    [3]File_Str, // id, name, image
-	flags:   u32, // ITEM_OWN
+	flags:   u32, // FILE_ITEM_OWNED
 	tracks:  i64,
 	updated: i64,
 }
 
-ITEM_OWN :: 1
+FILE_ITEM_OWNED :: 1
 
 File_Error :: enum u8 {
 	None,
@@ -158,7 +158,7 @@ sidebar_encode :: proc(sb: ^Sidebar, fetched: i64, allocator: runtime.Allocator)
 	for it, i in sb.items {
 		items[i] = {
 			text    = {put(&w, it.id), put(&w, it.name), put(&w, it.image)},
-			flags   = ITEM_OWN if it.own else 0,
+			flags   = FILE_ITEM_OWNED if it.owned else 0,
 			tracks  = i64(it.tracks),
 			updated = it.updated,
 		}
@@ -318,7 +318,7 @@ sidebar_decode :: proc(data: []u8, allocator: runtime.Allocator) -> (h: ^File_He
 		}
 		it.tracks = int(f.tracks)
 		it.updated = f.updated
-		it.own = f.flags & ITEM_OWN != 0
+		it.owned = f.flags & FILE_ITEM_OWNED != 0
 	}
 	return
 }

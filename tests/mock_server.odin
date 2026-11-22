@@ -12,9 +12,19 @@ import "core:time"
 
 // A one-connection-at-a-time HTTP server on 127.0.0.1 standing in for TIDAL.
 // It models one playlist's items, adding tracks to it and liking tracks,
-// the session endpoints, an echo endpoint, a rate-limited endpoint, a slow
-// one, token refresh, the device login and the parts of an artist page,
-// and records every request line.
+// playlists the user makes, renames and deletes, whose items take the same
+// adds, lists and removals as that one's, the session endpoints, an
+// echo endpoint, a rate-limited endpoint, a slow one, token refresh, the
+// device login and the parts of an artist page, and records every request
+// line.
+
+// Mock_Playlist is a playlist made with create-playlist. Its strings are
+// the mock's.
+Mock_Playlist :: struct {
+	id:    string,
+	name:  string,
+	items: [dynamic]Mock_Item, // as the playlist pl's, see mock_items_route
+}
 
 // A "gone" item is a track TIDAL can't play: counted, but left out of the
 // pages, as TIDAL does.
@@ -52,6 +62,11 @@ Mock :: struct {
 	// since they were listed on top of it.
 	liked_removed: [dynamic]i64,
 	followed:      [dynamic]i64, // artists followed by a POST, oldest first
+	// Playlists made by create-playlist, newest first, which
+	// playlistsAndFavoritePlaylists lists, POST /playlists/<id> renames and
+	// DELETE /playlists/<id> deletes.
+	playlists:     [dynamic]Mock_Playlist,
+	made:          int, // playlists made, which names the next one's id
 	// Stuck accepts DELETEs without removing anything.
 	stuck:         bool,
 	requests:   [dynamic]string, // "METHOD /path?query"
@@ -94,6 +109,7 @@ mock_start :: proc(m: ^Mock, items: []Mock_Item = nil) {
 	m.liked = make([dynamic]i64, m.allocator)
 	m.liked_removed = make([dynamic]i64, m.allocator)
 	m.followed = make([dynamic]i64, m.allocator)
+	m.playlists = make([dynamic]Mock_Playlist, m.allocator)
 	m.requests = make([dynamic]string, m.allocator)
 	m.poll_times = make([dynamic]time.Tick, m.allocator)
 	m.files = make(map[string][]u8, m.allocator)
@@ -126,6 +142,12 @@ mock_stop :: proc(m: ^Mock) {
 	delete(m.items)
 	delete(m.liked)
 	delete(m.followed)
+	for p in m.playlists {
+		delete(p.id, m.allocator)
+		delete(p.name, m.allocator)
+		delete(p.items)
+	}
+	delete(m.playlists)
 	delete(m.poll_times)
 	clear_query(&m.last_query, m.allocator)
 	delete(m.last_query)
@@ -305,14 +327,6 @@ mock_route :: proc(m: ^Mock, req: Mock_Request, target: string) -> (status: int,
 		m.last_query[strings.clone(k)] = strings.clone(v)
 	}
 
-	tracks, videos := 0, 0
-	for it in m.items {
-		if it.kind == "video" {
-			videos += 1
-		} else {
-			tracks += 1
-		}
-	}
 	etag = fmt.tprintf("etag-%d", len(m.items))
 	if data, ok := m.files[req.path]; ok {
 		return 200, string(data), etag
@@ -399,6 +413,52 @@ mock_route :: proc(m: ^Mock, req: Mock_Request, target: string) -> (status: int,
 			ordered_remove(&m.followed, at)
 		}
 		return 200, `{}`, etag
+	case req.path == "/v2/my-collection/playlists/folders/create-playlist" && req.method == "PUT":
+		m.made += 1
+		made := Mock_Playlist{fmt.aprintf("made-%d", m.made, allocator = m.allocator), strings.clone(req.query["name"] or_else "", m.allocator), make([dynamic]Mock_Item, m.allocator)}
+		inject_at(&m.playlists, 0, made)
+		return 200, fmt.tprintf(`{{"trn":"trn:playlist:%s","itemType":"PLAYLIST","addedAt":"2026-03-01T10:00:00.000+0000","parent":null,"data":%s}}`, made.id, mock_playlist_json(made)), etag
+	case req.path == "/users/123/playlistsAndFavoritePlaylists":
+		b := strings.builder_make(context.temp_allocator)
+		fmt.sbprintf(&b, `{{"limit":50,"offset":0,"totalNumberOfItems":%d,"items":[`, len(m.playlists))
+		for p, i in m.playlists {
+			fmt.sbprintf(&b, `%s{{"type":"USER_CREATED","created":"2026-03-01T10:00:00.000+0000","playlist":%s}}`, "," if i > 0 else "", mock_playlist_json(p))
+		}
+		strings.write_string(&b, "]}")
+		return 200, strings.to_string(b), etag
+	case strings.has_prefix(req.path, "/playlists/made-"):
+		id, _, rest := strings.partition(strings.trim_prefix(req.path, "/playlists/"), "/")
+		at := -1
+		for p, i in m.playlists {
+			if p.id == id {
+				at = i
+			}
+		}
+		if at < 0 {
+			return 404, `{"status":404,"userMessage":"Playlist not found"}`, etag
+		}
+		made := &m.playlists[at]
+		made_etag := fmt.tprintf("etag-%s-%d", made.id, len(made.items))
+		switch {
+		case rest != "":
+			if st, b, ok := mock_items_route(m, req, &made.items, fmt.tprintf("/%s", rest), made_etag); ok {
+				return st, b, made_etag
+			}
+		case req.method == "DELETE":
+			delete(m.playlists[at].id, m.allocator)
+			delete(m.playlists[at].name, m.allocator)
+			delete(m.playlists[at].items)
+			ordered_remove(&m.playlists, at)
+			return 200, ``, etag
+		case req.method == "POST":
+			if title, ok := req.form["title"]; ok {
+				delete(m.playlists[at].name, m.allocator)
+				m.playlists[at].name = strings.clone(title, m.allocator)
+			}
+			return 200, ``, etag
+		case:
+			return 200, mock_playlist_json(m.playlists[at]), made_etag
+		}
 	case req.path == "/users/123/favorites/ids":
 		return 200, mock_liked_ids(m.liked[:], m.liked_removed[:], m.followed[:]), etag
 	case req.path == "/users/123/favorites/tracks":
@@ -456,40 +516,82 @@ mock_route :: proc(m: ^Mock, req: Mock_Request, target: string) -> (status: int,
 		// A refresh that rotates the refresh token, as TIDAL may.
 		m.refreshes += 1
 		return 200, fmt.tprintf(`{{"access_token":"access-%d","refresh_token":"refresh-%d","token_type":"Bearer","expires_in":3600}}`, m.refreshes, m.refreshes), etag
-	case strings.has_prefix(req.path, "/playlists/pl/items/") && req.method == "DELETE":
+	case req.path == "/playlists/pl" || strings.has_prefix(req.path, "/playlists/pl/"):
+		ok: bool
+		if status, body, ok = mock_items_route(m, req, &m.items, strings.trim_prefix(req.path, "/playlists/pl"), etag); ok {
+			if status == 200 && req.method == "POST" {
+				m.limit_left = m.add_then_limit
+			}
+			return status, body, etag
+		}
+	case req.path == "/search":
+		// Every search finds artist 7 and one of its songs.
+		return 200, `{"artists":{"items":[{"id":7,"name":"Artist 7","picture":"pic-7"}]},"tracks":{"items":[{"id":700,"title":"Top 1 of Artist 7","duration":200,"artist":{"id":7,"name":"Artist 7"},"artists":[{"id":7,"name":"Artist 7"}],"album":{"id":7000,"title":"Album 7000","cover":"cover-7000"}}]},"albums":{"items":[]},"playlists":{"items":[]}}`, etag
+	case strings.has_prefix(req.path, "/artists/"):
+		status, body = mock_artist(req)
+		return status, body, etag
+	}
+	return 404, `{"userMessage":"not found"}`, etag
+}
+
+// mock_counts is how many tracks, gone ones included, and videos items has.
+@(private = "file")
+mock_counts :: proc(items: []Mock_Item) -> (tracks, videos: int) {
+	for it in items {
+		if it.kind == "video" {
+			videos += 1
+		} else {
+			tracks += 1
+		}
+	}
+	return
+}
+
+// mock_items_route answers a playlist's own routes, rest being the path
+// after /playlists/<id>: the playlist (as pl, which tests read with the
+// items' counts), its tracks and items, adding with the ETag in
+// If-None-Match and removing by index. ok is false for another route.
+@(private = "file")
+mock_items_route :: proc(m: ^Mock, req: Mock_Request, items: ^[dynamic]Mock_Item, rest, etag: string) -> (status: int, body: string, ok: bool) {
+	tracks, videos := mock_counts(items[:])
+	offset, _ := strconv.parse_int(req.query["offset"] or_else "0")
+	limit, _ := strconv.parse_int(req.query["limit"] or_else "1000")
+	switch {
+	case rest == "" && req.method == "GET":
+		return 200, fmt.tprintf(`{{"uuid":"pl","title":"pl","numberOfTracks":%d,"numberOfVideos":%d,"type":"USER","lastUpdated":"2026-03-01T10:00:%02d.000+0000"}}`, tracks, videos, len(items) % 60), true
+	case strings.has_prefix(rest, "/items/") && req.method == "DELETE":
 		if !m.stuck {
-			index_list := strings.trim_prefix(req.path, "/playlists/pl/items/")
-			indices := strings.split(index_list, ",", context.temp_allocator)
+			indices := strings.split(strings.trim_prefix(rest, "/items/"), ",", context.temp_allocator)
 			// Remove from the back so earlier indices stay valid.
 			for i := len(indices) - 1; i >= 0; i -= 1 {
-				idx, ok := strconv.parse_int(indices[i])
-				if ok && idx >= 0 && idx < len(m.items) {
-					ordered_remove(&m.items, idx)
+				idx, iok := strconv.parse_int(indices[i])
+				if iok && idx >= 0 && idx < len(items) {
+					ordered_remove(items, idx)
 				}
 			}
 		}
-		return 200, `{}`, etag
-	case req.path == "/playlists/pl/items" && req.method == "POST":
+		return 200, `{}`, true
+	case rest == "/items" && req.method == "POST":
 		if req.etag != etag {
-			return 412, `{"status":412,"userMessage":"The playlist was changed"}`, etag
+			return 412, `{"status":412,"userMessage":"The playlist was changed"}`, true
 		}
 		b := strings.builder_make(context.temp_allocator)
 		strings.write_string(&b, `{"addedItemIds":[`)
 		ids := req.form["trackIds"] or_else ""
 		first := true
 		ids_loop: for s in strings.split_iterator(&ids, ",") {
-			id, ok := strconv.parse_i64(s)
-			if !ok {
+			id, iok := strconv.parse_i64(s)
+			if !iok {
 				continue
 			}
 			if req.form["onDupes"] != "ADD" {
-				for it in m.items {
+				for it in items {
 					if it.kind == "track" && it.id == id {
 						continue ids_loop
 					}
 				}
 			}
-			append(&m.items, Mock_Item{"track", id})
+			append(items, Mock_Item{"track", id})
 			if !first {
 				strings.write_byte(&b, ',')
 			}
@@ -497,16 +599,13 @@ mock_route :: proc(m: ^Mock, req: Mock_Request, target: string) -> (status: int,
 			fmt.sbprintf(&b, "%d", id)
 		}
 		strings.write_string(&b, "]}")
-		m.limit_left = m.add_then_limit
-		return 200, strings.to_string(b), etag
-	case req.path == "/playlists/pl/tracks":
-		offset, _ := strconv.parse_int(req.query["offset"] or_else "0")
-		limit, _ := strconv.parse_int(req.query["limit"] or_else "1000")
+		return 200, strings.to_string(b), true
+	case rest == "/tracks":
 		b := strings.builder_make(context.temp_allocator)
 		fmt.sbprintf(&b, `{{"totalNumberOfItems":%d,"items":[`, tracks)
 		n := 0
 		first := true
-		for it in m.items {
+		for it in items {
 			if it.kind == "video" {
 				continue
 			}
@@ -520,15 +619,13 @@ mock_route :: proc(m: ^Mock, req: Mock_Request, target: string) -> (status: int,
 			n += 1
 		}
 		strings.write_string(&b, "]}")
-		return 200, strings.to_string(b), etag
-	case req.path == "/playlists/pl/items":
-		offset, _ := strconv.parse_int(req.query["offset"] or_else "0")
-		limit, _ := strconv.parse_int(req.query["limit"] or_else "1000")
+		return 200, strings.to_string(b), true
+	case rest == "/items":
 		b := strings.builder_make(context.temp_allocator)
-		fmt.sbprintf(&b, `{{"totalNumberOfItems":%d,"items":[`, len(m.items))
+		fmt.sbprintf(&b, `{{"totalNumberOfItems":%d,"items":[`, len(items))
 		first := true
-		for i in offset ..< min(offset + limit, len(m.items)) {
-			it := m.items[i]
+		for i in offset ..< min(offset + limit, len(items)) {
+			it := items[i]
 			if it.kind == "gone" {
 				continue
 			}
@@ -539,17 +636,16 @@ mock_route :: proc(m: ^Mock, req: Mock_Request, target: string) -> (status: int,
 			fmt.sbprintf(&b, `{{"type":"%s","item":{{"id":%d,"title":"t%d"}}}}`, it.kind, it.id, it.id)
 		}
 		strings.write_string(&b, "]}")
-		return 200, strings.to_string(b), etag
-	case req.path == "/search":
-		// Every search finds artist 7 and one of its songs.
-		return 200, `{"artists":{"items":[{"id":7,"name":"Artist 7","picture":"pic-7"}]},"tracks":{"items":[{"id":700,"title":"Top 1 of Artist 7","duration":200,"artist":{"id":7,"name":"Artist 7"},"artists":[{"id":7,"name":"Artist 7"}],"album":{"id":7000,"title":"Album 7000","cover":"cover-7000"}}]},"albums":{"items":[]},"playlists":{"items":[]}}`, etag
-	case strings.has_prefix(req.path, "/artists/"):
-		status, body = mock_artist(req)
-		return status, body, etag
-	case req.path == "/playlists/pl":
-		return 200, fmt.tprintf(`{{"uuid":"pl","title":"pl","numberOfTracks":%d,"numberOfVideos":%d,"type":"USER","lastUpdated":"2026-03-01T10:00:%02d.000+0000"}}`, tracks, videos, len(m.items) % 60), etag
+		return 200, strings.to_string(b), true
 	}
-	return 404, `{"userMessage":"not found"}`, etag
+	return 0, "", false
+}
+
+// mock_playlist_json is a made playlist as TIDAL's playlist object.
+@(private = "file")
+mock_playlist_json :: proc(p: Mock_Playlist) -> string {
+	tracks, videos := mock_counts(p.items[:])
+	return fmt.tprintf(`{{"uuid":"%s","title":%q,"description":"","numberOfTracks":%d,"numberOfVideos":%d,"type":"USER","creator":{{"id":123}},"squareImage":"","lastUpdated":"2026-03-01T10:00:%02d.000+0000"}}`, p.id, p.name, tracks, videos, len(p.items) % 60)
 }
 
 MOCK_LIKED :: 1433

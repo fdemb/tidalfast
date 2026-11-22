@@ -124,6 +124,7 @@ Playback :: struct {
 	dragging:        bool, // the progress bar is held: show the drag position
 	drag_seconds:    f64,
 	volume_sent:     f32,
+	volume_save_at:  f64, // when to save the volume the wheel set, once it has stopped; 0 for none
 	message:         Small,
 	error_seen:      u64,
 
@@ -169,8 +170,8 @@ playback_start :: proc(s: ^State, shell: ^platform.Shell) {
 		s.settings.device = {}
 		settings_queue(&s.data, settings_to_save(s))
 	}
-	pb.player = audio.create(shell.request_redraw, s.settings.volume, small_str(&pb.capture), pb.window, pb.null_output, output_of(s.settings))
-	pb.volume_sent = s.settings.volume
+	pb.volume_sent = volume_heard(s.settings)
+	pb.player = audio.create(shell.request_redraw, pb.volume_sent, small_str(&pb.capture), pb.window, pb.null_output, output_of(s.settings))
 }
 
 playback_shutdown :: proc(s: ^State) {
@@ -178,6 +179,9 @@ playback_shutdown :: proc(s: ^State) {
 	if pb.player != nil && pb.index >= 0 && disk_on(&s.data) {
 		pb.status = audio.status(pb.player)
 		queue_write_now(&s.data, queue_file(pb, context.temp_allocator))
+	}
+	if pb.volume_save_at != 0 {
+		volume_save(s, now = true)
 	}
 	audio.destroy(pb.player)
 	pb.player = nil
@@ -992,19 +996,59 @@ playback_seek_by :: proc(s: ^State, seconds: f64) {
 	playback_seek(s, at)
 }
 
-// playback_set_volume sets the volume, and saves it when save is set, as
-// at the end of a drag.
+// playback_set_volume sets the volume, unmuting at it, and saves it when
+// save is set, as at the end of a drag.
 playback_set_volume :: proc(s: ^State, v: f32, save: bool) {
-	pb := &s.playback
 	s.settings.volume = v
-	if pb.player != nil && v != pb.volume_sent {
+	s.settings.muted = false
+	volume_send(s)
+	if save {
+		volume_save(s)
+	}
+}
+
+// playback_toggle_mute mutes, or unmutes at the level from before. At a
+// level of 0 it unmutes at the default, so the button always brings the
+// sound back.
+playback_toggle_mute :: proc(s: ^State) {
+	if volume_silent(s.settings) {
+		s.settings.muted = false
+		if s.settings.volume == 0 {
+			s.settings.volume = VOLUME_DEFAULT
+		}
+	} else {
+		s.settings.muted = true
+	}
+	volume_send(s)
+	settings_queue(&s.data, settings_to_save(s))
+}
+
+// volume_heard is the volume the player plays at: none while muted.
+volume_heard :: proc(st: Settings) -> f32 {
+	return 0 if st.muted else st.volume
+}
+
+// volume_silent says whether the speaker button shows the sound off, and
+// unmutes when clicked.
+volume_silent :: proc(st: Settings) -> bool {
+	return st.muted || st.volume == 0
+}
+
+@(private = "file")
+volume_send :: proc(s: ^State) {
+	pb := &s.playback
+	if v := volume_heard(s.settings); pb.player != nil && v != pb.volume_sent {
 		audio.set_volume(pb.player, v)
 		pb.volume_sent = v
 	}
-	if save {
-		s.volume_before_override = nil
-		settings_queue(&s.data, s.settings)
-	}
+}
+
+// volume_save saves the volume the slider or the wheel set, over
+// TIDALFAST_VOLUME's.
+volume_save :: proc(s: ^State, now := false) {
+	s.playback.volume_save_at = 0
+	s.volume_before_override = nil
+	settings_queue(&s.data, s.settings, now)
 }
 
 // playback_position is the current track's position in seconds, as the
@@ -1264,7 +1308,7 @@ queue_find :: proc(pb: ^Playback, track: i64, at: int) -> int {
 list_key :: proc(s: ^State) -> u64 {
 	if s.data.fake {
 		sr := &s.search
-		return fake_list_key(sr.fake_source, s.library.playlist, small_str(&sr.fake_title))
+		return fake_list_key(sr.fake_source, fake_key(s, s.library.playlist), small_str(&sr.fake_title))
 	}
 	v := &s.data.view
 	if v.source == .None {
@@ -1312,7 +1356,7 @@ sidebar_queued :: proc(s: ^State, i: int) -> bool {
 	key: u64
 	switch {
 	case s.data.fake:
-		key = fake_list_key(.None, i, "")
+		key = fake_list_key(.None, fake_key(s, i), "")
 	case i == 0:
 		key = source_list_key(.Liked, "")
 	case i - 1 < len(s.data.sidebar.items):
@@ -1420,7 +1464,7 @@ update_controls :: proc(s: ^State) {
 		.One = .One,
 	}
 	c := platform.Player_Controls {
-		volume  = f64(s.settings.volume),
+		volume  = f64(volume_heard(s.settings)),
 		shuffle = b32(s.settings.shuffle),
 		repeat  = REPEATS[s.settings.repeat],
 	}
