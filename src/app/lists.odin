@@ -230,7 +230,6 @@ lru_oldest :: proc(d: ^Data) -> int {
 list_keep :: proc(d: ^Data, v: Track_View) {
 	l := &d.lists
 	v := v
-	v.gaps = nil // only used while pages arrive
 	if i := lru_find(d, v.source, small_str(&v.id)); i >= 0 {
 		lru_drop(d, i)
 	}
@@ -427,7 +426,7 @@ rows_moved :: proc(s: ^State, m: Row_Marks) {
 			lib.menu_list = list_gen(s)
 		}
 	}
-	if lib.status != .None {
+	if lib.status != .None && lib.status not_in REMOVE_STATUSES {
 		if row := find_row(v, m.status, m.at[3]); row >= 0 {
 			lib.status_track = row
 		} else {
@@ -555,6 +554,148 @@ list_forget :: proc(s: ^State, source: Source, id: string) {
 	disk_push(d, {op = .Delete, source = source, id = small(id)})
 }
 
+// Removing a track from one of the user's playlists.
+
+REMOVE_STATUSES :: bit_set[Status]{.Removing, .Removed, .Remove_Failed}
+
+// REMOVE_PROBES is how many of TIDAL's indices a removal may try for a row
+// whose page came back short. A row that could be at more isn't offered.
+REMOVE_PROBES :: 8
+
+// remove_place is where TIDAL has row i of the open list, lo to hi, when
+// the track menu can offer to take it off: the list is one of the user's
+// own playlists and all there, no other removal is out, and the row's
+// place is known within REMOVE_PROBES indices. The fake data has nothing
+// to remove from.
+remove_place :: proc(s: ^State, i: int) -> (lo, hi: int, ok: bool) {
+	d := &s.data
+	v := &d.view
+	if d.fake || d.removing || open_owned_entry(s) < 1 || !view_complete(v) || v.fetched == 0 {
+		return
+	}
+	row := view_row(s, i)
+	if row == nil || row.id <= 0 {
+		return
+	}
+	lo, hi, ok = view_item_index(v, i)
+	return lo, hi, ok && hi - lo < REMOVE_PROBES
+}
+
+// remove_from_list takes row i of the open list off the playlist on TIDAL
+// with a Remove_Track job. The row stays until TIDAL has taken it off, see
+// remove_result.
+remove_from_list :: proc(s: ^State, i: int) {
+	lo, hi, ok := remove_place(s, i)
+	if !ok {
+		return
+	}
+	d := &s.data
+	lib := &s.library
+	row := view_row(s, i)
+	lib.remove_serial += 1
+	d.removing = true
+	push_job(d, {payload = Remove_Track_Job{track = row.id, id = d.view.id, row = i32(i), lo = i32(lo), hi = i32(hi), serial = lib.remove_serial}})
+	set_status(s, .Removing, i)
+	lib.status_title = small(row.title)
+	lib.status_name = d.view.name
+}
+
+// remove_result takes a Remove_Track. A removal TIDAL took leaves the kept
+// copies with the row out (list_removed). A failed one leaves them as they
+// were, unless the track wasn't where the list had it: then the list
+// changed on TIDAL, and it's fetched again. The status line says how it
+// went if it still names this removal.
+remove_result :: proc(s: ^State, res: ^Result, job: Remove_Track_Job) {
+	d := &s.data
+	lib := &s.library
+	job := job
+	d.removing = false
+	id := small_str(&job.id)
+	out, _ := res.payload.(Remove_Track_Result)
+	status := Status.Removed
+	if err, failed := res.err.?; failed {
+		status = .Remove_Failed
+		log.warnf("lists: removing a track from %s failed: %v", list_name(.Playlist, id), err)
+		if out.missing {
+			list_forget(s, .Playlist, id)
+		}
+	} else {
+		list_removed(s, id, job, out)
+	}
+	if lib.status == .Removing && lib.remove_serial == job.serial {
+		lib.status = status
+	}
+}
+
+// list_removed takes the row a removal took off a playlist out of the
+// copies kept of it, and the sidebar's count down, so the list isn't
+// fetched again. Without the version TIDAL gave after it, the list's
+// version stays behind the sidebar's, so it's fetched again when it next
+// opens or the sidebar comes.
+@(private = "file")
+list_removed :: proc(s: ^State, id: string, job: Remove_Track_Job, out: Remove_Track_Result) {
+	d := &s.data
+	version: List_Version
+	if out.read {
+		version = out.version
+	}
+	for &it in d.sidebar.items {
+		if it.id != id {
+			continue
+		}
+		if out.read {
+			it.tracks, it.updated = int(version.count), version.updated
+		} else {
+			it.tracks = max(it.tracks - 1, 0)
+		}
+	}
+	sidebar_save(d)
+	if r := &d.refresh; r.source == .Playlist && small_str(&r.id) == id {
+		refresh_drop(d)
+	}
+	v := &d.view
+	open := v.source == .Playlist && small_str(&v.id) == id && v.fetched != 0
+	kept := -1
+	if !open {
+		if kept = lru_find(d, .Playlist, id); kept < 0 {
+			// Only on disk, if at all: it's fetched again when it opens.
+			disk_push(d, {op = .Delete, source = .Playlist, id = small(id)})
+			return
+		}
+		v = &d.lists.entries[kept].view
+	}
+	at := int(job.row)
+	if at >= min(v.count, len(v.loaded)) || !v.loaded[at] || v.rows[at].id != job.track {
+		at = find_row(v, job.track, at)
+	}
+	if at < 0 {
+		list_forget(s, .Playlist, id)
+		return
+	}
+	marks: Row_Marks
+	if open {
+		marks = row_marks(s)
+	}
+	// The queue follows its list as rows move (queue_follow), but the song
+	// playing can't leave it: the queue keeps its copy and plays on, as
+	// after a refresh.
+	pb := &s.playback
+	if d.queue_view == v.gen && pb.index >= 0 && pb.index < pb.list_n && pb.entries[pb.index].id == job.track {
+		d.queue_view = view_gen(d)
+	}
+	view_remove_at(v, at, out.index)
+	v.version = version
+	if open {
+		rows_moved(s, marks)
+	} else {
+		e := &d.lists.entries[kept]
+		d.lists.bytes -= e.bytes
+		e.bytes = view_bytes(&e.view)
+		d.lists.bytes += e.bytes
+	}
+	list_save(d, v)
+}
+
 // list_edited applies an edit the app made on TIDAL to the copies it keeps,
 // so neither the next open nor the next launch fetches the list again. With
 // add, row goes at the end of a playlist or the top of Liked Songs; without
@@ -631,16 +772,7 @@ view_edit :: proc(v: ^Track_View, add: bool, row: Row) -> bool {
 			break
 		}
 	}
-	if at < 0 {
-		return false
-	}
-	copy(v.rows[at:], v.rows[at + 1:n])
-	v.loaded[n - 1] = false
-	v.count = n - 1
-	v.loaded_rows -= 1
-	v.moved += 1
-	v.hint = max(v.hint - 1, 0)
-	return true
+	return view_remove_at(v, at, -1)
 }
 
 row_clone :: proc(r: Row, a: runtime.Allocator) -> Row {

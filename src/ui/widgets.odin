@@ -418,7 +418,7 @@ menu_is_open :: proc(id: string) -> bool {
 @(private)
 menu_end :: proc(open: bool) {
 	if open {
-		spacer(px(6))
+		spacer(px(MENU_PAD))
 		pop_parent()
 		floating_end()
 	}
@@ -460,11 +460,14 @@ menu :: proc(id: string, width: f32 = 220) -> bool {
 	b.flip_y = b.fixed_pos.y
 	b.opacity = b.open_t
 	push_parent(b)
-	spacer(px(6))
+	spacer(px(MENU_PAD))
 	return true
 }
 
-menu_item :: proc(id: string) -> Signal {
+// menu_item is an item of the open menu, MENU_ITEM_H tall. Clicking it
+// closes the menu, unless keep_open: then the item changes what the menu
+// shows, and calls menu_replaced once the menu is built.
+menu_item :: proc(id: string, keep_open := false) -> Signal {
 	u := ctx
 	flags := Box_Flags{.Clickable, .Focusable, .Draw_Text, .Draw_Hot_Effects, .Focus_Is_Hot, .No_Focus_Ring, .Instant_Hover}
 	if !u.menu_open {
@@ -472,7 +475,7 @@ menu_item :: proc(id: string) -> Signal {
 	}
 	set_next_text_pad(14)
 	set_next_hover_color({1, 1, 1, 0.08})
-	b := box_make(id, flags, fill(), px(30))
+	b := box_make(id, flags, fill(), px(MENU_ITEM_H))
 	accessible(b, .Menu_Item, b.label)
 	if u.menu_focus_new && u.menu_open && b.key != 0 {
 		u.menu_focus_new = false
@@ -480,17 +483,35 @@ menu_item :: proc(id: string) -> Signal {
 		u.focus_visible = true
 	}
 	sig := signal(b)
-	if sig.clicked {
+	if sig.clicked && !keep_open {
 		close_menu()
 	}
 	return sig
 }
 
+MENU_ITEM_H :: 30
+MENU_PAD :: 6 // above the first item and below the last
+MENU_SEPARATOR_H :: 9
+
+// menu_replaced says the open menu shows other items from the next frame,
+// after a keep_open item was clicked. The highlight goes with the item,
+// and when a key clicked it, comes back on the first new item, as when the
+// keyboard opens a menu.
+menu_replaced :: proc(keyboard: bool) {
+	u := ctx
+	if !u.menu_open {
+		return
+	}
+	u.focus = 0
+	u.menu_focus_new = keyboard
+	u.animating = true
+}
+
 menu_separator :: proc() {
-	spacer(px(4))
+	spacer(px((MENU_SEPARATOR_H - 1) / 2))
 	set_next_background(MENU_BORDER)
 	box_make("", {.Draw_Background}, fill(), px(1))
-	spacer(px(4))
+	spacer(px((MENU_SEPARATOR_H - 1) / 2))
 }
 
 // tooltip shows text in a box under sig's box, or above it when there's

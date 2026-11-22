@@ -41,6 +41,12 @@ first_frames_match_the_next :: proc(t: ^testing.T) {
 		expect_next_frame_same(t, s, &f, at, "the first frame")
 		settle_frames(t, s, &f)
 
+		// The field comes in the frame of the press, focused.
+		library_frame(t, s, &f, press(s, "New playlist"))
+		expect_next_frame_same(t, s, &f, at, "the new playlist's row")
+		library_frame(t, s, &f, key(.Escape))
+		settle_frames(t, s, &f)
+
 		library_frame(t, s, &f, press(s, s.rows[0].artist))
 		library_frame(t, s, &f)
 		expect_next_frame_same(t, s, &f, at, "an artist's page")

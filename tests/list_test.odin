@@ -363,6 +363,11 @@ player_bar_fits_at_every_width :: proc(t: ^testing.T) {
 		if testing.expect(t, speaker != nil && output != nil) {
 			testing.expectf(t, speaker.rect.w == app.SPEAKER_SIZE && right(output.rect) <= speaker.rect.x + 0.01 && right(speaker.rect) <= volume.rect.x + 0.01, "%v: the output button, the speaker and the slider overlap", w)
 			testing.expectf(t, right(left.rect) <= output.rect.x + 0.01, "%v: the time left runs into the output button", w)
+			// The sleep timer's button keeps its size, left of the output's.
+			sleep := find_box(root, "###sleep")
+			if testing.expect(t, sleep != nil) {
+				testing.expectf(t, sleep.rect.w == app.SPEAKER_SIZE && right(left.rect) <= sleep.rect.x + 0.01 && right(sleep.rect) <= output.rect.x + 0.01, "%v: the sleep timer's button is cut or overlaps", w)
+			}
 		}
 		for label in ([]^ui.Box{at, left}) {
 			need := ui.text_width(.Regular, 11, label.label)

@@ -125,6 +125,8 @@ Playback :: struct {
 	drag_seconds:    f64,
 	volume_sent:     f32,
 	volume_save_at:  f64, // when to save the volume the wheel set, once it has stopped; 0 for none
+	sleep:           Sleep_Timer,
+	sleep_test:      f64, // TIDALFAST_SLEEP_TEST: a timed sleep timer of this many seconds, set at the first frame
 	message:         Small,
 	error_seen:      u64,
 
@@ -155,6 +157,9 @@ playback_start :: proc(s: ^State, shell: ^platform.Shell) {
 		pb.window = kb << 10
 	}
 	pb.null_output = os.get_env("TIDALFAST_AUDIO_NULL", context.temp_allocator) != ""
+	if v, ok := strconv.parse_f64(os.get_env("TIDALFAST_SLEEP_TEST", context.temp_allocator)); ok && v > 0 {
+		pb.sleep_test = v
+	}
 	s.data.launch_log_path = launch_log_path(runtime.heap_allocator())
 	if v, ok := strconv.parse_f32(os.get_env("TIDALFAST_VOLUME", context.temp_allocator)); ok {
 		s.volume_before_override = s.settings.volume
@@ -625,6 +630,9 @@ playback_stop :: proc(s: ^State) {
 		queue_gen       = pb.queue_gen,
 		save_key        = pb.save_key,
 		index           = -1,
+		// A fade the stop cut short leaves the player's volume down until
+		// the stop has taken.
+		sleep           = {restore = pb.sleep.restore || pb.sleep.fade_from != 0, fade_serial = pb.sleep.fade_serial},
 	}
 	if pb.set_now_playing != nil {
 		none: platform.Now_Playing
@@ -925,6 +933,25 @@ next_drop :: proc(pb: ^Playback) {
 	audio.set_next(pb.player, {})
 }
 
+// sleep_hold_next keeps the next track from playing while a sleep timer
+// waits for the end of the current one. A preloaded next track the decoder
+// hasn't started is dropped. One whose first frames the decoder has
+// already put in the ring after the current track's last, which happens in
+// a track's last few seconds, is pulled back with a seek to where the
+// current track is, after which it is dropped too.
+sleep_hold_next :: proc(s: ^State) {
+	pb := &s.playback
+	st := &pb.status
+	if !pb.sleep.end_of_track || pb.next.serial == 0 || pb.cur.serial == 0 || st.serial != pb.cur.serial {
+		return
+	}
+	if st.next_serial == pb.next.serial || st.want_next {
+		next_drop(pb)
+	} else if st.next_serial == 0 && pb.seek_id == 0 && pb.cur.resolved {
+		playback_seek(s, playback_position(s))
+	}
+}
+
 // playback_toggle plays when nothing plays (idle, paused or at the end of
 // the queue) and pauses otherwise.
 playback_toggle :: proc(s: ^State) {
@@ -1173,9 +1200,18 @@ playback_observe :: proc(s: ^State, status: audio.Status) {
 		if pb.art.serial != pb.cur.serial {
 			request_artwork(s, &pb.cur)
 		}
+		// A sleep timer for the end of the track that couldn't hold the
+		// next one back, set as the track changed: stop it at its start.
+		if pb.sleep.end_of_track {
+			playback_set_paused(s, true)
+			playback_seek(s, 0)
+			sleep_fired(s, .Slept)
+		}
 	}
-	// It wants the track after the current one.
-	if st.want_next && pb.next.serial == 0 && st.serial == pb.cur.serial {
+	sleep_hold_next(s)
+	// It wants the track after the current one. A sleep timer for the end
+	// of the track wants none, so the track ends instead of going on.
+	if st.want_next && pb.next.serial == 0 && st.serial == pb.cur.serial && !pb.sleep.end_of_track {
 		if n := audio.queue_after(pb.entries, pb.order, pb.index, s.settings.repeat, user = false); n >= 0 && !next_failed(pb, n) {
 			pb.serial += 1
 			pb.next = {serial = pb.serial, queue = pb.queue_gen, item = n, track = pb.entries[n].id}
@@ -1183,9 +1219,17 @@ playback_observe :: proc(s: ^State, status: audio.Status) {
 		}
 	}
 	// The queue ran out, or the next track wasn't ready in time.
+	// With a sleep timer for the end of the track, the next one waits at
+	// its start, paused.
 	if st.state == .Ended && st.serial == pb.cur.serial && st.serial != 0 {
-		if n := audio.queue_after(pb.entries, pb.order, pb.index, s.settings.repeat, user = false); n >= 0 && pb.next.serial == 0 {
-			start_item(s, n)
+		n := audio.queue_after(pb.entries, pb.order, pb.index, s.settings.repeat, user = false)
+		if n >= 0 && pb.next.serial == 0 {
+			start_item(s, n, paused = pb.sleep.end_of_track)
+			if pb.sleep.end_of_track {
+				sleep_fired(s, .Slept)
+			}
+		} else if n < 0 && pb.sleep.end_of_track {
+			sleep_fired(s, .Slept_At_End)
 		}
 	}
 	if e := st.error; e.serial != 0 && e.serial == pb.cur.serial && e.serial != pb.error_seen {
@@ -1228,6 +1272,10 @@ playback_update :: proc(s: ^State, events: []platform.Event) {
 		pb.cur.item = pb.index
 		if pb.next.serial != 0 {
 			pb.next.item = queue_place(pb, {pb.next.item, pb.next.track}, old_n)
+			// A preloaded track taken off the list is no longer next.
+			if pb.next.item < 0 || pb.entries[pb.next.item].id != pb.next.track {
+				next_drop(pb)
+			}
 		}
 		if pb.next_failed.serial != 0 {
 			pb.next_failed.item = queue_place(pb, {pb.next_failed.item, pb.next_failed.track}, old_n)
@@ -1304,7 +1352,7 @@ queue_find :: proc(pb: ^Playback, track: i64, at: int) -> int {
 list_key :: proc(s: ^State) -> u64 {
 	if s.data.fake {
 		sr := &s.search
-		return fake_list_key(sr.fake_source, s.library.playlist, small_str(&sr.fake_title))
+		return fake_list_key(sr.fake_source, fake_key(s, s.library.playlist), small_str(&sr.fake_title))
 	}
 	v := &s.data.view
 	if v.source == .None {
@@ -1352,7 +1400,7 @@ sidebar_queued :: proc(s: ^State, i: int) -> bool {
 	key: u64
 	switch {
 	case s.data.fake:
-		key = fake_list_key(.None, i, "")
+		key = fake_list_key(.None, fake_key(s, i), "")
 	case i == 0:
 		key = source_list_key(.Liked, "")
 	case i - 1 < len(s.data.sidebar.items):

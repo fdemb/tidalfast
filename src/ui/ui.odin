@@ -992,6 +992,9 @@ focus_arrow :: proc(u: ^State, axis: Axis, dir: int) -> bool {
 	if h, at := find_hit(u, u.focus); at >= 0 && .Focusable in h.flags {
 		group = h.group
 	}
+	if u.menu_open && axis == .Y {
+		return menu_arrow(u, dir)
+	}
 	if u.menu_open && group != u.menu {
 		for i := 0 if dir > 0 else u.hit_count - 1; i >= 0 && i < u.hit_count; i += dir {
 			h := u.hits[i]
@@ -1046,6 +1049,26 @@ focus_arrow :: proc(u: ^State, axis: Axis, dir: int) -> bool {
 	move_focus(u, best, true)
 	u.focus_reveal = true
 	return true
+}
+
+// menu_arrow moves the open menu's highlight to its next or previous item
+// in drawing order, which runs down the menu, into and out of a list that
+// scrolls inside it. With no item lit it lights the first or the last.
+@(private)
+menu_arrow :: proc(u: ^State, dir: int) -> bool {
+	_, at := find_hit(u, u.focus)
+	if at < 0 || !u.hits[at].in_menu {
+		at = -1 if dir > 0 else u.hit_count
+	}
+	for i := at + dir; i >= 0 && i < u.hit_count; i += dir {
+		h := u.hits[i]
+		if .Focusable in h.flags && h.in_menu {
+			move_focus(u, h.key, true)
+			u.focus_reveal = true
+			return true
+		}
+	}
+	return false
 }
 
 // find_hit is key's hit from the last frame and where it is in u.hits,
@@ -1350,6 +1373,7 @@ finish :: proc(u: ^State, b: ^Box, clip: render.Rect, focus_parent, click_parent
 		if b.built_size != {b.rect.w, b.rect.h} {
 			mismatch^ = true
 		}
+		thumb_fit(u, b)
 	}
 	// A menu closed while it was built takes no input, though its boxes
 	// were built to.
@@ -1381,6 +1405,21 @@ finish :: proc(u: ^State, b: ^Box, clip: render.Rect, focus_parent, click_parent
 	cp := b.key if .Clickable in b.flags && b.key != 0 else click_parent
 	for c := b.first; c != nil; c = c.next {
 		finish(u, c, inner, fp, cp, floating, in_menu, mismatch)
+	}
+}
+
+// thumb_fit sizes and places view's scrollbar thumb for the content just
+// laid out. It was built from the last layout's, which is a frame behind
+// when rows come or go, as a new row in a list does.
+@(private)
+thumb_fit :: proc(u: ^State, view: ^Box) {
+	bar := box_lookup(u, key_from_string(view.key, "###scrollbar"))
+	if bar == nil || bar.last_frame != u.frame || bar.parent != view || bar.first == nil {
+		return
+	}
+	if t, ok := thumb_of(view); ok {
+		bar.first.rect.y = bar.rect.y + t.y
+		bar.first.rect.h = t.h
 	}
 }
 

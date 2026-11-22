@@ -145,7 +145,7 @@ hero_art :: proc(s: ^State, kind: List_Kind, h: List_Header) -> (a: Hero_Art) {
 	}
 	// A sidebar entry's gradient is the one the sidebar shows.
 	sidebar := s.search.fake_source == .None if s.data.fake else !s.search.browsing
-	a.seed = u32(s.library.playlist) * 7919 + 13 if sidebar else hash.fnv32a(transmute([]u8)view_title(s))
+	a.seed = u32(fake_key(s, s.library.playlist) if s.data.fake else s.library.playlist) * 7919 + 13 if sidebar else hash.fnv32a(transmute([]u8)view_title(s))
 	if h.hero > 0 {
 		a.side = h.hero - hero_top(h.nav) - HERO_PAD
 	}
@@ -286,7 +286,8 @@ draw_list_actions :: proc(s: ^State, kind: List_Kind, h: List_Header) {
 	ui.radius(20)
 	more, more_sig := icon_button("list_more", text.ICON_DOTS_THREE, .Icon, cat("More options for ", title), TEXT, 1, 40, {.Focusable})
 	if more_sig.clicked {
-		ui.open_menu("list_menu", {more.rect.x, more.rect.y + more.rect.h})
+		s.library.list_menu_pos = {more.rect.x, more.rect.y + more.rect.h}
+		ui.open_menu("list_menu", s.library.list_menu_pos)
 	}
 	ui.tooltip(more_sig, "More")
 }
@@ -341,9 +342,12 @@ list_play_button :: proc(s: ^State, id: string, side: f32) {
 	ui.tooltip(sig, "Pause" if playing else "Play")
 }
 
-// draw_list_menu is the More button's menu: Play and Shuffle, an album's
-// artist, and the list's link.
+// draw_list_menu is the More button's menu: Play and Shuffle, Rename and
+// Delete playlist for a playlist the user made, an album's artist, and the
+// list's link. Delete playlist opens the question that asks first in its
+// place.
 draw_list_menu :: proc(s: ^State, kind: List_Kind) {
+	draw_delete_menu(s)
 	if ui.menu("list_menu") {
 		ui.text_style(.Regular, 13, TEXT)
 		if ui.menu_item("Play").clicked {
@@ -351,6 +355,16 @@ draw_list_menu :: proc(s: ^State, kind: List_Kind) {
 		}
 		if ui.menu_item("Shuffle").clicked {
 			pending_set(s, Play_Row{order = .Shuffled})
+		}
+		if entry := open_owned_entry(s); entry > 0 && s.data.playlist_out == nil {
+			ui.menu_separator()
+			if ui.menu_item("Rename###rename_playlist").clicked {
+				rename_start(s, entry)
+			}
+			if ui.menu_item("Delete playlist###delete_playlist").clicked {
+				s.library.delete_id = small(sidebar_id(s, entry))
+				ui.open_menu(DELETE_MENU, s.library.list_menu_pos)
+			}
 		}
 		row := view_row(s, 0)
 		if kind == .Album && row != nil && (s.data.fake || first_artist(row.artists) != 0) {
