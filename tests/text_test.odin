@@ -986,7 +986,8 @@ test_kern_without_variation :: proc(t: ^testing.T) {
 	if !testing.expect_value(t, kbts.PlaceBlob(&font, &state, raw_data(scratch), raw_data(blob)), kbts.load_font_error.NONE) {
 		return
 	}
-	memory := make([]byte, 1 << 20)
+	// kb_text_shape puts 8-byte aligned structs at the start of the memory.
+	memory := make_aligned([]byte, 1 << 20, 16)
 	defer delete(memory)
 	ctx := kbts.PlaceShapeContextFixedMemory(memory)
 

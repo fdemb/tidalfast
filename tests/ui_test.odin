@@ -3,6 +3,7 @@ package tidal_tests
 import "core:fmt"
 import "core:log"
 import "core:math"
+import "core:mem"
 import "core:testing"
 
 import app "../src/app"
@@ -1786,6 +1787,250 @@ test_ui_tooltip_hides_after_click :: proc(t: ^testing.T) {
 	now += ui.TOOLTIP_DELAY + 0.1
 	tip, _ = tooltip_frame(&u, &now, 0)
 	testing.expect(t, tip != nil, "it shows again once the mouse has left and come back")
+}
+
+CUT_TITLE :: "A title much too long for its eighty points"
+
+@(private = "file", thread_local)
+cut_shift: f32
+
+// In a 300 by 200 window, 80 pt wide labels from y = 20 + cut_shift, 20 pt
+// apart: a
+// title cut off, one that fits, a cut one under a box drawn over it, two
+// artists whose second is cut off in a Tip_Text box, a button with a
+// tooltip of its own whose label is cut off too, and a 30 pt list row with
+// a cut title at its top.
+@(private = "file")
+cut_frame :: proc(u: ^ui.State, f: ^Fonts, now: ^f64, events: ..platform.Event) -> (tip: ^ui.Box, animating: bool) {
+	// A renderer without a device draws nothing, but labels are cut and
+	// noted as they would be on screen.
+	text.begin_frame(f.state, &f.r)
+	render.begin_frame(&f.r, 300, 200, 1, {})
+	ui.begin_frame(u, events, &f.r, f.state, 300, 200, now^)
+	ui.spacer(ui.px(20 + cut_shift))
+	ui.label(CUT_TITLE, ui.px(80), ui.px(20))
+	ui.label("Fits", ui.px(80), ui.px(20))
+	ui.label(CUT_TITLE, ui.px(80), ui.px(20))
+	{
+		artists := ui.row("artists", {.Clip, .Shrink_From_End, .Tip_Text}, ui.px(80), ui.px(20))
+		artists.label = "Björk, Thom Yorke"
+		ui.label("Björk", ui.text_size(0, 0), ui.fill())
+		ui.label(", ", ui.text_size(0, 0), ui.fill())
+		ui.label("Thom Yorke", ui.text_size(0, 0), ui.fill())
+	}
+	button := ui.box_make("Play a song with a long name##button", {.Clickable, .Draw_Text}, ui.px(80), ui.px(20))
+	ui.tooltip(ui.signal(button), "Play")
+	{
+		ui.column("list_row", {.Clickable, .Instant_Hover}, ui.px(200), ui.px(30))
+		ui.label(CUT_TITLE, ui.px(80), ui.px(20))
+	}
+	ui.set_next_background({0, 0, 0, 1})
+	cover := ui.box_make("", {.Floating_X, .Floating_Y, .Draw_Background}, ui.px(80), ui.px(20))
+	cover.fixed_pos = {0, 60}
+	animating = ui.end_frame()
+	// A cut label's tooltip is built in end_frame.
+	if tip = ui.find("###tooltip"); tip != nil && tip.last_frame != u.frame {
+		tip = nil
+	}
+	return
+}
+
+// cut_tip rests the mouse at pos past the tooltip delay and returns the
+// tooltip shown there, if any.
+@(private = "file")
+cut_tip :: proc(u: ^ui.State, f: ^Fonts, now: ^f64, pos: [2]f32) -> ^ui.Box {
+	now^ += 0.05
+	cut_frame(u, f, now, {kind = .Mouse_Move, x = pos.x, y = pos.y})
+	tip, _ := cut_frame(u, f, now)
+	if tip != nil {
+		return tip
+	}
+	now^ += ui.TOOLTIP_DELAY + 0.1
+	tip, _ = cut_frame(u, f, now)
+	return tip
+}
+
+// A label cut off with an ellipsis shows its full text in a tooltip after
+// the delay, under it and inside the window, and the window goes idle once
+// it has faded in. It goes when the mouse leaves the label.
+@(test)
+test_ui_cut_label_tooltip :: proc(t: ^testing.T) {
+	f: Fonts
+	if !testing.expect(t, fonts_init(&f)) {
+		return
+	}
+	defer fonts_destroy(&f)
+	context.allocator = mem.arena_allocator(&f.arena)
+	u: ui.State
+	ui.init(&u)
+	now := 0.0
+	cut_frame(&u, &f, &now)
+	cut_frame(&u, &f, &now)
+
+	now += 0.05
+	tip, _ := cut_frame(&u, &f, &now, {kind = .Mouse_Move, x = 40, y = 30})
+	testing.expect(t, tip == nil, "no tooltip before the delay")
+	now += 0.5
+	tip, _ = cut_frame(&u, &f, &now)
+	testing.expect(t, tip == nil, "none halfway through the delay")
+	testing.expect(t, ui.wake_after(&u) > 0, "a frame is asked for at the end of the delay")
+	now += ui.TOOLTIP_DELAY
+	tip, _ = cut_frame(&u, &f, &now)
+	if !testing.expect(t, tip != nil, "the tooltip shows after the delay") {
+		return
+	}
+	testing.expect_value(t, tooltip_text(tip).label, CUT_TITLE)
+	r := tip.rect
+	testing.expect(t, r.x >= 8 && r.x + r.w <= 300 - 8, "inside the window")
+	testing.expect_value(t, r.y, f32(40 + 6))
+	testing.expect(t, !ui.rect_contains(r, {40, 30}), "not under the mouse")
+
+	animating := true
+	for i := 0; animating && i < 100; i += 1 {
+		now += 1.0 / 60
+		tip, animating = cut_frame(&u, &f, &now)
+	}
+	testing.expect(t, !animating, "the fade settles")
+	testing.expect(t, tip != nil && tip.opacity == 1, "the tooltip stays")
+	testing.expect_value(t, ui.wake_after(&u), f32(0))
+
+	now += 0.05
+	tip, _ = cut_frame(&u, &f, &now, {kind = .Mouse_Move, x = 250, y = 190})
+	testing.expect(t, tip == nil, "the tooltip goes with the mouse")
+}
+
+// A label that fits shows no tooltip, and neither does a cut one that a box
+// drawn over it hides.
+@(test)
+test_ui_whole_label_no_tooltip :: proc(t: ^testing.T) {
+	f: Fonts
+	if !testing.expect(t, fonts_init(&f)) {
+		return
+	}
+	defer fonts_destroy(&f)
+	context.allocator = mem.arena_allocator(&f.arena)
+	u: ui.State
+	ui.init(&u)
+	now := 0.0
+	cut_frame(&u, &f, &now)
+	cut_frame(&u, &f, &now)
+	testing.expect(t, cut_tip(&u, &f, &now, {40, 50}) == nil, "a label that fits")
+	testing.expect(t, cut_tip(&u, &f, &now, {40, 70}) == nil, "a label under another box")
+	now += 0.05
+	_, animating := cut_frame(&u, &f, &now)
+	testing.expect(t, !animating, "nothing keeps frames coming")
+	testing.expect_value(t, ui.wake_after(&u), f32(0))
+}
+
+// Over a Tip_Text box, a name cut off inside it shows the box's label,
+// wherever in the box the mouse is. A button's own tooltip beats its cut
+// label's. In a list row, the tooltip goes under the row.
+@(test)
+test_ui_cut_label_tip_text :: proc(t: ^testing.T) {
+	f: Fonts
+	if !testing.expect(t, fonts_init(&f)) {
+		return
+	}
+	defer fonts_destroy(&f)
+	context.allocator = mem.arena_allocator(&f.arena)
+	u: ui.State
+	ui.init(&u)
+	now := 0.0
+	cut_frame(&u, &f, &now)
+	cut_frame(&u, &f, &now)
+	tip := cut_tip(&u, &f, &now, {10, 90})
+	testing.expect(t, tip != nil && tooltip_text(tip).label == "Björk, Thom Yorke", "every artist")
+	now += 2
+	cut_frame(&u, &f, &now, {kind = .Mouse_Move, x = 250, y = 190})
+	now += 2
+	tip = cut_tip(&u, &f, &now, {40, 110})
+	testing.expect(t, tip != nil && tooltip_text(tip).label == "Play", "the button's own tooltip")
+	now += 2
+	cut_frame(&u, &f, &now, {kind = .Mouse_Move, x = 250, y = 190})
+	now += 2
+	tip = cut_tip(&u, &f, &now, {40, 130})
+	if testing.expect(t, tip != nil && tooltip_text(tip).label == CUT_TITLE, "the title in the row") {
+		testing.expect_value(t, tip.rect.y, f32(150 + 6))
+		testing.expect_value(t, tip.rect.x, f32(8)) // wider than the label, kept inside the window
+	}
+}
+
+// A click or a scroll hides the tooltip until another label comes under
+// the mouse.
+@(test)
+test_ui_cut_label_dismissed :: proc(t: ^testing.T) {
+	f: Fonts
+	if !testing.expect(t, fonts_init(&f)) {
+		return
+	}
+	defer fonts_destroy(&f)
+	context.allocator = mem.arena_allocator(&f.arena)
+	u: ui.State
+	ui.init(&u)
+	now := 0.0
+	cut_frame(&u, &f, &now)
+	cut_frame(&u, &f, &now)
+	testing.expect(t, cut_tip(&u, &f, &now, {40, 30}) != nil)
+
+	now += 0.05
+	tip, _ := cut_frame(&u, &f, &now, {kind = .Scroll, x = 40, y = 30, dy = -3})
+	testing.expect(t, tip == nil, "a scroll hides it")
+	now += ui.TOOLTIP_DELAY + 1
+	tip, _ = cut_frame(&u, &f, &now, {kind = .Mouse_Move, x = 41, y = 31})
+	testing.expect(t, tip == nil, "until the mouse leaves the label")
+
+	now += 0.05
+	cut_frame(&u, &f, &now, {kind = .Mouse_Move, x = 250, y = 190})
+	testing.expect(t, cut_tip(&u, &f, &now, {40, 30}) != nil, "it shows again once the mouse comes back")
+	now += 0.05
+	tip, _ = cut_frame(&u, &f, &now, {kind = .Mouse_Down, x = 40, y = 30, click_count = 1}, {kind = .Mouse_Up, x = 40, y = 30, click_count = 1})
+	testing.expect(t, tip == nil, "a click hides it")
+
+	// A press and a release in frames of their own.
+	now += 0.05
+	cut_frame(&u, &f, &now, {kind = .Mouse_Move, x = 250, y = 190})
+	testing.expect(t, cut_tip(&u, &f, &now, {40, 30}) != nil)
+	now += 0.05
+	cut_frame(&u, &f, &now, {kind = .Mouse_Down, x = 40, y = 30, click_count = 1})
+	now += 0.05
+	cut_frame(&u, &f, &now, {kind = .Mouse_Up, x = 40, y = 30, click_count = 1})
+	now += ui.TOOLTIP_DELAY + 1
+	tip, _ = cut_frame(&u, &f, &now)
+	testing.expect(t, tip == nil, "a click over several frames hides it too")
+}
+
+// A cut label that moves under a still mouse, as rows do in a list that
+// scrolls, waits for the delay, however recent the last tooltip was.
+@(test)
+test_ui_cut_label_waits_while_scrolling :: proc(t: ^testing.T) {
+	f: Fonts
+	if !testing.expect(t, fonts_init(&f)) {
+		return
+	}
+	defer fonts_destroy(&f)
+	context.allocator = mem.arena_allocator(&f.arena)
+	cut_shift = 0
+	defer cut_shift = 0
+	u: ui.State
+	ui.init(&u)
+	now := 0.0
+	cut_frame(&u, &f, &now)
+	cut_frame(&u, &f, &now)
+	testing.expect(t, cut_tip(&u, &f, &now, {40, 30}) != nil)
+	now += 0.05
+	tip, _ := cut_frame(&u, &f, &now, {kind = .Mouse_Move, x = 40, y = 50})
+	testing.expect(t, tip == nil, "none over the label that fits")
+
+	// The hidden title moves out from under the box over it, to the mouse.
+	cut_shift = -20
+	now += 0.05
+	cut_frame(&u, &f, &now)
+	now += 0.05
+	tip, _ = cut_frame(&u, &f, &now)
+	testing.expect(t, tip == nil, "no tooltip for the label that moved under the mouse")
+	now += ui.TOOLTIP_DELAY + 0.1
+	tip, _ = cut_frame(&u, &f, &now)
+	testing.expect(t, tip != nil && tooltip_text(tip).label == CUT_TITLE, "it shows after the delay")
 }
 
 // A scroll view given its size in points builds the rows that fill it in

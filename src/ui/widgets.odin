@@ -10,6 +10,7 @@ MENU_BORDER :: render.Color{1, 1, 1, 0.08}
 
 TOOLTIP_H :: 26
 TOOLTIP_GAP :: 6 // between a tooltip and its box
+FLOATING_MARGIN :: 8 // between a menu or a tooltip and the window's edges, see fit_floating
 TOOLTIP_KEYCAP_INSET :: 4 // around the keycap, inside the tooltip
 TOOLTIP_RADIUS :: 8
 TOOLTIP_BACKGROUND :: render.Color{0.135, 0.135, 0.165, 1}
@@ -522,11 +523,15 @@ menu_separator :: proc() {
 // TOOLTIP_WARM of the last tooltip it shows at once without fading in, so
 // moving the mouse along a row of buttons shows each one's. Boxes
 // scrolling under a still mouse wait for the delay. A click hides it until
-// the mouse leaves the box.
+// the mouse leaves the box. While the box is hovered, a label cut off
+// under the mouse shows no tooltip of its own (see cut_tooltip).
 tooltip :: proc(sig: Signal, text: string, shortcut := "") {
 	u := ctx
 	if sig.pressed || sig.held || sig.clicked || sig.right_clicked {
 		u.tooltip_dismissed = sig.box.key
+	}
+	if sig.hovering {
+		u.tooltip_asked = true
 	}
 	if !sig.hovering || u.tooltip_dismissed == sig.box.key || u.input.buttons != {} || u.menu_open {
 		return
@@ -536,6 +541,15 @@ tooltip :: proc(sig: Signal, text: string, shortcut := "") {
 		wake_at(shows)
 		return
 	}
+	tooltip_box(sig.box, {}, text, shortcut, warm)
+}
+
+// tooltip_box builds the tooltip, placed by anchor or else by anchor_rect
+// (see fit_floating).
+// Text wider than the window less the margins is cut off.
+@(private)
+tooltip_box :: proc(anchor: ^Box, anchor_rect: render.Rect, text: string, shortcut: string, warm: bool) {
+	u := ctx
 	u.tooltip_seen = u.time
 	floating()
 	set_next_background(TOOLTIP_BACKGROUND)
@@ -545,7 +559,9 @@ tooltip :: proc(sig: Signal, text: string, shortcut := "") {
 	b := row("###tooltip", {.Floating_X, .Floating_Y, .Draw_Background, .Draw_Border, .Draw_Shadow}, children_sum(), px(TOOLTIP_H))
 	b.pad.y = TOOLTIP_KEYCAP_INSET
 	// fit_floating places it once its size is known.
-	b.anchor = sig.box
+	b.anchor = anchor
+	u.tooltip_box = b
+	u.tooltip_rect = anchor_rect
 	if warm && b.first_frame == u.frame {
 		b.open_t = 1
 	}
@@ -554,7 +570,11 @@ tooltip :: proc(sig: Signal, text: string, shortcut := "") {
 	spacer(px(10))
 	set_next_font_size(12)
 	set_next_text_color(TOOLTIP_TEXT)
-	label(text, text_size(), fill())
+	width := text_size()
+	if room := u.width - 2 * FLOATING_MARGIN - 20; text_width(.Regular, 12, text) > room {
+		width = px(max(room, 0))
+	}
+	label(text, width, fill())
 	spacer(px(10))
 	if shortcut == "" {
 		return

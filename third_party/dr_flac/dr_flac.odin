@@ -5,8 +5,11 @@ package dr_flac
 
 import "core:c"
 
+// build.py points C_BUILD at another folder for a sanitizer build.
 @(private)
-LIB :: "../../build/windows/dr_flac/dr_flac.lib" when ODIN_OS == .Windows else "../../build/dr_flac/dr_flac.a"
+C_BUILD :: #config(TIDALFAST_C_BUILD, "build")
+@(private)
+LIB :: "../../build/windows/dr_flac/dr_flac.lib" when ODIN_OS == .Windows else "../../" + C_BUILD + "/dr_flac/dr_flac.a"
 
 when !#exists(LIB) {
 	#panic(LIB + " is missing: run ./build.py first")

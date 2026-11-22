@@ -80,12 +80,54 @@ draw_box :: proc(u: ^State, b: ^Box, alpha: f32) {
 	if .Clip in b.flags {
 		render.push_clip(r, rect)
 	}
-	for c := b.first; c != nil; c = c.next {
-		draw_box(u, c, a)
+	if u.cut_watch && watch_box(u, b) {
+		draw_children_owned(u, b, a)
+	} else {
+		for c := b.first; c != nil; c = c.next {
+			draw_box(u, c, a)
+		}
 	}
 	if .Clip in b.flags {
 		render.pop_clip(r)
 	}
+}
+
+// watch_box does what b means for the cut label under the mouse while
+// draw_box looks for one (cut_watch). A box drawn over the label hides it.
+// It returns whether a cut label inside b reports b (see note_cut).
+@(private)
+watch_box :: #force_inline proc(u: ^State, b: ^Box) -> bool {
+	if u.cut_found && b != u.cut_box && b != u.tooltip_box && covers(b) && rect_contains(b.clip, u.input.mouse) {
+		u.cut_found = false
+	}
+	return u.cut_scan && b.flags & {.Tip_Text, .Tip_Around, .Instant_Hover} != {}
+}
+
+// draw_children_owned draws b's children while it's the box a cut label
+// inside it reports, see note_cut.
+@(private)
+draw_children_owned :: proc(u: ^State, b: ^Box, a: f32) {
+	owner, row := u.cut_owner, u.cut_row
+	if .Tip_Text in b.flags {
+		u.cut_owner = b
+	}
+	if b.flags & {.Tip_Around, .Instant_Hover} != {} {
+		u.cut_row = b
+	}
+	for c := b.first; c != nil; c = c.next {
+		draw_box(u, c, a)
+	}
+	u.cut_owner, u.cut_row = owner, row
+}
+
+// covers says whether b paints over what was drawn before it, so a label
+// under it can't be read.
+@(private)
+covers :: proc(b: ^Box) -> bool {
+	if b.flags & {.Draw_Backdrop, .Draw_Glass} != {} || b.texture != 0 {
+		return true
+	}
+	return .Draw_Background in b.flags && (b.background.a > 0 || b.gradient.a > 0)
 }
 
 // draw_glass draws b as glass. Pressed, it swells a little and a light
@@ -107,7 +149,8 @@ draw_glass :: proc(u: ^State, b: ^Box, a: f32) {
 }
 
 // draw_label centres the label vertically and truncates it with an
-// ellipsis to the box's width less its padding.
+// ellipsis to the box's width less its padding. A label cut off under the
+// mouse is noted for its tooltip.
 @(private)
 draw_label :: proc(u: ^State, b: ^Box, a: f32) {
 	if b.run == nil {
@@ -117,6 +160,15 @@ draw_label :: proc(u: ^State, b: ^Box, a: f32) {
 	avail := b.rect.w - 2 * b.text_pad
 	if avail <= 0 {
 		return
+	}
+	if u.cut_scan && text.cut_off(run, avail) {
+		owner := b
+		if .Tip_Text not_in b.flags && u.cut_owner != nil {
+			owner = u.cut_owner
+		}
+		if rect_contains(owner.clip, u.input.mouse) {
+			note_cut(u, b, owner)
+		}
 	}
 	w := min(run.width, avail)
 	x := b.rect.x + b.text_pad

@@ -58,3 +58,24 @@ jobs:
           # The inner sh expands these, in a private D-Bus session and keyring.
           # shellcheck disable=SC2016
           dbus-run-session -- sh -c 'export HOME=$(mktemp -d); eval "$(echo x | gnome-keyring-daemon --unlock --components=secrets)"; python3 build.py test'
+
+  # The tests again under AddressSanitizer, with UndefinedBehaviorSanitizer on
+  # the C they link (docs/building.md). libclang-rt-18-dev has clang's
+  # sanitizer runtimes. Leak detection stays on: the suite has no leaks.
+  sanitize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang libclang-rt-18-dev pkg-config libwayland-dev wayland-protocols libxkbcommon-dev \
+            libvulkan-dev glslang-tools libfreetype-dev libfontconfig-dev libcurl4-openssl-dev libsystemd-dev dbus gnome-keyring \
+            fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji
+      - uses: ./.github/actions/install-odin
+      - name: Test with sanitizers
+        run: |
+          # The inner sh expands these, in a private D-Bus session and keyring.
+          # shellcheck disable=SC2016
+          dbus-run-session -- sh -c 'export HOME=$(mktemp -d); eval "$(echo x | gnome-keyring-daemon --unlock --components=secrets)"; python3 build.py test --sanitize=address'

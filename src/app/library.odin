@@ -983,7 +983,9 @@ text_link :: proc(s: ^State, label, id: string, has_id: bool, height: ui.Size, f
 // the signal of the link that was clicked, pressed or dragged, and k says
 // which artist it is. pad is the room left and right of the names.
 artist_links :: proc(s: ^State, joined: string, refs: []Artist_Ref, pad: f32, height := ui.Size{}, flags: ui.Box_Flags = {}) -> (k: int, sig: ui.Signal) {
-	box := ui.row("###artists", {.Clip, .Shrink_From_End}, ui.fill(), height if height.kind != .Null else ui.fill())
+	// A name cut off shows them all in its tooltip.
+	box := ui.row("###artists", {.Clip, .Shrink_From_End, .Tip_Text}, ui.fill(), height if height.kind != .Null else ui.fill())
+	box.label = joined
 	box.pad.x = pad
 	ui.text_pad(0)
 	for j in 0 ..< max(len(refs), 1) {
@@ -1259,7 +1261,9 @@ draw_player_bar :: proc(s: ^State, w, h: f32) {
 
 	item := playback_item(s)
 	{
-		ui.row("now_playing", {}, ui.px(title_side), ui.fill())
+		// A title or artist cut off shows in full over the bar, not on
+		// the line under it.
+		ui.row("now_playing", {.Tip_Around}, ui.px(title_side), ui.fill())
 		title := "Nothing playing"
 		if item != nil {
 			title = item.title

@@ -17,9 +17,11 @@ import "core:time"
 import "../src/platform"
 
 @(private = "file")
-MPRIS_OBJ :: "../build/shell/mpris.o"
+C_BUILD :: #config(TIDALFAST_C_BUILD, "build")
 @(private = "file")
-PNG_OBJ :: "../build/shell/png.o"
+MPRIS_OBJ :: "../" + C_BUILD + "/shell/mpris.o"
+@(private = "file")
+PNG_OBJ :: "../" + C_BUILD + "/shell/png.o"
 
 when !#exists(MPRIS_OBJ) || !#exists(PNG_OBJ) {
 	#panic("build/shell/mpris.o or png.o is missing: run ./build.py test first")
