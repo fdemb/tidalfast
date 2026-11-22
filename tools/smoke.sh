@@ -223,6 +223,7 @@ wait-ax=Paused Blue in Green
 ax-press=Next
 wait-ax=Playing שיר לשלום
 key=ctrl+f
+wait-ax=What do you want to play?
 commit=Kind
 wait-ax=Results for
 ax-press=Albums
@@ -306,6 +307,7 @@ wait-ax=Play Road Trip
 ax-press=Home
 wait-ax=Recommended albums
 key=ctrl+f
+wait-ax=What do you want to play?
 commit=Jazz
 wait-ax=Results for
 ax-dump
