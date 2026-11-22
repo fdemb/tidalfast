@@ -77,7 +77,7 @@ convert /tmp/a.tga /tmp/a.png
 tools/headless.sh sh -c 'build/tidalfast & sleep 5; playerctl -p tidalfast play; wait'
 ```
 
-`tools/idle_check.sh` checks that an idle window uses no CPU. It runs the app with fake data through `tools/headless.sh`, waits for a second with no CPU time, then reads the process's CPU time from `/proc/<pid>/stat` over 10 s and fails if it moved more than 5 ticks (50 ms). An idle window takes 0 ticks, and one that draws every frame on lavapipe 800 or more. CI runs it on every push.
+`tools/idle_check.sh` checks that an idle window uses no CPU. It runs the app with fake data through `tools/headless.sh`, waits until the app is up (its `tracks` startup mark from `TIDALFAST_MEASURE=1` and the window's resize, up to 60 s, since software Vulkan can take seconds to start on a slow machine and a process blocked before its first frame uses no CPU either), then for a second with no CPU time, then reads the process's CPU time from `/proc/<pid>/stat` over 10 s and fails if it moved more than 5 ticks (50 ms). An idle window takes 0 ticks, and one that draws every frame on lavapipe 800 or more. CI runs it on every push.
 
 ### The smoke test
 

@@ -12,6 +12,10 @@
                         tidalfast.exe and a .zip of it on Windows
 ./build.py test         what the tests link, then `odin test tests`; arguments after
                         -- go to odin, such as -- -define:ODIN_TEST_NAMES=tests.name
+./build.py test --sanitize=address
+                        the tests under AddressSanitizer and UndefinedBehaviorSanitizer,
+                        on Linux, with the C they link built by clang in build/sanitize-address;
+                        --sanitize=thread does the same with ThreadSanitizer
 
 --out DIR puts what would go in build/ in DIR instead, such as
 DIR/measure/app/tidalfast for measure, so a throwaway build leaves build/
@@ -49,7 +53,7 @@ import sys
 import zipfile
 
 PROG = "build.py"
-USAGE = "usage: build.py [release | measure | dist | libs | test] [--out DIR] [-- odin test args], or build.py --help"
+USAGE = "usage: build.py [release | measure | dist | libs | test [--sanitize=address|thread]] [--out DIR] [-- odin test args], or build.py --help"
 
 # The oldest macOS the app runs on. Odin and clang otherwise target the
 # build machine's version, and the app won't start on anything older.
@@ -74,6 +78,18 @@ WAYLAND_PROTOCOLS = [
 D3D_SHADERS = [("vs_rect", "vs"), ("ps_rect", "ps"), ("vs_blur", "vs"), ("ps_blur_down", "ps"), ("ps_blur_up", "ps")]
 
 WINDOWS_LIBS = "user32.lib gdi32.lib imm32.lib dwmapi.lib shell32.lib ole32.lib advapi32.lib psapi.lib"
+
+# What --sanitize adds to the C the tests link, and to odin test. Odin's
+# -sanitize:address doesn't cover undefined behaviour, so that runtime is
+# linked for the C alone.
+SANITIZE_C_FLAGS = {
+	"address": ["-g", "-fno-omit-frame-pointer", "-fsanitize=address,undefined", "-fno-sanitize-recover=undefined"],
+	"thread": ["-g", "-fno-omit-frame-pointer", "-fsanitize=thread"],
+}
+SANITIZE_ODIN_FLAGS = {
+	"address": ["-sanitize:address", "-extra-linker-flags:-fsanitize=undefined"],
+	"thread": ["-sanitize:thread"],
+}
 
 # Odin's own linker on Windows, rad-link, has failed here without a message
 # or an exit code, and it's the default, so MSVC's link does it.
@@ -168,11 +184,18 @@ def fill_template(source, out, values):
 class Build:
 	"""What one run of the script builds, and where it puts it."""
 
-	def __init__(self, target, mode, out, test_args):
+	def __init__(self, target, mode, out, test_args, sanitize):
 		self.target = target
 		self.mode = mode
 		self.out = out
 		self.test_args = test_args
+		self.sanitize = sanitize
+		# Where the C libraries and the tests' shell objects go, and what
+		# builds them. A sanitizer build keeps its own, so it never mixes
+		# objects with a normal build.
+		self.c_dir = f"build/sanitize-{sanitize}" if sanitize else "build"
+		self.cc = "clang" if sanitize else "cc"
+		self.sanitize_c_flags = SANITIZE_C_FLAGS[sanitize] if sanitize else []
 		self.version = ""
 		self.version_numbers = ""
 		self.app_flags = []
@@ -186,6 +209,7 @@ def main(argv):
 	mode = "debug"
 	out = "build"
 	test_args = []
+	sanitize = ""
 	i = 0
 	while i < len(argv):
 		arg = argv[i]
@@ -201,6 +225,8 @@ def main(argv):
 			out = argv[i]
 		elif arg.startswith("--out="):
 			out = arg[len("--out="):]
+		elif arg.startswith("--sanitize="):
+			sanitize = arg[len("--sanitize="):]
 		elif arg == "--":
 			test_args = argv[i + 1:]
 			break
@@ -215,10 +241,14 @@ def main(argv):
 		fail("arguments after -- are for test")
 	if not out:
 		fail("--out needs a folder")
+	if sanitize and (target != "test" or sanitize not in SANITIZE_C_FLAGS):
+		fail("--sanitize=address or --sanitize=thread goes with test")
+	if sanitize and platform.system() != "Linux":
+		fail("--sanitize only builds on Linux")
 
 	os.chdir(os.path.dirname(os.path.abspath(__file__)))
 	check_odin_version()
-	b = Build(target, mode, os.path.normpath(out), test_args)
+	b = Build(target, mode, os.path.normpath(out), test_args, sanitize)
 
 	# The commit goes into the app for the launch log (launch_log.odin), in
 	# full: a short hash of only digits would read as a number.
@@ -240,7 +270,10 @@ def main(argv):
 		build_windows(b)
 	else:
 		build_unix(b)
-	if target == "test":
+	if target == "test" and sanitize:
+		run("odin", "test", "tests", "-debug", SANITIZE_ODIN_FLAGS[sanitize], f"-define:TIDALFAST_C_BUILD={b.c_dir}",
+			test_args)
+	elif target == "test":
 		run("odin", "test", "tests", [WINDOWS_LINKER] if sys.platform == "win32" else [], test_args)
 
 
@@ -273,7 +306,7 @@ def build_unix(b):
 		lib_flags.append(f"-mmacosx-version-min={MACOS_MIN}")
 	mkdir("build")
 	for name, lib in C_LIBS:
-		c_lib(name, lib, lib_flags)
+		c_lib(name, lib, lib_flags + b.sanitize_c_flags, b.cc, b.c_dir)
 	if b.target == "libs":
 		return
 	if system == "Linux":
@@ -284,22 +317,22 @@ def build_unix(b):
 		fail(f"no build for {system}; build.py builds on macOS, Linux and Windows")
 
 
-def c_lib(name, lib, flags):
-	"""Rebuilds build/<name>/<lib>.a when its source is newer or the flags change."""
+def c_lib(name, lib, flags, cc, root):
+	"""Rebuilds <root>/<name>/<lib>.a when its source is newer or the flags change."""
 	src = f"third_party/{name}"
-	out = f"build/{name}/{lib}.a"
-	flags_file = f"build/{name}/flags"
+	out = f"{root}/{name}/{lib}.a"
+	flags_file = f"{root}/{name}/flags"
 	try:
 		old_flags = open(flags_file).read().strip()
 	except OSError:
 		old_flags = None
 	if not stale(out, f"{src}/{lib}.h", f"{src}/{lib}.c") and old_flags == " ".join(flags):
 		return
-	mkdir(f"build/{name}")
+	mkdir(f"{root}/{name}")
 	with open(flags_file, "w") as f:
 		f.write(" ".join(flags) + "\n")
-	obj = f"build/{name}/{lib}.o"
-	run("cc", flags, "-c", f"{src}/{lib}.c", "-o", obj)
+	obj = f"{root}/{name}/{lib}.o"
+	run(cc, flags, "-c", f"{src}/{lib}.c", "-o", obj)
 	remove(out)
 	run("ar", "-rcs", out, obj)
 	remove(obj)
@@ -334,8 +367,8 @@ def build_linux(b):
 	shell_libs = capture("pkg-config", "--libs", packages) + " -lm"
 	clang_flags = ["-O2"] if b.mode == "release" else ["-g", "-O0"]
 
-	def shell_object(c, out_dir, flags):
-		run("cc", "-std=gnu11", "-fPIC", "-c", c, "-o", f"{out_dir}/{stem(c)}.o",
+	def shell_object(c, out_dir, flags, cc="cc"):
+		run(cc, "-std=gnu11", "-fPIC", "-c", c, "-o", f"{out_dir}/{stem(c)}.o",
 			"-Ishell", "-Ibuild/wayland", "-Wall", "-Wno-unused-parameter", flags, shell_cflags)
 
 	def shell_objects(out_dir, flags):
@@ -353,9 +386,10 @@ def build_linux(b):
 	if b.target == "test":
 		# tests/scroll_linux.odin and mpris_linux.odin link the shell's
 		# scrolling, MPRIS and PNG code.
-		mkdir("build/shell")
+		shell_dir = f"{b.c_dir}/shell"
+		mkdir(shell_dir)
 		for c in ["shell/scroll.c", "shell/mpris.c", "shell/png.c"]:
-			shell_object(c, "build/shell", ["-O2"])
+			shell_object(c, shell_dir, ["-O2"] + b.sanitize_c_flags, b.cc)
 		return
 
 	if b.target == "dist":

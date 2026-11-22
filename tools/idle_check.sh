@@ -29,14 +29,36 @@ if [ "${1:-}" = --inside ]; then
 		echo $((${12} + ${13}))
 	}
 
-	TIDALFAST_FAKE=1 TIDALFAST_AUDIO_NULL=1 TIDALFAST_SHELL_TEST="1:size=1100,700" "$app" > "$log" 2>&1 &
+	# TIDALFAST_MEASURE=1 prints the startup marks, from frames drawn anyway.
+	TIDALFAST_FAKE=1 TIDALFAST_AUDIO_NULL=1 TIDALFAST_MEASURE=1 TIDALFAST_SHELL_TEST="1:size=1100,700" "$app" > "$log" 2>&1 &
 	pid=$!
-	# The fake library, the fonts, MPRIS and the first frames land in the first
-	# few seconds, later on a loaded machine. It has settled after a second
-	# with no CPU time, or 30 s, whichever is first: a window that never
+	# A process still blocked before its first frame uses no CPU either, and
+	# software Vulkan can take seconds to come up on a slow machine. So first
+	# wait, up to 60 s, until the app is up: the track rows drawn with every
+	# cover on screen (the tracks mark) and the window resized.
+	settled=0
+	until grep -q '"mark":"tracks"' "$log" && grep -q 'shell: test step 1:size=' "$log"; do
+		if ! kill -0 "$pid" 2> /dev/null; then
+			echo "idle_check: the app exited before it was up; its log:" >&2
+			cat "$log" >&2
+			exit 2
+		fi
+		if [ "$settled" -ge 60 ]; then
+			echo "idle_check: the app wasn't up after 60 s; its log:" >&2
+			cat "$log" >&2
+			kill -TERM "$pid"
+			exit 2
+		fi
+		sleep 1
+		settled=$((settled + 1))
+	done
+	# The covers, MPRIS and the frames after the resize land in the next few
+	# seconds, later on a loaded machine. It has settled after a second with
+	# no CPU time, or 30 s more, whichever is first: a window that never
 	# settles is measured all the same, and fails.
-	sleep 3
-	settled=3
+	sleep 2
+	settled=$((settled + 2))
+	limit=$((settled + 30))
 	before=
 	while :; do
 		now=$(ticks "$pid") || {
@@ -44,7 +66,7 @@ if [ "${1:-}" = --inside ]; then
 			cat "$log" >&2
 			exit 2
 		}
-		if [ "$now" = "$before" ] || [ "$settled" -ge 30 ]; then break; fi
+		if [ "$now" = "$before" ] || [ "$settled" -ge "$limit" ]; then break; fi
 		before=$now
 		sleep 1
 		settled=$((settled + 1))
@@ -103,4 +125,4 @@ if [ -z "$log" ]; then
 fi
 case $log in /*) ;; *) log="$PWD/$log" ;; esac
 
-"$here/headless.sh" -t $((window + 60)) "$here/idle_check.sh" --inside "$app" "$window" "$max" "$log"
+"$here/headless.sh" -t $((window + 120)) "$here/idle_check.sh" --inside "$app" "$window" "$max" "$log"

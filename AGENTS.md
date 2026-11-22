@@ -11,6 +11,7 @@ TIDALfast is a native TIDAL client in Odin for macOS and Linux, with a first Win
 ./build.py dist         # TIDALfast.app and .dmg, the AppImage, or the .zip, in build/dist/
 ./build.py libs         # only the C libraries in third_party, into build/kbts and build/dr_flac
 ./build.py test         # what the tests link, then odin test tests; odin's flags go after --
+./build.py test --sanitize=address   # the same under ASan and UBSan, Linux only (docs/building.md)
 ```
 
 `--out DIR` puts a build in `DIR` in place of `build/`. Keep `./build.py` clean with `-vet -strict-style`. The tests run without `-strict-style`.

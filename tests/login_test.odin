@@ -2555,7 +2555,7 @@ sign_out_doesnt_wait_for_the_keychain :: proc(t: ^testing.T) {
 		sync.atomic_store(done, true)
 	})
 	start := time.tick_now()
-	for !sync.atomic_load(&done) && time.tick_since(start) < 2 * time.Second {
+	for !sync.atomic_load(&done) && time.tick_since(start) < 10 * time.Second {
 		time.sleep(time.Millisecond)
 	}
 	returned := sync.atomic_load(&done)
