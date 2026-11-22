@@ -100,6 +100,7 @@ Box_Flag :: enum u32 {
 	Tip_Around, // a label cut off inside this box puts its tooltip under or over the whole box, as an Instant_Hover box does
 	Tip_Text, // a label cut off inside this box shows this box's label in its tooltip, which the box doesn't draw itself
 	Instant_Hover, // hot_t jumps with no fade, for list rows and tiles: a fast mouse is on one for a few frames, and a fade would light neighbours unevenly. end_frame lights the one under the mouse in this frame's layout
+	Takes_Scroll, // a scroll over it goes to it along both axes, in Signal.scroll, and not to a view behind it: a control the wheel turns, as the volume
 }
 Box_Flags :: bit_set[Box_Flag; u32]
 
@@ -188,6 +189,7 @@ Signal :: struct {
 	drag_delta:     [2]f32, // mouse movement since the press, up to the release if released
 	mouse:          [2]f32, // while held the mouse, when released where the button came up
 	scroll:         [2]f32, // points scrolled over the box this frame
+	scroll_precise: [2]f32, // the part of scroll from trackpads; the rest is wheel lines of SCROLL_LINE
 }
 
 // Cut_Label is a label cut off with an ellipsis that was under the mouse
@@ -705,6 +707,11 @@ process_events :: proc(u: ^State, events: []platform.Event, text_bytes: []u8) {
 			u.scroll_key = u.scroll_latch
 			d := scroll_delta(e)
 			gesture_event(&u.gesture, e, d)
+			// A box that takes scrolls follows the fingers, not the glide
+			// after them, so a flick doesn't fling it.
+			if e.momentum_phase != .None && takes_scroll(u, u.scroll_key) {
+				break
+			}
 			u.scroll += d
 			if e.precise {
 				u.scroll_precise += d
@@ -1063,7 +1070,8 @@ hit_at :: proc(u: ^State, pos: [2]f32) -> Key {
 }
 
 // scroll_hit_at is the innermost scroll view under pos that scrolls along
-// axis. An open menu over it takes the scroll instead.
+// axis, or box that takes scrolls. An open menu over it takes the scroll
+// instead.
 @(private)
 scroll_hit_at :: proc(u: ^State, pos: [2]f32, axis: Axis) -> Key {
 	overflow := Box_Flag.Allow_Overflow_X if axis == .X else .Allow_Overflow_Y
@@ -1072,7 +1080,7 @@ scroll_hit_at :: proc(u: ^State, pos: [2]f32, axis: Axis) -> Key {
 		if !rect_contains(h.rect, pos) {
 			continue
 		}
-		if .View_Scroll in h.flags && overflow in h.flags {
+		if (.View_Scroll in h.flags && overflow in h.flags) || .Takes_Scroll in h.flags {
 			return h.key
 		}
 		if h.floating && .Clickable in h.flags {
@@ -1080,6 +1088,16 @@ scroll_hit_at :: proc(u: ^State, pos: [2]f32, axis: Axis) -> Key {
 		}
 	}
 	return 0
+}
+
+@(private)
+takes_scroll :: proc(u: ^State, keys: [2]Key) -> bool {
+	for k in keys {
+		if h, at := find_hit(u, k); at >= 0 && .Takes_Scroll in h.flags {
+			return true
+		}
+	}
+	return false
 }
 
 // end_frame lays out and draws the tree. It returns whether anything is
@@ -1329,7 +1347,7 @@ finish :: proc(u: ^State, b: ^Box, clip: render.Rect, focus_parent, click_parent
 	// A menu closed while it was built takes no input, though its boxes
 	// were built to.
 	closed := in_menu && !u.menu_open
-	if b.key != 0 && b.flags & {.Clickable, .Focusable, .View_Scroll} != {} && .Disabled not_in b.flags && !closed && u.hit_count < len(u.hits) {
+	if b.key != 0 && b.flags & {.Clickable, .Focusable, .View_Scroll, .Takes_Scroll} != {} && .Disabled not_in b.flags && !closed && u.hit_count < len(u.hits) {
 		u.hits[u.hit_count] = {
 			key          = b.key,
 			rect         = b.clip,
@@ -1609,6 +1627,7 @@ signal :: proc(b: ^Box) -> (s: Signal) {
 	for axis in 0 ..< 2 {
 		if u.scroll_key[axis] == k {
 			s.scroll[axis] = u.scroll[axis]
+			s.scroll_precise[axis] = u.scroll_precise[axis]
 		}
 	}
 	return

@@ -30,6 +30,7 @@ platform_h_matches_platform_odin :: proc(t: ^testing.T) {
 		{"Event", platform.Event},
 		{"Memory", platform.Memory},
 		{"Now_Playing", platform.Now_Playing},
+		{"Player_Controls", platform.Player_Controls},
 		{"Text_Input", platform.Text_Input},
 		{"Access_Node", platform.Access_Node},
 		{"Wayland_Surface", platform.Wayland_Surface},

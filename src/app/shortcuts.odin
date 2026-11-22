@@ -15,6 +15,7 @@ Shortcut_Kind :: enum u8 {
 	Seek_Forward,
 	Volume_Up,
 	Volume_Down,
+	Mute,
 	Shuffle,
 	Repeat,
 	Back,
@@ -45,6 +46,7 @@ SHORTCUTS :: [Shortcut_Kind]Shortcut {
 	.Seek_Forward = {.Right, {.Shift}, SHIFT_KEYS + "→", "Forward 5 seconds"},
 	.Volume_Up    = {.Up, {ui.PRIMARY}, PRIMARY_KEYS + "↑", "Volume up"},
 	.Volume_Down  = {.Down, {ui.PRIMARY}, PRIMARY_KEYS + "↓", "Volume down"},
+	.Mute         = {.M, {}, "M", "Mute or unmute"},
 	.Shuffle      = {.S, {ui.PRIMARY}, PRIMARY_KEYS + "S", "Shuffle on or off"},
 	.Repeat       = {.R, {ui.PRIMARY}, PRIMARY_KEYS + "R", "Repeat all, one or off"},
 	.Back         = {.Left, {.Alt}, ALT_KEYS + "←", "Go back"},
@@ -112,6 +114,10 @@ library_shortcuts :: proc(s: ^State) {
 	}
 	for take_shortcut(.Volume_Down) {
 		playback_set_volume(s, max(s.settings.volume - VOLUME_STEP, 0), true)
+		ui.data_changed()
+	}
+	for take_shortcut(.Mute, repeats = false) {
+		playback_toggle_mute(s)
 		ui.data_changed()
 	}
 	for take_shortcut(.Shuffle, repeats = false) {

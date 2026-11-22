@@ -47,6 +47,7 @@ On macOS, Cmd in place of Ctrl and Option in place of Alt. The settings page lis
 - **Ctrl+Left / Ctrl+Right**: previous and next track
 - **Shift+Left / Shift+Right**: back and forward 5 seconds
 - **Ctrl+Up / Ctrl+Down**: volume up and down
+- **M**: mute or unmute
 - **Ctrl+S**: shuffle on or off
 - **Ctrl+R**: repeat all, one or off
 - **Alt+Left / Alt+Right**: back and forward through the pages you visited, as the mouse's Back and Forward buttons do

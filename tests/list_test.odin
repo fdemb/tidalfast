@@ -329,6 +329,8 @@ player_bar_fits_at_every_width :: proc(t: ^testing.T) {
 	pb.cur = {serial = 1, rate = 96000, resolved = true}
 	pb.status = {serial = 1, rate = 96000, total = 96000 * 3725, sample = 96000 * 3500, state = .Playing}
 	s.settings.volume = 1
+	// The longest output button there is, next to the speaker.
+	pb.output_seen.name_len = copy(pb.output_seen.name[:], "Built-in Audio Analog Stereo Headphones")
 
 	for w in ([]f32{575, 820, 1100, 1600}) {
 		free_all(context.temp_allocator)
@@ -346,15 +348,22 @@ player_bar_fits_at_every_width :: proc(t: ^testing.T) {
 		rail := progress.first.next
 		fill := rail.first
 		at := find_box(root, app.clock(3500))
-		left := find_box(root, fmt.tprintf("-%s", app.clock(225)))
+		left := find_box(root, "###bar_time")
 		if !testing.expect(t, at != nil && left != nil) {
 			return
 		}
+		testing.expect_value(t, left.label, fmt.tprintf("-%s", app.clock(225)))
 		right :: proc(r: render.Rect) -> f32 {return r.x + r.w}
 		testing.expectf(t, fill.rect.w > 0 && right(fill.rect) <= right(rail.rect) + 0.01, "%v: the fill ends at %v, the rail at %v", w, right(fill.rect), right(rail.rect))
 		testing.expectf(t, abs(fill.rect.w - rail.rect.w * 3500 / 3725) < 0.5, "%v: the fill is %v of a %v rail", w, fill.rect.w, rail.rect.w)
 		testing.expectf(t, right(at.rect) <= progress.rect.x + 0.01 && right(progress.rect) <= left.rect.x + 0.01, "%v: the rail overlaps the times", w)
 		testing.expectf(t, right(volume.rect) <= w + 0.01 && right(left.rect) <= w + 0.01, "%v: the bar runs off the window", w)
+		speaker := find_box(root, "###speaker")
+		output := find_box(root, "###output")
+		if testing.expect(t, speaker != nil && output != nil) {
+			testing.expectf(t, speaker.rect.w == app.SPEAKER_SIZE && right(output.rect) <= speaker.rect.x + 0.01 && right(speaker.rect) <= volume.rect.x + 0.01, "%v: the output button, the speaker and the slider overlap", w)
+			testing.expectf(t, right(left.rect) <= output.rect.x + 0.01, "%v: the time left runs into the output button", w)
+		}
 		for label in ([]^ui.Box{at, left}) {
 			need := ui.text_width(.Regular, 11, label.label)
 			testing.expectf(t, label.rect.w - 2 * label.text_pad >= need, "%v: %q has %v for %v", w, label.label, label.rect.w - 2 * label.text_pad, need)

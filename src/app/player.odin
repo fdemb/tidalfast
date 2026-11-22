@@ -86,6 +86,8 @@ Artwork :: struct {
 Playback :: struct {
 	player:          ^audio.Player,
 	set_now_playing: proc "c" (info: ^platform.Now_Playing), // the shell's
+	set_controls:    proc "c" (controls: ^platform.Player_Controls), // the shell's, or nil
+	controls_sent:   Maybe(platform.Player_Controls),
 	capture:         Small, // TIDALFAST_AUDIO_CAPTURE
 	window:          int, // TIDALFAST_AUDIO_WINDOW_KB, in bytes
 	null_output:     bool, // TIDALFAST_AUDIO_NULL: play to the silent null device
@@ -122,6 +124,7 @@ Playback :: struct {
 	dragging:        bool, // the progress bar is held: show the drag position
 	drag_seconds:    f64,
 	volume_sent:     f32,
+	volume_save_at:  f64, // when to save the volume the wheel set, once it has stopped; 0 for none
 	message:         Small,
 	error_seen:      u64,
 
@@ -145,6 +148,7 @@ playback_start :: proc(s: ^State, shell: ^platform.Shell) {
 	pb := &s.playback
 	pb.index = -1
 	pb.set_now_playing = shell.set_now_playing
+	pb.set_controls = shell.set_player_controls
 	pb.capture = small(os.get_env("TIDALFAST_AUDIO_CAPTURE", context.temp_allocator))
 	pb.window = audio.STREAM_WINDOW
 	if kb, ok := strconv.parse_int(os.get_env("TIDALFAST_AUDIO_WINDOW_KB", context.temp_allocator)); ok {
@@ -166,8 +170,8 @@ playback_start :: proc(s: ^State, shell: ^platform.Shell) {
 		s.settings.device = {}
 		settings_queue(&s.data, settings_to_save(s))
 	}
-	pb.player = audio.create(shell.request_redraw, s.settings.volume, small_str(&pb.capture), pb.window, pb.null_output, output_of(s.settings))
-	pb.volume_sent = s.settings.volume
+	pb.volume_sent = volume_heard(s.settings)
+	pb.player = audio.create(shell.request_redraw, pb.volume_sent, small_str(&pb.capture), pb.window, pb.null_output, output_of(s.settings))
 }
 
 playback_shutdown :: proc(s: ^State) {
@@ -175,6 +179,9 @@ playback_shutdown :: proc(s: ^State) {
 	if pb.player != nil && pb.index >= 0 && disk_on(&s.data) {
 		pb.status = audio.status(pb.player)
 		queue_write_now(&s.data, queue_file(pb, context.temp_allocator))
+	}
+	if pb.volume_save_at != 0 {
+		volume_save(s, now = true)
 	}
 	audio.destroy(pb.player)
 	pb.player = nil
@@ -608,6 +615,8 @@ playback_stop :: proc(s: ^State) {
 	pb^ = {
 		player          = pb.player,
 		set_now_playing = pb.set_now_playing,
+		set_controls    = pb.set_controls,
+		controls_sent   = pb.controls_sent,
 		capture         = pb.capture,
 		window          = pb.window,
 		null_output     = pb.null_output,
@@ -987,19 +996,59 @@ playback_seek_by :: proc(s: ^State, seconds: f64) {
 	playback_seek(s, at)
 }
 
-// playback_set_volume sets the volume, and saves it when save is set, as
-// at the end of a drag.
+// playback_set_volume sets the volume, unmuting at it, and saves it when
+// save is set, as at the end of a drag.
 playback_set_volume :: proc(s: ^State, v: f32, save: bool) {
-	pb := &s.playback
 	s.settings.volume = v
-	if pb.player != nil && v != pb.volume_sent {
+	s.settings.muted = false
+	volume_send(s)
+	if save {
+		volume_save(s)
+	}
+}
+
+// playback_toggle_mute mutes, or unmutes at the level from before. At a
+// level of 0 it unmutes at the default, so the button always brings the
+// sound back.
+playback_toggle_mute :: proc(s: ^State) {
+	if volume_silent(s.settings) {
+		s.settings.muted = false
+		if s.settings.volume == 0 {
+			s.settings.volume = VOLUME_DEFAULT
+		}
+	} else {
+		s.settings.muted = true
+	}
+	volume_send(s)
+	settings_queue(&s.data, settings_to_save(s))
+}
+
+// volume_heard is the volume the player plays at: none while muted.
+volume_heard :: proc(st: Settings) -> f32 {
+	return 0 if st.muted else st.volume
+}
+
+// volume_silent says whether the speaker button shows the sound off, and
+// unmutes when clicked.
+volume_silent :: proc(st: Settings) -> bool {
+	return st.muted || st.volume == 0
+}
+
+@(private = "file")
+volume_send :: proc(s: ^State) {
+	pb := &s.playback
+	if v := volume_heard(s.settings); pb.player != nil && v != pb.volume_sent {
 		audio.set_volume(pb.player, v)
 		pb.volume_sent = v
 	}
-	if save {
-		s.volume_before_override = nil
-		settings_queue(&s.data, s.settings)
-	}
+}
+
+// volume_save saves the volume the slider or the wheel set, over
+// TIDALFAST_VOLUME's.
+volume_save :: proc(s: ^State, now := false) {
+	s.playback.volume_save_at = 0
+	s.volume_before_override = nil
+	settings_queue(&s.data, s.settings, now)
 }
 
 // playback_position is the current track's position in seconds, as the
@@ -1068,6 +1117,26 @@ playback_media :: proc(s: ^State, events: []platform.Event) {
 			playback_previous(s)
 		case .Seek:
 			playback_seek(s, f64(e.dx))
+		case .Volume:
+			// Saved at once, as when the slider is let go.
+			if !math.is_nan(e.dx) {
+				playback_set_volume(s, clamp(e.dx, 0, 1), true)
+			}
+		case .Shuffle:
+			if on := e.dx != 0; on != s.settings.shuffle {
+				playback_set_shuffle(s, on)
+			}
+		case .Repeat:
+			REPEATS := [platform.Player_Repeat]audio.Repeat {
+				.Off = .Off,
+				.All = .All,
+				.One = .One,
+			}
+			if e.dx >= 0 && e.dx <= f32(max(platform.Player_Repeat)) {
+				if r := REPEATS[platform.Player_Repeat(e.dx)]; r != s.settings.repeat {
+					playback_set_repeat(s, r)
+				}
+			}
 		}
 	}
 }
@@ -1174,6 +1243,7 @@ playback_update :: proc(s: ^State, events: []platform.Event) {
 	}
 	s.library.playing = playing_row(s)
 	update_now_playing(s)
+	update_controls(s)
 	queue_save(s)
 }
 
@@ -1374,6 +1444,31 @@ update_now_playing :: proc(s: ^State) {
 		np.artwork_height = u32(pb.art.h)
 	}
 	pb.set_now_playing(&np)
+}
+
+// update_controls tells the shell the player bar's volume, shuffle and
+// repeat when they change, so the desktop's media controls show them.
+@(private = "file")
+update_controls :: proc(s: ^State) {
+	pb := &s.playback
+	if pb.set_controls == nil {
+		return
+	}
+	REPEATS := [audio.Repeat]platform.Player_Repeat {
+		.Off = .Off,
+		.All = .All,
+		.One = .One,
+	}
+	c := platform.Player_Controls {
+		volume  = f64(volume_heard(s.settings)),
+		shuffle = b32(s.settings.shuffle),
+		repeat  = REPEATS[s.settings.repeat],
+	}
+	if sent, ok := pb.controls_sent.?; ok && sent == c {
+		return
+	}
+	pb.controls_sent = c
+	pb.set_controls(&c)
 }
 
 // queue_save writes the queue's file when its rows change, and its
