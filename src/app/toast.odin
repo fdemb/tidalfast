@@ -23,6 +23,7 @@ Error_Source :: enum u8 {
 	List,
 	Search,
 	Add,
+	Remove,
 	Data, // Data.message: the sidebar, following, settings, the Keychain
 }
 
@@ -59,6 +60,9 @@ current_error :: proc(s: ^State) -> (source: Error_Source, text: string) {
 		if t := view_row(s, lib.status_track); t != nil {
 			return .Add, fmt.tprintf("Couldn't add %s to %s", t.title, sidebar_entry(s, lib.status_list).name)
 		}
+	}
+	if lib.status == .Remove_Failed {
+		return .Remove, remove_text(s)
 	}
 	return .None, ""
 }

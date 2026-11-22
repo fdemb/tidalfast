@@ -30,6 +30,7 @@ bold speaker-hifi ea08
 bold speaker-high e44a
 bold speaker-low e44c
 bold speaker-x e45c
+bold moon e330
 fill house e2c2
 bold magnifying-glass e30c
 fill magnifying-glass e30c
