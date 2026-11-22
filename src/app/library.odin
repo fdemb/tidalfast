@@ -149,6 +149,8 @@ Status :: enum u8 {
 	Add_Failed,
 	Playing_Next,
 	Queued,
+	Slept, // the sleep timer paused playback
+	Slept_At_End, // the sleep timer was for the end of the track, and the queue ended there
 }
 
 PLAYLISTS := [?]string {
@@ -267,6 +269,9 @@ draw_library :: proc(s: ^State, w, h: f32) {
 	ui.text_style(.Regular, 13, TEXT)
 	lib.sidebar_w = sidebar_width(s.settings.sidebar_w, w)
 	lib.drop_target = -1
+	if at := sleep_update(s, s.ui.time); at != 0 {
+		ui.wake_at(at)
+	}
 
 	ui.set_next_background(WINDOW_BG)
 	bg := ui.box_make("", {.Draw_Background}, ui.fill(), ui.fill())
@@ -1279,12 +1284,15 @@ draw_player_bar :: proc(s: ^State, w, h: f32) {
 
 	{
 		// Laid out by hand so it fits in side at any window width: the volume
-		// slider gives up room before anything else does, and the speaker
-		// button none.
+		// slider gives up room before anything else does, then the output
+		// button's name, and the sleep timer and speaker buttons none.
 		ui.row("extras", {}, ui.px(side), ui.fill())
-		output_w := min(output_width(s), side - OUTPUT_GAP - SPEAKER_W)
-		slider_w := clamp(side - output_w - OUTPUT_GAP - SPEAKER_W, 0, VOLUME_W)
-		ui.spacer(ui.px(side - output_w - OUTPUT_GAP - SPEAKER_W - slider_w, 0))
+		fixed := f32(SLEEP_W + OUTPUT_GAP + SPEAKER_W)
+		output_w := min(output_width(s), side - fixed)
+		slider_w := clamp(side - output_w - fixed, 0, VOLUME_W)
+		ui.spacer(ui.px(side - output_w - fixed - slider_w, 0))
+		draw_sleep_button(s)
+		ui.spacer(ui.px(SLEEP_W - SPEAKER_SIZE))
 		draw_output_button(s, output_w)
 		ui.spacer(ui.px(OUTPUT_GAP))
 		draw_volume(s, slider_w)
@@ -1298,6 +1306,7 @@ VOLUME_W :: 110
 VOLUME_H :: 28 // the slider takes presses this far around its bar
 SPEAKER_SIZE :: 28
 SPEAKER_W :: SPEAKER_SIZE + 4 // the speaker button and the gap after it
+SLEEP_W :: SPEAKER_SIZE + 4 // the sleep timer's button, as big as the speaker, and the gap after it
 VOLUME_NOTCH :: 0.05 // a mouse wheel's notch turns the volume this much
 // The lines a notch scrolls: macOS's one, and three in the Linux shell and
 // by default on Windows.
@@ -1531,8 +1540,13 @@ status_text :: proc(s: ^State) -> string {
 	if status := data_status(s); status != "" {
 		return status
 	}
-	if lib.status == .Copied_Page {
+	#partial switch lib.status {
+	case .Copied_Page:
 		return fmt.tprintf("Copied the link to %s", view_title(s))
+	case .Slept:
+		return "Sleep timer: paused"
+	case .Slept_At_End:
+		return "Sleep timer: the queue ended"
 	}
 	t := view_row(s, lib.status_track)
 	if lib.status == .None || t == nil {
@@ -1554,7 +1568,7 @@ status_text :: proc(s: ^State) -> string {
 		return fmt.tprintf("Playing %s next", t.title)
 	case .Queued:
 		return fmt.tprintf("Added %s to the queue", t.title)
-	case .Copied_Page:
+	case .Copied_Page, .Slept, .Slept_At_End:
 	}
 	return ""
 }
