@@ -262,6 +262,12 @@ apply_tone :: proc(pixels: []byte, tone: Tone) {
 	}
 }
 
+// cut_off says whether draw_run cuts run off with an ellipsis at
+// max_width.
+cut_off :: proc(run: ^Run, max_width: f32) -> bool {
+	return max_width > 0 && run.width > max_width + FIT_SLACK
+}
+
 // draw_run draws a run with its top left at pos (points), truncated with an
 // ellipsis to max_width if that's above 0. The baseline lands on a whole
 // pixel; each glyph's bitmap is picked by its fractional x. Draw a pending
@@ -272,7 +278,7 @@ draw_run :: proc(t: ^State, r: ^render.Renderer, run: ^Run, pos: [2]f32, color: 
 	width := run.width
 	shift, ellipsis_x: f32
 	ellipsis: ^Run
-	if max_width > 0 && run.width > max_width + FIT_SLACK {
+	if cut_off(run, max_width) {
 		ellipsis = shape(t, run.font, run.size, ELLIPSIS)
 		first, last: int
 		first, last, shift, ellipsis_x, width = truncate(glyphs, run.width, max_width, ellipsis.width, run.rtl)
