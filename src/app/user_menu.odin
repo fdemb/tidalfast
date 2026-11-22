@@ -87,7 +87,7 @@ draw_user_row :: proc(s: ^State) {
 	ui.show_on_hover(caret, b)
 	ui.spacer(ui.px(ROW_PAD - 3))
 
-	if ui.menu(USER_MENU, b.rect.w) {
+	if ui.menu(USER_MENU, b.rect.w, label) {
 		ui.text_style(.Regular, 13, TEXT)
 		if ui.menu_item("Settings###user_settings").clicked {
 			pending_set(s, Settings_Place{})

@@ -96,6 +96,11 @@ Search :: struct {
 	place:       Maybe(int),
 	// The field takes the focus the next time it's built.
 	focus:       bool,
+	// The tab chosen with the focus on it takes the focus once built: the
+	// Songs tab's tabs and the others' are built in different views, so
+	// their keys differ. tab_ring is whether it shows its ring.
+	tab_focus:   bool,
+	tab_ring:    bool,
 	// The fake data's lists: indices into State.rows, and for the tabs
 	// indices of rows (albums, artists) and of PLAYLISTS.
 	fake:        []i32,
@@ -177,11 +182,11 @@ draw_search_page :: proc(s: ^State, main_w, view_h: f32) {
 // main_w wide. Like them it's built after the view, over the bar the
 // results pin there. It stops short of the window's buttons. So Return asks for its search once the frame is done
 // (Search_Now), and the debounce runs before the view (search_tick).
-draw_search_bar :: proc(s: ^State, main_w: f32) {
+draw_search_bar :: proc(s: ^State, main_w: f32) -> (bar: ^ui.Box) {
 	sr := &s.search
 	x := f32(NAV_PAD + NAV_W + NAV_PAD)
 	w := clamp(main_w - x - NAV_PAD - window_buttons_w(s), 0, SEARCH_BAR_MAX)
-	bar := ui.row("search_bar", {.Floating_X, .Floating_Y}, ui.px(w), ui.px(NAV_BUTTON_H))
+	bar = ui.row("search_bar", {.Floating_X, .Floating_Y}, ui.px(w), ui.px(NAV_BUTTON_H))
 	bar.fixed_pos = {x, (nav_h(s) - NAV_BUTTON_H) / 2}
 	ui.text_style(.Regular, 14, TEXT)
 	ui.set_next_background(SURFACE)
@@ -209,6 +214,7 @@ draw_search_bar :: proc(s: ^State, main_w: f32) {
 	if sig.changed {
 		search_edited(s)
 	}
+	return
 }
 
 // search_tick sends the search once typing has stopped for the debounce.
@@ -667,7 +673,16 @@ draw_search_tabs :: proc(s: ^State) {
 			ui.set_next_background(SURFACE_ACTIVE if sr.tab == tab else {})
 			label := fmt.tprintf("%s  %d###tab%d", names[tab], counts[tab], int(tab))
 			sig := ui.button(label, ui.text_size(12), ui.fill())
+			ui.accessible(sig.box, .Button, sig.box.label, selected = sr.tab == tab)
+			if sr.tab_focus && sr.tab == tab {
+				sr.tab_focus = false
+				ui.restore_focus(sig.box.key, sr.tab_ring)
+			}
 			if sig.clicked {
+				if sr.tab != tab {
+					_, sr.tab_ring = ui.focus_key()
+					sr.tab_focus = true
+				}
 				sr.tab = tab
 			}
 			ui.spacer(ui.px(6))
@@ -748,7 +763,7 @@ draw_found_list :: proc(s: ^State, w, h: f32) {
 			f := found_at(s, tab, i)
 			ui.set_next_radius(6)
 			row_highlight(LIST_ROWS, false)
-			row := ui.row(fmt.tprintf("##found%d", i), {.Clickable, .Draw_Background, .Draw_Hot_Effects, .Instant_Hover}, ui.fill(), ui.px(TRACK_ROW_H))
+			row := ui.row(fmt.tprintf("##found%d", i), {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects, .Instant_Hover}, ui.fill(), ui.px(TRACK_ROW_H))
 			ui.accessible(row, .Row, fmt.tprintf("%s, %s", f.name, f.subtitle))
 			if ui.signal(row).clicked {
 				open_found(s, tab, f)

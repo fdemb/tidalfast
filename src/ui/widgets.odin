@@ -109,9 +109,10 @@ button :: proc(id: string, width: Size = {}, height: Size = {}) -> Signal {
 // when there's less room, so only the text takes the click. The text goes
 // from the text colour to hot_color as it lights. A label given apart from
 // id is the text, and id only the key, as label###id would be without
-// joining them.
-link :: proc(id: string, hot_color: render.Color, height: Size = {}, label := "") -> Signal {
-	b := box_make(id, {.Clickable, .Draw_Text, .Draw_Hot_Underline}, text_size(0, 0), height)
+// joining them. flags adds to the link's, such as Focusable for one
+// outside a row.
+link :: proc(id: string, hot_color: render.Color, height: Size = {}, label := "", flags: Box_Flags = {}) -> Signal {
+	b := box_make(id, {.Clickable, .Draw_Text, .Draw_Hot_Underline} + flags, text_size(0, 0), height)
 	if label != "" {
 		b.label = label
 	}
@@ -426,8 +427,9 @@ menu_end :: proc(open: bool) {
 
 // menu returns true while the menu id is open or closing, with its panel
 // as the parent until the end of the scope. Use it as `if ui.menu(id) {}`.
+// name is what assistive apps call it, such as what it acts on.
 @(deferred_out = menu_end)
-menu :: proc(id: string, width: f32 = 220) -> bool {
+menu :: proc(id: string, width: f32 = 220, name := "") -> bool {
 	u := ctx
 	if u.menu == 0 || u.menu != key_from_string(0, id) {
 		return false
@@ -444,7 +446,7 @@ menu :: proc(id: string, width: f32 = 220) -> bool {
 	set_next_radius(8)
 	b := box_make(id, flags, px(width), children_sum())
 	b.child_axis = .Y
-	accessible(b, .Menu, "")
+	accessible(b, .Menu, name)
 	b.open_t = approach(u, b.open_t, 1 if u.menu_open else 0, 1 - math.exp(-u.dt * 24), 0.01)
 	u.menu_built = true
 	if !u.menu_open && b.open_t == 0 {

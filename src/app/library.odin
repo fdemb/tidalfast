@@ -315,7 +315,7 @@ draw_library :: proc(s: ^State, w, h: f32) {
 // draw_history_buttons is Back and Forward through the places visited
 // (History), a pill over the main view's top left corner, built after the
 // view so it stays on top as the view scrolls under it.
-draw_history_buttons :: proc(s: ^State) {
+draw_history_buttons :: proc(s: ^State) -> (pill: ^ui.Box) {
 	pos := [2]f32{NAV_PAD, (nav_h(s) - NAV_BUTTON_H) / 2}
 	if s.library.nav_float > 0 {
 		// A box of its own, so the shadow fades without the pill.
@@ -327,7 +327,7 @@ draw_history_buttons :: proc(s: ^State) {
 	ui.set_next_background(SURFACE)
 	ui.set_next_border_color(OUTLINE)
 	ui.set_next_radius(NAV_BUTTON_H / 2)
-	pill := ui.row("history", {.Floating_X, .Floating_Y, .Clickable, .Click_Shield, .Draw_Background, .Draw_Border}, ui.px(NAV_W), ui.px(NAV_BUTTON_H))
+	pill = ui.row("history", {.Floating_X, .Floating_Y, .Clickable, .Click_Shield, .Draw_Background, .Draw_Border}, ui.px(NAV_W), ui.px(NAV_BUTTON_H))
 	pill.fixed_pos = pos
 	if history_button(text.ICON_CARET_LEFT + "###back", "Back", history_can_back(s)).clicked {
 		pending_set(s, Go_Back{})
@@ -336,6 +336,7 @@ draw_history_buttons :: proc(s: ^State) {
 	if history_button(text.ICON_CARET_RIGHT + "###forward", "Forward", history_can_forward(s)).clicked {
 		pending_set(s, Go_Forward{})
 	}
+	return
 }
 
 // nav_reserve is the room for Back and Forward that the view under them
@@ -564,8 +565,21 @@ sidebar_prefetch :: proc(s: ^State, first, last: int) {
 
 draw_sidebar_handle :: proc(s: ^State, window_w: f32) {
 	lib := &s.library
-	handle := ui.row("sidebar_handle", {.Clickable}, ui.px(HANDLE_W), ui.fill())
+	handle := ui.row("sidebar_handle", {.Clickable, .Focusable, .Arrow_Keys}, ui.px(HANDLE_W), ui.fill())
 	sig := ui.signal(handle)
+	if steps, home, end := ui.slider_keys(handle); steps != 0 || home || end {
+		w := lib.sidebar_w + f32(steps) * SIDEBAR_KEY_STEP
+		if home {
+			w = SIDEBAR_MIN
+		}
+		if end {
+			w = SIDEBAR_MAX
+		}
+		lib.sidebar_w = clamp(w, SIDEBAR_MIN, sidebar_limit(window_w))
+		s.settings.sidebar_w = lib.sidebar_w
+		settings_queue(&s.data, settings_to_save(s))
+		ui.data_changed()
+	}
 	if sig.pressed {
 		if sig.double_clicked && s.settings.sidebar_w != 0 {
 			s.settings.sidebar_w = 0
@@ -592,10 +606,12 @@ draw_sidebar_handle :: proc(s: ^State, window_w: f32) {
 	ui.box_make("", {.Draw_Background}, ui.px(1), ui.fill())
 }
 
+SIDEBAR_KEY_STEP :: 10 // points an arrow key moves the sidebar's handle
+
 // draw_main_view is the view the history's current place shows, main_w
 // wide and h tall, with Back and Forward over it.
 draw_main_view :: proc(s: ^State, main_w, h: f32) {
-	ui.column("main", {.Clip}, ui.fill(), ui.fill())
+	main := ui.column("main", {.Clip}, ui.fill(), ui.fill())
 	// Before anything: a search it sends replaces the results the view
 	// would otherwise have built already, and results keep the room for
 	// Back and Forward where the empty page doesn't.
@@ -617,9 +633,11 @@ draw_main_view :: proc(s: ^State, main_w, h: f32) {
 	s.library.nav_float = 0
 	view_h := h - (0 if under else nav_h(s)) - (LOGIN_NOTICE_H if login_notice_shown(s) else 0)
 	draw_view(s, main_w, view_h)
-	draw_history_buttons(s)
+	// Drawn over the view, but first in Tab order, as they're first in
+	// the layout.
+	ui.tab_first(draw_history_buttons(s), main)
 	if search_page_showing(s) {
-		draw_search_bar(s, main_w)
+		ui.tab_first(draw_search_bar(s, main_w), main)
 	}
 }
 
@@ -868,7 +886,10 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 	liked := liked_has(&s.data, key)
 	// The buttons show while the row is lit, which end_frame may settle
 	// after this build: a row that scrolled under the mouse.
-	heart_sig := heart_button("heart", liked, cat("Unlike " if liked else "Like ", track.title), TEXT, 1 if selected else 0, cols.heart)
+	// The selected row's buttons show, and are where Tab goes after the
+	// table, so the keyboard reaches the heart and the track menu.
+	row_buttons := ui.Box_Flags{.Focusable} if selected else {}
+	heart_sig := heart_button("heart", liked, cat("Unlike " if liked else "Like ", track.title), TEXT, 1 if selected else 0, cols.heart, row_buttons)
 	ui.show_on_hover(heart_sig.box, row)
 	if heart_sig.clicked {
 		lib.selected = i
@@ -877,7 +898,7 @@ track_row :: proc(s: ^State, i: int, cols: Track_Columns) {
 	}
 	cell(track.duration, cols.duration, .Right)
 
-	more, more_sig := icon_button("more", text.ICON_DOTS_THREE, .Icon, cat("More options for ", track.title), TEXT, 1 if selected else 0, cols.more)
+	more, more_sig := icon_button("more", text.ICON_DOTS_THREE, .Icon, cat("More options for ", track.title), TEXT, 1 if selected else 0, cols.more, row_buttons)
 	ui.show_on_hover(more, row)
 	if more_sig.clicked {
 		lib.selected = i
@@ -911,7 +932,7 @@ icon_button :: proc(id, icon: string, font: text.Font, name: string, color: rend
 // heart_button is a filled heart in the accent when the track is liked,
 // and an outline in color at opacity hot otherwise (0 hides it, but it
 // still clicks).
-heart_button :: proc(id: string, liked: bool, name: string, color: render.Color, hot: f32, side: f32) -> ui.Signal {
+heart_button :: proc(id: string, liked: bool, name: string, color: render.Color, hot: f32, side: f32, flags: ui.Box_Flags = {}) -> ui.Signal {
 	_, sig := icon_button(
 		id,
 		text.ICON_HEART_FILL if liked else text.ICON_HEART,
@@ -920,6 +941,7 @@ heart_button :: proc(id: string, liked: bool, name: string, color: render.Color,
 		ACCENT if liked else color,
 		1 if liked else hot,
 		side,
+		flags,
 	)
 	ui.tooltip(sig, "Remove from Liked Songs" if liked else "Save to Liked Songs")
 	return sig
@@ -944,13 +966,13 @@ row_link :: proc(s: ^State, i: int, sig: ui.Signal) -> bool {
 // text_link is a link to an album or an artist when it has an id to open
 // (the fake data goes by name), and plain text when it hasn't. It goes
 // inside a row of its own, since it's only as wide as its text.
-text_link :: proc(s: ^State, label, id: string, has_id: bool, height: ui.Size) -> ui.Signal {
+text_link :: proc(s: ^State, label, id: string, has_id: bool, height: ui.Size, flags: ui.Box_Flags = {}) -> ui.Signal {
 	if !has_id && !s.data.fake {
 		b := ui.label(label, ui.fill(), height)
 		ui.accessible(b, .Static_Text, label)
 		return {}
 	}
-	return ui.link(id, TEXT, height, label)
+	return ui.link(id, TEXT, height, label, flags)
 }
 
 // artist_links shows the artists in joined, each a link to its top tracks,
@@ -960,7 +982,7 @@ text_link :: proc(s: ^State, label, id: string, has_id: bool, height: ui.Size) -
 // no room (Shrink_From_End), as the layout of this frame finds them. sig is
 // the signal of the link that was clicked, pressed or dragged, and k says
 // which artist it is. pad is the room left and right of the names.
-artist_links :: proc(s: ^State, joined: string, refs: []Artist_Ref, pad: f32, height := ui.Size{}) -> (k: int, sig: ui.Signal) {
+artist_links :: proc(s: ^State, joined: string, refs: []Artist_Ref, pad: f32, height := ui.Size{}, flags: ui.Box_Flags = {}) -> (k: int, sig: ui.Signal) {
 	// A name cut off shows them all in its tooltip.
 	box := ui.row("###artists", {.Clip, .Shrink_From_End, .Tip_Text}, ui.fill(), height if height.kind != .Null else ui.fill())
 	box.label = joined
@@ -975,7 +997,7 @@ artist_links :: proc(s: ^State, joined: string, refs: []Artist_Ref, pad: f32, he
 			ui.label(joined[refs[j - 1].end:refs[j].start], ui.text_size(0, 0), ui.fill())
 		}
 		if linked {
-			link := ui.link(ARTIST_LINKS[j] if j < len(ARTIST_LINKS) else cat("###artist", num(j)), TEXT, ui.fill(), name)
+			link := ui.link(ARTIST_LINKS[j] if j < len(ARTIST_LINKS) else cat("###artist", num(j)), TEXT, ui.fill(), name, flags)
 			if link.clicked || link.pressed || link.right_clicked || link.dragging {
 				k, sig = j, link
 			}
@@ -1089,7 +1111,8 @@ draw_track_menu :: proc(s: ^State, h: f32) {
 	row := view_row(s, i)
 	page := lib.menu_page
 	turned: ui.Signal
-	if ui.menu("track_menu") {
+	name := "Add to playlist" if page == .Playlists else row.title if row != nil else ""
+	if ui.menu("track_menu", name = name) {
 		ui.text_style(.Regular, 13, TEXT)
 		if page == .Playlists {
 			turned = draw_playlist_chooser(s, i, h)
@@ -1254,7 +1277,7 @@ draw_player_bar :: proc(s: ^State, w, h: f32) {
 			ui.accessible(ui.label(title, ui.fill(), ui.px(20)), .Static_Text, title)
 		} else {
 			ui.row("", {}, ui.fill(), ui.px(20))
-			if text_link(s, title, "###album", item.album_id != 0, ui.fill()).clicked {
+			if text_link(s, title, "###album", item.album_id != 0, ui.fill(), {.Focusable}).clicked {
 				open_album(s, item.album_id, item.album, item.cover, item.row)
 			}
 			ui.spacer(ui.px(4))
@@ -1267,7 +1290,7 @@ draw_player_bar :: proc(s: ^State, w, h: f32) {
 			}
 			liked := liked_has(&s.data, playing)
 			ui.radius(6)
-			if heart_button("heart_bar", liked, "Unlike" if liked else "Like", SECONDARY, 1, 20).clicked {
+			if heart_button("heart_bar", liked, "Unlike" if liked else "Like", SECONDARY, 1, 20, {.Focusable}).clicked {
 				liked_toggle(s, playing)
 				ui.data_changed()
 			}
@@ -1279,13 +1302,13 @@ draw_player_bar :: proc(s: ^State, w, h: f32) {
 			ui.text_style(.Regular, 12, SECONDARY)
 			if item == nil {
 				ui.spacer(ui.px(18))
-			} else if k, sig := artist_links(s, item.artist, item.artists, 0, ui.px(18)); sig.clicked {
+			} else if k, sig := artist_links(s, item.artist, item.artists, 0, ui.px(18), {.Focusable}); sig.clicked {
 				open_artist_of(s, item.artist, item.artists, k, item.row)
 			}
 			if format := track_format(s); format != "" {
 				ui.text_style(.Regular, 11, DIM)
 				ui.text_pad(0)
-				if sig := ui.link("###track_format", SECONDARY, ui.px(16), format); sig.clicked {
+				if sig := ui.link("###track_format", SECONDARY, ui.px(16), format, {.Focusable}); sig.clicked {
 					open_output_menu(sig.box.rect.x, sig.box.rect.y - 8)
 				}
 			}
@@ -1452,9 +1475,20 @@ progress_fraction :: proc(position, duration: f64) -> f32 {
 // straight away; letting go seeks there.
 draw_progress :: proc(s: ^State, position, duration: f64, active: bool) {
 	pb := &s.playback
-	slider := ui.column("progress", {.Clickable} if active else {}, ui.fill(), ui.fill())
+	slider := ui.column("progress", {.Clickable, .Focusable, .Arrow_Keys} if active else {.Disabled}, ui.fill(), ui.fill())
 	ui.accessible(slider, .Slider, "Position", cat(clock(position), " of ", clock(duration)))
 	sig := ui.signal(slider)
+	if steps, home, end := ui.slider_keys(slider); active && (steps != 0 || home || end) {
+		switch {
+		case home:
+			playback_seek(s, 0)
+		case end:
+			playback_seek(s, duration)
+		case:
+			playback_seek_by(s, f64(steps) * SEEK_STEP)
+		}
+		ui.data_changed()
+	}
 	if active && duration > 0 && slider.rect.w > 0 && (sig.held || sig.released) {
 		frac := clamp((sig.mouse.x - slider.rect.x) / slider.rect.w, 0, 1)
 		pb.drag_seconds = f64(frac) * duration
@@ -1541,9 +1575,24 @@ draw_volume :: proc(s: ^State, width: f32) {
 	ui.column("", {}, ui.px(width), ui.fill())
 	ui.spacer(ui.fill())
 	{
-		slider := ui.column("volume", {.Clickable, .Takes_Scroll}, ui.fill(), ui.px(VOLUME_H))
+		// Out of the Tab order while the bar leaves it no room.
+		slider := ui.column("volume", {.Clickable, .Takes_Scroll} + ({.Focusable, .Arrow_Keys} if width > 0 else {}), ui.fill(), ui.px(VOLUME_H))
 		ui.accessible(slider, .Slider, "Volume", "Muted" if s.settings.muted else cat(num(int(math.round(s.settings.volume * 100))), "%"))
 		sig := ui.signal(slider)
+		// The keys go from the level before a mute and unmute, as the
+		// volume shortcuts do, and save once they stop, as the wheel does.
+		if steps, home, end := ui.slider_keys(slider); steps != 0 || home || end {
+			v := s.settings.volume + f32(steps) * VOLUME_NOTCH
+			if home {
+				v = 0
+			}
+			if end {
+				v = 1
+			}
+			playback_set_volume(s, clamp(v, 0, 1), false)
+			s.playback.volume_save_at = s.ui.time + VOLUME_SCROLL_SAVE
+			ui.data_changed()
+		}
 		if (sig.held || sig.released) && slider.rect.w > 0 {
 			playback_set_volume(s, clamp((sig.mouse.x - slider.rect.x) / slider.rect.w, 0, 1), sig.released)
 		}

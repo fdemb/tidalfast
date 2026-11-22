@@ -46,6 +46,8 @@ Playlist_Editor :: struct {
 	focus:  bool, // the field takes the focus when it's next built
 	reveal: bool, // scroll the sidebar to the row first
 	built:  bool, // the field was built this frame
+	back:   ui.Key, // what had the focus before, such as the +, which gets it back once Return or Escape closes the field
+	ring:   bool, // back showed its focus ring
 }
 
 PLAYLIST_NAME_MAX :: len(Small{}.buf) // what a Playlist_Job carries
@@ -196,6 +198,7 @@ new_playlist_start :: proc(s: ^State) {
 		focus  = true,
 		reveal = true,
 	}
+	e.back, e.ring = ui.focus_key()
 	e.field.limit = PLAYLIST_NAME_MAX
 }
 
@@ -211,6 +214,7 @@ rename_start :: proc(s: ^State, i: int) {
 		focus  = true,
 		reveal = true,
 	}
+	e.back, e.ring = ui.focus_key()
 	e.field.limit = PLAYLIST_NAME_MAX
 	ui.field_set_text(&e.field, sidebar_entry(s, i).name)
 }
@@ -538,10 +542,17 @@ edit_field :: proc(s: ^State) {
 	sig := ui.text_field("playlist_name", &e.field, "Playlist name", ui.fill(), EDIT_FIELD_H, focus = focus)
 	e.focus = false
 	e.built = true
+	// Return and Escape give the focus back to what opened the field, the
+	// + or the list's More button; a click or a Tab elsewhere keeps it.
+	back, ring := e.back, e.ring
 	switch {
 	case sig.submitted:
 		edit_commit(s, sig.submitted_text)
-	case sig.escaped, !sig.focused && !focus:
+		ui.restore_focus(back, ring)
+	case sig.escaped:
+		s.library.edit = {}
+		ui.restore_focus(back, ring)
+	case !sig.focused && !focus:
 		s.library.edit = {}
 	case:
 		return
@@ -585,7 +596,7 @@ sidebar_edit_reveal :: proc(s: ^State, list: ^ui.Box, h: f32, extra: int) {
 // draw_delete_menu asks before deleting the playlist the More menu was
 // opened for, in its place.
 draw_delete_menu :: proc(s: ^State) {
-	if ui.menu(DELETE_MENU, 260) {
+	if ui.menu(DELETE_MENU, 260, "Delete playlist") {
 		lib := &s.library
 		i := sidebar_find(s, small_str(&lib.delete_id))
 		name := sidebar_entry(s, i).name if i > 0 else ""
