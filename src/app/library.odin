@@ -153,11 +153,11 @@ Status :: enum u8 {
 	Add_Failed,
 	Playing_Next,
 	Queued,
+	Slept, // the sleep timer paused playback
+	Slept_At_End, // the sleep timer was for the end of the track, and the queue ended there
 	Removing,
 	Removed,
 	Remove_Failed,
-	Slept, // the sleep timer paused playback
-	Slept_At_End, // the sleep timer was for the end of the track, and the queue ended there
 }
 
 // Track_Menu_Page is what the track menu shows: its actions, or the
@@ -1714,7 +1714,7 @@ status_text :: proc(s: ^State) -> string {
 		return fmt.tprintf("Playing %s next", t.title)
 	case .Queued:
 		return fmt.tprintf("Added %s to the queue", t.title)
-	case .Copied_Page, .Removing, .Removed, .Remove_Failed, .Slept, .Slept_At_End:
+	case .Copied_Page, .Slept, .Slept_At_End, .Removing, .Removed, .Remove_Failed:
 	}
 	return ""
 }
