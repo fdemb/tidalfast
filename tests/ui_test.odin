@@ -392,6 +392,19 @@ test_ui_interaction :: proc(t: ^testing.T) {
 	sig, _ = frame(&u, &now, {kind = .Key_Down, key = .Escape})
 	testing.expect(t, !ui.has_focus(sig.box))
 
+	// An assistive app's press clicks it, and asks for one more frame to
+	// show what the click changed, since no release follows it.
+	for _ in 0 ..< 200 {
+		if _, animating = frame(&u, &now); !animating {
+			break
+		}
+	}
+	sig, animating = frame(&u, &now, {kind = .Access_Press, target = u64(sig.box.key)})
+	testing.expect(t, sig.clicked && sig.keyboard)
+	testing.expect(t, animating, "a press asks for the frame that shows it")
+	_, animating = frame(&u, &now)
+	testing.expect(t, !animating, "and then no more")
+
 	// A box not built for a frame is freed.
 	ui.begin_frame(&u, {}, nil, nil, 300, 200, now + 0.01)
 	ui.end_frame()

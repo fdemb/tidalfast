@@ -445,6 +445,10 @@ bool access_pressable(uint32_t role) {
 //   ime                 print the shell's mirror of the text field and the surrounding text an input method gets
 //   ax-dump             print the accessibility tree
 //   ax-press=label      press the first pressable node whose label or value starts with label
+//   wait-ax=label       hold the steps after it until a node whose label or value starts with label
+//                       is in the tree, and move them later by the time it took; after 30 s
+//                       it gives up, prints the tree and lets them go on, and later waits
+//                       give up at once
 //   capture=path        copy the last TIDALFAST_CAPTURE frame to path
 //   quit
 //
@@ -459,6 +463,13 @@ typedef struct {
 static Test_Step *g_test_steps;
 static int g_test_count, g_test_next;
 static double g_test_start; // now_seconds at setup_shell_test, which step times count from
+static double g_test_delay; // seconds the steps' times moved by, from wait-ax
+static char *g_wait_for;    // the label wait-ax waits for, or NULL
+static double g_wait_since;
+static bool g_wait_failed; // a wait gave up, so the steps are off course
+
+#define TEST_WAIT_MAX 30.0
+#define TEST_WAIT_POLL 0.05
 
 static uint32_t key_named(const char *name) {
   static const struct {
@@ -543,6 +554,34 @@ static void test_ax(const char *press) {
   if (press && !pressed) fprintf(stderr, "shell: ax: nothing to press called %s\n", press);
 }
 
+static bool test_ax_has(const char *label) {
+  size_t n = strlen(label);
+  for (uint32_t i = 0; i < g_node_count; i++) {
+    const char *l = g_nodes[i].label, *v = g_nodes[i].value;
+    if ((l && !strncmp(l, label, n)) || (v && !strncmp(v, label, n))) return true;
+  }
+  return false;
+}
+
+// test_wait_over ends a wait-ax once its node is in the tree or it has
+// waited too long, and says whether it has.
+static bool test_wait_over(void) {
+  double waited = now_seconds() - g_wait_since;
+  bool found = test_ax_has(g_wait_for);
+  if (!found && waited < TEST_WAIT_MAX && !g_wait_failed) return false;
+  if (found) {
+    fprintf(stderr, "shell: test: %s showed after %.1f s\n", g_wait_for, waited);
+  } else {
+    fprintf(stderr, "shell: test: gave up waiting for %s after %.0f s%s\n", g_wait_for, waited, g_wait_failed ? "" : "; the tree:");
+    if (!g_wait_failed) test_ax(NULL);
+    g_wait_failed = true;
+  }
+  g_test_delay += waited;
+  free(g_wait_for);
+  g_wait_for = NULL;
+  return true;
+}
+
 static void test_clean(const char *hex) {
   uint32_t n = (uint32_t)strlen(hex) / 2;
   char *in = malloc(n + 1), *out = malloc(n + 1);
@@ -624,6 +663,10 @@ static void test_step(const char *command, char *arg) {
     test_ax(NULL);
   } else if (!strcmp(command, "ax-press")) {
     test_ax(arg);
+  } else if (!strcmp(command, "wait-ax")) {
+    free(g_wait_for);
+    g_wait_for = strdup(arg);
+    g_wait_since = now_seconds();
   } else if (!strcmp(command, "capture")) {
     const char *from = getenv("TIDALFAST_CAPTURE");
     if (!from || !copy_file(from, arg)) fprintf(stderr, "shell: test: couldn't copy the capture to %s\n", arg);
@@ -643,7 +686,8 @@ static int compare_steps(const void *a, const void *b) {
 
 static void arm_test_timer(void) {
   double next = 1e30;
-  if (g_test_next < g_test_count) next = g_test_steps[g_test_next].at;
+  if (g_wait_for) next = now_seconds() - g_test_start + TEST_WAIT_POLL;
+  else if (g_test_next < g_test_count) next = g_test_steps[g_test_next].at + g_test_delay;
   if (g_remote_next < g_remote_count && g_remote_steps[g_remote_next].at < next) next = g_remote_steps[g_remote_next].at;
   if (next < 1e30) {
     double after = next - (now_seconds() - g_test_start);
@@ -652,8 +696,8 @@ static void arm_test_timer(void) {
 }
 
 void run_due_steps(void) {
-  double now = now_seconds() - g_test_start;
-  while (g_test_next < g_test_count && g_test_steps[g_test_next].at <= now) {
+  if (g_wait_for) test_wait_over();
+  while (!g_wait_for && g_test_next < g_test_count && g_test_steps[g_test_next].at + g_test_delay <= now_seconds() - g_test_start) {
     Test_Step *s = &g_test_steps[g_test_next++];
     fprintf(stderr, "shell: test step %g:%s\n", s->at, s->text);
     char *save;
@@ -667,6 +711,7 @@ void run_due_steps(void) {
       test_step(rest, arg);
     }
   }
+  double now = now_seconds() - g_test_start;
   while (g_remote_next < g_remote_count && g_remote_steps[g_remote_next].at <= now) {
     Remote_Step *s = &g_remote_steps[g_remote_next++];
     fprintf(stderr, "shell: remote test sends %s\n", s->text);
