@@ -74,16 +74,13 @@ draw_box :: proc(u: ^State, b: ^Box, alpha: f32) {
 	if b.focus_t > 0 {
 		render.push_rect(r, rect, fade(ACCENT, a * b.focus_t), b.radius, 2)
 	}
-	if u.cut_found && b != u.tooltip_box && covers(b) && rect_contains(b.clip, u.input.mouse) {
-		u.cut_found = false
-	}
 	if .Draw_Text in b.flags && b.label != "" && u.texts != nil {
 		draw_label(u, b, a)
 	}
 	if .Clip in b.flags {
 		render.push_clip(r, rect)
 	}
-	if u.cut_scan && b.flags & {.Tip_Text, .Tip_Around, .Instant_Hover} != {} {
+	if u.cut_watch && watch_box(u, b) {
 		draw_children_owned(u, b, a)
 	} else {
 		for c := b.first; c != nil; c = c.next {
@@ -93,6 +90,17 @@ draw_box :: proc(u: ^State, b: ^Box, alpha: f32) {
 	if .Clip in b.flags {
 		render.pop_clip(r)
 	}
+}
+
+// watch_box does what b means for the cut label under the mouse while
+// draw_box looks for one (cut_watch). A box drawn over the label hides it.
+// It returns whether a cut label inside b reports b (see note_cut).
+@(private)
+watch_box :: #force_inline proc(u: ^State, b: ^Box) -> bool {
+	if u.cut_found && b != u.cut_box && b != u.tooltip_box && covers(b) && rect_contains(b.clip, u.input.mouse) {
+		u.cut_found = false
+	}
+	return u.cut_scan && b.flags & {.Tip_Text, .Tip_Around, .Instant_Hover} != {}
 }
 
 // draw_children_owned draws b's children while it's the box a cut label
@@ -159,7 +167,7 @@ draw_label :: proc(u: ^State, b: ^Box, a: f32) {
 			owner = u.cut_owner
 		}
 		if rect_contains(owner.clip, u.input.mouse) {
-			note_cut(u, owner)
+			note_cut(u, b, owner)
 		}
 	}
 	w := min(run.width, avail)

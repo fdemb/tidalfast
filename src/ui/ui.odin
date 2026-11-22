@@ -352,9 +352,11 @@ State :: struct {
 	cut:            Cut_Label,
 	// What this frame's draw finds under the mouse, see note_cut.
 	cut_scan:       bool, // look for a cut label: drawing the main tree with the mouse free
+	cut_watch:      bool, // cut_scan, or a cut label found that a box drawn later may hide
 	cut_owner:      ^Box, // the innermost Tip_Text box being drawn
 	cut_row:        ^Box, // the innermost Instant_Hover or Tip_Around box being drawn, such as a list row or a card
 	cut_found:      bool,
+	cut_box:        ^Box, // the label found
 	cut_text:       string,
 	cut_rect:       render.Rect,
 	cut_anchor:     render.Rect,
@@ -1162,10 +1164,14 @@ end_frame :: proc() -> bool {
 	u.cut_owner = nil
 	u.cut_row = nil
 	u.cut_scan = u.input.mouse_inside && u.input.buttons == {} && !u.menu_open && !u.drag_active
+	u.cut_watch = u.cut_scan
 	draw_box(u, u.root, 1)
 	scanned := u.cut_scan
 	u.cut_scan = false
+	// A menu or a toast drawn over the label found still hides it.
+	u.cut_watch = u.cut_found
 	draw_box(u, u.floating_root, 1)
+	u.cut_watch = false
 	// While a button is held or a menu is open the label under the mouse
 	// stays what it was, so a click on it still hides its tooltip after
 	// the release.
@@ -1187,14 +1193,15 @@ end_frame :: proc() -> bool {
 	return u.animating
 }
 
-// note_cut records that a label inside owner, or owner's own, was cut off
+// note_cut records that label, inside owner or owner itself, was cut off
 // under the mouse. A box drawn over it later takes it back (see draw_box),
 // so what's found is what the mouse is on. In a list row, a card or another
 // Tip_Around box the tooltip goes under or over the whole box, so it covers
 // none of the box's other text.
 @(private)
-note_cut :: proc(u: ^State, owner: ^Box) {
+note_cut :: proc(u: ^State, label, owner: ^Box) {
 	u.cut_found = true
+	u.cut_box = label
 	u.cut_text = owner.label
 	u.cut_rect = owner.clip
 	u.cut_anchor = owner.clip
