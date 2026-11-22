@@ -126,6 +126,9 @@ Library :: struct {
 	nav_float:     f32, // this frame's shadow under Back and Forward, 0 to 1 (nav_float)
 	play_waiting:  bool, // a double-clicked playlist plays once it can
 	play_gen:      u32, // its list_gen
+	edit:          Playlist_Editor, // a playlist's name being typed, see playlist_edit.odin
+	list_menu_pos: [2]f32, // where the list's More menu opened, for the delete question in its place
+	delete_id:     Small, // the playlist the delete question is for, see sidebar_id
 }
 
 // Songs_Total is the open list's length in seconds, and the list_gen,
@@ -412,23 +415,38 @@ draw_sidebar :: proc(s: ^State, h: f32) {
 		ui.text_style(.Semibold, 11, DIM)
 		heading := ui.label("Your Library", ui.fill(), ui.fill())
 		ui.accessible(heading, .Static_Text, heading.label)
+		draw_new_playlist_button(s)
+		ui.spacer(ui.px(SIDEBAR_PAD + ROW_PAD - (NEW_PLAYLIST_W - 15) / 2))
 	}
 	ui.spacer(ui.px(SIDEBAR_LIST_TOP))
 	list_h := h - top - SIDEBAR_HEAD_H - SIDEBAR_LIST_TOP - LIST_PAD_Y - USER_ROW_H - bar_inset(s)
+	lib.edit.built = false
 	{
 		list := ui.scroll_view("playlists", ui.px(lib.sidebar_w), ui.px(list_h))
 		list.pad.x = SIDEBAR_PAD
 		ui.accessible(list, .List, "Playlists")
 		{
-			rows := ui.virtual_rows(list, sidebar_count(s), PLAYLIST_ROW_H)
-			for i in rows.first ..< rows.last {
-				draw_playlist_row(s, i)
+			// A playlist being made has a row under Liked Songs, where it
+			// goes once made, and the rest move down.
+			extra := 1 if new_playlist_row_shown(s) else 0
+			sidebar_edit_reveal(s, list, list_h, extra)
+			rows := ui.virtual_rows(list, sidebar_count(s) + extra, PLAYLIST_ROW_H)
+			for j in rows.first ..< rows.last {
+				if extra > 0 && j == 1 {
+					draw_new_playlist_row(s)
+				} else {
+					draw_playlist_row(s, j - extra if j > 1 else j)
+				}
 				ui.spacer(ui.px(PLAYLIST_GAP))
 			}
-			sidebar_prefetch(s, rows.first - COVER_PREFETCH_ROWS, rows.first)
-			sidebar_prefetch(s, rows.last, rows.last + COVER_PREFETCH_ROWS)
+			sidebar_prefetch(s, rows.first - COVER_PREFETCH_ROWS - extra, rows.first - extra)
+			sidebar_prefetch(s, rows.last - extra, rows.last - extra + COVER_PREFETCH_ROWS)
 		}
 		ui.spacer(ui.px(LIST_PAD_Y))
+	}
+	// A row scrolled out of view takes its field with it.
+	if lib.edit.mode != .None && !lib.edit.built {
+		lib.edit = {}
 	}
 	ui.spacer(ui.px(LIST_PAD_Y))
 	draw_user_row(s)
@@ -443,6 +461,18 @@ draw_playlist_row :: proc(s: ^State, i: int) {
 	entry := sidebar_entry(s, i)
 	current := playlist_showing(s, i)
 	queued := sidebar_queued(s, i)
+	// Its name being typed, or on its way to TIDAL.
+	editing := lib.edit.mode == .Rename && small_str(&lib.edit.id) == sidebar_id(s, i)
+	sending := false
+	if out, ok := s.data.playlist_out.?; ok && out.op != .Create && small_str(&out.id) == sidebar_id(s, i) {
+		sending = true
+		if out.op == .Rename {
+			entry.name = cat(small_str(&out.name))
+			entry.subtitle = "Renaming…"
+		} else {
+			entry.subtitle = "Deleting…"
+		}
+	}
 	ui.set_next_radius(10)
 	sidebar_selected(current)
 	item := ui.row(cat("##playlist", num(i)), {.Clickable, .Focusable, .Draw_Background, .Draw_Hot_Effects, .Draw_Border, .Instant_Hover}, ui.fill(), ui.px(PLAYLIST_ROW_H - PLAYLIST_GAP))
@@ -464,14 +494,11 @@ draw_playlist_row :: proc(s: ^State, i: int) {
 	ui.spacer(ui.px(8))
 	cover_art(s, .Playlist, entry.image, entry.seed, PLAYLIST_COVER, ui.px(PLAYLIST_COVER), radius = 6)
 	ui.spacer(ui.px(10))
-	{
-		// The two lines, 33 pt, centred in the row.
-		ui.column("", {}, ui.fill(), ui.fill()).pad.y = (PLAYLIST_ROW_H - PLAYLIST_GAP - 33) / 2
-		ui.text_style(.Medium, 13, ACCENT if queued else TEXT)
-		ui.label(entry.name, ui.fill(), ui.px(16))
-		ui.spacer(ui.px(2))
-		ui.text_style(.Regular, 12, QUIET)
-		ui.label(entry.subtitle, ui.fill(), ui.px(15))
+	if editing {
+		ui.column("", {}, ui.fill(), ui.fill()).pad.y = (PLAYLIST_ROW_H - PLAYLIST_GAP - EDIT_FIELD_H) / 2
+		edit_field(s)
+	} else {
+		playlist_lines(entry.name, entry.subtitle, DIM if sending else ACCENT if queued else TEXT)
 	}
 	if queued && playback_playing(s) {
 		draw_level_bars()
@@ -1553,6 +1580,7 @@ Pending :: union {
 	Go_Back,
 	Go_Forward,
 	Log_Out,
+	Playlist_Job, // make, rename or delete a playlist, see playlist_edit
 }
 
 Close_Search :: struct {}
@@ -1726,6 +1754,8 @@ apply_pending :: proc(s: ^State) -> bool {
 		}
 	case Log_Out:
 		sign_out(s, "")
+	case Playlist_Job:
+		playlist_edit(s, p)
 	}
 	ui.data_changed()
 	return true
@@ -1856,11 +1886,10 @@ same_place :: proc(a, b: Place) -> bool {
 // playlist_place is sidebar entry i as a place. A TIDAL playlist goes by
 // its id, since the sidebar can change order before Back returns to it.
 playlist_place :: proc(s: ^State, i: int) -> Playlist_Place {
-	items := s.data.sidebar.items
-	if s.data.fake || i < 1 || i > len(items) {
-		return {index = i}
+	if id := sidebar_id(s, i); id != "" {
+		return {id = small(id)}
 	}
-	return {id = small(items[i - 1].id)}
+	return {index = i}
 }
 
 // playlist_index is where a playlist place is in the sidebar now, -1 when
@@ -1869,12 +1898,7 @@ playlist_index :: proc(s: ^State, p: ^Playlist_Place) -> int {
 	if p.id.len == 0 {
 		return p.index
 	}
-	for it, i in s.data.sidebar.items {
-		if it.id == small_str(&p.id) {
-			return i + 1
-		}
-	}
-	return -1
+	return sidebar_find(s, small_str(&p.id))
 }
 
 // history_from is the place Back and Forward step from: the search they

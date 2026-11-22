@@ -1304,7 +1304,7 @@ queue_find :: proc(pb: ^Playback, track: i64, at: int) -> int {
 list_key :: proc(s: ^State) -> u64 {
 	if s.data.fake {
 		sr := &s.search
-		return fake_list_key(sr.fake_source, s.library.playlist, small_str(&sr.fake_title))
+		return fake_list_key(sr.fake_source, fake_key(s, s.library.playlist), small_str(&sr.fake_title))
 	}
 	v := &s.data.view
 	if v.source == .None {
@@ -1352,7 +1352,7 @@ sidebar_queued :: proc(s: ^State, i: int) -> bool {
 	key: u64
 	switch {
 	case s.data.fake:
-		key = fake_list_key(.None, i, "")
+		key = fake_list_key(.None, fake_key(s, i), "")
 	case i == 0:
 		key = source_list_key(.Liked, "")
 	case i - 1 < len(s.data.sidebar.items):
