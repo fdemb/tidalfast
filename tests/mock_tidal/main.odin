@@ -63,7 +63,10 @@
 // The app's own edits work too. GET /playlists/<uuid> gives a playlist and
 // its ETag, and POST /playlists/<uuid>/items with that ETag in If-None-Match
 // adds trackIds at the end, skipping one that's there already, and moves
-// lastUpdated on. A stale ETag gets 412. POST /users/123/favorites/tracks
+// lastUpdated on. A stale ETag gets 412. GET /playlists/<uuid>/items lists
+// the items as TIDAL does, each under "item", and DELETE
+// /playlists/<uuid>/items/<indices> with the ETag removes the items at those
+// indices, comma separated. POST /users/123/favorites/tracks
 // likes trackId, unless it's liked already, and DELETE
 // /users/123/favorites/tracks/<id> unlikes it: it leaves the liked tracks
 // until the same POST likes it back. POST /users/123/favorites/artists
@@ -151,13 +154,9 @@ Server :: struct {
 	liked_added:   [dynamic]int, // track ids liked through /mock/change or a POST, oldest first; heap
 	liked_removed: [dynamic]int, // track ids unliked with a DELETE, oldest first; heap
 	followed:      [dynamic]int, // artist ids followed with a POST, oldest first; heap
-	added:         [len(PLAYLISTS)][dynamic]Added_Item, // tracks added by a POST; heap
+	items:         [len(PLAYLISTS)][dynamic]int, // each playlist's track ids, in order; heap
+	next_row:      [len(PLAYLISTS)]int, // the row number of the next track /mock/change adds
 	playlist_count: int, // of PLAYLISTS, the made ones included
-}
-
-Added_Item :: struct {
-	at: int, // the row it went in at
-	id: int,
 }
 
 server: Server
@@ -257,6 +256,13 @@ main :: proc() {
 	copy(PLAYLISTS[:], BASE_PLAYLISTS[:])
 	server.playlist_count = len(BASE_PLAYLISTS)
 	PLAYLISTS[0].tracks = c.tracks
+	for pl, p in PLAYLISTS {
+		server.items[p] = make([dynamic]int, 0, pl.tracks, runtime.heap_allocator())
+		for i in 0 ..< pl.tracks {
+			append(&server.items[p], p * 1_000_000 + i)
+		}
+		server.next_row[p] = pl.tracks
+	}
 	server.config = c
 	server.token = 1
 
@@ -485,7 +491,9 @@ route :: proc(req: ^Request) -> Response {
 	case path == "/mock/change":
 		sync.guard(&server.mutex)
 		if p, ok := parse_i(req.query["playlist"] or_else ""); ok && p >= 0 && p < server.playlist_count {
-			PLAYLISTS[p].tracks += 1
+			append(&server.items[p], p * 1_000_000 + server.next_row[p])
+			server.next_row[p] += 1
+			PLAYLISTS[p].tracks = len(server.items[p])
 			server.changes[p] += 1
 			fmt.printfln("mock: playlist %d changed, %d tracks", p, PLAYLISTS[p].tracks)
 		}
@@ -696,6 +704,32 @@ route :: proc(req: ^Request) -> Response {
 		return made_up_tracks(-1, id, offset, limit)
 	case strings.has_prefix(path, "/artists/"):
 		return artist_response(path, req.query, offset, limit)
+	case strings.has_prefix(path, "/playlists/") && strings.count(path, "/") == 4 && req.method == "DELETE":
+		rest := strings.trim_prefix(path, "/playlists/")
+		slash := strings.index_byte(rest, '/')
+		p := playlist_index(rest[:slash])
+		if p < 0 || !strings.has_prefix(rest[slash:], "/items/") {
+			return json_response(404, `{"status":404,"userMessage":"Playlist not found"}`)
+		}
+		return remove_items(p, rest[slash + len("/items/"):], req)
+	case strings.has_prefix(path, "/playlists/") && strings.has_suffix(path, "/items") && req.method == "GET":
+		p := playlist_index(strings.trim_suffix(strings.trim_prefix(path, "/playlists/"), "/items"))
+		if p < 0 {
+			return json_response(404, `{"status":404,"userMessage":"Playlist not found"}`)
+		}
+		sync.guard(&server.mutex)
+		total := len(server.items[p])
+		b := list_begin(total, offset, limit)
+		for i in offset ..< min(offset + limit, total) {
+			if i > offset {
+				strings.write_byte(&b, ',')
+			}
+			strings.write_string(&b, `{"type":"track","item":`)
+			write_track_id(&b, server.items[p][i])
+			strings.write_byte(&b, '}')
+		}
+		strings.write_string(&b, "]}")
+		return json_response(200, strings.to_string(b))
 	case strings.has_prefix(path, "/playlists/") && strings.has_suffix(path, "/items") && req.method == "POST":
 		p := playlist_index(strings.trim_suffix(strings.trim_prefix(path, "/playlists/"), "/items"))
 		if p < 0 {
@@ -726,19 +760,13 @@ route :: proc(req: ^Request) -> Response {
 			time.sleep(time.Duration(server.config.page_delay) * time.Millisecond)
 		}
 		sync.guard(&server.mutex)
-		total := PLAYLISTS[p].tracks
+		total := len(server.items[p])
 		b := list_begin(total, offset, limit)
-		rows: for i in offset ..< min(offset + limit, total) {
+		for i in offset ..< min(offset + limit, total) {
 			if i > offset {
 				strings.write_byte(&b, ',')
 			}
-			for a in server.added[p] {
-				if a.at == i {
-					write_track_id(&b, a.id)
-					continue rows
-				}
-			}
-			write_track(&b, p, i)
+			write_track_id(&b, server.items[p][i])
 		}
 		strings.write_string(&b, "]}")
 		return json_response(200, strings.to_string(b))
@@ -904,6 +932,9 @@ playlist_etag :: proc(p: int) -> string {
 // POST /playlists/<uuid>/items does.
 add_items :: proc(p: int, req: ^Request) -> Response {
 	sync.guard(&server.mutex)
+	if PLAYLISTS[p].editorial {
+		return json_response(403, `{"status":403,"userMessage":"Not your playlist"}`)
+	}
 	if req.etag != playlist_etag(p) {
 		fmt.printfln("mock: adding to playlist %d with a stale ETag, 412", p)
 		return json_response(412, `{"status":412,"subStatus":0,"userMessage":"The playlist was changed"}`)
@@ -918,8 +949,8 @@ add_items :: proc(p: int, req: ^Request) -> Response {
 			fmt.printfln("mock: track %s is in playlist %d already", s, p)
 			continue
 		}
-		append(&server.added[p], Added_Item{PLAYLISTS[p].tracks, id})
-		PLAYLISTS[p].tracks += 1
+		append(&server.items[p], id)
+		PLAYLISTS[p].tracks = len(server.items[p])
 		if !first {
 			strings.write_byte(&b, ',')
 		}
@@ -934,23 +965,42 @@ add_items :: proc(p: int, req: ^Request) -> Response {
 	return json_response(200, strings.to_string(b))
 }
 
+// remove_items removes the items of playlist p at indices, a comma
+// separated list, as DELETE /playlists/<uuid>/items/<indices> does.
+remove_items :: proc(p: int, indices: string, req: ^Request) -> Response {
+	sync.guard(&server.mutex)
+	if PLAYLISTS[p].editorial {
+		return json_response(403, `{"status":403,"userMessage":"Not your playlist"}`)
+	}
+	if req.etag != playlist_etag(p) {
+		fmt.printfln("mock: removing from playlist %d with a stale ETag, 412", p)
+		return json_response(412, `{"status":412,"subStatus":0,"userMessage":"The playlist was changed"}`)
+	}
+	at := make([dynamic]int, context.temp_allocator)
+	rest := indices
+	for part in strings.split_iterator(&rest, ",") {
+		i, ok := parse_i(part)
+		if !ok || i < 0 || i >= len(server.items[p]) {
+			return json_response(400, `{"status":400,"userMessage":"Bad index"}`)
+		}
+		append(&at, i)
+	}
+	// From the back, so the earlier indices stay where they were.
+	slice.sort(at[:])
+	for k := len(at) - 1; k >= 0; k -= 1 {
+		if k == len(at) - 1 || at[k] != at[k + 1] {
+			ordered_remove(&server.items[p], at[k])
+		}
+	}
+	PLAYLISTS[p].tracks = len(server.items[p])
+	server.changes[p] += 1
+	fmt.printfln("mock: removed %d items from playlist %d, %d tracks", len(at), p, PLAYLISTS[p].tracks)
+	return json_response(200, "{}")
+}
+
 // in_playlist says whether playlist p lists track id. Hold the mutex.
 in_playlist :: proc(p, id: int) -> bool {
-	for a in server.added[p] {
-		if a.id == id {
-			return true
-		}
-	}
-	at := id % 1_000_000
-	if id / 1_000_000 != p || at >= PLAYLISTS[p].tracks {
-		return false
-	}
-	for a in server.added[p] {
-		if a.at == at {
-			return false // another track took that row
-		}
-	}
-	return true
+	return slice.contains(server.items[p][:], id)
 }
 
 // is_liked says whether track id is among the liked tracks. A DELETE

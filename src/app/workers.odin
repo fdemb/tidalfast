@@ -87,6 +87,7 @@ Job_Payload :: union {
 	Save_Settings_Job,
 	Disk_Job,
 	Add_Track_Job,
+	Remove_Track_Job,
 	Liked_Ids_Job,
 	Follow_Job,
 	Launch_Log_Job,
@@ -191,6 +192,19 @@ Add_Track_Job :: struct {
 	remove: bool, // .Liked only: unlike it
 }
 
+// Remove_Track_Job takes a track off one of the user's playlists, see
+// remove_from_list. TIDAL removes by item index, so the job carries the
+// indices the row can be at, lo to hi (see view_item_index), and the
+// worker removes the first of them that holds the track. One is out at a
+// time (Data.removing): each moves the indices after it.
+Remove_Track_Job :: struct {
+	track:  i64,
+	id:     Small, // the playlist's
+	row:    i32, // the row it was in when the job went out
+	lo, hi: i32,
+	serial: u32, // the status line's, see remove_result
+}
+
 // Playlist_Job creates, renames or deletes one of the user's playlists,
 // see playlist_edit.odin.
 Playlist_Job :: struct {
@@ -221,7 +235,7 @@ Sidebar_Item :: struct {
 	image:   string, // square image id, "" for none
 	tracks:  int,
 	updated: i64, // lastUpdated, unix ms, 0 if TIDAL didn't say
-	owned:   bool, // the user made it, so it can be renamed and deleted
+	owned:   bool, // the user made it: it can be renamed, deleted, added to and removed from
 }
 
 Login_Link :: struct {
@@ -256,6 +270,7 @@ Result_Payload :: union {
 	List_File_Result,
 	Queue_File_Result,
 	Add_Track_Result,
+	Remove_Track_Result,
 	Liked_Ids_Result,
 	Artist_Result,
 	Home_Result,
@@ -328,6 +343,16 @@ Add_Track_Result :: struct {
 	added:   bool, // TIDAL added it rather than finding it there
 	version: List_Version,
 	row:     Maybe(Row), // the track as the list now has it, in arena
+}
+
+// Remove_Track_Result is where a removal found the track, and with read
+// the playlist's version after it. missing says, with an error, that none
+// of the indices held the track: the list changed since it was fetched.
+Remove_Track_Result :: struct {
+	index:   int,
+	version: List_Version,
+	read:    bool, // the playlist was read again after the removal
+	missing: bool,
 }
 
 Liked_Ids_Result :: struct {
@@ -717,6 +742,8 @@ run_job :: proc(d: ^Data, job: Job) -> (res: Result) {
 		res.payload = Tracks_Result{rows_from_tracks(tracks, alloc), total}
 	case Add_Track_Job:
 		run_add_track(s, p, &res, alloc)
+	case Remove_Track_Job:
+		run_remove_track(s, p, &res)
 	case Liked_Ids_Job:
 		run_liked_ids(s, p, &res, alloc)
 	case Follow_Job:
@@ -880,11 +907,7 @@ run_playlists :: proc(s: ^tidal.Session, res: ^Result, alloc: mem.Allocator) {
 			first_id = page[0].id
 		}
 		for pl in page {
-			item := Sidebar_Item{id = pl.id, name = pl.name, image = pl.square_picture, tracks = pl.num_tracks}
-			if t, ok := pl.last_updated.?; ok {
-				item.updated = time.to_unix_nanoseconds(t) / 1e6
-			}
-			append(&items, item)
+			append(&items, sidebar_item(pl))
 		}
 		if listed < PLAYLIST_PAGE || (total >= 0 && offset + listed >= total) {
 			break
@@ -1007,6 +1030,56 @@ run_add_track :: proc(s: ^tidal.Session, job: Add_Track_Job, res: ^Result, alloc
 		if lerr == nil && total == pl.num_tracks && len(last) == 1 && last[0].id == job.track {
 			out.version = version
 			out.row = row_from_track(last[0], alloc)
+		}
+	}
+	res.payload = out
+}
+
+// run_remove_track finds the track at one of the job's indices, asking
+// TIDAL for the one item at each, and removes it there with the playlist's
+// ETag. A row whose place the list got wrong is never removed: if no index
+// holds the track, the job fails and says so. The playlist is read again
+// after the removal for its new count and version; if that read fails the
+// removal still counts.
+@(private = "file")
+run_remove_track :: proc(s: ^tidal.Session, job: Remove_Track_Job, res: ^Result) {
+	id := job.id
+	playlist := small_str(&id)
+	pl, err := tidal.playlist_get(s, playlist, context.temp_allocator)
+	if err != nil {
+		fail(res, err)
+		return
+	}
+	at := -1
+	for k in job.lo ..= job.hi {
+		items, ierr := tidal.playlist_items(s, playlist, limit = 1, offset = int(k), allocator = context.temp_allocator)
+		if ierr != nil {
+			fail(res, ierr)
+			return
+		}
+		if len(items) == 1 {
+			if t, ok := items[0].(tidal.Track); ok && t.id == job.track {
+				at = int(k)
+				break
+			}
+		}
+	}
+	if at < 0 {
+		res.err = .Object_Not_Found
+		res.payload = Remove_Track_Result{missing = true}
+		return
+	}
+	if err = tidal.user_playlist_remove_by_index(s, &pl, at, context.temp_allocator); err != nil {
+		fail(res, err)
+		return
+	}
+	out := Remove_Track_Result{index = at}
+	// Without an ETag the playlist wasn't read again after the removal.
+	if pl.etag != "" {
+		out.read = true
+		out.version.count = i64(pl.num_tracks)
+		if t, ok := pl.last_updated.?; ok {
+			out.version.updated = time.to_unix_nanoseconds(t) / 1e6
 		}
 	}
 	res.payload = out
