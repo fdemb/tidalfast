@@ -202,7 +202,7 @@ draw_list_meta :: proc(s: ^State, kind: List_Kind, artist: ^Artist_Page) {
 			ui.text_style(.Semibold, 13, TEXT)
 			{
 				ui.row("", {}, ui.px(ui.text_width(.Semibold, 13, name) + 1), ui.fill())
-				if k, sig := artist_links(s, row.artist, refs, 0, ui.fill()); sig.clicked {
+				if k, sig := artist_links(s, row.artist, refs, 0, ui.fill(), {.Focusable}); sig.clicked {
 					open_artist_of(s, row.artist, row.artists, k, fake_row_index(s, 0))
 				}
 			}
@@ -348,7 +348,7 @@ list_play_button :: proc(s: ^State, id: string, side: f32) {
 // place.
 draw_list_menu :: proc(s: ^State, kind: List_Kind) {
 	draw_delete_menu(s)
-	if ui.menu("list_menu") {
+	if ui.menu("list_menu", name = view_title(s)) {
 		ui.text_style(.Regular, 13, TEXT)
 		if ui.menu_item("Play").clicked {
 			pending_set(s, Play_Row{order = .In_Order})

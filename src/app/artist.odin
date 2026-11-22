@@ -513,7 +513,7 @@ draw_artist_actions :: proc(s: ^State, p: ^List_Place, page: ^Artist_Page) {
 
 @(private = "file")
 draw_artist_menu :: proc(s: ^State, p: ^List_Place, page: ^Artist_Page) {
-	if ui.menu("artist_menu") {
+	if ui.menu("artist_menu", name = small_str(&page.name)) {
 		ui.text_style(.Regular, 13, TEXT)
 		playable := row_playable(s, 0)
 		if ui.menu_item("Play").clicked && playable {

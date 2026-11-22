@@ -176,7 +176,7 @@ draw_sleep_button :: proc(s: ^State) {
 	if n := sleep_left(pb, now); n > 1 && (sig.hovering || ui.menu_is_open("sleep_menu")) {
 		ui.wake_at(pb.sleep.at - f64(n - 1) * 60)
 	}
-	if ui.menu("sleep_menu", SLEEP_MENU_W) {
+	if ui.menu("sleep_menu", SLEEP_MENU_W, "Sleep timer") {
 		draw_sleep_menu(s, now)
 	}
 }

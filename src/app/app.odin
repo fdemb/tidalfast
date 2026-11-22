@@ -332,10 +332,7 @@ update_and_draw :: proc(s: ^State, input: ^platform.Frame_Input, shell: ^platfor
 	s.ui.scrollbars = s.settings.scrollbars
 	s.bar_over_content = s.blur_reference || (render.BACKDROPS && s.settings.bar == .Blurred)
 
-	// Backtick toggles the frame-time overlay.
-	if ui.take_key(.Grave) {
-		s.show_overlay = !s.show_overlay
-	}
+	overlay_key(s)
 	dev_input(s, input.time)
 
 	if !dev_draw_screen(s, w, h) {
@@ -463,4 +460,12 @@ draw_frame_overlay :: proc(s: ^State, view_width: f32) {
 	y += 16
 	pm := process_memory(r)
 	text.draw(t, r, .Regular, 11, {x0 + 8, y}, {1, 1, 1, 0.9}, fmt.tprintf("ram %.1f MB   gpu %.1f MB", f64(pm.footprint) / (1 << 20), f64(pm.gpu) / (1 << 20)))
+}
+
+// overlay_key toggles the frame-time overlay on a backtick, unless it's
+// typed in a text field.
+overlay_key :: proc(s: ^State) {
+	if !ui.text_focused() && ui.take_key(.Grave) {
+		s.show_overlay = !s.show_overlay
+	}
 }

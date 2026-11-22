@@ -188,7 +188,7 @@ draw_output_button :: proc(s: ^State, width: f32) {
 	ui.tooltip(sig, output_description(s))
 	ui.spacer(ui.fill())
 
-	if ui.menu("output_menu", OUTPUT_MENU_W) {
+	if ui.menu("output_menu", OUTPUT_MENU_W, "Output") {
 		draw_signal_path(s)
 	}
 }
@@ -214,9 +214,11 @@ dot :: proc(color: render.Color) {
 draw_signal_path :: proc(s: ^State) {
 	ui.text_style(.Semibold, 11, DIM)
 	ui.set_next_text_pad(14)
-	ui.label("Signal path", ui.fill(), ui.px(24))
+	heading := ui.label("Signal path", ui.fill(), ui.px(24))
+	ui.accessible(heading, .Static_Text, heading.label)
 	for step in signal_path(s) {
-		ui.row("", {}, ui.fill(), ui.px(24))
+		line := ui.row("", {}, ui.fill(), ui.px(24))
+		ui.accessible(line, .Static_Text, fmt.tprintf("%s, %s", step.name, step.detail))
 		ui.spacer(ui.px(14))
 		if step.mark == .None {
 			ui.spacer(ui.px(OUTPUT_DOT))
@@ -237,12 +239,16 @@ draw_signal_path :: proc(s: ^State) {
 	color := mark_color(mark) if mark != .None else SECONDARY
 	ui.text_style(.Regular, 12, color)
 	ui.set_next_text_pad(14)
-	ui.label(output_description(s), ui.fill(), ui.px(26))
+	about := ui.label(output_description(s), ui.fill(), ui.px(26))
+	ui.accessible(about, .Static_Text, about.label)
 	when audio.BIT_PERFECT {
 		ui.menu_separator()
 		ui.text_style(.Regular, 13, TEXT)
 		on := s.settings.bit_perfect
-		if ui.menu_item(fmt.tprintf("%s Bit-perfect output###bit_perfect", "✓" if on else "   ")).clicked {
+		item := ui.menu_item(fmt.tprintf("%s Bit-perfect output###bit_perfect", "✓" if on else "   "))
+		// Read without its mark, which selected stands for.
+		ui.accessible(item.box, .Menu_Item, "Bit-perfect output", selected = on)
+		if item.clicked {
 			st := s.settings
 			st.bit_perfect = !on
 			settings_set(s, st)

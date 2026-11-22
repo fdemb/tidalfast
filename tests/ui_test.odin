@@ -2710,3 +2710,34 @@ test_ui_box_takes_scroll :: proc(t: ^testing.T) {
 	testing.expect_value(t, knob.scroll, [2]f32{})
 	testing.expect_value(t, list.view_off.y, f32(50))
 }
+
+// A box built under a focusable one, focusable only while it shows.
+@(private = "file")
+fallback_frame :: proc(u: ^ui.State, now: ^f64, focusable: bool, events: ..platform.Event) -> (outer, inner: ^ui.Box) {
+	now^ += 1.0 / 60
+	ui.begin_frame(u, events, nil, nil, 300, 200, now^)
+	outer = ui.box_make("table", {.Focusable}, ui.px(300), ui.px(100))
+	ui.push_parent(outer)
+	inner = ui.box_make("more", {.Clickable, .Focusable} if focusable else {.Clickable}, ui.px(40), ui.px(40))
+	ui.pop_parent()
+	ui.end_frame()
+	return
+}
+
+// A focused box that stops taking the focus, as a row's More button when
+// its row is removed and the next one takes its place unselected, hands
+// it to the focusable box it's in, ring and all, not to nothing.
+@(test)
+focus_falls_back_to_the_box_around_it :: proc(t: ^testing.T) {
+	u: ui.State
+	ui.init(&u)
+	defer ui_destroy(&u)
+	now := 0.0
+	fallback_frame(&u, &now, true)
+	fallback_frame(&u, &now, true)
+	_, inner := fallback_frame(&u, &now, true, {kind = .Key_Down, key = .Tab}, {kind = .Key_Down, key = .Tab})
+	testing.expect(t, ui.has_focus(inner))
+	outer, _ := fallback_frame(&u, &now, false)
+	testing.expect(t, ui.has_focus(outer), "the box around it has the focus")
+	testing.expect(t, ui.focus_visible(), "with its ring")
+}

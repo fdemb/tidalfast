@@ -20,6 +20,7 @@ package ui
 import "core:hash"
 import "core:log"
 import "core:math"
+import "core:slice"
 
 import "../platform"
 import "../render"
@@ -98,6 +99,7 @@ Box_Flag :: enum u32 {
 	Draw_Glass, // a lens of glass tinted by background, lit while hot and swelling while pressed, see render.push_glass
 	Instant_Hover, // hot_t jumps with no fade, for list rows and tiles: a fast mouse is on one for a few frames, and a fade would light neighbours unevenly. end_frame lights the one under the mouse in this frame's layout
 	Takes_Scroll, // a scroll over it goes to it along both axes, in Signal.scroll, and not to a view behind it: a control the wheel turns, as the volume
+	Arrow_Keys, // with the focus it keeps the arrow keys for ui.take_key rather than moving the focus with them, as a slider does, see slider_keys
 }
 Box_Flags :: bit_set[Box_Flag; u32]
 
@@ -145,6 +147,8 @@ Build :: struct {
 	flip_y:                    f32, // with keep_in_window, where its bottom goes when it doesn't fit below
 	above:                     bool, // with keep_in_window, its bottom goes at flip_y even when it fits below
 	anchor:                    ^Box, // a floating box centred under this one, or above it when there's no room below, see fit_floating
+	tab_first:                 ^Box, // Tab reaches this box and its children before the boxes inside this ancestor, see tab_first
+	hit_from:                  int, // how many hits the frame had when finish reached the box
 	id:                        string, // as given; must live until end_frame
 	label:                     string, // the part of id before "##"
 	using style:               Style,
@@ -199,6 +203,7 @@ Hit :: struct {
 	click_parent: Key, // nearest clickable ancestor
 	floating:     bool,
 	in_menu:      bool, // the open menu or inside it
+	tab:          int, // where Tab reaches it: twice its place in the hits, plus one, or for a tab_first box twice its ancestor's hit_from
 }
 
 Key_Press :: struct {
@@ -848,14 +853,19 @@ key_down :: proc(u: ^State, e: platform.Event) {
 			u.key_click = u.focus
 		}
 		return
-	case (code == .Up || code == .Down) && mods == {}:
+	case (code == .Up || code == .Down) && mods == {} && !focus_keeps_arrows(u):
 		if focus_arrow(u, .Y, -1 if code == .Up else 1) {
 			return
 		}
-	case (code == .Left || code == .Right) && mods == {} && !focus_takes_text(u):
+	case (code == .Left || code == .Right) && mods == {} && !focus_takes_text(u) && !focus_keeps_arrows(u):
 		if focus_arrow(u, .X, -1 if code == .Left else 1) {
 			return
 		}
+	}
+	// With a menu open, the keys it doesn't use go nowhere, so a shortcut
+	// such as M doesn't act behind it.
+	if u.menu_open {
+		return
 	}
 	if u.key_count < MAX_KEY_PRESSES {
 		u.keys[u.key_count] = {code, mods, bool(e.repeat)}
@@ -872,6 +882,14 @@ shortcut_for :: proc(u: ^State, k: Key_Press) -> Key {
 		}
 	}
 	return 0
+}
+
+// focus_keeps_arrows says whether the focused box takes the arrow keys
+// itself, as a slider does, outside an open menu.
+@(private)
+focus_keeps_arrows :: proc(u: ^State) -> bool {
+	h, at := find_hit(u, u.focus)
+	return at >= 0 && .Arrow_Keys in h.flags && !u.menu_open
 }
 
 // focus_takes_text says whether the focused box is a text field.
@@ -913,24 +931,40 @@ text_event :: proc(u: ^State, e: platform.Event, text_bytes: []u8) {
 }
 
 // focus_step moves the focus to the next or previous focusable box in
-// drawing order, wrapping around.
+// drawing order, wrapping around. A box given tab_first comes before the
+// boxes inside its ancestor, wherever it's drawn.
 @(private)
 focus_step :: proc(u: ^State, dir: int) {
-	n := u.hit_count
+	// Each focusable hit as its place in Tab order and its index.
+	order := make([dynamic][2]int, 0, u.hit_count, context.temp_allocator)
+	for h, i in u.hits[:u.hit_count] {
+		if .Focusable in h.flags && (!u.menu_open || h.in_menu) {
+			append(&order, [2]int{h.tab, i})
+		}
+	}
+	n := len(order)
 	if n == 0 {
 		return
 	}
-	_, at := find_hit(u, u.focus)
-	start := at if at >= 0 else (-1 if dir > 0 else n)
-	for step in 1 ..= n {
-		i := ((start + dir * step) % n + n) % n
-		h := u.hits[i]
-		if .Focusable in h.flags && (!u.menu_open || h.in_menu) {
-			move_focus(u, h.key, true)
-			u.focus_reveal = true
-			return
+	slice.sort_by(order[:], proc(a, b: [2]int) -> bool {return a[0] < b[0] || (a[0] == b[0] && a[1] < b[1])})
+	// Step from the focus's place, or from where it would go among them.
+	start := -1 if dir > 0 else n
+	if h, at := find_hit(u, u.focus); at >= 0 {
+		here := [2]int{h.tab, at}
+		before := 0
+		for o in order {
+			if o[0] < here[0] || (o[0] == here[0] && o[1] < here[1]) {
+				before += 1
+			}
+		}
+		start = before
+		if dir > 0 && (before == n || order[before] != here) {
+			start = before - 1
 		}
 	}
+	i := ((start + dir) % n + n) % n
+	move_focus(u, u.hits[order[i][1]].key, true)
+	u.focus_reveal = true
 }
 
 // menu_blocks reports whether an open menu keeps the keyboard from key.
@@ -1109,6 +1143,13 @@ end_frame :: proc() -> bool {
 	finish(u, u.root, {0, 0, u.width, u.height}, 0, 0, false, false, &mismatch)
 	finish(u, u.floating_root, {0, 0, u.width, u.height}, 0, 0, true, false, &mismatch)
 	cut_drag_regions(u)
+	// A focused box that's no longer focusable, such as a row's button
+	// once the row isn't selected, gives the focus to the focusable box
+	// it's in, so the keyboard goes on from there.
+	if h, at := find_hit(u, u.focus); at >= 0 && .Focusable not_in h.flags && !u.menu_open {
+		u.focus = h.focus_parent
+		u.focus_visible &&= u.focus != 0
+	}
 	if u.focus_reveal {
 		u.focus_reveal = false
 		reveal_focus(u)
@@ -1253,6 +1294,11 @@ finish :: proc(u: ^State, b: ^Box, clip: render.Rect, focus_parent, click_parent
 	// A menu closed while it was built takes no input, though its boxes
 	// were built to.
 	closed := in_menu && !u.menu_open
+	b.hit_from = u.hit_count
+	tab := 2 * u.hit_count + 1
+	if f := b.tab_first; f != nil && f.last_frame == u.frame {
+		tab = 2 * f.hit_from
+	}
 	if b.key != 0 && b.flags & {.Clickable, .Focusable, .View_Scroll, .Takes_Scroll} != {} && .Disabled not_in b.flags && !closed && u.hit_count < len(u.hits) {
 		u.hits[u.hit_count] = {
 			key          = b.key,
@@ -1263,6 +1309,7 @@ finish :: proc(u: ^State, b: ^Box, clip: render.Rect, focus_parent, click_parent
 			click_parent = click_parent,
 			floating     = floating,
 			in_menu      = in_menu,
+			tab          = tab,
 		}
 		u.hit_count += 1
 	}
@@ -1279,6 +1326,9 @@ finish :: proc(u: ^State, b: ^Box, clip: render.Rect, focus_parent, click_parent
 	fp := b.key if .Focusable in b.flags && b.key != 0 else focus_parent
 	cp := b.key if .Clickable in b.flags && b.key != 0 else click_parent
 	for c := b.first; c != nil; c = c.next {
+		if c.tab_first == nil {
+			c.tab_first = b.tab_first
+		}
 		finish(u, c, inner, fp, cp, floating, in_menu, mismatch)
 	}
 }
@@ -1619,6 +1669,33 @@ take_key :: proc(code: platform.Key, modifiers: platform.Modifiers = {}, repeats
 	return false
 }
 
+// slider_keys takes the keys that move slider b while it has the focus:
+// steps is how many steps Right and Up moved it up, less Left and Down,
+// and home and end say Home or End sent it to its lowest or highest. Give
+// b Arrow_Keys and Focusable, so the arrows reach it.
+slider_keys :: proc(b: ^Box) -> (steps: int, home, end: bool) {
+	if !has_focus(b) {
+		return
+	}
+	for take_key(.Right) || take_key(.Up) {
+		steps += 1
+	}
+	for take_key(.Left) || take_key(.Down) {
+		steps -= 1
+	}
+	home = take_key(.Home)
+	end = take_key(.End)
+	return
+}
+
+// tab_first makes Tab reach b and the boxes inside it before the boxes
+// inside within, one of b's ancestors, wherever b is drawn among them: a
+// box drawn over a view so it stays on top, such as a toolbar, still comes
+// first in Tab order.
+tab_first :: proc(b, within: ^Box) {
+	b.tab_first = within
+}
+
 // take_button reports whether Back or Forward on the mouse went down this
 // frame, and keeps the press from any later caller.
 take_button :: proc(button: platform.Mouse_Button) -> bool {
@@ -1641,6 +1718,23 @@ find :: proc(id: string) -> ^Box {
 // check this first.
 text_focused :: proc() -> bool {
 	return focus_takes_text(ctx)
+}
+
+// focus_key is the key with the focus, and whether the keyboard put it
+// there, showing its ring, for something that takes the focus for a while,
+// such as a text field opened in place, to give it back with
+// restore_focus.
+focus_key :: proc() -> (key: Key, ring: bool) {
+	return ctx.focus, ctx.focus_visible
+}
+
+// restore_focus gives the focus to key, with its ring when ring is set,
+// and scrolls it into view.
+restore_focus :: proc(key: Key, ring: bool) {
+	u := ctx
+	move_focus(u, key, ring && key != 0)
+	u.focus_reveal = ring
+	u.animating = true
 }
 
 has_focus :: proc(b: ^Box) -> bool {
